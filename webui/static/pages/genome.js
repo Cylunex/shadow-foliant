@@ -1,0 +1,184 @@
+import { reactive, ref, computed, onMounted } from 'vue'
+import { api, cls } from '../lib.js'
+
+const CN_MAP = {
+  enter:'放量上涨', keep_increasing:'均线多头', turtle_trade:'海龟交易',
+  parking_apron:'停机坪', low_atr:'低ATR成长', high_tight_flag:'高而窄旗形',
+  breakthrough_platform:'突破平台', backtrace_ma250:'回踩年线',
+  climax_limitdown:'放量跌停', low_backtrace_increase:'无大幅回撤',
+  rsi_oversold_bounce:'RSI超卖反弹', bollinger_squeeze_breakout:'布林收窄突破',
+  weekly_trend_daily_signal:'周线趋势+日线',
+  composed:'🧪组合新策略',
+}
+
+export default {
+  template: `<div>
+    <h1 class="h1">🧬 策略基因组</h1>
+    <p class="sub">策略自动进化追踪 · 每日 16:30 更新</p>
+
+    <!-- 策略评分面板 -->
+    <div class="card">
+      <h3>📊 全市场策略效能排行 <span style="font-weight:400;color:var(--muted);font-size:12px">（近30天横截面回测）</span></h3>
+      <div v-if="s.loading" class="loading">加载中...</div>
+      <div v-else-if="s.err" class="err">{{s.err}}</div>
+      <table v-else style="width:100%">
+        <tr style="color:var(--muted);font-size:12px">
+          <th align=left>策略</th><th align=right>评分</th><th align=right>胜率</th>
+          <th align=right>均收益</th><th align=right>最大回撤</th><th align=right>最佳</th>
+          <th align=right>最差</th><th align=right>触发/池</th>
+        </tr>
+        <tr v-for="r in s.scores" :key="r.strategy_id" style="border-bottom:1px solid var(--bdr)">
+          <td><b>{{CN_MAP[r.strategy_id] || r.strategy_id}}</b></td>
+          <td align=right><span :style="{fontWeight:700,color:(r.score||0)>=70?'var(--amber)':(r.score||0)>=55?'var(--accent)':'var(--muted)'}">{{r.score||'--'}}</span></td>
+          <td align=right>{{r.win_rate_pct!=null ? (r.win_rate_pct|0)+'%' : '--'}}</td>
+          <td align=right :class="cls(r.avg_ret_pct)">{{r.avg_ret_pct!=null ? (r.avg_ret_pct>=0?'+':'')+r.avg_ret_pct.toFixed(1)+'%' : '--'}}</td>
+          <td align=right>{{r.max_dd_pct!=null ? r.max_dd_pct.toFixed(1)+'%' : '--'}}</td>
+          <td align=right class="red">{{r.best_ret_pct!=null ? '+'+r.best_ret_pct.toFixed(1)+'%' : '--'}}</td>
+          <td align=right class="green">{{r.worst_ret_pct!=null ? r.worst_ret_pct.toFixed(1)+'%' : '--'}}</td>
+          <td align=right style="color:var(--muted)">{{r.triggered_n||0}}/{{r.stock_pool_n||0}}</td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- 变体列表 -->
+    <div class="card" style="margin-top:16px">
+      <h3>🧪 活跃策略变体 <span style="font-weight:400;color:var(--muted);font-size:12px">（含变异后代）</span></h3>
+      <div v-if="s.varLoading" class="loading">加载中...</div>
+      <table v-else-if="s.variants.length" style="width:100%">
+        <tr style="color:var(--muted);font-size:12px">
+          <th align=left>基础策略</th><th align=left>中文名</th><th align=right>代数</th>
+          <th align=right>评分</th><th align=right>胜率</th><th align=right>均收益</th>
+          <th align=right>样本股</th><th align=left>参数</th><th align=left>状态</th>
+        </tr>
+        <tr v-for="v in s.variants" :key="v.id" style="border-bottom:1px solid var(--bdr)"
+            :style="{background:v.generation>0?'rgba(79,124,255,0.06)':''}">
+          <td><b>{{v.base_strategy}}</b></td>
+          <td>{{v.strategy_cn||''}}</td>
+          <td align=right>
+            <span :style="{fontWeight:v.generation>0?700:400,color:v.generation>0?'var(--amber)':'var(--muted)'}">
+              gen{{v.generation}}
+            </span>
+          </td>
+          <td align=right :style="{fontWeight:700,color:(v.score||0)>=70?'var(--amber)':(v.score||0)>=55?'var(--accent)':'var(--muted)'}">
+            {{v.score!=null ? v.score.toFixed(0) : '--'}}
+          </td>
+          <td align=right>{{v.win_rate_pct!=null ? (v.win_rate_pct|0)+'%' : '--'}}</td>
+          <td align=right :class="cls(v.avg_ret_pct)">{{v.avg_ret_pct!=null ? (v.avg_ret_pct>=0?'+':'')+v.avg_ret_pct.toFixed(1)+'%' : '--'}}</td>
+          <td align=right style="color:var(--muted)">{{v.sample_stocks||0}}</td>
+          <td style="font-size:11px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            {{formatParams(v.params)}}
+          </td>
+          <td>
+            <span :class="v.status==='promoted'?'pill':''" :style="v.status==='promoted'?{background:'var(--amber)',color:'#000'}:{color:'var(--muted)'}">
+              {{v.status||'active'}}
+            </span>
+          </td>
+        </tr>
+      </table>
+      <div v-else class="sub" style="margin-top:12px">尚无变体数据，随回测运行后自动生成</div>
+    </div>
+
+    <!-- 因子 IC 评估 -->
+    <div class="card" style="margin-top:16px">
+      <h3>🔬 因子效能(IC评估) <span style="font-weight:400;color:var(--muted);font-size:12px">（RankIC/IC-IR/随机对照,科学衡量价量因子预测力）</span></h3>
+      <div v-if="!s.factors" class="loading">加载中…(首次较慢,需拉股池K线;周任务会预热)</div>
+      <div v-else-if="s.factorsErr" class="sub">{{s.factorsErr}}</div>
+      <table v-else-if="s.factors.length" style="width:100%">
+        <tr style="color:var(--muted);font-size:12px">
+          <th align=left>因子</th><th align=left>类别</th><th align=center>判定</th>
+          <th align=right>RankIC</th><th align=right>IC-IR</th><th align=right>胜率</th><th align=right>随机对照</th>
+        </tr>
+        <tr v-for="f in s.factors" :key="f.key" style="border-bottom:1px solid var(--bdr)">
+          <td><b>{{f.name}}</b></td><td style="color:var(--muted)">{{f.category}}</td>
+          <td align=center>{{f.verdict}}</td>
+          <td align=right :class="cls(f.rank_ic)">{{f.rank_ic>0?'+':''}}{{f.rank_ic}}</td>
+          <td align=right :style="{fontWeight:700,color:Math.abs(f.ic_ir)>=0.5?'var(--amber)':Math.abs(f.ic_ir)>=0.3?'var(--accent)':'var(--muted)'}">{{f.ic_ir>0?'+':''}}{{f.ic_ir}}</td>
+          <td align=right>{{f.win_rate}}%</td>
+          <td align=right style="color:var(--muted)">{{f.random_ic!=null?(f.random_ic>0?'+':'')+f.random_ic:'—'}}</td>
+        </tr>
+      </table>
+      <div v-else class="sub">尚无因子评估数据(周任务 factor_eval 预热后显示)</div>
+    </div>
+
+    <!-- 个股适配度查询 -->
+    <div class="card" style="margin-top:16px">
+      <h3>🎯 个股策略适配度查询</h3>
+      <div class="row" style="margin-bottom:12px">
+        <input v-model="s.searchCode" placeholder="股票代码 e.g. 600519" style="width:160px" @keyup.enter="searchAffinity">
+        <button @click="searchAffinity" :disabled="!s.searchCode">查询</button>
+      </div>
+      <div v-if="s.affinity" style="margin-top:8px">
+        <p style="color:var(--muted);font-size:13px">{{s.searchCode}} 策略适配度：</p>
+        <div v-if="s.affinity.length===0" class="sub">该股暂无策略适配数据</div>
+        <table v-else style="width:100%">
+          <tr style="color:var(--muted);font-size:12px">
+            <th align=left>策略</th><th align=right>评分</th><th align=right>胜率</th>
+            <th align=right>均收益</th><th align=right>触发次数</th>
+          </tr>
+          <tr v-for="a in s.affinity" :key="a.strategy_id" style="border-bottom:1px solid var(--bdr)">
+            <td><b>{{CN_MAP[a.strategy_id]||a.strategy_id}}</b></td>
+            <td align=right :style="{fontWeight:700,color:(a.score||0)>=60?'var(--amber)':'var(--muted)'}">{{a.score!=null?a.score.toFixed(0):'--'}}</td>
+            <td align=right>{{a.win_rate_pct!=null?(a.win_rate_pct|0)+'%':'--'}}</td>
+            <td align=right :class="cls(a.avg_ret_pct)">{{a.avg_ret_pct!=null?(a.avg_ret_pct>=0?'+':'')+a.avg_ret_pct.toFixed(1)+'%':'--'}}</td>
+            <td align=right>{{a.trigger_count||0}}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>`,
+
+  setup() {
+    const s = reactive({
+      scores: [], variants: [], affinity: null,
+      loading: false, varLoading: false,
+      err: '', searchCode: '',
+      factors: null, factorsErr: '',
+    })
+
+    async function loadFactors() {
+      try {
+        const r = await api('factors/eval')
+        if (r && r.error && (!r.factors || !r.factors.length)) s.factorsErr = r.error
+        s.factors = (r && r.factors) || []
+      } catch(e) { s.factors = []; s.factorsErr = String(e) }
+    }
+
+    const formatParams = (p) => {
+      if (!p) return ''
+      const d = typeof p === 'string' ? JSON.parse(p) : p
+      return Object.entries(d).map(([k,v])=>`${k}=${v}`).join(', ')
+    }
+
+    async function loadScores() {
+      s.loading = true
+      try {
+        const r = await api('strategy-genome/scores?days=30')
+        s.scores = r.rows || []
+      } catch(e) { s.err = String(e) }
+      s.loading = false
+    }
+
+    async function loadVariants() {
+      s.varLoading = true
+      try {
+        const r = await api('strategy-genome/variants?limit=100')
+        s.variants = r.rows || []
+      } catch(e) {}
+      s.varLoading = false
+    }
+
+    async function searchAffinity() {
+      const code = s.searchCode.trim()
+      if (!code) return
+      try {
+        const r = await api(`strategy-genome/affinity?stock_code=${code}`)
+        s.affinity = r.rows || []
+      } catch(e) { s.affinity = [{ strategy_id: 'error', score: 0 }] }
+    }
+
+    onMounted(() => { loadScores(); loadVariants(); loadFactors() })
+
+    // cls 必须 return 给模板(模板里多处 :class="cls(...)";漏 return → 运行时 cls is not a function)
+    return { s, CN_MAP, formatParams, searchAffinity, cls }
+  }
+}

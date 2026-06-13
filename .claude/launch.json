@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webui",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["F:/Project/AiAgentStock/shadow-foliant/webui/run_dev.py"],
+      "port": 8601
+    }
+  ]
+}

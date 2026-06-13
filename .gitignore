@@ -1,0 +1,27 @@
+/*.rar
+/test_akshare.py
+/test_fixed.py
+/test_pdf_export.py
+/test_pe_pb.py
+/venv
+__pycache__/
+# 环境变量文件
+.env
+/.cursor
+/openspec
+TradEnv/
+*.pyc
+__pycache__/
+# 日志(运行时生成,不入库)
+*.log
+/logs/
+
+# 调试/测试临时输出
+*_debug_output.txt
+test_pull.txt
+test_push.txt
+
+# 本地数据库(个人数据,不入库/不推送)
+/db/
+
+venv2/
