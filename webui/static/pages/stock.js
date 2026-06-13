@@ -194,7 +194,7 @@ export default {
       md+='\n## 决策依据\n\n'+(summary.value||'—')+'\n'
       for(const k of ['technical','fundamental','risk']){ if(r[k]) md+='\n## '+({technical:'技术面',fundamental:'基本面',risk:'风险'}[k])+'\n\n'+(typeof r[k]==='string'?r[k]:JSON.stringify(r[k],null,2))+'\n' }
       if(r.rag_evidence) md+='\n## 检索证据\n\n'+r.rag_evidence+'\n'
-      md+='\n---\n*本研报由 aiagents-stock 多智能体生成,仅供参考,不构成投资建议。*\n'
+      md+='\n---\n*本研报由 shadow-foliant 多智能体生成,仅供参考,不构成投资建议。*\n'
       const blob=new Blob([md],{type:'text/markdown;charset=utf-8'})
       const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
       a.download=(info.name||s.code)+'_'+s.code+'_研报_'+today+'.md'; a.click(); URL.revokeObjectURL(a.href)

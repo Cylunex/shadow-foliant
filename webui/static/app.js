@@ -59,7 +59,7 @@ createApp({
     // 否则外层 wrapper div 会让 #app 的 display:flex 失效(侧栏/内容垂直堆叠)。
     return () => [
       h('div', { class:'sidebar' }, [
-        h('div', { class:'brand', translate:'no' }, [ '📈 aiagents-stock', h('small', '智能投研 · FastAPI + Vue') ]),
+        h('div', { class:'brand', translate:'no' }, [ '📈 shadow-foliant', h('small', '智能投研 · FastAPI + Vue') ]),
         ...NAV.map(it => h('div', {
           class:['nav-item', { active: cur.value.k===it.k }], onClick:()=>go(it)
         }, [ h('span',{class:'ic'}, it.ic), h('span', it.t) ])),

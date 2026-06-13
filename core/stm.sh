@@ -1,14 +1,14 @@
 # 1. 删除带 \r 的旧文件
-rm -f /www/wwwroot/aiagents-stock/stm /www/wwwroot/aiagents-stock/stm.py
+rm -f /www/wwwroot/shadow-foliant/stm /www/wwwroot/shadow-foliant/stm.py
 
 # 2. 重新写入（纯 Unix 换行）
-cat > /www/wwwroot/aiagents-stock/stm << 'EOF'
+cat > /www/wwwroot/shadow-foliant/stm << 'EOF'
 #!/usr/bin/env python3
 import os, time, signal, subprocess, psutil
 
 APP_NAME  = "app.py"
-VENV_PATH = "/www/wwwroot/aiagents-stock/venv"
-APP_PATH  = "/www/wwwroot/aiagents-stock"
+VENV_PATH = "/www/wwwroot/shadow-foliant/venv"
+APP_PATH  = "/www/wwwroot/shadow-foliant"
 PORT      = 8501
 STR = os.path.join(VENV_PATH, "bin", "streamlit")
 LOG = os.path.join(APP_PATH, "app.log")
@@ -62,10 +62,10 @@ if __name__ == "__main__": main()
 EOF
 
 # 3. 赋可执行权限
-chmod +x /www/wwwroot/aiagents-stock/stm
+chmod +x /www/wwwroot/shadow-foliant/stm
 
 # 4. 确保 PATH 包含当前目录（已加可忽略）
-echo 'export PATH="/www/wwwroot/aiagents-stock:$PATH"' >> ~/.bashrc
+echo 'export PATH="/www/wwwroot/shadow-foliant:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # 5. 运行
