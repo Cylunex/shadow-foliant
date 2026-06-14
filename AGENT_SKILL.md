@@ -109,7 +109,21 @@ portfolio_db.import_trades([
 ], update_position=True)            # 返回 {imported, failed, positions_updated}
 portfolio_db.get_trades('600519')   # 查成交记录(含 pos_quantity/pos_cost_price/delta_qty 持仓快照)
 # 注:trade_records 是「成交记录+变动日志」合并表;成交记录行自带持仓快照(一行=成交+持仓变化)
+
+import portfolio_insights as pi
+pi.holding_duration_distribution(); pi.trading_frequency_analysis(90); pi.portfolio_change_timeline(90)  # 交易习惯洞察(纯库读)
+pi.diagnose_portfolio()             # AI 持仓诊断(LLM;无 key 降级返回规则报表)
+import portfolio_classifier as pc
+pc.classify_all(limit=15, with_fundamental=False)  # 持仓分级 健康/观察/警报(盈亏+趋势+形态)
+import position_guardian, position_profit_taker
+position_guardian.evaluate_all_triggered(limit=20, with_fundamental=False)  # 加仓审核(跌幅触发→质地/仓位约束)
+position_profit_taker.evaluate_all(limit=20)        # 减仓信号(阶梯止盈+破位保护)
+
+from portfolio_backtest import portfolio_backtest, portfolio_backtest_live
+portfolio_backtest([('600519','茅台'),...], '2024-01-01','2025-12-31', strategy_id='enter', max_positions=5)  # 组合级回测(实盘口径)
 ```
+- MCP 工具(组合/持仓):`list_holdings`/`import_holdings`/`portfolio_diagnosis`/`portfolio_performance`/`portfolio_stress_scenario`/`portfolio_stress_all`/`stock_portfolio_curve` + 新增 `portfolio_trading_habits`/`portfolio_classify`/`portfolio_action_signals`/`portfolio_ai_diagnose`/`portfolio_backtest`。
+- MCP 工具(个股,补 B 节):`dcf_valuation`(两阶段DCF,自市值/PE推导)。
 
 ### E. 聚合 context(Agent 首选入口)
 ```python
@@ -160,13 +174,16 @@ fund_portfolio.diagnose(holdings)          # 组合诊断:大类/类型配置 + 
 fund_portfolio.combined_asset_view()       # 🌐 股票+基金 大类资产合并视图(成本口径)
 fund_analysis.ai_research_panel('110011')  # 🧑‍⚖️ 多角色AI研判(业绩/风险/定投适配 + 综合)⚠️需LLM key
 fund_analysis.score_fund('110011', with_extras=True)  # 综合评分 0-100 + 等级 + 建议(with_extras 加同类排名分位维)
+fund_analysis.compare_funds(['110011','005827'], lookback_days=1095)  # 多只并排对比(共同窗归一:年化/回撤/夏普/卡玛 + 叠加曲线)
+fund_data.top_holdings('110011'); fund_data.rating_summary('110011')  # 前十大重仓股(最新季度)/ 评级摘要(经理/公司/机构星级/费率)
+# 名单已主源直连东财 fundcode_search.js(0.4s,快于 akshare fund_name_em ~7s),akshare 兜底
 fund_analysis.ai_research('110011')        # 🤖 AI研判(适合长期/定投? 风险点 + 节奏建议)⚠️需LLM key、耗token
 fund_db.get_holdings(); fund_db.add_transaction('110011','定投',nav=4.38,amount=1000)  # 持有+申赎流水(自动移动成本)
 fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 ```
 - 定位:**长期持有 + 定投为主**,区别于股票模块的短线择时。阶段一含基础定投+回测;估值智能定投/价值平均法/止盈在阶段二。
 - 后台任务(`jobs_hub`,默认全关):`fund_nav_refresh`(盘后净值入库+组合快照)/`fund_dca_reminder`(定投到期**自动记账/提醒**)/`fund_target_check`(止盈检查)/`fund_valuation_signal`(宽基估值分位播报)。
-- MCP 工具(12):`fund_info`/`fund_nav_history`/`fund_metrics`/`fund_score`/`fund_dca_backtest`/`fund_index_valuation`/`fund_screen`/`fund_portfolio_diagnose`/`fund_ai_panel`/`fund_ai_research`/`fund_holdings`/`asset_overview`。
+- MCP 工具(14):`fund_info`/`fund_nav_history`/`fund_metrics`/`fund_score`/`fund_dca_backtest`/`fund_index_valuation`/`fund_screen`/`fund_portfolio_diagnose`/`fund_ai_panel`/`fund_ai_research`/`fund_holdings`/`asset_overview` + 新增 `fund_compare`/`fund_detail`。
 
 ---
 
