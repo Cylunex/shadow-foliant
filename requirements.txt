@@ -6,8 +6,12 @@ plotly>=5.15.0
 yfinance>=0.2.18
 akshare>=1.11.0
 tushare>=1.3.0
-mootdx>=0.11.0          # 通达信公网行情(可移植TDX数据源);注:其声明 httpx<0.26 过于保守,实测 httpx>=0.27 正常,以 mcp 的 httpx 要求为准
-httpx>=0.27.1           # mcp 需要;勿被 mootdx 降级到 0.25
+httpx>=0.27.1           # mcp 需要
+# ⚠️ mootdx(通达信公网行情,可选的 K 线兜底源)其包元数据锁 httpx<0.26,与上面 mcp 需要的
+#    httpx>=0.27 直接冲突 → 若写进主依赖,pip 新解析器会 ResolutionImpossible 整个装不上。
+#    故移出主依赖。**不装也不影响**:data_source_manager 的 mootdx 取数链已 try/except 守卫,缺库自动跳过。
+#    需要它时单独装(实测 httpx0.27 兼容,装完把 httpx 再升回去即可):
+#        pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"
 openai>=1.12.0
 python-dotenv>=1.0.0
 pytz
