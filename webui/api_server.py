@@ -89,7 +89,8 @@ def _with_deadline(fn, seconds, default):
 
 
 def _jsonsafe(o):
-    """递归把 NaN/Inf → None,保证 JSON 可序列化(否则 Starlette 序列化抛 500)。"""
+    """递归把 NaN/Inf → None + numpy 标量 → python 原生,保证 JSON 可序列化(否则 Starlette 抛 500)。
+    numpy.bool_/integer/floating 不是 JSON 原生类型(如策略/形态用 numpy 比较产出 np.bool_)→ 必须降级。"""
     import math
     if isinstance(o, float):
         return None if (math.isnan(o) or math.isinf(o)) else o
@@ -97,6 +98,12 @@ def _jsonsafe(o):
         return {k: _jsonsafe(v) for k, v in o.items()}
     if isinstance(o, (list, tuple)):
         return [_jsonsafe(v) for v in o]
+    # numpy 标量降级(不硬依赖 numpy:没装就跳过)
+    if hasattr(o, "item") and type(o).__module__ == "numpy":
+        try:
+            return _jsonsafe(o.item())
+        except Exception:
+            return None
     return o
 
 
@@ -246,6 +253,42 @@ def stock_insights(code: str):
         return _err(e)
 
 
+@app.get("/api/stock/{code}/dcf")
+def stock_dcf(code: str, growth: float = 0.10, years: int = 5,
+              terminal: float = 0.03, discount: float = 0.10):
+    """两阶段 DCF 内在价值估值(补 PE/PB 之外的绝对估值)。
+    自 stock_info 推导:股本=市值/现价、基准FCF≈净利润=市值/PE(净利近似,注明)。
+    可调 高速增速 growth/高速年数 years/永续增速 terminal/折现率 discount。返回内在价值/安全边际/敏感性表。"""
+    try:
+        import datahub
+        import dcf_valuation
+        info = datahub.stock_info(code) or {}
+        mc = info.get("market_cap")
+        px = info.get("current_price")
+        pe = info.get("pe_ratio")
+        if not (mc and px and px > 0):
+            return _err("无法获取市值/现价")
+        if not (pe and pe > 0):
+            return _err("该股 PE 不可用(亏损或缺数据),无法用净利润近似 FCF")
+        shares = mc / px
+        base_fcf = mc / pe   # 净利润近似(trailing)
+        r = dcf_valuation.analyze_dcf(
+            base_fcf=base_fcf, shares=shares, current_price=px,
+            high_growth=growth, high_years=int(years), terminal_growth=terminal,
+            discount_rate=discount, fcf_is_proxy=True)
+        if "error" in r:
+            return _err(r["error"])
+        sens = dcf_valuation.sensitivity(
+            base_fcf, growth, int(years), shares, 0.0, px,
+            wacc_range=[round(discount - 0.02, 4), discount, round(discount + 0.02, 4)],
+            tg_range=[max(0.005, round(terminal - 0.01, 4)), terminal, round(terminal + 0.01, 4)])
+        r["sensitivity"] = sens["sensitivity"]
+        r["code"], r["name"] = code, info.get("name")
+        return _ok(r)
+    except Exception as e:
+        return _err(e)
+
+
 @app.get("/api/stock/{code}/backtest")
 def stock_backtest(code: str, strategy: str = "enter", hold_days: int = 10,
                    stop_pct: float = 8.0, target_pct: float = 15.0, lookback_days: int = 365):
@@ -262,6 +305,71 @@ def stock_backtest(code: str, strategy: str = "enter", hold_days: int = 10,
         r = backtest_one(code, strategy, df, start, end, hold_days=hold_days,
                          stop_pct=stop_pct, target_pct=target_pct)
         return _ok({"symbol": code, "strategy": strategy, "period": r.get("period"), "summary": r.get("summary", {})})
+    except Exception as e:
+        return _err(e)
+
+
+class PortfolioBacktestReq(BaseModel):
+    codes: list[str] = []          # 自定义股票池(空则按 universe 取)
+    universe: str = "holdings"     # holdings(我的持仓) | index(指数成分) | custom(用 codes)
+    index_code: str = "000300"     # universe=index 时的指数
+    limit: int = 50                # universe 取数上限(逐股拉K线,防慢)
+    start: str = ""                # 空=近2年
+    end: str = ""                  # 空=今天
+    strategy: str = "enter"
+    use_live: bool = False         # True=用策略基因组 live 集(各策略最优变体+组合策略)
+    hold_days: int = 10
+    stop_pct: float = 8.0
+    target_pct: float = 15.0
+    max_positions: int = 5
+    initial_cash: float = 1_000_000.0
+    allocation: str = "equal"      # equal 等权 | signal 信号强度加权
+    benchmark: str = "000300"
+
+
+@app.post("/api/backtest/portfolio")
+def backtest_portfolio(req: PortfolioBacktestReq):
+    """组合级回测:一个现金账户、并发持仓上限、先卖后买、含交易成本,
+    输出组合 CAGR/最大回撤/夏普/胜率/净值曲线并对比沪深300。无前视(次日开盘建仓)。
+    单股回测(/api/stock/.../backtest)系统性高估收益,组合回测才是实盘口径。"""
+    try:
+        from datetime import datetime, timedelta
+        from portfolio_backtest import portfolio_backtest, portfolio_backtest_live
+
+        # —— 解析股票池 → [(code, name)] ——
+        stocks = []
+        if req.universe == "custom" or req.codes:
+            stocks = [(c, "") for c in req.codes if c]
+        elif req.universe == "holdings":
+            from portfolio_db import portfolio_db
+            stocks = [(str(s.get("code")), s.get("name") or "")
+                      for s in (portfolio_db.get_all_stocks() or [])
+                      if float(s.get("quantity") or s.get("shares") or 0) > 0 and s.get("code")]
+        elif req.universe == "index":
+            from multi_factor_screener import get_index_universe
+            stocks = [(c, "") for c in get_index_universe(req.index_code)]
+        if not stocks:
+            return _err("股票池为空(无持仓/无成分/未填代码)")
+        stocks = stocks[:max(1, min(req.limit, 200))]
+
+        end = req.end or datetime.now().strftime("%Y-%m-%d")
+        start = req.start or (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+
+        common = dict(
+            hold_days=req.hold_days, stop_pct=req.stop_pct, target_pct=req.target_pct,
+            max_positions=req.max_positions, initial_cash=req.initial_cash,
+            allocation=req.allocation, benchmark=req.benchmark or None,
+            curve_points=150,
+        )
+        if req.use_live:
+            r = portfolio_backtest_live(stocks, start, end, **common)
+        else:
+            r = portfolio_backtest(stocks, start, end, strategy_id=req.strategy, **common)
+        if "error" in r:
+            return _err(r.get("error"))
+        # trades 可能很多,只回最近 60 笔(摘要+曲线为主)
+        r["trades"] = r.get("trades", [])[-60:]
+        return _ok(r)
     except Exception as e:
         return _err(e)
 
@@ -538,6 +646,39 @@ def fund_dca(req: DcaReq):
         return _err(e)
 
 
+class DcaCompareReq(BaseModel):
+    code: str
+    amount: float = 1000
+    period: str = "monthly"
+    day: int = 5
+
+
+@app.post("/api/fund/dca-compare")
+def fund_dca_compare(req: DcaCompareReq):
+    """一键对比三种定投策略(normal 定额 / valuation 估值智能 / value_avg 价值平均)在同一基金、
+    同一周期下的收益/年化IRR/最大回撤/是否跑赢一次性买入。净值只抓一次,三策略复用。"""
+    try:
+        import fund_data, fund_dca
+        df = fund_data.get_nav_history(req.code)
+        if df is None or df.empty:
+            return _err("净值获取失败")
+        keep = ("total_invested", "final_value", "profit_pct", "annualized_irr",
+                "max_drawdown", "dca_beats_lump", "n_invests", "lump_sum", "start", "end")
+        out = []
+        for strat in ("normal", "valuation", "value_avg"):
+            try:
+                r = fund_dca.dca_backtest(df, req.amount, req.period, day=req.day, strategy=strat)
+                if r.get("error"):
+                    out.append({"strategy": strat, "error": r["error"]})
+                else:
+                    out.append({"strategy": strat, **{k: r.get(k) for k in keep}})
+            except Exception as e:
+                out.append({"strategy": strat, "error": str(e)[:80]})
+        return _ok({"code": req.code, "period": req.period, "amount": req.amount, "results": out})
+    except Exception as e:
+        return _err(e)
+
+
 @app.get("/api/fund/holdings")
 def fund_holdings(realtime: bool = False):
     """我的基金持有。净值**优先读库**(fund_nav 表)→ 秒开;库里缺的才现抓一次并落库。
@@ -758,13 +899,18 @@ def fund_import_plans(req: FundPlansImportReq):
 
 
 @app.get("/api/fund/screen")
-def fund_screen(type: str = "股票型", sort_by: str = "r_1y", top_n: int = 20):
+def fund_screen(type: str = "股票型", sort_by: str = "r_1y", top_n: int = 20,
+                min_1y: float | None = None, min_3y: float | None = None,
+                max_fee: float | None = None):
     """基金同类排行筛选。type: 全部/股票型/混合型/债券型/指数型/QDII/LOF/FOF;
-    sort_by: r_1w/r_1m/r_3m/r_6m/r_1y/r_2y/r_3y/r_ytd/r_since。Redis 缓存 1h。"""
+    sort_by: r_1w/r_1m/r_3m/r_6m/r_1y/r_2y/r_3y/r_ytd/r_since;
+    可选过滤:min_1y/min_3y(近1/3年收益%下限)、max_fee(手续费%上限)。Redis 缓存 1h。"""
     try:
         import fund_screener
-        out = _cache_or(f"fundscreen:{type}:{sort_by}:{top_n}", 3600,
-                        lambda: fund_screener.screen_funds(type, sort_by, top_n),
+        key = f"fundscreen:{type}:{sort_by}:{top_n}:{min_1y}:{min_3y}:{max_fee}"
+        out = _cache_or(key, 3600,
+                        lambda: fund_screener.screen_funds(type, sort_by, top_n,
+                                                           min_1y=min_1y, min_3y=min_3y, max_fee=max_fee),
                         keep=lambda v: bool(v))
         return _ok(out)
     except Exception as e:
@@ -780,6 +926,109 @@ def fund_valuation_pe(index: str = "沪深300"):
                         lambda: fund_valuation.index_pe_percentile(index, None),
                         keep=lambda v: isinstance(v, dict) and v.get("pe"))
         return _ok(out or {"error": "估值获取失败", "index": index})
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/fund/compare")
+def fund_compare(codes: str = "", lookback_days: int = 0):
+    """多只基金并排对比(同一共同时间窗):年化/总收益/回撤/夏普/卡玛/波动 + 归一净值叠加曲线。
+    codes 逗号分隔(2-6 只为宜);lookback_days>0 只比最近 N 天。Redis 缓存 1h。"""
+    try:
+        import fund_analysis
+        cs = [c.strip() for c in codes.replace("，", ",").split(",") if c.strip()]
+        if len(cs) < 2:
+            return _err("请至少提供 2 只基金代码(逗号分隔)")
+        lb = lookback_days or None
+        key = f"fundcompare:{','.join(sorted(cs))}:{lb}"
+        out = _cache_or(key, 3600, lambda: fund_analysis.compare_funds(cs, lookback_days=lb),
+                        keep=lambda v: isinstance(v, dict) and bool(v.get("funds")))
+        return _ok(out)
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/fund/{code}/extras")
+def fund_extras(code: str):
+    """单只基金档案:前十大重仓股(最新季度)+ 评级摘要(经理/公司/机构星级/费率)+ 基本信息。
+    3 个网络调用并发,**各自独立缓存 6h 且仅成功才缓存**(某源瞬时失败不会被缓存,下次自动重试)。"""
+    import fund_data
+    from concurrent.futures import ThreadPoolExecutor
+    nonempty = lambda v: isinstance(v, dict) and bool(v)
+    def th():
+        return _cache_or(f"fundth:{code}", 21600, lambda: fund_data.top_holdings(code, 10),
+                         keep=lambda v: isinstance(v, dict) and bool(v.get("holdings")))
+    def rt():
+        return _cache_or(f"fundrt:{code}", 21600, lambda: fund_data.rating_summary(code), keep=nonempty)
+    def ba():
+        return _cache_or(f"fundba:{code}", 21600, lambda: fund_data.get_fund_basic(code), keep=nonempty)
+    try:
+        with ThreadPoolExecutor(max_workers=3) as exr:
+            fth, frt, fba = exr.submit(th), exr.submit(rt), exr.submit(ba)
+            return _ok({"top_holdings": fth.result() or {"holdings": []},
+                        "rating": frt.result() or {}, "basic": fba.result() or {}})
+    except Exception as e:
+        return _err(e)
+
+
+@app.delete("/api/fund/plan/{plan_id}")
+def fund_delete_plan(plan_id: int):
+    """删除定投计划。"""
+    try:
+        import fund_db
+        fund_db.init_db()
+        fund_db.delete_plan(plan_id)
+        return _ok({"deleted": plan_id})
+    except Exception as e:
+        return _err(e)
+
+
+@app.post("/api/fund/plan/{plan_id}/toggle")
+def fund_toggle_plan(plan_id: int):
+    """启用/停用定投计划(翻转当前状态)。"""
+    try:
+        import fund_db
+        fund_db.init_db()
+        cur = next((p for p in fund_db.get_plans() if int(p.get("id")) == plan_id), None)
+        if not cur:
+            return _err("计划不存在")
+        new_state = not bool(cur.get("enabled"))
+        fund_db.set_plan_enabled(plan_id, new_state)
+        return _ok({"id": plan_id, "enabled": new_state})
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/fund/diagnose")
+def fund_diagnose(overlap: bool = False):
+    """基金组合诊断:大类/类型配置权重、集中度(HHI/top1/top3)、(可选)重仓股穿透重叠 + 建议。
+    市值用库内净值×份额估算(避免逐只联网);overlap=1 才做重仓穿透(慢,53只逐只抓持仓)。"""
+    try:
+        import fund_db, fund_portfolio
+        fund_db.init_db()
+        holdings = fund_db.get_holdings()
+        if not holdings:
+            return _ok({"error": "无持有基金"})
+        # 用库内净值算市值,避免 diagnose 内逐只 latest_nav 联网(53只省~7s)
+        codes = [str(h.get("code")) for h in holdings]
+        navs = fund_db.get_latest_navs(codes)
+        enriched = []
+        for h in holdings:
+            code = str(h.get("code"))
+            shares = float(h.get("shares") or 0)
+            unit = float((navs.get(code) or {}).get("unit_nav") or h.get("cost_nav") or 0)
+            enriched.append({**h, "code": code, "market_value": round(shares * unit, 2)})
+        return _ok(fund_portfolio.diagnose(enriched, with_overlap=overlap))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/fund/combined-view")
+def fund_combined_view():
+    """股票 + 基金 大类资产合并视图(成本口径,offline)。各大类金额与占比。"""
+    try:
+        import fund_portfolio
+        return _ok(fund_portfolio.combined_asset_view())
     except Exception as e:
         return _err(e)
 
@@ -1091,6 +1340,101 @@ def portfolio_snapshot_now():
         if not r:
             return _ok({"saved": False, "msg": "当前无股票持仓"})
         return _ok({"saved": True, **r})
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/portfolio/signals")
+def portfolio_signals_api(limit: int = 20):
+    """持仓操作信号(on-demand):加仓审核(guardian:触发跌幅→质地审核 approve/reject)+
+    减仓信号(profit_taker:30/60/100%阶梯 + 跌破MA20/60 保护 + 情绪过热)。
+    加/减仓两路**并发**扫描(走常驻池,不被 hang 住的冷门股阻塞响应),各只扫市值前 limit 只(默认20),
+    各 45s 截止护栏。Redis 缓存 10min。"""
+    def compute():
+        import position_guardian as pg
+        import position_profit_taker as pt
+        from concurrent.futures import wait as _cf_wait
+        # 用模块级常驻池(_DEADLINE_POOL):其不会在退出时 shutdown(wait=True) 阻塞,
+        # 超时即放弃(被弃线程后台跑完丢弃),响应不被个别卡死的行情源拖住。
+        fa = _DEADLINE_POOL.submit(pg.evaluate_all_triggered, 8, limit, False)  # 跳过慢基本面
+        fr = _DEADLINE_POOL.submit(pt.evaluate_all, 8, limit)
+        # 单一 45s 预算等两路(wait 一起等,避免 fa.result(45)+fr.result(45) 叠加成 90s)
+        done, _ = _cf_wait([fa, fr], timeout=45)
+
+        def _res(f):
+            try:
+                return f.result() if f in done else None
+            except Exception:
+                return None
+        add, reduce = _res(fa), _res(fr)
+        if add is None and reduce is None:
+            return None
+        # add_ok/reduce_ok:该路是否扫完(超时=False)→ 前端区分"无信号"与"扫描超时,别误读 0"。
+        # _complete=两路都成功才缓存:某路超时的"部分结果"不缓存(否则 add=[] 被当真无信号缓存10min)
+        return {"add": add or [], "reduce": reduce or [],
+                "add_count": len(add or []), "reduce_count": len(reduce or []),
+                "add_ok": add is not None, "reduce_ok": reduce is not None,
+                "_complete": (add is not None and reduce is not None)}
+    try:
+        out = _cache_or(f"portfolio:signals:{limit}", 600, compute,
+                        keep=lambda v: isinstance(v, dict) and v.get("_complete"))
+        if out is None:
+            return _err("信号扫描超时(部分持仓行情源较慢),请稍后重试")
+        out.pop("_complete", None)
+        return _ok(out)
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/portfolio/insights")
+def portfolio_insights_api(since_days: int = 90):
+    """持仓交易习惯洞察(纯库读,秒回):持有时长分布 + 交易频次/买卖比 + 变动时间线/最活跃股。"""
+    try:
+        import portfolio_insights as pi
+        return _ok({
+            "duration": pi.holding_duration_distribution(),
+            "frequency": pi.trading_frequency_analysis(since_days=since_days),
+            "timeline": pi.portfolio_change_timeline(since_days=since_days, limit=200),
+        })
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/portfolio/classify")
+def portfolio_classify_api(limit: int = 15, fundamental: bool = False):
+    """持仓自动分级(健康🟢/观察🟡/警报🔴/数据不足⚪),基于 持仓盈亏+趋势(MA)+看跌反转形态。
+    limit 只扫市值最大的前 N 只(默认30)。fundamental=true 才加基本面评分(每只2-4s且依赖pywencai/F10,
+    弱网/未配置时返回N/A纯耗时,默认关→秒级)。Redis 缓存 30min。"""
+    try:
+        import portfolio_classifier as pc
+        # 逐只走实时报价/K线,个别冷门股外部源会卡 → 45s 截止护栏,超时返回提示而非挂死(已算的进缓存下次秒回)
+        out = _cache_or(
+            f"portfolio:classify:{limit}:{fundamental}", 1800,
+            lambda: _with_deadline(lambda: pc.classify_all(limit=limit, with_fundamental=fundamental), 45, None),
+            keep=lambda v: isinstance(v, dict) and any(v.get(k) for k in ("healthy", "watch", "alert", "na")))
+        if not out:
+            return _err("分级超时(部分持仓行情源较慢),请调小 limit 或稍后重试")
+        counts = {k: len(out.get(k, [])) for k in ("healthy", "watch", "alert", "na")}
+        return _ok({"counts": counts, "by_class": out, "limit": limit, "with_fundamental": fundamental})
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/portfolio/diagnose-ai")
+def portfolio_diagnose_ai():
+    """AI 持仓诊断(LLM):基于 估值/变动/持有时长/交易频次 4 报表,给交易习惯+风险+改进建议+风险/纪律评分。
+    ⚠️ 需 LLM key;**无 key/超时不阻塞**——仍返回 context(规则报表),diagnosis 段标注失败。
+    LLM 已有 per-call 超时,这里再套 60s 截止护栏。仅 LLM 成功才缓存(30min),失败下次重试。"""
+    try:
+        import portfolio_insights as pi
+        out = _cache_or(
+            "portfolio:diagnose_ai", 1800,
+            lambda: _with_deadline(pi.diagnose_portfolio, 60, None),
+            keep=lambda v: isinstance(v, dict) and isinstance(v.get("diagnosis"), dict)
+            and "error" not in v["diagnosis"] and "raw_text" not in v["diagnosis"])
+        if out is None:
+            return _err("AI 诊断超时,请稍后重试(规则报表可看交易习惯洞察卡片)")
+        return _ok(out)
     except Exception as e:
         return _err(e)
 

@@ -118,6 +118,111 @@ export default {
         </tbody>
       </table>
     </div>
+    <!-- ===== 交易习惯洞察 ===== -->
+    <div class="card" v-if="p.insights">
+      <h3>🧭 交易习惯洞察 <span style="color:var(--muted);font-weight:400;font-size:12px">近{{insSince}}天 · 纯记录,秒回</span></h3>
+      <div class="row stretch">
+        <div class="flex1">
+          <div class="sub" style="margin-bottom:4px">持有时长分布 <span v-if="p.insights.duration">(平均 {{p.insights.duration.avg_days}} 天)</span></div>
+          <template v-for="(n,k) in (p.insights.duration&&p.insights.duration.buckets)" :key="k">
+            <div v-if="n>0" style="margin:3px 0">
+              <div style="display:flex;justify-content:space-between;font-size:12px"><span>{{durLabel(k)}}</span><span>{{n}}只</span></div>
+              <div style="height:7px;background:var(--panel2);border-radius:4px;overflow:hidden"><div :style="{width:durPct(n)+'%',height:'100%',background:'#4f7cff'}"></div></div>
+            </div>
+          </template>
+        </div>
+        <div class="flex1" v-if="p.insights.frequency">
+          <div class="sub" style="margin-bottom:4px">交易频次</div>
+          <table style="font-size:13px;width:100%"><tbody>
+            <tr><td>近{{insSince}}天变动</td><td style="text-align:right"><b>{{p.insights.frequency.total_changes}}</b> 次</td></tr>
+            <tr><td>买入 / 卖出</td><td style="text-align:right"><span class="red">{{p.insights.frequency.buys}}</span> / <span class="green">{{p.insights.frequency.sells}}</span></td></tr>
+            <tr><td>买卖比</td><td style="text-align:right">{{p.insights.frequency.buy_sell_ratio}}</td></tr>
+            <tr><td>日均变动</td><td style="text-align:right">{{p.insights.frequency.daily_avg_changes}} 次</td></tr>
+          </tbody></table>
+        </div>
+        <div class="flex1" v-if="p.insights.timeline">
+          <div class="sub" style="margin-bottom:4px">最活跃(变动最多)</div>
+          <table style="font-size:13px;width:100%"><tbody>
+            <tr v-for="s in (p.insights.timeline.most_active||[]).slice(0,6)" :key="s.code"><td>{{s.code}} {{s.name}}</td><td style="text-align:right">{{s.count}}次</td></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 操作信号 ===== -->
+    <div class="card">
+      <h3>🎯 操作信号
+        <button class="ghost" style="float:right" :disabled="p.sigBusy" @click="loadSignals">{{p.sigBusy?'扫描中…':'扫描加/减仓'}}</button>
+        <span v-if="p.sig" style="color:var(--muted);font-weight:400;font-size:12px;margin-left:8px">加仓 {{p.sig.add_ok===false?'⏱超时':p.sig.add_count}} · 减仓 {{p.sig.reduce_ok===false?'⏱超时':p.sig.reduce_count}}</span>
+      </h3>
+      <div v-if="p.sigErr" class="err">{{p.sigErr}}</div>
+      <template v-if="p.sig">
+        <div v-if="p.sig.reduce&&p.sig.reduce.length" style="margin-top:6px">
+          <b>💰 减仓信号 ({{p.sig.reduce.length}})</b>
+          <div v-for="x in p.sig.reduce" :key="'r'+x.symbol" style="font-size:13px;padding:3px 0;border-bottom:1px solid var(--bdr)">
+            {{x.symbol}} {{x.name}} <span :class="cls(x.profit_pct)">{{pct((x.profit_pct||0)/100)}}</span>
+            <span v-for="(a,i) in x.actions" :key="i" :style="{color:sigColor(a.severity)}"> · {{a.recommendation}}</span>
+          </div>
+        </div>
+        <div v-if="p.sig.add&&p.sig.add.length" style="margin-top:8px">
+          <b>📈 加仓审核 ({{p.sig.add.length}})</b>
+          <div v-for="x in p.sig.add" :key="'a'+x.symbol" style="font-size:13px;padding:3px 0;border-bottom:1px solid var(--bdr)">
+            <span :style="{color:x.verdict==='approve'?'#3da35d':'#e0a030',fontWeight:700}">{{x.verdict==='approve'?'✅可加':'⚠️勿加'}}</span>
+            {{x.symbol}} {{x.name}} <span :class="cls(x.holding_pnl_pct)">{{pct((x.holding_pnl_pct||0)/100)}}</span>
+            <span style="color:var(--muted)"> · {{x.verdict==='approve'?'触发跌幅且质地审核通过':(x.reason_codes||[]).join('; ')}}</span>
+          </div>
+        </div>
+        <div v-if="p.sig.add_ok===false" class="sub" style="margin-top:6px;color:var(--amber,#e0a030)">⏱ 加仓审核扫描超时(个别持仓行情源较慢),可重试。</div>
+        <div v-if="p.sig.reduce_ok===false" class="sub" style="margin-top:6px;color:var(--amber,#e0a030)">⏱ 减仓信号扫描超时,可重试。</div>
+        <div v-if="(p.sig.add_ok!==false&&!(p.sig.add||[]).length) && (p.sig.reduce_ok!==false&&!(p.sig.reduce||[]).length)" class="sub" style="margin-top:6px">当前无加/减仓触发 🟢</div>
+      </template>
+      <div v-else-if="!p.sigBusy" class="loading">点"扫描加/减仓"查当前操作信号(跌幅触发的加仓审核 + 阶梯止盈/破位减仓)。仅提示不下单。</div>
+    </div>
+
+    <!-- ===== 持仓分级 ===== -->
+    <div class="card">
+      <h3>🚦 持仓分级
+        <button class="ghost" style="float:right" :disabled="p.clsBusy" @click="classify">{{p.clsBusy?'分级中…(逐只基本面+形态,稍候)':'运行分级'}}</button>
+        <span v-if="p.cls&&p.cls.counts" style="color:var(--muted);font-weight:400;font-size:12px;margin-left:8px">🟢{{p.cls.counts.healthy}} 🟡{{p.cls.counts.watch}} 🔴{{p.cls.counts.alert}} ⚪{{p.cls.counts.na}}</span>
+      </h3>
+      <div v-if="p.clsErr" class="err">{{p.clsErr}}</div>
+      <template v-if="p.cls&&p.cls.by_class">
+        <div v-for="grp in ['alert','watch']" :key="grp">
+          <div v-if="p.cls.by_class[grp]&&p.cls.by_class[grp].length" style="margin-top:6px">
+            <b>{{grp==='alert'?'🔴 警报':'🟡 观察'}} ({{p.cls.by_class[grp].length}})</b>
+            <div v-for="x in p.cls.by_class[grp]" :key="x.symbol" style="font-size:13px;padding:2px 0;border-bottom:1px solid var(--bdr)">
+              {{x.symbol}} {{x.name}} <span :class="cls(x.holding_pnl_pct)">{{pct((x.holding_pnl_pct||0)/100)}}</span>
+              <span style="color:var(--muted)">· <span v-if="x.fundamental_grade&&x.fundamental_grade!=='N/A'">{{x.fundamental_grade}} · </span>{{(x.reasons||[]).join('; ')}}</span>
+            </div>
+          </div>
+        </div>
+        <div v-if="!(p.cls.by_class.alert||[]).length && !(p.cls.by_class.watch||[]).length" class="sub" style="margin-top:6px">无警报/观察持仓 🎉(健康 {{p.cls.counts.healthy}} 只)</div>
+      </template>
+      <div v-else-if="!p.clsBusy" class="loading">点"运行分级"扫描前15大持仓(持仓盈亏+趋势MA+看跌反转形态,结果缓存30分钟)。</div>
+    </div>
+
+    <!-- ===== AI 持仓诊断 ===== -->
+    <div class="card">
+      <h3>🧠 AI 持仓诊断
+        <button class="ghost" style="float:right" :disabled="p.diagBusy" @click="aiDiag">{{p.diagBusy?'诊断中…':'AI诊断'}}</button>
+        <span v-if="diagD&&diagD.risk_score" style="color:var(--muted);font-weight:400;font-size:12px;margin-left:8px">风险 {{diagD.risk_score}}/10 · 纪律 {{diagD.discipline_score}}/10</span>
+      </h3>
+      <div v-if="p.diagErr" class="err">{{p.diagErr}}</div>
+      <template v-if="p.diag">
+        <div v-if="diagD&&diagD.summary" style="margin-top:4px"><b>{{diagD.summary}}</b></div>
+        <div v-if="diagD&&diagD.problems&&diagD.problems.length" style="margin-top:8px">
+          <b>⚠️ 问题</b><ul style="margin:4px 0;padding-left:20px;line-height:1.8"><li v-for="(x,i) in diagD.problems" :key="i">{{x}}</li></ul>
+        </div>
+        <div v-if="diagD&&diagD.suggestions&&diagD.suggestions.length" style="margin-top:4px">
+          <b>💡 建议</b><ul style="margin:4px 0;padding-left:20px;line-height:1.8"><li v-for="(x,i) in diagD.suggestions" :key="i">{{x}}</li></ul>
+        </div>
+        <div v-if="diagD&&(diagD.error||diagD.raw_text)" class="sub" style="margin-top:6px;color:var(--amber,#e0a030)">
+          ⚠️ AI 暂不可用(未配置 LLM 或调用失败),以下为规则数据:总盈亏 {{money((p.diag.context&&p.diag.context.overview||{}).total_pnl)}}、近90天变动 {{(p.diag.context&&p.diag.context.trading_frequency||{}).total_changes}} 次。
+        </div>
+      </template>
+      <div v-else-if="!p.diagBusy" class="loading">点"AI诊断":大模型基于你的 估值/交易频次/持有时长 给习惯诊断+改进建议(需 LLM key;无 key 也返回规则数据,不阻塞)。</div>
+    </div>
+
     <div class="card">
       <h3>股票持仓 <span style="color:var(--muted);font-weight:400;font-size:12px">(点表头排序)</span></h3>
       <table v-if="p.stocks&&p.stocks.length">
@@ -130,8 +235,29 @@ export default {
     </div>
   </div>`,
   setup(){
-    const p = reactive({ stocks:null, stress:null, curve:null, overview:null, xray:null, perf:null, bench:null, mc:null, opt:null, optBusy:false, err:'', busy:false, snapMsg:'', daily:null })
+    const p = reactive({ stocks:null, stress:null, curve:null, overview:null, xray:null, perf:null, bench:null, mc:null, opt:null, optBusy:false, err:'', busy:false, snapMsg:'', daily:null, insights:null, cls:null, clsBusy:false, clsErr:'', sig:null, sigBusy:false, sigErr:'', diag:null, diagBusy:false, diagErr:'' })
     const alloc = ref(), curve = ref(), pnlchart = ref()
+    const insSince = 90
+    const DUR_LABELS = { '<7d':'7天内', '7-30d':'1周-1月', '30-90d':'1-3月', '90-180d':'3-6月', '>180d':'半年以上', 'unknown':'未知' }
+    const durLabel = k => DUR_LABELS[k] || k
+    const durPct = n => { const b=(p.insights&&p.insights.duration&&p.insights.duration.buckets)||{}; const mx=Math.max(1,...Object.values(b)); return Math.round(n/mx*100) }
+    async function classify(){
+      p.clsBusy=true; p.clsErr=''
+      try{ p.cls = await api('/api/portfolio/classify') }
+      catch(e){ p.clsErr=''+e }finally{ p.clsBusy=false }
+    }
+    const sigColor = sev => ({critical:'#e0533d', warning:'#e0a030', info:'#3da35d'}[sev] || 'var(--muted)')
+    async function loadSignals(){
+      p.sigBusy=true; p.sigErr=''
+      try{ p.sig = await api('/api/portfolio/signals') }
+      catch(e){ p.sigErr=''+e }finally{ p.sigBusy=false }
+    }
+    const diagD = computed(()=> (p.diag&&p.diag.diagnosis)||null)
+    async function aiDiag(){
+      p.diagBusy=true; p.diagErr=''
+      try{ p.diag = await api('/api/portfolio/diagnose-ai') }
+      catch(e){ p.diagErr=''+e }finally{ p.diagBusy=false }
+    }
     const { sortBy, arrow, sorted: sortedStocks } = useSort(()=> p.stocks, 'mv', -1)
     // 今日股票盈亏(盘中实时):Σ 持仓股 数量×(现价-昨收)
     const todayStock = computed(()=> (p.stocks||[]).reduce((a,s)=> a + (Number(s.qty)||0)*(Number(s.today_change)||0), 0))
@@ -145,6 +271,7 @@ export default {
       api('/api/portfolio/performance').then(v=>p.perf=v).catch(()=>{})
       api('/api/portfolio/benchmark').then(v=>p.bench=v).catch(()=>{})
       api('/api/portfolio/montecarlo').then(v=>p.mc=v).catch(()=>{})
+      api('/api/portfolio/insights').then(v=>p.insights=v).catch(()=>{})
       api('/api/portfolio/curve').then(async v=>{
         p.curve=v; await nextTick()
         if(v&&v.length) lineChart(curve.value, v.map(s=>({date:s.snap_date,mv:s.total_mv})),'date','mv','#4f7cff')
@@ -178,6 +305,8 @@ export default {
     }
     onMounted(load)
     return { p, alloc, curve, pnlchart, todayStock, scols:STOCK_COLS, sortedStocks, sortBy, arrow,
-             snapshot, optimize, load, fmt, pct, money, cls }
+             snapshot, optimize, load, fmt, pct, money, cls,
+             insSince, durLabel, durPct, classify, sigColor, loadSignals,
+             diagD, aiDiag }
   }
 }

@@ -147,6 +147,57 @@ def backtest_strategy(code: str, strategy: str = 'enter', hold_days: int = 10,
 
 
 @mcp.tool()
+def portfolio_backtest(codes: List[str], strategy: str = 'enter',
+                       start: str = '', end: str = '',
+                       hold_days: int = 10, stop_pct: float = 8.0, target_pct: float = 15.0,
+                       max_positions: int = 5, initial_cash: float = 1000000.0,
+                       allocation: str = 'equal', use_live: bool = False,
+                       benchmark: str = '000300') -> Dict[str, Any]:
+    """组合级回测(实盘口径,优于单股回测):给一组股票按**一个现金账户**逐日撮合——
+    并发持仓上限 max_positions、每根bar先卖(止损/止盈/到期)再买、含佣金+印花税+滑点、
+    无前视(信号次日开盘建仓)。输出组合 CAGR/最大回撤/夏普/年化波动/胜率/盈亏比/净值曲线,
+    并对比沪深300(超额收益)。
+    codes: 6位代码列表(如 ['600519','000858']);start/end 空=近2年。
+    allocation: equal等权 / signal按信号强度;use_live=True 用策略基因组进化出的最优参数集。
+    单股回测(backtest_strategy)各信号独立全仓→系统性高估;要评估"这套策略实际能赚多少"用本工具。"""
+    from datetime import datetime, timedelta
+    from portfolio_backtest import portfolio_backtest as _pbt, portfolio_backtest_live as _pbt_live
+    stocks = [(c, '') for c in (codes or []) if c]
+    if not stocks:
+        return {'error': '请提供股票代码列表 codes'}
+    end = end or datetime.now().strftime('%Y-%m-%d')
+    start = start or (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+    common = dict(hold_days=hold_days, stop_pct=stop_pct, target_pct=target_pct,
+                  max_positions=max_positions, initial_cash=initial_cash,
+                  allocation=allocation, benchmark=benchmark or None, curve_points=60)
+    r = (_pbt_live(stocks, start, end, **common) if use_live
+         else _pbt(stocks, start, end, strategy_id=strategy, **common))
+    # MCP 返回精简:摘要 + 配置 + 最近10笔(完整曲线对 Agent 噪声大)
+    return {'summary': r.get('summary', {}), 'config': r.get('config', {}),
+            'recent_trades': r.get('trades', [])[-10:]}
+
+
+@mcp.tool()
+def dcf_valuation(code: str, growth: float = 0.10, years: int = 5,
+                  terminal: float = 0.03, discount: float = 0.10) -> Dict[str, Any]:
+    """两阶段 DCF 内在价值估值(补 PE/PB 之外的绝对估值)。自市值/现价/PE 推导 股本与基准FCF(净利近似)。
+    growth 高速期年增速(0.10=10%)、years 高速年数、terminal 永续增速、discount 折现率/WACC。
+    返回每股内在价值/安全边际/看法 + 永续占比 + 折现×永续 敏感性表。判断"现价相对内在价值贵不贵"。"""
+    import datahub, dcf_valuation as dcf
+    info = datahub.stock_info(code) or {}
+    mc, px, pe = info.get('market_cap'), info.get('current_price'), info.get('pe_ratio')
+    if not (mc and px and px > 0):
+        return {'error': '无法获取市值/现价', 'code': code}
+    if not (pe and pe > 0):
+        return {'error': '该股 PE 不可用(亏损或缺数据),无法用净利润近似 FCF', 'code': code}
+    r = dcf.analyze_dcf(base_fcf=mc / pe, shares=mc / px, current_price=px,
+                        high_growth=growth, high_years=int(years), terminal_growth=terminal,
+                        discount_rate=discount, fcf_is_proxy=True)
+    r['code'], r['name'] = code, info.get('name')
+    return r
+
+
+@mcp.tool()
 def chip_distribution(code: str) -> Dict[str, Any]:
     """筹码分布(由K线本地估算):获利盘比例/平均成本/90%(70%)成本区间/集中度/当前价vs均价。
     判断底部套牢盘、上方套牢压力、筹码集中度。"""
@@ -228,6 +279,49 @@ def portfolio_diagnosis() -> Dict[str, Any]:
     if not rows:
         return {'available': False, 'error': '无有效持仓市值'}
     return diagnose_portfolio(rows)
+
+
+@mcp.tool()
+def portfolio_trading_habits(since_days: int = 90) -> Dict[str, Any]:
+    """持仓交易习惯洞察(纯库读):持有时长分布、交易频次/买卖比/日均、近N天变动时间线与最活跃股。
+    看清"我是短炒还是长持、买卖是否频繁、最近在折腾哪些股"。"""
+    import portfolio_insights as pi
+    return {
+        'duration': pi.holding_duration_distribution(),
+        'frequency': pi.trading_frequency_analysis(since_days=since_days),
+        'timeline': pi.portfolio_change_timeline(since_days=since_days, limit=200),
+    }
+
+
+@mcp.tool()
+def portfolio_ai_diagnose() -> Dict[str, Any]:
+    """AI 持仓诊断(LLM):综合 估值/交易频次/持有时长/变动 给交易习惯+风险+改进建议+风险/纪律评分。
+    ⚠️ 需 LLM key,失败仍返回 context(规则报表)。回答"我的持仓/交易习惯有什么问题、怎么改"。"""
+    import portfolio_insights as pi
+    return pi.diagnose_portfolio()
+
+
+@mcp.tool()
+def portfolio_action_signals(limit: int = 40) -> Dict[str, Any]:
+    """持仓操作信号:加仓审核(跌幅触发→仓位/加仓次数/基本面硬约束 approve/reject)+
+    减仓信号(30/60/100%阶梯止盈 + 跌破MA20减半/MA60清仓 + 情绪过热)。回答"现在该加/减仓哪些"。
+    limit 只扫市值前 N 只(默认40,避冷门小仓卡顿)。"""
+    import position_guardian as pg
+    import position_profit_taker as pt
+    add = pg.evaluate_all_triggered(limit=limit, with_fundamental=False)
+    reduce = pt.evaluate_all(limit=limit)
+    return {'add': add, 'reduce': reduce, 'add_count': len(add), 'reduce_count': len(reduce)}
+
+
+@mcp.tool()
+def portfolio_classify(limit: int = 30, with_fundamental: bool = False) -> Dict[str, Any]:
+    """持仓自动分级:健康🟢/观察🟡/警报🔴/数据不足⚪,基于 持仓盈亏+趋势(MA)+看跌反转形态。
+    limit 只扫市值最大前 N 只(默认30,已并发)。with_fundamental=True 才加基本面评分
+    (每只2-4s且依赖pywencai/F10,弱网/未配置返回N/A纯耗时,默认关→快)。锁定该重点关注/可能止损的持仓。"""
+    import portfolio_classifier as pc
+    by = pc.classify_all(limit=limit, with_fundamental=with_fundamental)
+    return {'counts': {k: len(by.get(k, [])) for k in ('healthy', 'watch', 'alert', 'na')},
+            'by_class': by}
 
 
 # =========================== 多智能体深度分析(⚠️ 耗 token) ===========================
@@ -415,7 +509,38 @@ def fund_portfolio_diagnose(with_overlap: bool = False) -> Dict[str, Any]:
     """诊断我的基金组合:大类/类型配置、集中度(HHI/top1/top3)、(可选)重仓股穿透重叠 + 建议。"""
     import fund_db, fund_portfolio
     fund_db.init_db()
-    return fund_portfolio.diagnose(fund_db.get_holdings(), with_overlap=with_overlap)
+    holdings = fund_db.get_holdings()
+    if not holdings:
+        return {'error': '无持有基金'}
+    # 用库内净值算市值,避免 diagnose 内逐只 latest_nav 联网
+    navs = fund_db.get_latest_navs([str(h.get('code')) for h in holdings])
+    enriched = [{**h, 'market_value': round(float(h.get('shares') or 0) *
+                float((navs.get(str(h.get('code'))) or {}).get('unit_nav') or h.get('cost_nav') or 0), 2)}
+                for h in holdings]
+    return fund_portfolio.diagnose(enriched, with_overlap=with_overlap)
+
+
+@mcp.tool()
+def fund_detail(code: str) -> Dict[str, Any]:
+    """单只基金档案:前十大重仓股(最新季度,占净值比)+ 评级摘要(基金经理/公司/各机构星级/费率)+ 基本信息
+    (成立时间/规模/投资目标等)。看清一只基金"持什么、谁管、几星、多大"。"""
+    import fund_data
+    return {'top_holdings': fund_data.top_holdings(code, 10),
+            'rating': fund_data.rating_summary(code),
+            'basic': fund_data.get_fund_basic(code)}
+
+
+@mcp.tool()
+def fund_compare(codes: List[str], lookback_days: Optional[int] = None) -> Dict[str, Any]:
+    """多只基金并排对比(同一共同时间窗,公平可比):年化/总收益/最大回撤/夏普/卡玛/波动。
+    codes 为基金代码列表(2-6 只);lookback_days 只比最近 N 天(缺省=最大重叠区间)。选基金时用。"""
+    import fund_analysis
+    if not codes or len(codes) < 2:
+        return {'error': '请至少提供 2 只基金代码'}
+    r = fund_analysis.compare_funds(codes, lookback_days=lookback_days, curve_points=0)
+    for f in r.get('funds', []):
+        f.pop('curve', None)   # MCP 省去逐点曲线
+    return r
 
 
 @mcp.tool()

@@ -106,20 +106,26 @@ def _get_total_capital() -> Optional[float]:
     try:
         pdb = _portfolio_db()
         stocks = pdb.get_all_stocks() or []
+        # ⚡ 用成本价(库内,零网络)估算总市值——原来逐只 _get_current_price,
+        # 而本函数在 evaluate_one 里**每只触发股都调一次** → N×全持仓 次实时报价(N² 爆炸,扫描卡死)。
+        # 总资金只是仓位占比的分母,成本口径足够;要实时口径可在 user_strategy_config 配 total_capital。
+        cfg_cap = cfg.get('total_capital', 0)
+        if cfg_cap and float(cfg_cap) > 0:
+            return float(cfg_cap)
         total = 0.0
         for s in stocks:
-            price = _get_current_price(s.get('code', '')) or s.get('cost_price', 0) or 0
-            qty = s.get('quantity', 0) or 0
-            total += float(price) * float(qty)
-        # 默认按持仓市值 * 1.4 估算（假设 70% 仓位），可在 user_strategy_config 中调
-        multiplier = cfg.get('total_capital_multiplier', 1.4)
+            price = float(s.get('cost_price', 0) or 0)
+            qty = float(s.get('quantity', 0) or 0)
+            total += price * qty
+        multiplier = cfg.get('total_capital_multiplier', 1.4)  # 假设 ~70% 仓位
         return total * multiplier if total > 0 else None
     except Exception:
         return None
 
 
-def evaluate_one(symbol: str, stock_info: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
-    """审核单股加仓资格
+def evaluate_one(symbol: str, stock_info: Optional[Dict] = None,
+                 with_fundamental: bool = True) -> Optional[Dict[str, Any]]:
+    """审核单股加仓资格(with_fundamental=False 跳过慢的基本面评分,仅按 仓位/加仓次数 硬约束)
 
     Returns:
         None: 未触发跌幅条件
@@ -154,8 +160,8 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None) -> Optional[Dic
 
     today_change_pct = 0.0
     try:
-        from stock_data import StockDataFetcher
-        df = StockDataFetcher().get_stock_data(symbol, '1mo')
+        import datahub
+        df = datahub.kline(symbol, '1mo')   # 走 datahub:磁盘缓存+多源兜底,避 StockDataFetcher 冷拉卡死
         if df is not None and len(df) >= 2:
             close_col = 'Close' if 'Close' in df.columns else 'close'
             today = float(df[close_col].iloc[-1])
@@ -176,7 +182,7 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None) -> Optional[Dic
     total_cap = _get_total_capital() or position_value * 10
     position_pct = position_value / total_cap * 100 if total_cap > 0 else 0
 
-    fund = _get_fundamental_score(symbol)
+    fund = _get_fundamental_score(symbol) if with_fundamental else None
     fund_score = (fund or {}).get('score') if fund else None
     fund_grade = (fund or {}).get('grade', 'N/A')
 
@@ -231,22 +237,27 @@ def _format_recommendation(symbol, name, verdict, reasons,
             f'  👉 反向建议：考虑止损 30-50% 而非加仓')
 
 
-def evaluate_all_triggered() -> List[Dict[str, Any]]:
-    """扫所有持仓，返回触发跌幅的股 + 各自审核结果"""
+def evaluate_all_triggered(max_workers: int = 8, limit: int = 0,
+                           with_fundamental: bool = True) -> List[Dict[str, Any]]:
+    """扫所有持仓，返回触发跌幅的股 + 各自审核结果。每只独立(实时价+K线+基本面)→ 并发跑。
+    limit>0 时只扫市值最大前 N 只(冷门小仓外部源易卡);with_fundamental=False 跳过慢的基本面评分。"""
+    from concurrent.futures import ThreadPoolExecutor
     pdb = _portfolio_db()
-    stocks = pdb.get_all_stocks() or []
-    out = []
-    for s in stocks:
-        code = s.get('code')
-        if not code:
-            continue
+    stocks = [s for s in (pdb.get_all_stocks() or []) if s.get('code')]
+    if limit and limit > 0 and len(stocks) > limit:
+        stocks.sort(key=lambda s: float(s.get('cost_price') or 0) * float(s.get('quantity') or 0), reverse=True)
+        stocks = stocks[:limit]
+    if not stocks:
+        return []
+
+    def _one(s):
         try:
-            r = evaluate_one(code, stock_info=s)
-            if r is not None:
-                out.append(r)
-        except Exception as e:
-            print(f'[position_guardian] {code} 审核失败: {e}')
-    return out
+            return evaluate_one(s['code'], stock_info=s, with_fundamental=with_fundamental)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(stocks))) as ex:
+        return [r for r in ex.map(_one, stocks) if r is not None]
 
 
 def format_alert(items: List[Dict[str, Any]]) -> str:

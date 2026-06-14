@@ -1,5 +1,6 @@
 import openai
 import json
+import os
 import re as _re
 from typing import Dict, List, Any, Optional
 import config
@@ -70,18 +71,21 @@ class DeepSeekClient:
         self.model = model or config.DEFAULT_MODEL_NAME
         self.client = openai.OpenAI(
             api_key=config.DEEPSEEK_API_KEY,
-            base_url=config.DEEPSEEK_BASE_URL
+            base_url=config.DEEPSEEK_BASE_URL,
+            max_retries=0,   # 不让 SDK 重试放大超时;降级由 router 跨 provider 处理
         )
         self.last_used_provider: Optional[str] = None
         
     def call_api(self, messages: List[Dict[str, str]], model: Optional[str] = None,
                  temperature: float = 0.7, max_tokens: int = 2000,
-                 thinking: bool = False, use_router: bool = True) -> str:
+                 thinking: bool = False, use_router: bool = True,
+                 timeout: Optional[float] = None) -> str:
         """调用 LLM。默认走 llm_router（多 provider 自动降级），保留 OpenAI 直连兜底。
 
         Args:
             thinking: True 时优先用 reasoner/R1/QwQ 等思考模型
             use_router: 默认 True；False 时退回旧的 DeepSeek 直连（用于单测/调试）
+            timeout: 调用超时(秒);None→env LLM_TIMEOUT(默认40)。**有界超时,挡住挂起的 provider 阻塞主路径。**
         """
         model_to_use = model or self.model
         if "reasoner" in model_to_use.lower() and max_tokens <= 2000:
@@ -89,13 +93,21 @@ class DeepSeekClient:
         if thinking and max_tokens <= 2000:
             max_tokens = 8000
 
+        if timeout is None:
+            try:
+                timeout = float(os.getenv('LLM_TIMEOUT', '40'))
+            except (TypeError, ValueError):
+                timeout = 40.0
+        eff_timeout = max(timeout, 120.0) if thinking else timeout
+
         if use_router:
             try:
                 from llm_router import get_router
                 router = get_router()
                 if router.providers:
                     text, used = router.call(messages, temperature=temperature,
-                                             max_tokens=max_tokens, thinking=thinking)
+                                             max_tokens=max_tokens, thinking=thinking,
+                                             timeout=timeout)
                     if text and not text.startswith('[LLM-Router]'):
                         self.last_used_provider = used
                         return text
@@ -107,7 +119,8 @@ class DeepSeekClient:
                 model=model_to_use,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                timeout=eff_timeout,
             )
             message = response.choices[0].message
             result = ""

@@ -333,6 +333,60 @@ def get_stock_holdings(code: str, year: str = None) -> Optional[pd.DataFrame]:
         return None
 
 
+def top_holdings(code: str, n: int = 10) -> dict:
+    """前 N 大重仓股(最新季度)。返回 {quarter, holdings:[{code,name,pct,mv}]}。失败返回空。"""
+    df = get_stock_holdings(code)
+    if df is None or len(df) == 0:
+        return {'quarter': None, 'holdings': []}
+    q_col = next((c for c in df.columns if '季度' in c), None)
+    name_col = next((c for c in df.columns if '股票名称' in c), None)
+    code_col = next((c for c in df.columns if '股票代码' in c), None)
+    pct_col = next((c for c in df.columns if '占净值比例' in c), None)
+    mv_col = next((c for c in df.columns if '持仓市值' in c), None)
+    latest = None
+    if q_col:
+        try:
+            latest = sorted(df[q_col].dropna().astype(str).unique())[-1]
+            df = df[df[q_col].astype(str) == latest]
+        except Exception:
+            pass
+    if pct_col:
+        df = df.sort_values(pct_col, ascending=False)
+    out = []
+    for _, r in df.head(n).iterrows():
+        out.append({
+            'code': str(r.get(code_col)) if code_col else None,
+            'name': str(r.get(name_col)) if name_col else None,
+            'pct': _to_float(r.get(pct_col)) if pct_col else None,
+            'mv': _to_float(r.get(mv_col)) if mv_col else None,
+        })
+    return {'quarter': latest, 'holdings': out}
+
+
+def rating_summary(code: str) -> dict:
+    """评级摘要:基金经理/公司/各机构星级/手续费。失败返回 {}。"""
+    df = get_rating(code)
+    if df is None or len(df) == 0:
+        return {}
+    row = df.iloc[0]
+    keep = ['基金经理', '基金公司', '5星评级家数', '上海证券', '招商证券', '济安金信', '晨星评级', '手续费']
+    out = {}
+    for k in keep:
+        if k not in df.columns:
+            continue
+        v = row.get(k)
+        if pd.isna(v):
+            out[k] = None
+        elif isinstance(v, (int, float)) or hasattr(v, 'item'):
+            try:
+                out[k] = float(v)
+            except Exception:
+                out[k] = str(v)
+        else:
+            out[k] = str(v)
+    return out
+
+
 def get_rating(code: str = None) -> Optional[pd.DataFrame]:
     """基金评级(全表或过滤单只)。失败 None。"""
     ak = _ak()

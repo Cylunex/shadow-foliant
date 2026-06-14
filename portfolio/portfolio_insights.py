@@ -53,6 +53,19 @@ def portfolio_valuation(with_current_price: bool = True) -> Dict:
     total_cost = 0.0
     total_value = 0.0
     rows = []
+    # 批量取价(一次 datahub.quotes 代替逐只 datahub.quote)→ 避免 N 次串行报价
+    price_map = {}
+    if with_current_price and stocks:
+        try:
+            import datahub
+            codes = [str(s.get('code')) for s in stocks if s.get('code')]
+            q = datahub.quotes(codes) or {}
+            for c, v in q.items():
+                p = (v or {}).get('price')
+                if p:
+                    price_map[str(c)] = float(p)
+        except Exception:
+            pass
     for s in stocks:
         cost_price = s.get('cost_price') or 0
         qty = s.get('quantity') or 0
@@ -63,7 +76,7 @@ def portfolio_valuation(with_current_price: bool = True) -> Dict:
             cost_price = 0.0
         cost = cost_price * qty
         total_cost += cost
-        current_price = _get_current_price(s['code']) if with_current_price else None
+        current_price = price_map.get(str(s.get('code'))) if with_current_price else None
         value = (current_price or cost_price) * qty
         total_value += value
         pnl = value - cost

@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["F:/Project/AiAgentStock/shadow-foliant/webui/run_dev.py"],
       "port": 8601
+    },
+    {
+      "name": "webui-sf",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import os,sys;os.chdir('F:/Project/AiAgentStock/shadow-foliant');sys.path.insert(0,'.');import uvicorn;uvicorn.run('webui.api_server:app',host='127.0.0.1',port=8611,reload=False)"],
+      "port": 8611
     }
   ]
 }

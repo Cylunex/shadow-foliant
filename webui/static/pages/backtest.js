@@ -93,6 +93,66 @@ export default {
         <span v-if="r.results.every(st=>!st.summary?.count||st.error)" style="color:var(--muted)">无有效信号</span>
       </div>
     </div>
+
+    <!-- ════ 组合级回测(实盘口径) ════ -->
+    <div class="card" style="margin-top:18px;border-left:3px solid var(--accent,#4a9)">
+      <h3 style="margin:0 0 4px">🧮 组合级回测 <span class="pill">实盘口径</span></h3>
+      <p class="sub" style="margin-top:0">一个现金账户·并发持仓上限·先卖后买·含佣金+印花税+滑点·无前视(次日开盘建仓)。单股回测各信号独立全仓→系统性高估;组合回测才是"这套策略实际能赚多少、回撤多大"。</p>
+      <div class="row" style="flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <div><label>股票池</label><select v-model="p.universe" style="width:120px">
+          <option value="holdings">我的持仓</option><option value="index">沪深300成分</option><option value="custom">自定义</option>
+        </select></div>
+        <div v-if="p.universe==='custom'"><label>代码(逗号分隔)</label><input v-model="p.codes" placeholder="600519,000858" style="width:200px"/></div>
+        <div v-if="p.universe==='index'"><label>取数上限</label><input type="number" v-model.number="p.limit" style="width:70px"/></div>
+        <div><label>策略</label>
+          <select v-model="p.strategy" :disabled="p.useLive" style="width:130px">
+            <option v-for="st in STRATEGIES" :key="st.id" :value="st.id">{{st.cn}}</option>
+          </select></div>
+        <div><label style="cursor:pointer"><input type="checkbox" v-model="p.useLive" style="vertical-align:middle"/>用进化最优集</label></div>
+        <div><label>并发上限</label><input type="number" v-model.number="p.maxPos" style="width:60px"/></div>
+        <div><label>持有天数</label><input type="number" v-model.number="p.hold" style="width:60px"/></div>
+        <div><label>止损%</label><input type="number" v-model.number="p.stop" style="width:60px"/></div>
+        <div><label>止盈%</label><input type="number" v-model.number="p.target" style="width:60px"/></div>
+        <div><label>分配</label><select v-model="p.alloc" style="width:90px"><option value="equal">等权</option><option value="signal">信号加权</option></select></div>
+        <div><label>初始资金</label><input type="number" v-model.number="p.cash" style="width:100px"/></div>
+        <button :disabled="p.loading" @click="runPortfolio">{{p.loading?'回测中…(逐股拉K线,稍候)':'跑组合回测'}}</button>
+      </div>
+      <p class="sub" style="margin-top:6px">区间默认近2年。注:行情主源单次约返回~1年日线,实际回测深度受数据源限制。</p>
+    </div>
+
+    <div v-if="p.err" class="err">{{p.err}}</div>
+
+    <div v-if="p.res" class="card" style="margin-top:12px">
+      <h3 style="margin:0 0 8px">组合回测结果
+        <span class="pill">{{p.res.config?.stocks_count}}只 · {{p.res.config?.trigger_count}}信号 · {{p.res.config?.period}}</span></h3>
+      <div class="grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:12px">
+        <div v-for="m in metrics" :key="m.k" class="card" style="margin:0;padding:8px 10px;text-align:center">
+          <div style="color:var(--muted);font-size:11px">{{m.k}}</div>
+          <div :class="m.cls" style="font-size:18px;font-weight:700">{{m.v}}</div>
+        </div>
+      </div>
+      <!-- 净值曲线: 策略 vs 沪深300 -->
+      <svg v-if="curve.pts" :viewBox="'0 0 '+curve.W+' '+curve.H" style="width:100%;height:200px;background:var(--bg2,#111);border-radius:6px">
+        <polyline :points="curve.base" fill="none" stroke="var(--bdr,#555)" stroke-width="1" stroke-dasharray="4 3"/>
+        <polyline v-if="curve.bench" :points="curve.bench" fill="none" stroke="#e0a030" stroke-width="1.5"/>
+        <polyline :points="curve.pts" fill="none" :stroke="curve.up?'#e05050':'#30b070'" stroke-width="2"/>
+      </svg>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px">
+        <span :style="{color:curve.up?'#e05050':'#30b070'}">━ 组合净值</span>
+        <span v-if="curve.bench" style="color:#e0a030;margin-left:14px">━ 沪深300</span>
+        <span style="color:var(--bdr,#888);margin-left:14px">┄ 本金</span>
+      </div>
+      <!-- 最近成交 -->
+      <table v-if="p.res.trades?.length" style="width:100%;margin-top:12px;font-size:12px">
+        <tr style="color:var(--muted)"><th align=left>买入</th><th align=left>卖出</th><th align=left>代码</th><th align=right>入场</th><th align=right>出场</th><th align=right>收益</th><th align=center>了结</th></tr>
+        <tr v-for="(t,i) in p.res.trades.slice().reverse().slice(0,20)" :key="i" style="border-bottom:1px solid var(--bdr)">
+          <td>{{t.entry_date}}</td><td>{{t.exit_date}}</td><td>{{t.symbol}} {{t.name||''}}</td>
+          <td align=right>{{t.entry_price}}</td><td align=right>{{t.exit_price}}</td>
+          <td align=right :class="cls(t.ret_pct)">{{fmtPct(t.ret_pct)}}</td>
+          <td align=center>{{REASON[t.exit_reason]||t.exit_reason}}</td>
+        </tr>
+      </table>
+    </div>
   </div>`,
 
   setup(){
@@ -158,6 +218,69 @@ export default {
       s.batchLoading=false
     }
 
-    return { s, STRATEGIES, CATEGORIES, CN, fmtPct, runAll, runBatch }
+    // ════ 组合级回测 ════
+    const REASON = {stop:'止损', target:'止盈', expiry:'到期', ambiguous:'止损?', final_close:'清盘'}
+    const p = reactive({
+      universe:'holdings', codes:'', limit:50,
+      strategy:'enter', useLive:false,
+      maxPos:5, hold:10, stop:8, target:15, alloc:'equal', cash:1000000,
+      loading:false, err:'', res:null
+    })
+
+    async function runPortfolio(){
+      p.err=''; p.loading=true; p.res=null
+      try{
+        const body = {
+          universe:p.universe, index_code:'000300', limit:p.limit,
+          codes: p.universe==='custom' ? p.codes.split(/[,，\s]+/).map(x=>x.trim()).filter(Boolean) : [],
+          strategy:p.strategy, use_live:p.useLive,
+          hold_days:p.hold, stop_pct:p.stop, target_pct:p.target,
+          max_positions:p.maxPos, initial_cash:p.cash, allocation:p.alloc, benchmark:'000300'
+        }
+        p.res = await api('/api/backtest/portfolio', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+        })
+      }catch(e){ p.err=e.toString() }
+      p.loading=false
+    }
+
+    const metrics = computed(()=>{
+      const m = p.res?.summary; if(!m) return []
+      const pf = m.profit_factor
+      return [
+        {k:'总收益', v:fmtPct(m.total_return_pct), cls:cls(m.total_return_pct)},
+        {k:'CAGR年化', v:fmtPct(m.cagr_pct), cls:cls(m.cagr_pct)},
+        {k:'最大回撤', v:fmtPct(m.max_dd_pct), cls:''},
+        {k:'夏普', v:m.sharpe!=null?m.sharpe.toFixed(2):'--', cls:cls(m.sharpe)},
+        {k:'年化波动', v:fmtPct(m.volatility_pct), cls:''},
+        {k:'胜率', v:m.win_rate_pct!=null?m.win_rate_pct+'%':'--', cls:''},
+        {k:'盈亏比', v:pf!=null?pf.toFixed(2):'--', cls:''},
+        {k:'超额(vs300)', v:m.excess_return_pct!=null?fmtPct(m.excess_return_pct):'--', cls:cls(m.excess_return_pct)},
+        {k:'成交笔数', v:m.trade_count??'--', cls:''},
+        {k:'平均仓位', v:m.avg_exposure_pct!=null?m.avg_exposure_pct+'%':'--', cls:''},
+      ]
+    })
+
+    const curve = computed(()=>{
+      const c = p.res?.equity_curve; if(!c||c.length<2) return {pts:null}
+      const W=600, H=180, pad=6
+      const navs = c.map(x=>x.nav)
+      const benchVals = c.map(x=>x.bench_nav).filter(v=>v!=null)
+      const all = navs.concat(benchVals, [1.0])
+      let lo=Math.min(...all), hi=Math.max(...all); if(hi===lo) hi=lo+1
+      const X=i=> pad + i*(W-2*pad)/(c.length-1)
+      const Y=v=> H-pad - (v-lo)*(H-2*pad)/(hi-lo)
+      const toLine = arr => arr.map((v,i)=> v==null?null:(X(i)+','+Y(v))).filter(Boolean).join(' ')
+      const baseY = Y(1.0)
+      return {
+        W, H,
+        pts: toLine(navs),
+        bench: benchVals.length ? toLine(c.map(x=>x.bench_nav)) : null,
+        base: `${pad},${baseY} ${W-pad},${baseY}`,
+        up: navs[navs.length-1] >= 1.0
+      }
+    })
+
+    return { s, p, STRATEGIES, CATEGORIES, CN, REASON, fmtPct, cls, runAll, runBatch, runPortfolio, metrics, curve }
   }
 }

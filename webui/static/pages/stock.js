@@ -133,6 +133,40 @@ export default {
         <p class="sub" style="margin-top:8px">回测区间 {{bt.period||'近一年'}}。"纪律"=触发后按止损/止盈离场。样本少时仅供参考。</p>
       </div>
     </div>
+
+    <div v-if="s.info" class="card">
+      <h3>💰 DCF 内在价值 <span style="color:var(--muted);font-weight:400;font-size:12px">两阶段现金流折现(净利近似FCF)· 补 PE/PB 之外的绝对估值</span></h3>
+      <div class="row">
+        <div><label>高速增速%</label><input type="number" v-model.number="dcf.growth" style="width:84px"/></div>
+        <div><label>高速年数</label><input type="number" v-model.number="dcf.years" style="width:70px"/></div>
+        <div><label>永续增速%</label><input type="number" step="0.5" v-model.number="dcf.terminal" style="width:84px"/></div>
+        <div><label>折现率%</label><input type="number" step="0.5" v-model.number="dcf.discount" style="width:84px"/></div>
+        <button :disabled="dcf.loading" @click="runDcf">{{dcf.loading?'计算中…':'估值'}}</button>
+      </div>
+      <div v-if="dcf.err" class="err" style="margin-top:10px">{{dcf.err}}</div>
+      <div v-if="dcf.res" style="margin-top:14px">
+        <div class="metrics">
+          <div class="metric"><div class="k">每股内在价值</div><div class="v">{{dcf.res.intrinsic_per_share}}</div></div>
+          <div class="metric"><div class="k">现价</div><div class="v">{{dcf.res.current_price}}</div></div>
+          <div class="metric"><div class="k">安全边际</div><div class="v" :class="cls(dcf.res.margin_of_safety)">{{dcf.res.margin_of_safety>=0?'+':''}}{{(dcf.res.margin_of_safety*100).toFixed(1)}}%</div></div>
+          <div class="metric"><div class="k">判断</div><div class="v" style="font-size:15px">{{dcf.res.verdict}}</div></div>
+          <div class="metric"><div class="k">永续价值占比</div><div class="v">{{pr(dcf.res.terminal_pct)}}</div></div>
+        </div>
+        <p class="sub" style="margin-top:8px">{{dcf.res.summary}}</p>
+        <div v-if="dcf.res.caution" class="sub" style="color:var(--amber,#e0a030)">⚠️ {{dcf.res.caution}}</div>
+        <div style="margin-top:10px">
+          <div class="sub" style="margin-bottom:4px">敏感性(每股内在价值:折现率 × 永续增速)</div>
+          <table v-if="dcf.res.sensitivity&&dcf.res.sensitivity.length" style="font-size:12px">
+            <thead><tr><th>折现＼永续</th><th v-for="c in dcf.res.sensitivity[0].cells" :key="c.tg">{{(c.tg*100).toFixed(1)}}%</th></tr></thead>
+            <tbody><tr v-for="row in dcf.res.sensitivity" :key="row.wacc">
+              <td><b>{{(row.wacc*100).toFixed(1)}}%</b></td>
+              <td v-for="c in row.cells" :key="c.tg" :style="{fontWeight: row.wacc===dcf.res.assumptions.discount_rate ? 600:400}">{{c.value}}</td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+      <p v-else class="sub" style="margin-top:8px">基于 市值/现价/PE 推导股本与基准利润,默认保守假设。点"估值"查看内在价值与安全边际。</p>
+    </div>
   </div>`,
   setup(){
     const s = reactive({ code:'600519', info:null, err:'', loading:false })
@@ -164,6 +198,16 @@ export default {
       try{ const r = await api('/api/stock/'+s.code+'/backtest?strategy='+bt.strategy+'&hold_days='+bt.hold+'&stop_pct='+bt.stop+'&target_pct='+bt.target); bt.res=r.summary; bt.period=r.period }
       catch(e){ bt.err=''+e }finally{ bt.loading=false }
     }
+    // DCF 估值
+    const dcf = reactive({ growth:10, years:5, terminal:3, discount:10, res:null, err:'', loading:false })
+    const pr = v => v==null?'—':(v*100).toFixed(1)+'%'
+    async function runDcf(){
+      dcf.loading=true; dcf.err=''; dcf.res=null
+      try{
+        const u='/api/stock/'+s.code+'/dcf?growth='+(dcf.growth/100)+'&years='+dcf.years+'&terminal='+(dcf.terminal/100)+'&discount='+(dcf.discount/100)
+        dcf.res = await api(u)
+      }catch(e){ dcf.err=''+e }finally{ dcf.loading=false }
+    }
     const summary = computed(()=>{
       if(!ai.res) return ''
       const d = ai.res.decision
@@ -171,7 +215,7 @@ export default {
       return ''+ (d||'')
     })
     async function load(){
-      s.loading=true; s.err=''; s.info=null; ai.res=null; ins.data=null; ins.err=''; bt.res=null
+      s.loading=true; s.err=''; s.info=null; ai.res=null; ins.data=null; ins.err=''; bt.res=null; dcf.res=null; dcf.err=''
       try{
         s.info = await api('/api/stock/'+s.code)
         const k = await api('/api/stock/'+s.code+'/kline')
@@ -203,6 +247,7 @@ export default {
     return { s, ai, chart, summary, load, deep, exportReport,
              ins, icur, itabs:ITABS, loadInsights, chanText, regimeCn, sigList, flowRows, flowCols,
              bt, btStrats:BT_STRATS, runBacktest,
+             dcf, runDcf, pr,
              fmt, pct, cls, zh, cell }
   }
 }

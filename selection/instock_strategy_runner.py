@@ -78,6 +78,9 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             return pd.DataFrame()
         df[col] = pd.to_numeric(df[col], errors='coerce').astype('float64')
+    # 丢弃 close 缺失/非正(0/负) 的脏 bar:数据源偶发断线重传会送来 0 或 NaN,
+    # 否则下游策略的 (a-close)/close、close.pct_change() 会除零/产 inf → 虚假信号(根治多策略)。
+    df = df[df['close'].notna() & (df['close'] > 0)]
     if 'p_change' not in df.columns:
         df['p_change'] = df['close'].pct_change() * 100
     df['p_change'] = df['p_change'].fillna(0).astype('float64')

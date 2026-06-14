@@ -123,13 +123,17 @@ class LLMRouter:
     def call(self, messages: List[Dict[str, str]],
              temperature: float = 0.7, max_tokens: int = 2000,
              thinking: bool = False,
-             prefer: Optional[str] = None) -> Tuple[str, str]:
+             prefer: Optional[str] = None,
+             timeout: Optional[float] = None) -> Tuple[str, str]:
         """调用 LLM；返回 (response_text, used_provider_name)
 
         Args:
             messages: OpenAI 格式
             thinking: True 时优先用 thinking_model（如 R1/QwQ/Sonnet-Thinking）
             prefer: 强制指定 provider 名（仍带降级 fallback）
+            timeout: 单 provider 调用超时(秒)。None→env LLM_TIMEOUT(默认40);thinking 取 max(timeout,120)。
+                     ⚠️ 关键:openai SDK 默认超时 ~10min,无超时会让"挂起的 provider"阻塞调用方主路径
+                     (选股job/持仓建议/离场)。这里强制有界:超时即抛错→降级下一 provider。
         """
         if not self.providers:
             return ('[LLM-Router] 无可用 provider，请配置至少一个 API key', 'none')
@@ -138,6 +142,14 @@ class LLMRouter:
             import openai
         except ImportError:
             return ('[LLM-Router] openai SDK 未安装', 'none')
+
+        if timeout is None:
+            try:
+                timeout = float(os.getenv('LLM_TIMEOUT', '40'))
+            except (TypeError, ValueError):
+                timeout = 40.0
+        if thinking:
+            timeout = max(timeout, 120.0)   # 思考模型推理更久
 
         chain = list(self.providers)
         if prefer:
@@ -149,10 +161,12 @@ class LLMRouter:
             model = p.thinking_model or p.default_model if thinking else p.default_model
             mtokens = max(max_tokens, 8000) if thinking else max_tokens
             try:
-                client = openai.OpenAI(api_key=key, base_url=p.base_url)
+                # max_retries=0:SDK 默认重试2次会把超时×3(我们自己跨 provider 降级,不需SDK重试)
+                client = openai.OpenAI(api_key=key, base_url=p.base_url, timeout=timeout, max_retries=0)
                 resp = client.chat.completions.create(
                     model=model, messages=messages,
                     temperature=temperature, max_tokens=mtokens,
+                    timeout=timeout,
                 )
                 msg = resp.choices[0].message
                 result = ''

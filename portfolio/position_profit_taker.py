@@ -32,8 +32,8 @@ def _check_ma_break(symbol: str, ma_short: int, ma_long: int) -> Dict[str, Any]:
     result = {'last': None, 'ma_short': None, 'ma_long': None,
               'broke_short': False, 'broke_long': False}
     try:
-        from stock_data import StockDataFetcher
-        df = StockDataFetcher().get_stock_data(symbol, '1y')
+        import datahub
+        df = datahub.kline(symbol, '1y')   # 走 datahub:磁盘缓存+多源兜底,避冷拉卡死
         if df is None or len(df) < max(ma_short, ma_long):
             return result
         close_col = 'Close' if 'Close' in df.columns else 'close'
@@ -124,10 +124,10 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None) -> Optional[Dic
 
     # 情绪过热预警(借 strategy_signals):乖离 MA20 过大 + 放量 → 提示锁利,叠加在阶梯之上
     try:
-        from stock_data import StockDataFetcher
+        import datahub
         from strategy_signals import emotion_top_warning
-        _df = StockDataFetcher().get_stock_data(symbol, '6mo')
-        if not isinstance(_df, dict):
+        _df = datahub.kline(symbol, '6mo')   # 走 datahub:磁盘缓存+多源兜底
+        if _df is not None and not isinstance(_df, dict) and len(_df):
             et = emotion_top_warning(_df)
             if et.get('signal'):
                 actions.append({
@@ -154,21 +154,23 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None) -> Optional[Dic
     }
 
 
-def evaluate_all() -> List[Dict[str, Any]]:
-    """扫所有持仓"""
+def evaluate_all(max_workers: int = 8, limit: int = 0) -> List[Dict[str, Any]]:
+    """扫所有持仓(并发,每只独立:实时价+MA+情绪过热)。limit>0 只扫市值最大前 N 只。"""
+    from concurrent.futures import ThreadPoolExecutor
     pdb = _portfolio_db()
-    stocks = pdb.get_all_stocks() or []
+    stocks = [s for s in (pdb.get_all_stocks() or []) if s.get('code')]
+    if limit and limit > 0 and len(stocks) > limit:
+        stocks.sort(key=lambda s: float(s.get('cost_price') or 0) * float(s.get('quantity') or 0), reverse=True)
+        stocks = stocks[:limit]
     out = []
-    for s in stocks:
-        code = s.get('code')
-        if not code:
-            continue
-        try:
-            r = evaluate_one(code, stock_info=s)
-            if r is not None:
-                out.append(r)
-        except Exception as e:
-            print(f'[position_profit_taker] {code} 扫描失败: {e}')
+    if stocks:
+        def _one(s):
+            try:
+                return evaluate_one(s['code'], stock_info=s)
+            except Exception:
+                return None
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(stocks))) as ex:
+            out = [r for r in ex.map(_one, stocks) if r is not None]
     out.sort(key=lambda x: (
         # critical > warning > info
         {'critical': 0, 'warning': 1, 'info': 2}.get(x['actions'][0]['severity'], 9),
