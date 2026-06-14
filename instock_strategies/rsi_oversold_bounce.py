@@ -13,7 +13,7 @@ RSI 超卖反弹 — 左侧抄底策略
 """
 
 import numpy as np
-import talib as tl
+from instock_strategies._talib_compat import tl
 
 
 def check(code_name, data, date=None, threshold=60,

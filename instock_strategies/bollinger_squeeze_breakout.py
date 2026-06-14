@@ -15,7 +15,7 @@
 """
 
 import numpy as np
-import talib as tl
+from instock_strategies._talib_compat import tl
 
 
 def check(code_name, data, date=None, threshold=100,

@@ -12,6 +12,8 @@ httpx>=0.27.1           # mcp 需要
 #    故移出主依赖。**不装也不影响**:data_source_manager 的 mootdx 取数链已 try/except 守卫,缺库自动跳过。
 #    需要它时单独装(实测 httpx0.27 兼容,装完把 httpx 再升回去即可):
 #        pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"
+# ⚠️ TA-Lib(C 库,难装)同样**不放主依赖**:缺它不影响——instock_strategies 与 strategy_composer 均有
+#    pandas 等价 shim(instock_strategies/_talib_compat.py),实测信号与真 talib 一致。想用真 talib 再单独装。
 openai>=1.12.0
 python-dotenv>=1.0.0
 pytz

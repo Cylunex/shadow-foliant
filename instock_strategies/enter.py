@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import talib as tl
+from instock_strategies._talib_compat import tl
 
 
 __author__ = 'myh '

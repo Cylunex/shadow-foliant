@@ -3,7 +3,7 @@
 
 from datetime import datetime
 import numpy as np
-import talib as tl
+from instock_strategies._talib_compat import tl
 from instock_strategies import enter
 
 __author__ = 'myh '
