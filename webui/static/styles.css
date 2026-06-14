@@ -2,6 +2,11 @@
   --bg:#0f1320; --panel:#181d2e; --panel2:#1f2740; --line:#2a3350;
   --txt:#e6e9f2; --muted:#8b93ad; --accent:#4f7cff; --green:#26c281; --red:#ff5d6c; --amber:#f5a623;
 }
+/* 亮色主题(切换时 html[data-theme=light]) */
+html[data-theme="light"]{
+  --bg:#f4f6fb; --panel:#ffffff; --panel2:#eef1f7; --line:#e2e6ef;
+  --txt:#1a2233; --muted:#6b7384; --accent:#3a66e0; --green:#12a45a; --red:#e23a4a; --amber:#c47d10;
+}
 *{box-sizing:border-box} html,body{margin:0;height:100%}
 body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
 #app{display:flex;min-height:100vh}
@@ -15,6 +20,10 @@ body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"Segoe UI
 .sidebar .tip{margin-top:24px;padding:0 12px;color:var(--muted);font-size:11px;line-height:1.7}
 .appbar{display:none}          /* 仅手机版显示(见媒体查询) */
 .nav-backdrop{display:none}
+.theme-btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:9px;
+  padding:6px 11px;font-size:16px;line-height:1;cursor:pointer;font-weight:600}
+.theme-btn:hover{filter:brightness(1.06)}
+.sidebar .theme-btn{width:100%;margin-top:12px;text-align:left;padding:9px 12px}
 .main{flex:1;min-width:0;padding:24px 32px;overflow:auto}
 .main > div{max-width:100%}
 .h1{font-size:20px;font-weight:700;margin:0 0 4px}
@@ -93,7 +102,7 @@ tbody tr:hover{background:var(--panel2)}
     background:var(--panel);border-bottom:1px solid var(--line);padding:10px 14px;
   }
   .appbar .hamburger{background:none;border:0;color:var(--txt);font-size:22px;line-height:1;padding:2px 6px;cursor:pointer}
-  .appbar .appbar-title{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .appbar .appbar-title{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
   /* 侧栏 → 左侧滑入抽屉(off-canvas) */
   .sidebar{
     position:fixed;left:0;top:0;bottom:0;width:236px;z-index:50;

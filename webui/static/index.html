@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
+<script>/* 早于样式应用主题,避免刷新闪烁;默认暗色 */try{var _t=localStorage.getItem('sf-theme');if(_t==='light')document.documentElement.dataset.theme='light';}catch(e){}</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>shadow-foliant · 智能投研</title>
 <link rel="icon" href="data:," /><!-- 空图标:免浏览器去站点根请求 /favicon.ico(不在 /stock/ 下会404) -->
@@ -12,7 +13,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="投研" />
-<link rel="stylesheet" href="styles.css?v=5" />
+<link rel="stylesheet" href="styles.css?v=6" />
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script type="importmap">
 { "imports": { "vue": "https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js" } }
@@ -20,7 +21,7 @@
 </head>
 <body>
 <div id="app"></div>
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=5"></script>
 <script>
 /* 注册 Service Worker(仅安全上下文:HTTPS 或 localhost;手机走 http 局域网会静默跳过,不报错)。
    API 永不被缓存——见 sw.js。*/

@@ -52,6 +52,13 @@ createApp({
     const initial = (location.hash || '#briefing').slice(1)
     const cur = shallowRef(NAV.find(n=>n.k===initial) || NAV[0])
     const navOpen = ref(false)   // 手机版抽屉开关(MoviePilot 风格:汉堡→左侧滑入)
+    const theme = ref(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
+    function toggleTheme(){
+      theme.value = theme.value === 'dark' ? 'light' : 'dark'
+      if (theme.value === 'light') document.documentElement.dataset.theme = 'light'
+      else document.documentElement.removeAttribute('data-theme')
+      try { localStorage.setItem('sf-theme', theme.value) } catch(e) {}
+    }
     function go(it){ cur.value = it; location.hash = it.k; navOpen.value = false }
     window.addEventListener('hashchange', ()=>{
       const it = NAV.find(n=>n.k===location.hash.slice(1)); if(it) cur.value = it
@@ -63,6 +70,7 @@ createApp({
       h('div', { class:'appbar' }, [
         h('button', { class:'hamburger', 'aria-label':'菜单', onClick:()=>{ navOpen.value = !navOpen.value } }, '☰'),
         h('div', { class:'appbar-title', translate:'no' }, cur.value.ic + ' ' + cur.value.t),
+        h('button', { class:'theme-btn', 'aria-label':'切换主题', onClick:toggleTheme }, theme.value==='dark' ? '🌙' : '☀️'),
       ]),
       // 抽屉遮罩(点击关闭)
       h('div', { class:['nav-backdrop', { show: navOpen.value }], onClick:()=>{ navOpen.value = false } }),
@@ -71,6 +79,7 @@ createApp({
         ...NAV.map(it => h('div', {
           class:['nav-item', { active: cur.value.k===it.k }], onClick:()=>go(it)
         }, [ h('span',{class:'ic'}, it.ic), h('span', it.t) ])),
+        h('button', { class:'theme-btn', onClick:toggleTheme }, theme.value==='dark' ? '🌙 暗色' : '☀️ 亮色'),
         h('div', { class:'tip' }, '新 UI(替代 Streamlit)。功能持续迁移中。'),
       ]),
       h('div', { class:'main' }, [ h(IndexBar), h(cur.value.comp) ]),

@@ -116,17 +116,21 @@ function _inst(el){
   return c
 }
 
+// 读 CSS 主题变量(亮/暗主题切换时图表配色自适应,缺省回退暗色值)
+function _cv(name, fb){ const v=getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return v||fb }
+
 export function lineChart(el, data, xKey, yKey, color){
   if(!el || !window.echarts) return
   const c = _inst(el)
+  const muted=_cv('--muted','#8b93ad'), line=_cv('--line','#2a3350'), accent=color||_cv('--accent','#4f7cff')
   c.setOption({
     backgroundColor:'transparent', grid:{left:54,right:18,top:18,bottom:30},
     tooltip:{trigger:'axis'},
-    xAxis:{type:'category',data:data.map(d=>d[xKey]),axisLabel:{color:'#8b93ad'},axisLine:{lineStyle:{color:'#2a3350'}}},
-    yAxis:{type:'value',scale:true,axisLabel:{color:'#8b93ad'},splitLine:{lineStyle:{color:'#222a42'}}},
+    xAxis:{type:'category',data:data.map(d=>d[xKey]),axisLabel:{color:muted},axisLine:{lineStyle:{color:line}}},
+    yAxis:{type:'value',scale:true,axisLabel:{color:muted},splitLine:{lineStyle:{color:line}}},
     series:[{type:'line',showSymbol:false,smooth:true,data:data.map(d=>d[yKey]),
-      lineStyle:{color:color||'#4f7cff',width:2},areaStyle:{color:'rgba(79,124,255,.12)'}}]
-  })
+      lineStyle:{color:accent,width:2},areaStyle:{color:'rgba(79,124,255,.12)'}}]
+  }, true)
   c.resize()
 }
 
@@ -138,8 +142,8 @@ export function pieChart(el, entries){
     tooltip:{trigger:'item',formatter:'{b}: {d}%'},
     series:[{type:'pie',radius:['45%','72%'],
       data:entries.map(([k,v])=>({name:k,value:+(v*100).toFixed(1)})),
-      label:{color:'#e6e9f2'}}]
-  })
+      label:{color:_cv('--txt','#e6e9f2')}}]
+  }, true)
   c.resize()
 }
 
