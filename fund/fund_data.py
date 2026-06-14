@@ -45,8 +45,32 @@ _name_lock = threading.Lock()
 _name_cache: Optional[pd.DataFrame] = None
 
 
+def _fund_list_eastmoney() -> Optional[pd.DataFrame]:
+    """直连天天基金 fundcode_search.js 取全市场名单(实测 ~0.4s,远快于 akshare fund_name_em ~7s)。
+    返回与 akshare fund_name_em 同列名的 DataFrame(基金代码/拼音缩写/基金简称/基金类型/拼音全称),失败 None。"""
+    import json as _json
+    import re as _re
+    import urllib.request
+    try:
+        throttle('eastmoney')
+        req = urllib.request.Request('https://fund.eastmoney.com/js/fundcode_search.js',
+                                     headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'http://fund.eastmoney.com/'})
+        txt = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', 'replace')
+        m = _re.search(r'var\s+r\s*=\s*(\[.*\]);', txt, _re.S)
+        if not m:
+            return None
+        arr = _json.loads(m.group(1))   # [[code, pinyin_abbr, name, type, pinyin_full], ...]
+        if not arr:
+            return None
+        return pd.DataFrame(arr, columns=['基金代码', '拼音缩写', '基金简称', '基金类型', '拼音全称'])
+    except Exception as e:
+        print(f'[fund_data] _fund_list_eastmoney 失败: {type(e).__name__}')
+        return None
+
+
 def list_funds(force: bool = False) -> pd.DataFrame:
     """全市场场外基金名单。列:基金代码/拼音缩写/基金简称/基金类型/拼音全称。
+    **优先直连东财 fundcode_search(快~0.4s),失败回退 akshare fund_name_em(~7s)。**
     进程内缓存(force=True 强刷)。失败返回空 DataFrame。"""
     global _name_cache
     if _name_cache is not None and not force:
@@ -54,17 +78,19 @@ def list_funds(force: bool = False) -> pd.DataFrame:
     with _name_lock:
         if _name_cache is not None and not force:
             return _name_cache
-        ak = _ak()
-        if ak is None:
-            return pd.DataFrame()
-        try:
-            throttle('akshare')
-            df = ak.fund_name_em()
-            _name_cache = df
-            return df
-        except Exception as e:
-            print(f'[fund_data] list_funds 失败: {e}')
-            return pd.DataFrame()
+        df = _fund_list_eastmoney()   # 主源:直连东财(快)
+        if df is None or df.empty:
+            ak = _ak()                # 兜底:akshare
+            if ak is None:
+                return pd.DataFrame()
+            try:
+                throttle('akshare')
+                df = ak.fund_name_em()
+            except Exception as e:
+                print(f'[fund_data] list_funds 失败: {e}')
+                return pd.DataFrame()
+        _name_cache = df
+        return df
 
 
 def fund_name(code: str) -> Optional[str]:
