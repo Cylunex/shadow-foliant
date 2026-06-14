@@ -17,4 +17,7 @@ sys.path.insert(0, ROOT)
 import uvicorn
 
 if __name__ == '__main__':
-    uvicorn.run('webui.api_server:app', host='127.0.0.1', port=8601, reload=False)
+    # 带时间戳的日志配置(uvicorn 默认日志不带时间);文件缺失则回退默认
+    _logcfg = os.path.join(ROOT, 'webui', 'log_config.json')
+    uvicorn.run('webui.api_server:app', host='127.0.0.1', port=8601, reload=False,
+                log_config=_logcfg if os.path.isfile(_logcfg) else None)
