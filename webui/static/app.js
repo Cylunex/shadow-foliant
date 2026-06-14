@@ -1,4 +1,4 @@
-import { createApp, shallowRef, h } from 'vue'
+import { createApp, shallowRef, ref, h } from 'vue'
 import Stock from './pages/stock.js'
 import Fund from './pages/fund.js'
 import Portfolio from './pages/portfolio.js'
@@ -51,14 +51,22 @@ createApp({
     // 支持 URL hash 路由(可前进后退/刷新保持)
     const initial = (location.hash || '#briefing').slice(1)
     const cur = shallowRef(NAV.find(n=>n.k===initial) || NAV[0])
-    function go(it){ cur.value = it; location.hash = it.k }
+    const navOpen = ref(false)   // 手机版抽屉开关(MoviePilot 风格:汉堡→左侧滑入)
+    function go(it){ cur.value = it; location.hash = it.k; navOpen.value = false }
     window.addEventListener('hashchange', ()=>{
       const it = NAV.find(n=>n.k===location.hash.slice(1)); if(it) cur.value = it
     })
     // 注意:返回 fragment(数组),让 .sidebar/.main 直接成为 #app 的子节点,
     // 否则外层 wrapper div 会让 #app 的 display:flex 失效(侧栏/内容垂直堆叠)。
     return () => [
-      h('div', { class:'sidebar' }, [
+      // 手机版顶部 app-bar(桌面 CSS 隐藏):汉堡 + 当前页标题
+      h('div', { class:'appbar' }, [
+        h('button', { class:'hamburger', 'aria-label':'菜单', onClick:()=>{ navOpen.value = !navOpen.value } }, '☰'),
+        h('div', { class:'appbar-title', translate:'no' }, cur.value.ic + ' ' + cur.value.t),
+      ]),
+      // 抽屉遮罩(点击关闭)
+      h('div', { class:['nav-backdrop', { show: navOpen.value }], onClick:()=>{ navOpen.value = false } }),
+      h('div', { class:['sidebar', { open: navOpen.value }] }, [
         h('div', { class:'brand', translate:'no' }, [ '📈 shadow-foliant', h('small', '智能投研 · FastAPI + Vue') ]),
         ...NAV.map(it => h('div', {
           class:['nav-item', { active: cur.value.k===it.k }], onClick:()=>go(it)

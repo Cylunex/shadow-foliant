@@ -13,6 +13,8 @@ body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"Segoe UI
 .nav-item.active{background:var(--accent);color:#fff}
 .nav-item .ic{font-size:16px;width:20px;text-align:center}
 .sidebar .tip{margin-top:24px;padding:0 12px;color:var(--muted);font-size:11px;line-height:1.7}
+.appbar{display:none}          /* 仅手机版显示(见媒体查询) */
+.nav-backdrop{display:none}
 .main{flex:1;min-width:0;padding:24px 32px;overflow:auto}
 .main > div{max-width:100%}
 .h1{font-size:20px;font-weight:700;margin:0 0 4px}
@@ -80,24 +82,32 @@ tbody tr:hover{background:var(--panel2)}
 .sw input:checked + .sl:before{transform:translateX(19px)}
 
 /* ============ 手机版 H5 适配(≤768px)============ */
-/* 桌面是 侧栏+主区 两列;手机改为 顶部横向滚动导航 + 全宽单列。表格沿用卡片内 overflow-x 横滑。*/
+/* 借鉴 MoviePilot:桌面"侧栏+主区";手机改为 顶部 app-bar(汉堡)+ 左侧滑入抽屉(覆盖式)+ 全宽单列。
+   表格沿用卡片内 overflow-x 横滑。*/
 @media(max-width:768px){
   #app{flex-direction:column}
+  /* 顶部 app-bar */
+  .appbar{
+    display:flex;align-items:center;gap:10px;
+    position:sticky;top:0;z-index:40;
+    background:var(--panel);border-bottom:1px solid var(--line);padding:10px 14px;
+  }
+  .appbar .hamburger{background:none;border:0;color:var(--txt);font-size:22px;line-height:1;padding:2px 6px;cursor:pointer}
+  .appbar .appbar-title{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 侧栏 → 左侧滑入抽屉(off-canvas) */
   .sidebar{
-    width:100%;flex-shrink:0;
-    border-right:none;border-bottom:1px solid var(--line);
-    padding:6px 8px;display:flex;flex-direction:row;gap:6px;
-    overflow-x:auto;-webkit-overflow-scrolling:touch;
-    position:sticky;top:0;z-index:30;
+    position:fixed;left:0;top:0;bottom:0;width:236px;z-index:50;
+    display:flex;flex-direction:column;overflow-y:auto;
+    border-right:1px solid var(--line);border-bottom:none;
+    transform:translateX(-100%);transition:transform .25s ease;
   }
-  .sidebar::-webkit-scrollbar{height:0}            /* 隐藏横向滚动条 */
-  .sidebar .brand,.sidebar .tip{display:none}      /* 省空间:手机隐藏品牌/提示 */
-  .nav-item{
-    flex-direction:column;gap:2px;flex-shrink:0;
-    padding:6px 9px;margin-bottom:0;border-radius:8px;
-    font-size:11px;line-height:1.2;text-align:center;white-space:nowrap;
+  .sidebar.open{transform:translateX(0);box-shadow:6px 0 30px rgba(0,0,0,.5)}
+  /* 抽屉遮罩 */
+  .nav-backdrop{
+    display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);
+    z-index:45;opacity:0;pointer-events:none;transition:opacity .25s;
   }
-  .nav-item .ic{font-size:18px;width:auto}
+  .nav-backdrop.show{opacity:1;pointer-events:auto}
   .main{padding:12px 12px 40px}
   .h1{font-size:18px}
   .sub{margin-bottom:14px}
@@ -107,11 +117,9 @@ tbody tr:hover{background:var(--panel2)}
   .metric .v{font-size:19px}
   .idxbar{gap:16px;padding:8px 12px}
   .row{gap:10px}
-  /* 输入控件防 iOS 聚焦缩放(字号≥16);宽控件占满 */
-  input,select{font-size:16px}
+  input,select{font-size:16px}                       /* 防 iOS 聚焦缩放 */
   .card td{max-width:200px}
 }
 @media(max-width:380px){
-  .metric{min-width:100%}                           /* 极窄屏指标块单列 */
-  .nav-item span:not(.ic){font-size:10px}
+  .metric{min-width:100%}                            /* 极窄屏指标块单列 */
 }
