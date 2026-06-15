@@ -7,11 +7,12 @@
 
 from numpy.ma import minimum_fill_value
 import pandas as pd
-import pywencai
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import time
-import concurrent.futures as _cf
+
+# ⭐ 全项目统一从 data.pywencai_safe 调 pywencai, 自带硬超时(防僵尸进程)
+from data.pywencai_safe import pywencai_get
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
 try:
@@ -19,24 +20,6 @@ try:
 except Exception:
     def _throttle(*a, **k):
         return 0.0
-
-# ⭐ pywencai 硬超时(2026-06-15)
-# 背景:pywencai.get(loop=True) 翻全分页, 自身无整体 timeout, 同花顺反爬抽风时
-#       可永久卡住底层 socket → 整个调度线程池被堵死(僵尸进程)。
-# 方案:套一层独立 ThreadPoolExecutor + future.result(timeout=) 强制超时。
-# 注意:不能用 `with ThreadPoolExecutor()` —— __exit__ 会 shutdown(wait=True) 阻塞等
-#       超时的孤儿线程跑完, 反而失去超时意义(同 api_server._DEADLINE_POOL 的做法)。
-_PYWENCAI_POOL = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix='pywencai')
-
-def _pywencai_get_with_timeout(query: str, timeout_seconds: int = 90, **kwargs):
-    """带硬超时的 pywencai.get 包装。超时即抛 TimeoutError, 上层 except 走降级。"""
-    fut = _PYWENCAI_POOL.submit(pywencai.get, query=query, loop=True, **kwargs)
-    try:
-        return fut.result(timeout=timeout_seconds)
-    except _cf.TimeoutError:
-        # 孤儿线程留给底层自然结束 / 退出, 不阻塞当前流程
-        fut.cancel()
-        raise TimeoutError(f'pywencai 查询超时 {timeout_seconds}s')
 
 class MainForceStockSelector:
     """主力选股类"""
@@ -105,7 +88,7 @@ class MainForceStockSelector:
                 
                 try:
                     _throttle('pywencai')
-                    result = _pywencai_get_with_timeout(query, timeout_seconds=90)
+                    result = pywencai_get(query, timeout=90)
 
                     if result is None:
                         print(f"  ⚠️ 方案{i}返回None，尝试下一个方案")

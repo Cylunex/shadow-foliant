@@ -43,7 +43,7 @@ class ProfitGrowthSelector:
             (是否成功, 数据DataFrame, 消息)
         """
         try:
-            import pywencai
+            from data.pywencai_safe import pywencai_get
 
             # 先尝试统一数据源（screen_stocks → dataapi 兜底，不传 profit_growth_min）
             self.logger.info('尝试统一数据源筛选...')
@@ -72,7 +72,7 @@ class ProfitGrowthSelector:
             
             # 调用pywencai
             _throttle('pywencai')
-            result = pywencai.get(query=query, loop=True)
+            result = pywencai_get(query, timeout=90)
             
             if result is None or result.empty:
                 self.logger.warning("未获取到符合条件的股票")

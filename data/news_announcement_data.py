@@ -4,7 +4,7 @@
 """
 
 import pandas as pd
-import pywencai
+from data.pywencai_safe import pywencai_get
 import sys
 import io
 import warnings
@@ -100,7 +100,7 @@ class NewsAnnouncementDataFetcher:
             print(f"   使用问财查询: {query}")
             
             # 使用pywencai查询
-            result = pywencai.get(query=query, loop=True)
+            result = pywencai_get(query, timeout=60)
             
             if result is None:
                 print(f"   问财查询返回None")
@@ -191,7 +191,7 @@ class NewsAnnouncementDataFetcher:
             print(f"   使用问财查询: {query}")
             
             # 使用pywencai查询
-            result = pywencai.get(query=query, loop=True)
+            result = pywencai_get(query, timeout=60)
             
             if result is None:
                 print(f"   问财查询返回None")

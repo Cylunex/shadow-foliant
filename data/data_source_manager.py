@@ -303,10 +303,10 @@ class DataSourceManager:
         
         # ========== 策略4: pywencai（同花顺，限流较严，偶尔报错）==========
         try:
-            import pywencai
+            from data.pywencai_safe import pywencai_get
             print(f"[Pywencai] 正在获取 {symbol} 的历史数据...")
             query = f"股票代码{symbol}的日线行情"
-            result = pywencai.get(query=query, loop=True)
+            result = pywencai_get(query, timeout=60)
             if result is not None and isinstance(result, dict):
                 for key in result:
                     df = result[key]

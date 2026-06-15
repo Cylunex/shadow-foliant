@@ -200,9 +200,9 @@ def screen_stocks(
             # 不直接 return, 继续尝试 fallback
             pass
 
-    # pywencai fallback
+    # pywencai fallback (统一从 data.pywencai_safe 走, 自带 30s 硬超时)
     try:
-        import pywencai
+        from data.pywencai_safe import pywencai_get
         import pandas as pd
         parts = []
         if price_max is not None:
@@ -217,21 +217,11 @@ def screen_stocks(
         query = '，'.join(parts) + '，成交额由小至大排名'
 
         _throttle('pywencai')
-        import threading
-        result_container = []
-        def _pywencai_call():
-            try:
-                result_container.append(pywencai.get(query=query, loop=True))
-            except Exception:
-                result_container.append(None)
-        t = threading.Thread(target=_pywencai_call, daemon=True)
-        t.start()
-        t.join(timeout=30)
-        if t.is_alive():
+        try:
+            result = pywencai_get(query, timeout=30)
+        except TimeoutError:
             logger.warning('pywencai 超时(30s)，降级到 dataapi')
             result = None
-        else:
-            result = result_container[0] if result_container else None
         if result is not None:
             if isinstance(result, pd.DataFrame):
                 return {'success': True, 'data': result.to_dict('records'), 'msg': 'pywencai: %s只' % len(result)}

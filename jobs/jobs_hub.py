@@ -2377,11 +2377,11 @@ def _daily_candidate_pool():
         # 1. 获取候选股票池 — pywencai(主) → 东财 dataapi(兜底)
         base = None
         try:
-            import pywencai
+            from data.pywencai_safe import pywencai_get
             query = (f'股价小于{price_max}，'
                      f'非st，非退市风险股，资产负债率小于70%，'
                      f'按当日成交额由大到小排名')
-            base = pywencai.get(query=query, loop=True)
+            base = pywencai_get(query, timeout=90)
             if base is not None and len(base) == 0:
                 base = None
         except Exception:

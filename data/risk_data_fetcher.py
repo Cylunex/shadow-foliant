@@ -6,7 +6,7 @@
 3. 近期重要事件
 """
 
-import pywencai
+from data.pywencai_safe import pywencai_get
 import pandas as pd
 from typing import Dict, Any
 import time
@@ -108,7 +108,7 @@ class RiskDataFetcher:
             query = f"{symbol}限售解禁"
             
             # 使用pywencai查询
-            response = pywencai.get(query=query, loop=True)
+            response = pywencai_get(query, timeout=60)
             
             if response is None:
                 return result
@@ -171,7 +171,7 @@ class RiskDataFetcher:
             query = f"{symbol}大股东减持公告"
             
             # 使用pywencai查询
-            response = pywencai.get(query=query, loop=True)
+            response = pywencai_get(query, timeout=60)
             
             if response is None:
                 return result
@@ -234,7 +234,7 @@ class RiskDataFetcher:
             query = f"{symbol}近期重要事件"
             
             # 使用pywencai查询
-            response = pywencai.get(query=query, loop=True)
+            response = pywencai_get(query, timeout=60)
             
             if response is None:
                 return result

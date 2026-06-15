@@ -157,12 +157,12 @@ def collect_factors(symbol: str) -> Dict[str, Optional[float]]:
         pass
 
     try:
-        import pywencai
+        from data.pywencai_safe import pywencai_get
         query = (
             f"{symbol} 市盈率(动态) 市净率 净资产收益率 "
             f"净利润同比增长率 资产负债率 股息率 经营活动产生的现金流量净额 净利润"
         )
-        df = pywencai.get(query=query, loop=False)
+        df = pywencai_get(query, timeout=30, loop=False)
         if df is not None and hasattr(df, 'empty') and not df.empty:
             row = df.iloc[0]
             def _g(*keys):

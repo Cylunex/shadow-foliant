@@ -6,10 +6,10 @@
 """
 
 import pandas as pd
-import pywencai
 from datetime import datetime
 from typing import Tuple, Optional
 from selection.data_source_config import screen_stocks
+from data.pywencai_safe import pywencai_get
 import time
 
 
@@ -74,7 +74,7 @@ class ValueStockSelector:
                 print(f"正在调用问财接口...")
 
                 # 调用pywencai
-                result = pywencai.get(query=query, loop=True)
+                result = pywencai_get(query, timeout=90)
 
                 if result is None:
                     return False, None, "问财接口返回None，请检查网络或稍后重试"

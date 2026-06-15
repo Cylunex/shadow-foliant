@@ -58,7 +58,7 @@ class SmallCapSelector:
                 return True, result, f"成功获取 {len(result)} 只股票"
             
             self.logger.warning(f"统一数据源失败({result_dict['msg']}), 回退pywencai")
-            import pywencai
+            from data.pywencai_safe import pywencai_get
             
             # 构建查询语句（按总市值由小至大排名）
             query = (
@@ -76,7 +76,7 @@ class SmallCapSelector:
             
             # 调用pywencai
             _throttle('pywencai')
-            result = pywencai.get(query=query, loop=True)
+            result = pywencai_get(query, timeout=90)
             
             if result is None or result.empty:
                 self.logger.warning("未获取到符合条件的股票")

@@ -6,9 +6,9 @@
 """
 
 import pandas as pd
-import pywencai
 from datetime import datetime
 from typing import Tuple, Optional
+from data.pywencai_safe import pywencai_get
 import time
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
@@ -88,7 +88,7 @@ class LowPriceBullSelector:
             print(f"正在调用问财接口...")
             
             _throttle('pywencai')
-            pywencai_result = pywencai.get(query=query, loop=True)
+            pywencai_result = pywencai_get(query, timeout=90)
             
             if pywencai_result is None:
                 return False, None, "问财接口返回None，请检查网络或稍后重试"
