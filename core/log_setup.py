@@ -25,6 +25,8 @@
 环境变量:
     SHADOW_LOG_TIMESTAMPS=false  关闭 stdout 时间戳拦截(supervisor 不需要重复加时也用)
     SHADOW_LOG_LEVEL=INFO        get_logger 默认级别(DEBUG/INFO/WARNING/ERROR)
+    SHADOW_LOG_FILTER_HTML=false 关闭 HTML 标签行过滤(默认开;过滤 akshare/PyExecJS
+                                  上游残留 print 出来的整页 HTML, 实测占日志体积 73%)
 """
 from __future__ import annotations
 
@@ -49,6 +51,29 @@ _TS_OK_RE = re.compile(
 # 调试用前缀,这些已经是 uvicorn 自带带 ts 的 INFO:/WARNING:/ERROR: 行 → 不二次加
 _UVICORN_RE = re.compile(r'^(INFO|WARNING|ERROR|DEBUG|CRITICAL):\s')
 
+# HTML 标签行特征:trim 后头是 '<' 且 (含 '</' 或 ' class=' 或 '/>' 或常见 HTML 标签名)
+# 误杀风险评估:业务 print 极少这样开头, 即便有 `<dict>` `<obj>` 也不会含 'class=' '</' '/>',
+# 所以触发器组合起来很安全。下面"任一命中即视为 HTML 噪音"。
+_HTML_HINTS = ('</', 'class=', 'style=', '/>',
+               '<td', '<tr', '<div', '<th', '<span', '<br',
+               '<!DOCTYPE', '<!doctype', '<html', '<table',
+               '<thead', '<tbody', '<a ', '<h1', '<h2', '<h3', '<h4',
+               '<script', '<link', '<meta', '<input', '<button')
+
+
+def _is_html_noise(line: str) -> bool:
+    """识别"akshare/PyExecJS 上游残留 print"出来的整页 HTML 标签行。
+    保守判断:头是 '<', 并且含 HTML 标志符号之一。这样业务里写 `print('<msg>')`
+    类的不会误伤(没有 HTML 标志)。"""
+    s = line.lstrip()
+    if not s or s[0] != '<':
+        return False
+    return any(h in s for h in _HTML_HINTS)
+
+
+# 过滤统计:get_filter_stats() 可以观测
+_FILTER_STATS = {'html_dropped': 0}
+
 
 def _ts() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -66,10 +91,11 @@ class _TimestampedStream:
       - **透传其它属性**(isatty/fileno/encoding/...)给底层流。
     """
 
-    def __init__(self, target):
+    def __init__(self, target, filter_html: bool = True):
         self._target = target
         self._buf = ''
         self._lock = threading.Lock()
+        self._filter_html = filter_html
 
     def write(self, s: str) -> int:
         if not s:
@@ -84,6 +110,11 @@ class _TimestampedStream:
             now = _ts()
             out_lines = []
             for line in complete:
+                # HTML 噪音过滤(默认开):akshare/PyExecJS 上游残留 print 的
+                # 整页 HTML, 实测占日志体积 73%, 直接 drop
+                if self._filter_html and _is_html_noise(line):
+                    _FILTER_STATS['html_dropped'] += 1
+                    continue
                 if not line.strip():
                     out_lines.append(line)
                 elif _TS_OK_RE.match(line) or _UVICORN_RE.match(line):
@@ -91,7 +122,8 @@ class _TimestampedStream:
                 else:
                     # 行尾可能有 '\r'(tqdm finalize), 时间戳放最前
                     out_lines.append(f'{now} {line}')
-            self._target.write('\n'.join(out_lines) + '\n')
+            if out_lines:
+                self._target.write('\n'.join(out_lines) + '\n')
             return len(s)
 
     def flush(self):
@@ -129,8 +161,9 @@ def init_logging():
         # —— stdout / stderr 拦截 —— (可关)
         if os.getenv('SHADOW_LOG_TIMESTAMPS', 'true').lower() not in ('false', '0', 'no'):
             _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
-            sys.stdout = _TimestampedStream(sys.stdout)
-            sys.stderr = _TimestampedStream(sys.stderr)
+            filter_html = os.getenv('SHADOW_LOG_FILTER_HTML', 'true').lower() not in ('false', '0', 'no')
+            sys.stdout = _TimestampedStream(sys.stdout, filter_html=filter_html)
+            sys.stderr = _TimestampedStream(sys.stderr, filter_html=filter_html)
 
         # —— stdlib logging 默认 root 配置(给 get_logger 用, 也兜底第三方库) ——
         level_str = os.getenv('SHADOW_LOG_LEVEL', 'INFO').upper()
@@ -159,6 +192,11 @@ def restore():
     if _orig_stderr is not None:
         sys.stderr = _orig_stderr
     _installed = False
+
+
+def get_filter_stats() -> dict:
+    """返回 stdout 拦截器过滤掉的行计数(观测用)。"""
+    return dict(_FILTER_STATS)
 
 
 def get_logger(name: str = 'shadow') -> logging.Logger:

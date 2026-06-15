@@ -283,14 +283,17 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     try:
         r = _session.get(url, headers=headers, timeout=15)
         r.encoding = "gbk"
-        dfs = pd.read_html(r.text)
+        # ⚠️ pandas 2.1+ 不再接受裸 HTML 字符串(短串会被当文件路径打开,抛 FileNotFoundError
+        #    "[Errno 2] No such file or directory: <!DOCTYPE HTML>"), 必须 StringIO 包装。
+        dfs = pd.read_html(StringIO(r.text))
         for df in dfs:
             cols = [str(c) for c in df.columns]
             if any("每股收益" in c or "均值" in c for c in cols):
                 return df
         return dfs[0] if dfs else pd.DataFrame()
     except Exception as e:
-        print(f"[a-stock] 一致预期请求失败: {e}")
+        # 日志只打异常类型 + 短消息, 避免泄漏整段 HTML 内容
+        print(f"[a-stock] 一致预期请求失败: {type(e).__name__}: {str(e)[:120]}")
         return pd.DataFrame()
 
 
