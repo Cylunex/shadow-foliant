@@ -195,6 +195,8 @@ _CACHE_TTL: Dict[str, Any] = {
     "announcements": 3600,
     "screen": 1800,
     "convertible_bonds": (1800, 21600),
+    # —— 基金:历史净值每天 17:00~21:00 公布一次, 收盘前不变 ——
+    "fund_nav": (3600, 7200),
 }
 _DEFAULT_TTL = 3600
 
@@ -859,6 +861,112 @@ def convertible_bonds() -> List[dict]:
                   [("eastmoney", _cb_eastmoney), ("jsl", _cb_jsl)], empty=[]) or []
 
 
+# ── 基金历史净值 ──────────────────────────────────────────────────────
+# 主源:东财官方 lsjz JSON(纯 HTTP, 无 JS exec, 稳定)
+# 兜底:akshare fund_open_fund_info_em(部分基金 PyExecJS 抛 ReferenceError 时主源已覆盖)
+# 返回标准列 [date, unit_nav, acc_nav, daily_return] 升序 DataFrame。
+def _fund_nav_eastmoney(code: str) -> pd.DataFrame:
+    """直连东财 f10/lsjz JSON 翻页拉取全部历史净值。被 _route 调用, 失败抛异常即可。"""
+    import urllib.request
+    import json as _json
+    try:
+        from rate_limiter import throttle as _throttle
+    except Exception:
+        def _throttle(*a, **k): return 0.0
+    code = str(code).zfill(6)
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': f'http://fundf10.eastmoney.com/jjjz_{code}.html',
+    }
+    rows: List[dict] = []
+    page_size = 200
+    for page in range(1, 200):  # 200*200=40000 条上限, 远超任何基金的历史长度
+        url = (f'https://api.fund.eastmoney.com/f10/lsjz?'
+               f'fundCode={code}&pageIndex={page}&pageSize={page_size}')
+        _throttle('eastmoney')
+        req = urllib.request.Request(url, headers=headers)
+        raw = urllib.request.urlopen(req, timeout=8).read().decode('utf-8', 'replace')
+        data = _json.loads(raw)
+        lst = ((data.get('Data') or {}).get('LSJZList')) or []
+        if not lst:
+            break
+        rows.extend(lst)
+        if len(lst) < page_size:
+            break
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).rename(columns={
+        'FSRQ': 'date', 'DWJZ': 'unit_nav', 'LJJZ': 'acc_nav', 'JZZZL': 'daily_return',
+    })
+    keep = [c for c in ('date', 'unit_nav', 'acc_nav', 'daily_return') if c in df.columns]
+    if 'date' not in keep or 'unit_nav' not in keep:
+        return pd.DataFrame()
+    df = df[keep].copy()
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    for c in ('unit_nav', 'acc_nav', 'daily_return'):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    if 'acc_nav' not in df.columns:
+        df['acc_nav'] = df['unit_nav']
+    return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+
+
+def _fund_nav_akshare(code: str) -> pd.DataFrame:
+    """akshare 兜底。被 _route 调用, 异常会被 _route 吞掉续试下一源,
+    所以这里不用自己 print 长 traceback; 只在内部捕一次 acc_nav 失败(unit 已有则继续)。"""
+    try:
+        from rate_limiter import throttle as _throttle
+    except Exception:
+        def _throttle(*a, **k): return 0.0
+    import akshare as ak    # 缺包时让 _route 捕异常自动跳过
+    code = str(code).zfill(6)
+    _throttle('akshare')
+    unit = ak.fund_open_fund_info_em(symbol=code, indicator='单位净值走势')
+    if unit is None or len(unit) == 0:
+        return pd.DataFrame()
+    unit = unit.rename(columns={'净值日期': 'date', '单位净值': 'unit_nav', '日增长率': 'daily_return'})
+    df = unit[[c for c in ['date', 'unit_nav', 'daily_return'] if c in unit.columns]].copy()
+    if 'date' not in df.columns or 'unit_nav' not in df.columns:
+        return pd.DataFrame()
+    try:
+        _throttle('akshare')
+        acc = ak.fund_open_fund_info_em(symbol=code, indicator='累计净值走势')
+        if acc is not None and len(acc):
+            acc = acc.rename(columns={'净值日期': 'date', '累计净值': 'acc_nav'})
+            df = df.merge(acc[['date', 'acc_nav']], on='date', how='left')
+    except Exception:
+        # 累计净值 nice-to-have; unit 已在手, 静默
+        pass
+    if 'acc_nav' not in df.columns:
+        df['acc_nav'] = df['unit_nav']
+    df['date'] = pd.to_datetime(df['date'])
+    for c in ('unit_nav', 'acc_nav', 'daily_return'):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df.sort_values('date').reset_index(drop=True)
+
+
+def fund_nav_history(code: str, start: str = None, end: str = None) -> Optional[pd.DataFrame]:
+    """基金历史净值。源链:东财 lsjz JSON → akshare PyExecJS 兜底。
+    返回 DataFrame[date, unit_nav, acc_nav, daily_return] 升序;两源都失败返回 None。
+    start/end='YYYY-MM-DD' 区间过滤。
+
+    缓存:'fund_nav' 域(见 _CACHE_TTL);start/end 也参与缓存 key, 不会互相覆盖。
+    """
+    code = str(code).zfill(6)
+    df = _route("fund_nav",
+                [("eastmoney", lambda: _fund_nav_eastmoney(code)),
+                 ("akshare",   lambda: _fund_nav_akshare(code))],
+                empty=pd.DataFrame())
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        return None
+    if start:
+        df = df[df['date'] >= pd.to_datetime(start)]
+    if end:
+        df = df[df['date'] <= pd.to_datetime(end)]
+    return df.reset_index(drop=True)
+
+
 # ══════════════════════════════════════════════════════════
 #  给非实时数据域统一套缓存(在门面定义前完成,使 hub.* 与内部互调都走缓存版)
 #  · 不含 quote(委托 quotes,自动受益)、kline(自带专用磁盘缓存)。
@@ -869,8 +977,9 @@ for _name in ("quotes", "indices", "capital_flow_minute", "kline_with_indicators
               "margin", "block_trade", "holder_num_change", "dividend_history", "lockup_expiry",
               "hot_stocks", "sector_ranking", "sector_spot", "sector_fund_flow", "concept_blocks",
               "financials", "valuation", "full_valuation", "eps_forecast",
-              "stock_news", "market_news", "announcements", "screen", "convertible_bonds"):
-    globals()[_name] = _dh_cache(_name)(globals()[_name])
+              "stock_news", "market_news", "announcements", "screen", "convertible_bonds",
+              "fund_nav_history"):
+    globals()[_name] = _dh_cache(_name if _name != "fund_nav_history" else "fund_nav")(globals()[_name])
 del _name
 
 
@@ -910,6 +1019,7 @@ class _Hub:
     announcements = staticmethod(announcements)
     screen = staticmethod(screen)
     convertible_bonds = staticmethod(convertible_bonds)
+    fund_nav_history = staticmethod(fund_nav_history)
     source_stats = staticmethod(source_stats)
     cache_stats = staticmethod(cache_stats)
     cache_clear = staticmethod(cache_clear)

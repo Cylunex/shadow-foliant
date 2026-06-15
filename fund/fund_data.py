@@ -115,51 +115,15 @@ def fund_type(code: str) -> Optional[str]:
     return None
 
 
-# ----- 净值历史(核心) --------------------------------------------------
+# ----- 净值历史 --------------------------------------------------------
+# ⭐ 历史净值统一走 datahub(主源东财 lsjz JSON + 兜底 akshare, 健康度路由 + 缓存)。
+# 这里保留 get_nav_history 函数签名是为兼容上层调用方; 真正取数在 data.datahub.fund_nav_history。
 def get_nav_history(code: str, start: str = None, end: str = None) -> Optional[pd.DataFrame]:
-    """历史净值。返回标准 DataFrame[date, unit_nav, acc_nav, daily_return](升序)。
-    单位净值走势 + 累计净值走势 合并。失败返回 None。
+    """历史净值(瘦封装,实际走 datahub.fund_nav_history)。
+    返回标准 DataFrame[date, unit_nav, acc_nav, daily_return](升序),失败 None。
     start/end: 'YYYY-MM-DD' 可选区间过滤。"""
-    ak = _ak()
-    if ak is None:
-        return None
-    code = str(code).zfill(6)
-    try:
-        throttle('akshare')
-        unit = ak.fund_open_fund_info_em(symbol=code, indicator='单位净值走势')
-    except Exception as e:
-        print(f'[fund_data] get_nav_history({code}) 单位净值失败: {e}')
-        return None
-    if unit is None or len(unit) == 0:
-        return None
-    unit = unit.rename(columns={'净值日期': 'date', '单位净值': 'unit_nav', '日增长率': 'daily_return'})
-    df = unit[[c for c in ['date', 'unit_nav', 'daily_return'] if c in unit.columns]].copy()
-    # 列结构护栏:akshare 接口字段若变更(如某些基金无标准列),'date'/'unit_nav' 可能缺失,
-    # 后续 df['date']/to_datetime 会 KeyError 抛出 → 整个 nav 刷新任务当次中断。缺关键列直接降级 None。
-    if 'date' not in df.columns or 'unit_nav' not in df.columns:
-        print(f"[fund_data] get_nav_history({code}) 列结构异常,缺 date/unit_nav: {list(unit.columns)}")
-        return None
-    # 累计净值(可选,失败忽略)
-    try:
-        throttle('akshare')
-        acc = ak.fund_open_fund_info_em(symbol=code, indicator='累计净值走势')
-        if acc is not None and len(acc):
-            acc = acc.rename(columns={'净值日期': 'date', '累计净值': 'acc_nav'})
-            df = df.merge(acc[['date', 'acc_nav']], on='date', how='left')
-    except Exception:
-        pass
-    if 'acc_nav' not in df.columns:
-        df['acc_nav'] = df['unit_nav']
-    df['date'] = pd.to_datetime(df['date'])
-    for c in ('unit_nav', 'acc_nav', 'daily_return'):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df.sort_values('date').reset_index(drop=True)
-    if start:
-        df = df[df['date'] >= pd.to_datetime(start)]
-    if end:
-        df = df[df['date'] <= pd.to_datetime(end)]
-    return df.reset_index(drop=True)
+    from data.datahub import fund_nav_history
+    return fund_nav_history(str(code).zfill(6), start=start, end=end)
 
 
 def latest_nav(code: str) -> Optional[dict]:
