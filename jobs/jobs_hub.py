@@ -1241,9 +1241,23 @@ def _notify_task_error(name: str, exc: Exception, tb: str):
         pass  # 通知失败绝不影响主流程
 
 
+# ─── 任务运行时长追踪 + deadman switch (2026-06-15) ─────────────────────
+# 背景:6/14 夜里 pywencai 卡死, 整个线程池被 6 个僵尸任务堵满, 调度器主线程还活着
+#       但 supervisor 看 PID 在不重启 → 09:45 选股没跑。
+# 方案:每个任务进出 _run_with_log 时登记/注销时间; 一个独立 watcher 线程定期扫,
+#       一旦发现有任务运行时长 > TASK_DEADLINE_SEC, 直接 os._exit(99) 让 supervisor
+#       (autorestart=true) 拉起新进程。比靠外部 PID 检测更精准。
+_TASK_START_TS: Dict[str, float] = {}     # task name -> 开始时间戳
+_TASK_LOCK = threading.Lock()
+import os as _os
+TASK_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_DEADLINE_SEC', '1800'))  # 默认 30min
+
+
 def _run_with_log(name, func, *a, **kw):
     """Run task in thread pool and log result (module-level, usable by _wrap)。
     任务抛异常 → ① job_runs 记 error(带 traceback 尾,便于修复)② 推告警通知(限频)。"""
+    with _TASK_LOCK:
+        _TASK_START_TS[name] = time.time()
     try:
         func(*a, **kw)
     except Exception as e:
@@ -1251,6 +1265,9 @@ def _run_with_log(name, func, *a, **kw):
         tb = traceback.format_exc()
         _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}')
         _notify_task_error(name, e, tb)
+    finally:
+        with _TASK_LOCK:
+            _TASK_START_TS.pop(name, None)
 
 
 class _JobsHub:
@@ -1331,6 +1348,34 @@ class _JobsHub:
 
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
+
+        # ⭐ deadman switch: 任务卡死 > TASK_DEADLINE_SEC 就 hard-exit, 让 supervisor 拉起
+        def _deadman():
+            while self._running:
+                try:
+                    now = time.time()
+                    stuck = []
+                    with _TASK_LOCK:
+                        for n, ts in list(_TASK_START_TS.items()):
+                            age = now - ts
+                            if age > TASK_DEADLINE_SEC:
+                                stuck.append((n, int(age)))
+                    if stuck:
+                        msg = ', '.join(f'{n}({d}s)' for n, d in stuck)
+                        print(f'[jobs_hub] 💀 任务卡死超时 (>{TASK_DEADLINE_SEC}s): {msg} — '
+                              f'主动退出 (exit 99), 由 supervisor 重启', flush=True)
+                        # 写一条 job_runs 备查(不阻塞退出)
+                        try:
+                            for n, d in stuck:
+                                _log_run(n, 'error', error=f'deadman timeout {d}s')
+                        except Exception:
+                            pass
+                        # hard exit: 绕过 atexit / 线程清理, 避免被卡线程拖住
+                        _os._exit(99)
+                except Exception as e:
+                    print(f'[jobs_hub] deadman 线程异常: {e}', flush=True)
+                time.sleep(30)
+        threading.Thread(target=_deadman, name='jobs_hub-deadman', daemon=True).start()
 
     def stop(self):
         self._running = False
@@ -3730,15 +3775,22 @@ def serve_forever():
     """
     import time
     register_default_jobs()
-    print(f'[jobs_hub] 🚀 独立模式启动, {len(hub.list_jobs())} jobs 已注册')
+    print(f'[jobs_hub] 🚀 独立模式启动, {len(hub.list_jobs())} jobs 已注册', flush=True)
     hub.start()
     # 主线程保持存活
     try:
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
-        print('[jobs_hub] 收到退出信号')
+        print('[jobs_hub] 收到退出信号', flush=True)
         hub.stop()
+    except BaseException as e:
+        # SystemExit / C 扩展异常等 BaseException 子类: 不静默吞, 打 traceback 后
+        # 抛出去, 让 supervisor 看到非 0 退出码并 autorestart。
+        import traceback
+        print(f'[jobs_hub] 主线程异常退出: {type(e).__name__}: {e}', flush=True)
+        traceback.print_exc()
+        raise
 
 
 if __name__ == '__main__':
