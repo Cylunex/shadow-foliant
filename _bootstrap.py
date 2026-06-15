@@ -97,3 +97,15 @@ def db_path(name: str) -> str:
     if name == ':memory:' or os.path.isabs(name):
         return name
     return os.path.join(DB_DIR, os.path.basename(name))
+
+
+# ---------------------------------------------------------------------------
+# 统一日志初始化(2026-06-15):给所有裸 print 自动加时间戳, 同时配置 stdlib logging。
+# - SHADOW_LOG_TIMESTAMPS=false 可关(supervisor 自带 ts 时)
+# - core.log_setup.get_logger(name) 给新代码用
+# ---------------------------------------------------------------------------
+try:
+    from core.log_setup import init_logging as _init_logging
+    _init_logging()
+except Exception:
+    pass
