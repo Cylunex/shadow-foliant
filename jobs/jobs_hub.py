@@ -3089,7 +3089,9 @@ def task_unified_selection():
         except Exception:
             pass
 
-        # 3. 多因子打分:已在池的 +2;不在池的高分股也入池(修复:原来多因子自己的发现进不了候选)
+        # 3. 多因子打分:5 大策略 / InStock / 多因子 平权各 +1, 让 TOP 由"被多个 source 命中"
+        # 主导, 而不是被多因子单一来源垄断(2026-06-16 调权:此前多因子 +2 比 5 大策略 +1 高一倍,
+        # 加上 InStock 基因组初期还没积累 → TOP 15 全是多因子, 失去多策略综合的意义)。
         try:
             from multi_factor_screener import screen_index_cached
             mf_result = screen_index_cached(index_code='000300', n=25, add_sector_leaders=True,
@@ -3097,13 +3099,38 @@ def task_unified_selection():
             for item in mf_result.get('top', []):
                 sym = item.get('symbol', '')
                 if sym:
-                    _add(sym, 2.0, '多因子')
+                    _add(sym, 1.0, '多因子')
         except Exception:
             pass
 
-        # 排序 TOP 15
-        sorted_codes = sorted(candidates.items(), key=lambda x: -x[1]['score'])[:15]
-        top_list = [c for c, _ in sorted_codes]
+        # 排序 TOP 15:总分降序, 同分按"命中 source 数"二级排序(被多个策略命中的优先);
+        # **强制 source 多样性**:每个 source 最多 _MAX_PER_SOURCE 只, 防单一来源垄断。
+        # 配额满了就跳过, 取下一只(直到 15 个或候选耗尽)。
+        _MAX_PER_SOURCE = int(os.environ.get('UNIFIED_SELECTION_MAX_PER_SOURCE', '4'))
+        sorted_all = sorted(candidates.items(),
+                            key=lambda x: (-x[1]['score'], -len(x[1].get('src', []))))
+        source_count: Dict[str, int] = {}
+        top_list: List[str] = []
+        skipped_by_quota: List[str] = []
+        for code, info in sorted_all:
+            if len(top_list) >= 15:
+                break
+            srcs = info.get('src', []) or ['-']
+            # 这只所有来源都没达到配额上限, 才入选(任一来源已满 → 跳过)
+            if any(source_count.get(s, 0) >= _MAX_PER_SOURCE for s in srcs):
+                skipped_by_quota.append(code)
+                continue
+            top_list.append(code)
+            for s in srcs:
+                source_count[s] = source_count.get(s, 0) + 1
+        # 配额制可能凑不满 15 只 → 用之前被跳过的高分股按原排序补齐
+        if len(top_list) < 15 and skipped_by_quota:
+            for code in skipped_by_quota:
+                if code in top_list:
+                    continue
+                top_list.append(code)
+                if len(top_list) >= 15:
+                    break
         held_codes = {c for c, _ in _holdings_codes()}
 
         # 批量拉行情（一次性比15次单独调快得多）
