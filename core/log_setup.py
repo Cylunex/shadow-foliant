@@ -71,8 +71,21 @@ def _is_html_noise(line: str) -> bool:
     return any(h in s for h in _HTML_HINTS)
 
 
+# Node 子进程 deprecation 警告 — akshare→PyExecJS 每开一个 node 都打一遍, 占大量噪音。
+# _bootstrap.py 已经设 NODE_OPTIONS=--no-deprecation 让 node 不发, 这里再加一道兜底
+# 过滤(防止有未走 NODE_OPTIONS 的旁路)。
+# 形如:
+#   (node:12345) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. ...
+#   (Use `node --trace-deprecation ...` to show where the warning was created)
+_NODE_DEP_RE = re.compile(r'^\(node:\d+\)\s*\[DEP\d+\]|^\(Use `node --trace-deprecation')
+
+
+def _is_node_dep_noise(line: str) -> bool:
+    return bool(_NODE_DEP_RE.match(line.lstrip()))
+
+
 # 过滤统计:get_filter_stats() 可以观测
-_FILTER_STATS = {'html_dropped': 0}
+_FILTER_STATS = {'html_dropped': 0, 'node_dep_dropped': 0}
 
 
 def _ts() -> str:
@@ -114,6 +127,10 @@ class _TimestampedStream:
                 # 整页 HTML, 实测占日志体积 73%, 直接 drop
                 if self._filter_html and _is_html_noise(line):
                     _FILTER_STATS['html_dropped'] += 1
+                    continue
+                # Node 子进程 punycode/DEP 警告(无价值, 上游 npm 依赖问题)
+                if self._filter_html and _is_node_dep_noise(line):
+                    _FILTER_STATS['node_dep_dropped'] += 1
                     continue
                 if not line.strip():
                     out_lines.append(line)

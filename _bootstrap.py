@@ -67,6 +67,18 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
+# Node 子进程静音(2026-06-16):akshare→PyExecJS 解 JS 时每开一个 node 子进程就打
+# `(node:NNN) [DEP0040] DeprecationWarning: punycode module is deprecated...`
+# 是上游某依赖还在 require('punycode') 而 node 自带 punycode 已废弃。我们改不了
+# 上游, 但 node 看 NODE_OPTIONS=--no-deprecation 直接不发任何 deprecation 警告。
+# 子进程继承父进程环境, 一次设置全局生效。
+# ---------------------------------------------------------------------------
+_node_opts = os.environ.get('NODE_OPTIONS', '')
+if '--no-deprecation' not in _node_opts:
+    os.environ['NODE_OPTIONS'] = (_node_opts + ' --no-deprecation').strip()
+
+
+# ---------------------------------------------------------------------------
 # psycopg2 NUMERIC → float 全局适配:DB 标准化后价格/金额列改 NUMERIC,
 # 若不适配,psycopg2 会返回 Decimal,撞坏大量 `float * Decimal` 运算与 st.number_input
 # (交接 §A 记过此坑)。这里全局把 NUMERIC/DECIMAL 读出为 float,代码零改动。
