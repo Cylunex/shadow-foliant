@@ -1255,14 +1255,24 @@ TASK_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_DEADLINE_SEC', '1800'))  
 
 def _run_with_log(name, func, *a, **kw):
     """Run task in thread pool and log result (module-level, usable by _wrap)。
-    任务抛异常 → ① job_runs 记 error(带 traceback 尾,便于修复)② 推告警通知(限频)。"""
+    任务抛异常 → ① job_runs 记 error(带 traceback 尾,便于修复)② 推告警通知(限频)。
+    进 / 出 / 失败时都在 stdout 打一行带耗时的标识, 方便 grep 出某任务的执行窗口。"""
+    t0 = time.time()
+    # 顺手把线程池里"在跑"的任务数也打出来, 出现僵尸/堵塞时一眼能看出
+    pool_busy = len(_TASK_START_TS) + 1  # +1: 本任务马上登记
+    print(f'[jobs_hub] ▶ {name} 开始 (pool={pool_busy}/6)', flush=True)
     with _TASK_LOCK:
-        _TASK_START_TS[name] = time.time()
+        _TASK_START_TS[name] = t0
     try:
         func(*a, **kw)
+        elapsed = time.time() - t0
+        print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
+        elapsed = time.time() - t0
+        print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
+              f'{type(e).__name__}: {str(e)[:120]}', flush=True)
         _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}')
         _notify_task_error(name, e, tb)
     finally:
