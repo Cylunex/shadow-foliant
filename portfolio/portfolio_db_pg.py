@@ -197,14 +197,23 @@ class PortfolioDBPG:
             cur.close()
             conn.close()
 
-    def get_all_stocks(self, auto_monitor_only: bool = False) -> List[Dict]:
+    def get_all_stocks(self, auto_monitor_only: bool = False,
+                       include_cleared: bool = False) -> List[Dict]:
+        """include_cleared=False 默认过滤 quantity=0 的清仓行(NULL 保留, 视为"未填数量")。
+        2026-06-17: 此前清仓后行仍在表里, 持仓分析/监控/AI 还在跑已清仓股票。"""
         conn = get_conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
+            where = []
             if auto_monitor_only:
-                cur.execute("SELECT * FROM portfolio_stocks WHERE auto_monitor = TRUE ORDER BY created_at DESC")
-            else:
-                cur.execute("SELECT * FROM portfolio_stocks ORDER BY created_at DESC")
+                where.append('auto_monitor = TRUE')
+            if not include_cleared:
+                where.append('(quantity IS NULL OR quantity != 0)')
+            sql = 'SELECT * FROM portfolio_stocks'
+            if where:
+                sql += ' WHERE ' + ' AND '.join(where)
+            sql += ' ORDER BY created_at DESC'
+            cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
         finally:
             cur.close()

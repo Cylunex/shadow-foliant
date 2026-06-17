@@ -107,9 +107,10 @@ class PortfolioManager:
         """获取单只持仓股票信息"""
         return self.db.get_stock(stock_id)
     
-    def get_all_stocks(self, auto_monitor_only: bool = False) -> List[Dict]:
-        """获取所有持仓股票列表"""
-        return self.db.get_all_stocks(auto_monitor_only)
+    def get_all_stocks(self, auto_monitor_only: bool = False,
+                       include_cleared: bool = False) -> List[Dict]:
+        """获取所有持仓股票列表。include_cleared=False 默认过滤已清仓(quantity=0)行。"""
+        return self.db.get_all_stocks(auto_monitor_only, include_cleared=include_cleared)
     
     def search_stocks(self, keyword: str) -> List[Dict]:
         """搜索持仓股票"""

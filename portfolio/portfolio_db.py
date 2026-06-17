@@ -283,32 +283,40 @@ class PortfolioDB:
         finally:
             conn.close()
     
-    def get_all_stocks(self, auto_monitor_only: bool = False) -> List[Dict]:
+    def get_all_stocks(self, auto_monitor_only: bool = False,
+                       include_cleared: bool = False) -> List[Dict]:
         """
         获取所有持仓股票列表
-        
+
         Args:
             auto_monitor_only: 是否只返回启用自动监测的股票
-            
+            include_cleared: 是否包含 quantity=0 的清仓记录(默认 False, 即不返回)
+                ⭐ 2026-06-17: 默认过滤清仓行(quantity=0), 此前所有分析任务
+                (持仓分析/监控/AI 研判)还在跑已清仓的股票, 浪费资源 + 误报。
+                quantity IS NULL 视为"未填数量"(用代码记账的用户), 仍保留。
+                显式传 include_cleared=True 才返回全部(交易历史/汇总等场景)。
+
         Returns:
             股票信息字典列表
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         try:
+            where = []
             if auto_monitor_only:
-                cursor.execute('''
-                    SELECT * FROM portfolio_stocks 
-                    WHERE auto_monitor = 1
-                    ORDER BY created_at DESC
-                ''')
-            else:
-                cursor.execute('SELECT * FROM portfolio_stocks ORDER BY created_at DESC')
-            
+                where.append('auto_monitor = 1')
+            if not include_cleared:
+                # 排除明确为 0 的清仓行; NULL(未填)保留
+                where.append('(quantity IS NULL OR quantity != 0)')
+            sql = 'SELECT * FROM portfolio_stocks'
+            if where:
+                sql += ' WHERE ' + ' AND '.join(where)
+            sql += ' ORDER BY created_at DESC'
+            cursor.execute(sql)
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
-            
+
         finally:
             conn.close()
     
