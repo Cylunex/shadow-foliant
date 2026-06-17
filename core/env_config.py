@@ -109,6 +109,20 @@ SCHEMA: List[Dict[str, str]] = [
     {'key': 'EMAIL_FROM', 'label': '发件邮箱', 'group': '通知', 'type': 'text', 'help': ''},
     {'key': 'EMAIL_PASSWORD', 'label': '邮箱授权码', 'group': '通知', 'type': 'secret', 'help': '非登录密码'},
     {'key': 'EMAIL_TO', 'label': '收件邮箱', 'group': '通知', 'type': 'text', 'help': ''},
+    # —— 通知分类路由(2026-06-17): 每类消息走哪些渠道, 逗号分隔, 默认全部 qq;
+    # 可选: qq / email / dingtalk / feishu / wechat_work / telegram / discord / slack。
+    # 留空 = 用代码内置默认(alert/report/system_error/daily_summary→qq, archive→email,qq)。
+    # 想让某类同时收 QQ 和邮件: 填 "qq,email"; 只收邮件不要 QQ: 填 "email"。
+    {'key': 'NOTIFICATION_ROUTE_ALERT', 'label': '告警路由', 'group': '通知', 'type': 'text',
+     'help': '即时告警(止盈/止损/突破/任务失败) 走哪些渠道, 逗号分隔。默认 qq'},
+    {'key': 'NOTIFICATION_ROUTE_REPORT', 'label': '日报路由', 'group': '通知', 'type': 'text',
+     'help': '日常报告(晨报/早盘/尾盘/选股/进化日报) 走哪些渠道。默认 qq'},
+    {'key': 'NOTIFICATION_ROUTE_ARCHIVE', 'label': '存档长文路由', 'group': '通知', 'type': 'text',
+     'help': '存档类长文(周报/AI 评估等需留档检索) 走哪些渠道。默认 email,qq'},
+    {'key': 'NOTIFICATION_ROUTE_SYSTEM_ERROR', 'label': '系统错误路由', 'group': '通知', 'type': 'text',
+     'help': '系统错误/任务失败 走哪些渠道。默认 qq'},
+    {'key': 'NOTIFICATION_ROUTE_DAILY_SUMMARY', 'label': '每日汇总路由', 'group': '通知', 'type': 'text',
+     'help': '每日盈亏快照 走哪些渠道。默认 qq'},
     # —— 自动启动(autostart)——
     {'key': 'AUTOSTART_ENABLED', 'label': '总开关', 'group': '自动启动', 'type': 'bool',
      'help': '启动时拉起后台服务/调度'},

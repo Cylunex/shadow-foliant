@@ -84,10 +84,32 @@ class NotificationService:
         print(f"{'='*50}\n")
     
     def send_notification(self, notification: Dict) -> bool:
-        """发送单个通知。
-        ⚠️ 关键:配了真实渠道(webhook/邮件)但全部失败时,**返回 False**(不标记已发,下轮重试),
-        而不是退回"界面通知"假装成功——否则推送失败也被标 sent=True,用户永远收不到。
-        只有完全没配真实渠道时,才用界面通知兜底(纯记录)。"""
+        """发送单个通知(2026-06-17 改造: 走 notification_router 统一分类路由)。
+
+        monitor 推送的 type 全是 entry/take_profit/stop_loss → 归到 alert 类别。
+        用户在 .env 配 NOTIFICATION_ROUTE_ALERT=qq 就只发 QQ,
+        改成 qq,email 才同时发邮件 — 不再强制两边都推。
+
+        ⚠️ 真实渠道全部失败时返回 False(不标记 sent, 下轮重试);
+        完全没配真实渠道时用界面通知兜底(仅记录)。
+        """
+        # ---- 优先路径: 走 notification_router ----
+        try:
+            from notification_router import send as _route_send, list_available_channels
+            if list_available_channels():
+                # monitor 类全是告警 → alert category(用户可通过 env 自定义路由)
+                title = f"[{notification.get('type', 'alert')}] {notification.get('symbol', '')}"
+                content = notification.get('message', '')
+                results = _route_send('alert', title, content, fallback='email')
+                if results and any(ok for ok, _ in results.values()):
+                    return True
+                # 全部失败 — router 内部已记日志, 这里只 return False
+                return False
+        except Exception as e:
+            # router 加载失败(导入循环 / 配置异常)→ 退回老逻辑兜底
+            print(f"⚠️ notification_router 不可用, 退回老路径: {type(e).__name__}: {str(e)[:80]}")
+
+        # ---- 兜底: 老路径(webhook + email 都推, 行为不变, 向后兼容) ----
         success = False
         real_attempted = False
 
