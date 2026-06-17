@@ -176,7 +176,6 @@ class DataSourceManager:
                         if records:
                             df = pd.DataFrame(records)
                             df['date'] = pd.to_datetime(df['date'])
-                            print(f"[Curl-东方财富] ✅ 成功获取 {len(df)} 条数据")
                             return df
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     print(f"[Curl-东方财富] ⚠️ 数据解析失败(尝试{attempt+1}/{retries}): {e}")
@@ -243,7 +242,8 @@ class DataSourceManager:
                             df = pd.DataFrame(rows)
                             df['date'] = pd.to_datetime(df['date'])
                             df = df.sort_values('date')
-                            print(f'[新浪日K] ✅ {symbol} 获取成功: {len(df)} 条')
+                            # 成功不打日志(常态), 失败才打 ⚠️ — 否则 kline_prefetch
+                            # 焐 354 只股票 = 几百行 ✅ 刷屏(2026-06-17 调整)
                             return df
                         sina_fail_reason = '解析后无有效行'
             except Exception as e:
@@ -256,7 +256,7 @@ class DataSourceManager:
             try:
                 df = self._fetch_eastmoney_kline_via_curl(symbol, start_date, end_date, adjust, proxy=None)
                 if df is not None and not df.empty:
-                    print(f"[curl-东财] ✅ {symbol} 获取成功: {len(df)} 条")
+                    # 成功不打日志(走到这条说明新浪挂了,东财兜底成功是常态)
                     return df
                 print(f'[curl-东财] ⚠️ {symbol} 返回空, 转 Akshare')
             except Exception as e:
@@ -283,7 +283,6 @@ class DataSourceManager:
                     '涨跌幅': 'pct_change', '涨跌额': 'change', '换手率': 'turnover'
                 })
                 df['date'] = pd.to_datetime(df['date'])
-                print(f"[Akshare] ✅ 成功获取 {len(df)} 条数据")
                 return df
         except Exception as e:
             print(f"[Akshare] ❌ 获取失败: {e}")
@@ -310,7 +309,6 @@ class DataSourceManager:
                     df = df.sort_values('date')
                     df['volume'] = df['volume'] * 100
                     df['amount'] = df['amount'] * 1000
-                    print(f"[Tushare] ✅ 成功获取 {len(df)} 条数据")
                     return df
             except Exception as e:
                 print(f"[Tushare] ❌ 获取失败: {e}")
@@ -325,7 +323,6 @@ class DataSourceManager:
                 for key in result:
                     df = result[key]
                     if isinstance(df, pd.DataFrame) and len(df) > 0 and '收盘' in [str(c) for c in df.columns]:
-                        print(f"[Pywencai] ✅ 成功获取 {len(df)} 条数据")
                         return df
             print(f"[Pywencai] ❌ 返回数据格式异常")
         except ImportError:
@@ -349,7 +346,6 @@ class DataSourceManager:
                         ticker = yf.Ticker(ts)
                         df = ticker.history(period='1y')
                         if df is not None and not df.empty:
-                            print(f"[Yfinance] ✅ 通过 {ts} 成功获取 {len(df)} 条数据")
                             break
                         else:
                             df = None
@@ -373,7 +369,6 @@ class DataSourceManager:
                         else:
                             df['date_utc'] = df['date'].dt.tz_convert('UTC')
                             df = df[df['date_utc'] >= s].drop(columns=['date_utc'])
-                    print(f"[Yfinance] ✅ 成功获取最终 {len(df)} 条数据")
                     return df
             except ImportError:
                 pass
@@ -396,7 +391,6 @@ class DataSourceManager:
                 if df is not None and len(df) > 0:
                     if start_date:
                         df = df[df['date'] >= pd.to_datetime(start_date)]
-                    print(f"[Ashare兜底] ✅ 成功获取 {len(df)} 条数据")
                     return df
             except Exception as e:
                 print(f"[Ashare兜底] ❌ 获取失败: {e}")
@@ -409,7 +403,6 @@ class DataSourceManager:
                 if df is not None and len(df) > 0:
                     if start_date:
                         df = df[df['date'] >= pd.to_datetime(start_date)]
-                    print(f"[mootdx-TDX] ✅ 成功获取 {len(df)} 条数据")
                     return df
             except Exception as e:
                 print(f"[mootdx-TDX] ❌ 获取失败: {e}")

@@ -656,8 +656,8 @@ class StockDataFetcher:
                     df['Date'] = pd.to_datetime(df['Date'])
                     df.set_index('Date', inplace=True)
 
-                print(f"✅ 成功获取 {symbol} 的历史数据，共 {len(df)} 条记录")
-                # === 共享缓存写 ===
+                # 成功不打日志(常态), 写共享缓存后静默返回
+                # — kline_prefetch 焐 354 只股票时, 这条日志会刷屏几百行(2026-06-17)
                 try:
                     _os.makedirs(_os.path.dirname(cache_f), exist_ok=True)
                     df.to_pickle(cache_f)
