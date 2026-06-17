@@ -291,9 +291,15 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
             if any("每股收益" in c or "均值" in c for c in cols):
                 return df
         return dfs[0] if dfs else pd.DataFrame()
+    except ValueError as e:
+        # "No tables found" 是该股票无机构一致预期数据(同花顺返回空表), 正常语义不算异常,
+        # 静默返回空 DataFrame 避免日志刷屏(34 条/天)。其它 ValueError 仍走下面通用分支。
+        if 'No tables found' in str(e):
+            return pd.DataFrame()
+        print(f"[a-stock] 一致预期({code}) 解析失败: {type(e).__name__}: {str(e)[:120]}")
+        return pd.DataFrame()
     except Exception as e:
-        # 日志只打异常类型 + 短消息, 避免泄漏整段 HTML 内容
-        print(f"[a-stock] 一致预期请求失败: {type(e).__name__}: {str(e)[:120]}")
+        print(f"[a-stock] 一致预期({code}) 请求失败: {type(e).__name__}: {str(e)[:120]}")
         return pd.DataFrame()
 
 

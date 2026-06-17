@@ -208,7 +208,10 @@ class DataSourceManager:
         is_a_stock = bool(re.match(r'^[0-9]{6}$', str(symbol)))
         
         # ========== 策略1: 新浪日K（curl无代理，已验证可用）==========
+        # ETF 代码(51xxxx/15xxxx)和股票一样走这条; 6 位数字 prefix 规则 sh/sz 也覆盖
+        # 沪市 ETF (51xxxx 走 sh) 和 深市 ETF (15xxxx 走 sz)。
         if is_a_stock:
+            sina_fail_reason = None
             try:
                 import subprocess
                 prefix = 'sh' if symbol.startswith('6') else 'sz'
@@ -218,9 +221,15 @@ class DataSourceManager:
                                     '--noproxy', '*',
                                     '-H', 'User-Agent: Mozilla/5.0', url],
                                    capture_output=True, text=True, timeout=20)
-                if r.returncode == 0 and r.stdout:
+                if r.returncode != 0:
+                    sina_fail_reason = f'curl rc={r.returncode}'
+                elif not r.stdout:
+                    sina_fail_reason = 'curl 响应空'
+                else:
                     m = re.search(r'\[.*\]', r.stdout)
-                    if m:
+                    if not m:
+                        sina_fail_reason = '响应无 JSON 数组(可能反爬/非交易代码)'
+                    else:
                         raw = json.loads(m.group())
                         rows = []
                         for item in raw:
@@ -236,17 +245,22 @@ class DataSourceManager:
                             df = df.sort_values('date')
                             print(f'[新浪日K] ✅ {symbol} 获取成功: {len(df)} 条')
                             return df
+                        sina_fail_reason = '解析后无有效行'
             except Exception as e:
-                print(f'[新浪日K] {symbol} 获取失败: {e}')
-            
+                sina_fail_reason = f'{type(e).__name__}: {str(e)[:80]}'
+            if sina_fail_reason:
+                # 静默 fall through 加 ⚠️ 一行(成功路径不打),方便后续诊断为什么走到 Akshare
+                print(f'[新浪日K] ⚠️ {symbol} 失败 ({sina_fail_reason}), 转 curl-东财')
+
             # 策略1b: curl东财日K（无代理，作为新浪的备选）
             try:
                 df = self._fetch_eastmoney_kline_via_curl(symbol, start_date, end_date, adjust, proxy=None)
                 if df is not None and not df.empty:
                     print(f"[curl-东财] ✅ {symbol} 获取成功: {len(df)} 条")
                     return df
+                print(f'[curl-东财] ⚠️ {symbol} 返回空, 转 Akshare')
             except Exception as e:
-                print(f"[curl-东财] {symbol} 失败: {e}")
+                print(f"[curl-东财] ⚠️ {symbol} 失败 ({type(e).__name__}: {str(e)[:80]}), 转 Akshare")
 
         # ========== 策略2: akshare（限流后直连）==========
         try:
