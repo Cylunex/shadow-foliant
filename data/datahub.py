@@ -531,6 +531,30 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
     return {"code": code, "bars": int(len(df)), "wrote": wrote}
 
 
+def kline_akshare_compat(code: str, period: str = "1y") -> pd.DataFrame:
+    """走 kline()(磁盘缓存)取数据, 返回 akshare ak.stock_zh_a_hist 风格的
+    中文列(日期/开盘/收盘/最高/最低/成交量, 0-based index)。
+
+    用途:让 monitor / 老分析代码 无缝替换 `ak.stock_zh_a_hist(...)` 调用,
+    同时自动获得 datahub 的磁盘缓存。返回空 DataFrame 表示获取失败。
+    """
+    df = kline(code, period)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # datahub 内部统一 Date index + 大写英文列;转回 akshare 兼容格式
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = df.reset_index()
+    rename = {
+        'Date': '日期', 'date': '日期',
+        'Open': '开盘', 'open': '开盘',
+        'Close': '收盘', 'close': '收盘',
+        'High': '最高', 'high': '最高',
+        'Low': '最低', 'low': '最低',
+        'Volume': '成交量', 'volume': '成交量',
+    }
+    return df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+
+
 def kline_with_indicators(code: str, period: str = "1y") -> pd.DataFrame:
     """K线 + MyTT 技术指标(MA/MACD/KDJ/RSI/BOLL...)。失败返回空 DF。"""
     f = _fetcher()

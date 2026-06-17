@@ -163,7 +163,16 @@ def _benchmark_series(code: str) -> Dict[str, float]:
 
 
 def _benchmark_series_fetch(code: str) -> Dict[str, float]:
-    # 1) akshare 指数日线(沪深300=sh000300)
+    # 1) 首选 datahub.kline(磁盘缓存 + 多源路由), 2026-06-17 由兜底升为主路径
+    try:
+        import datahub
+        df = datahub.kline(code, '3y')
+        norm = _normalize_df(df)
+        if norm is not None and len(norm):
+            return dict(zip(norm['date'], norm['close'].astype('float64')))
+    except Exception:
+        pass
+    # 2) 兜底:akshare 指数日线(沪深300=sh000300)
     try:
         import akshare as ak
         sym = code if code.startswith(('sh', 'sz')) else (
@@ -172,15 +181,6 @@ def _benchmark_series_fetch(code: str) -> Dict[str, float]:
         if df is not None and not df.empty:
             d = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
             return dict(zip(d, df['close'].astype('float64')))
-    except Exception:
-        pass
-    # 2) 兜底:datahub(StockDataFetcher 多源)
-    try:
-        import datahub
-        df = datahub.kline(code, '3y')
-        norm = _normalize_df(df)
-        if norm is not None and len(norm):
-            return dict(zip(norm['date'], norm['close'].astype('float64')))
     except Exception:
         pass
     return {}

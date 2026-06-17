@@ -208,41 +208,19 @@ class SmartMonitorDataFetcher:
             except Exception as e:
                 self.logger.warning(f"TDX计算技术指标异常 {stock_code}: {e}，尝试降级到AKShare")
         
-        # 方法2: 尝试使用AKShare
-        for attempt in range(retry):
-            try:
-                # 获取历史数据（最近200个交易日，用于计算指标）
-                end_date = datetime.now().strftime('%Y%m%d')
-                start_date = (datetime.now() - timedelta(days=300)).strftime('%Y%m%d')
-                
-                # 获取历史数据
-                df = ak.stock_zh_a_hist(
-                    symbol=stock_code,
-                    period=period,
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust="qfq"  # 前复权
-                )
-                
-                if df.empty or len(df) < 60:
-                    if attempt < retry - 1:
-                        self.logger.warning(f"AKShare历史数据不足 {stock_code}，第{attempt+1}次重试...")
-                        time.sleep(1)
-                        continue
-                    else:
-                        self.logger.warning(f"AKShare历史数据不足 {stock_code}，尝试降级")
-                        break
-                
-                # 数据充足，计算技术指标
+        # 方法2: 走 datahub(磁盘缓存共享, 同股票 1h 内只外部调一次)
+        # 之前: 每只持仓股 monitor 每 30min 直接 ak.stock_zh_a_hist 一次, 完全没缓存。
+        # 改后: kline_akshare_compat 内部走 datahub.kline → 多源路由 + 三级缓存,
+        #       返回与 ak.stock_zh_a_hist 同格式的中文列 DF, 下游 _calculate_all_indicators
+        #       零改动。retry 改 1 次(datahub 内部已有多源轮询和重试逻辑)。
+        try:
+            from data.datahub import kline_akshare_compat
+            df = kline_akshare_compat(stock_code, '1y')   # 1y ≈ 200+ 交易日, 满足指标计算
+            if df is not None and not df.empty and len(df) >= 60:
                 return self._calculate_all_indicators(df, stock_code)
-                
-            except Exception as e:
-                if attempt < retry - 1:
-                    self.logger.warning(f"AKShare获取历史数据失败 {stock_code}，第{attempt+1}次重试... 错误: {type(e).__name__}: {str(e)[:50]}")
-                    time.sleep(1)
-                else:
-                    self.logger.warning(f"AKShare获取历史数据失败 {stock_code}（已重试{retry}次），尝试降级到Tushare")
-                    break
+            self.logger.warning(f"datahub 历史数据不足 {stock_code} (len={len(df) if df is not None else 0})，尝试降级")
+        except Exception as e:
+            self.logger.warning(f"datahub 获取历史数据失败 {stock_code}: {type(e).__name__}: {str(e)[:80]}，尝试降级到Tushare")
         
         # 方法3: 降级到Tushare
         if self.ts_pro:

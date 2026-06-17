@@ -341,26 +341,19 @@ class SmartMonitorKline:
             end_date = datetime.now().strftime('%Y%m%d')
             start_date = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')  # 多取30天以确保足够数据
             
-            # 方法2: 尝试使用AKShare获取（只尝试1次，避免IP封禁）
+            # 方法2: 走 datahub(磁盘缓存共享, 与 selection / monitor / portfolio 共用)
+            # 之前直接 ak.stock_zh_a_hist 每次实时拉; 改后命中缓存秒读, 未命中走多源路由。
             try:
-                import akshare as ak
-                df = ak.stock_zh_a_hist(
-                    symbol=stock_code,
-                    period='daily',
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust='qfq'
-                )
-                
+                from data.datahub import kline_akshare_compat
+                df = kline_akshare_compat(stock_code, '1y')   # datahub 内部按 period 缓存
                 if df is not None and not df.empty:
-                    # 只保留最近days天的数据
                     df = df.tail(days)
-                    self.logger.info(f"✅ AKShare获取K线数据成功 {stock_code}，共{len(df)}条")
+                    self.logger.info(f"✅ datahub 获取K线数据成功 {stock_code}，共{len(df)}条")
                     return df
                 else:
-                    self.logger.warning(f"AKShare未返回K线数据 {stock_code}，尝试降级到Tushare")
+                    self.logger.warning(f"datahub 未返回K线数据 {stock_code}，尝试降级到Tushare")
             except Exception as e:
-                self.logger.warning(f"AKShare获取K线数据失败 {stock_code}: {type(e).__name__}, 尝试降级到Tushare")
+                self.logger.warning(f"datahub 获取K线数据失败 {stock_code}: {type(e).__name__}, 尝试降级到Tushare")
             
             # 方法3: 降级到Tushare
             if data_fetcher and data_fetcher.ts_pro:
