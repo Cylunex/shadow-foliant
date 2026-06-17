@@ -592,7 +592,32 @@ class StockDataFetcher:
             return {"error": f"获取美股信息失败: {str(e)}"}
     
     def _get_chinese_stock_data(self, symbol, period="1y"):
-        """获取中国股票历史数据（支持akshare和tushare数据源自动切换）"""
+        """获取中国股票历史数据(支持akshare和tushare数据源自动切换)。
+
+        ⭐ 共享 datahub.kline 的磁盘缓存(2026-06-17):
+        selection / instock_strategies / multi_factor / pattern_recognition 都走这个函数,
+        以前每次实时拉(单次 ~100ms × 30+ 只 ≈ 3-5s + 网络抖动). 现在和 datahub.kline
+        共用 db/kline_cache/{symbol}_{period}_1d.pkl, TTL 盘中 1h / 盘外 12h, 同一只股票
+        同一周期 1h 内多次调用直接秒读, unified_selection 等多任务级联调用大幅提速。
+        """
+        # === 共享缓存读 ===
+        import os as _os
+        import time as _time
+        try:
+            import _bootstrap
+            from datahub import _norm_code as _nc, _KLINE_DIR as _KD
+            cache_f = _os.path.join(_KD, f"{_nc(symbol)}_{period}_1d.pkl")
+            # TTL 与 datahub._kline_ttl 对齐: 盘中 1h, 盘外 12h
+            _m = datetime.now().hour * 60 + datetime.now().minute
+            _ttl = 3600 if (9 * 60 <= _m <= 15 * 60 + 30) else 43200
+            if _os.path.isfile(cache_f) and (_time.time() - _os.path.getmtime(cache_f)) < _ttl:
+                df = pd.read_pickle(cache_f)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    # 缓存命中静默(对齐 datahub.kline 行为, 不刷"✅ 成功获取"日志)
+                    return df
+        except Exception:
+            pass
+
         try:
             # 计算日期范围
             end_date = datetime.now().strftime('%Y%m%d')
@@ -604,7 +629,7 @@ class StockDataFetcher:
                 start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
             else:
                 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
-            
+
             # 使用数据源管理器获取数据（自动切换akshare和tushare）
             df = self.data_source_manager.get_stock_hist_data(
                 symbol=symbol,
@@ -612,7 +637,7 @@ class StockDataFetcher:
                 end_date=end_date,
                 adjust='qfq'
             )
-            
+
             if df is not None and not df.empty:
                 # 标准化列名为大写（与原有格式保持一致）
                 df = df.rename(columns={
@@ -623,19 +648,25 @@ class StockDataFetcher:
                     'low': 'Low',
                     'volume': 'Volume'
                 })
-                
+
                 # 确保Date列为datetime类型
                 if 'Date' not in df.columns and df.index.name == 'date':
                     df.index.name = 'Date'
                 elif 'Date' in df.columns:
                     df['Date'] = pd.to_datetime(df['Date'])
                     df.set_index('Date', inplace=True)
-                
+
                 print(f"✅ 成功获取 {symbol} 的历史数据，共 {len(df)} 条记录")
+                # === 共享缓存写 ===
+                try:
+                    _os.makedirs(_os.path.dirname(cache_f), exist_ok=True)
+                    df.to_pickle(cache_f)
+                except Exception:
+                    pass
                 return df
             else:
                 return {"error": "所有数据源均无法获取历史数据"}
-                
+
         except Exception as e:
             return {"error": f"获取中国股票数据失败: {str(e)}"}
     
