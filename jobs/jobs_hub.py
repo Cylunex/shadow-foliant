@@ -1241,16 +1241,24 @@ def _notify_task_error(name: str, exc: Exception, tb: str):
         pass  # 通知失败绝不影响主流程
 
 
-# ─── 任务运行时长追踪 + deadman switch (2026-06-15) ─────────────────────
+# ─── 任务运行时长追踪 + deadman switch (2026-06-15, 06-17 调方案) ─────────────
 # 背景:6/14 夜里 pywencai 卡死, 整个线程池被 6 个僵尸任务堵满, 调度器主线程还活着
 #       但 supervisor 看 PID 在不重启 → 09:45 选股没跑。
-# 方案:每个任务进出 _run_with_log 时登记/注销时间; 一个独立 watcher 线程定期扫,
-#       一旦发现有任务运行时长 > TASK_DEADLINE_SEC, 直接 os._exit(99) 让 supervisor
-#       (autorestart=true) 拉起新进程。比靠外部 PID 检测更精准。
-_TASK_START_TS: Dict[str, float] = {}     # task name -> 开始时间戳
+# 方案(06-17 改):
+#   软超时 SOFT_DEADLINE_SEC(默认 30min): 只打 ⚠️ + 记 job_runs, 不杀进程。
+#     原始方案 30 分钟就 hard exit 整个 jobs_hub, 连带杀其它正在跑的任务 → 选股/回测
+#     这种本身就慢的任务(InStock 取因子 + 大量 K 线)会反复被误杀, 永远出不来结果。
+#   硬超时 HARD_DEADLINE_SEC(默认 90min): 任意单任务超这个时间 → os._exit, 真正失控才杀。
+#   僵尸检测:thread pool 全部 6 slot 都被超软超时的任务占据 → 也 os._exit(真僵尸)。
+_TASK_START_TS: Dict[str, float] = {}                     # task name -> 开始时间戳
+_TASK_ALERTED: 'set[tuple[str, float]]' = set()           # 已告警过的 (name, ts), 防刷屏
 _TASK_LOCK = threading.Lock()
 import os as _os
-TASK_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_DEADLINE_SEC', '1800'))  # 默认 30min
+SOFT_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_DEADLINE_SEC', '1800'))   # 默认 30min: 软告警
+HARD_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_HARD_DEADLINE_SEC',
+                                        str(SOFT_DEADLINE_SEC * 3)))             # 默认 90min: 硬杀
+# 兼容旧变量名(配置 / 文档引用过 TASK_DEADLINE_SEC, 不破坏)
+TASK_DEADLINE_SEC = SOFT_DEADLINE_SEC
 
 
 def _run_with_log(name, func, *a, **kw):
@@ -1359,28 +1367,66 @@ class _JobsHub:
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
 
-        # ⭐ deadman switch: 任务卡死 > TASK_DEADLINE_SEC 就 hard-exit, 让 supervisor 拉起
+        # ⭐ deadman switch(06-17 改方案):
+        #   - 软超时 > SOFT_DEADLINE_SEC: 每个 (name, ts) 只打一次 ⚠️ + 记 job_runs, 不杀进程
+        #     (任务可能本身就慢, 如 InStock 取因子, 让它继续跑完)
+        #   - 硬超时 > HARD_DEADLINE_SEC 任一任务: 真失控, 整体退出由 supervisor 拉起
+        #   - 僵尸: 线程池 6 个 slot 全部都超软超时 → 进程死锁, 也整体退出
         def _deadman():
+            pool_size = self._executor._max_workers  # 6
             while self._running:
                 try:
                     now = time.time()
-                    stuck = []
+                    new_alerts = []      # 本轮新增的软告警(去重)
+                    over_soft = []       # 当前所有超软超时的任务
+                    over_hard = []       # 当前所有超硬超时的任务
                     with _TASK_LOCK:
                         for n, ts in list(_TASK_START_TS.items()):
                             age = now - ts
-                            if age > TASK_DEADLINE_SEC:
-                                stuck.append((n, int(age)))
-                    if stuck:
-                        msg = ', '.join(f'{n}({d}s)' for n, d in stuck)
-                        print(f'[jobs_hub] 💀 任务卡死超时 (>{TASK_DEADLINE_SEC}s): {msg} — '
-                              f'主动退出 (exit 99), 由 supervisor 重启', flush=True)
-                        # 写一条 job_runs 备查(不阻塞退出)
+                            if age > SOFT_DEADLINE_SEC:
+                                over_soft.append((n, ts, int(age)))
+                                if (n, ts) not in _TASK_ALERTED:
+                                    new_alerts.append((n, int(age)))
+                                    _TASK_ALERTED.add((n, ts))
+                            if age > HARD_DEADLINE_SEC:
+                                over_hard.append((n, int(age)))
+                        # 清理已结束任务的告警记录, 防内存泄漏
+                        live = {(n, ts) for n, ts in _TASK_START_TS.items()}
+                        _TASK_ALERTED.intersection_update(live)
+
+                    # 软告警: 每任务只打一次 ⚠️, 不杀
+                    if new_alerts:
+                        msg = ', '.join(f'{n}({d}s)' for n, d in new_alerts)
+                        print(f'[jobs_hub] ⚠️ 任务超时但继续等 (>{SOFT_DEADLINE_SEC}s): {msg}',
+                              flush=True)
                         try:
-                            for n, d in stuck:
-                                _log_run(n, 'error', error=f'deadman timeout {d}s')
+                            for n, d in new_alerts:
+                                _log_run(n, 'error', error=f'soft_timeout {d}s, 继续运行')
                         except Exception:
                             pass
-                        # hard exit: 绕过 atexit / 线程清理, 避免被卡线程拖住
+
+                    # 硬超时: 任一任务 > HARD_DEADLINE_SEC, 整体退出
+                    if over_hard:
+                        msg = ', '.join(f'{n}({d}s)' for n, d in over_hard)
+                        print(f'[jobs_hub] 💀 任务硬超时 (>{HARD_DEADLINE_SEC}s): {msg} — '
+                              f'os._exit(99), supervisor 重启', flush=True)
+                        try:
+                            for n, d in over_hard:
+                                _log_run(n, 'error', error=f'hard_timeout {d}s')
+                        except Exception:
+                            pass
+                        _os._exit(99)
+
+                    # 僵尸检测: 线程池满 + 所有 slot 都超软超时 → 真死锁
+                    if len(over_soft) >= pool_size:
+                        msg = ', '.join(f'{n}({d}s)' for n, ts, d in over_soft)
+                        print(f'[jobs_hub] 💀 线程池({pool_size}) 全部任务都超时, 死锁判定 — '
+                              f'os._exit(99), supervisor 重启: {msg}', flush=True)
+                        try:
+                            for n, ts, d in over_soft:
+                                _log_run(n, 'error', error=f'pool_deadlock {d}s')
+                        except Exception:
+                            pass
                         _os._exit(99)
                 except Exception as e:
                     print(f'[jobs_hub] deadman 线程异常: {e}', flush=True)

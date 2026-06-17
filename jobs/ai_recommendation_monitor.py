@@ -312,13 +312,16 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
             if tp and price >= tp:
                 _close(rec['id'], 'target', 'hit_target_at', _pnl_pct(ref, price))
                 stats['hit_target'] += 1
+                # body 自带股票名+代码: QQ 等渠道可能不显示 title, 单看 body 也得知道是哪只
                 _notify(notify_fn, symbol, rec['name'],
-                        f"🎯 触发止盈 {tp}（现价 {price}）— {rec.get('reason', '')[:80]}")
+                        f"🎯 {rec['name']}({symbol}) 触发止盈 {tp}（现价 {price}）"
+                        f"— {rec.get('reason', '')[:80]}")
             elif sl and price <= sl:
                 _close(rec['id'], 'stop', 'hit_stop_at', _pnl_pct(ref, price))
                 stats['hit_stop'] += 1
                 _notify(notify_fn, symbol, rec['name'],
-                        f"⛔ 触发止损 {sl}（现价 {price}）— {rec.get('reason', '')[:80]}")
+                        f"⛔ {rec['name']}({symbol}) 触发止损 {sl}（现价 {price}）"
+                        f"— {rec.get('reason', '')[:80]}")
             else:
                 # 超期未触发 → 按当前浮盈浮亏了结,计入评估(消除"永远 pending"的幸存者偏差)
                 try:
