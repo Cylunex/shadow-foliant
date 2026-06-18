@@ -59,9 +59,11 @@ def index_pe_percentile(index: str = '沪深300', years: Optional[int] = None) -
         return None
     try:
         throttle('akshare')
-        df = ak.stock_index_pe_lg(symbol=index)
+        # ⭐ 套硬超时:乐咕乐股 API 偶尔反爬慢响应, 不超时整个任务卡死被 deadman 杀。
+        from data.akshare_safe import call as _ak_call
+        df = _ak_call(ak.stock_index_pe_lg, timeout=30, symbol=index)
     except Exception as e:
-        print(f'[fund_valuation] index_pe_percentile({index}) 失败: {type(e).__name__}')
+        print(f'[fund_valuation] index_pe_percentile({index}) 失败: {type(e).__name__}: {str(e)[:80]}')
         return None
     if df is None or df.empty:
         return None

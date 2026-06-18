@@ -308,6 +308,16 @@ def task_portfolio_indicator_snapshot():
             except Exception:
                 _pat_det = None
 
+        # ⭐ 2026-06-18: portfolio_snapshot 提到主循环之前先落地
+        # 之前在循环末尾(line 366), 任何一只股票卡死都会让 save_snapshot 不执行
+        # → stock_portfolio_snapshots 当日缺 row → 22:30 daily_pnl 推送显示"股票 0 元(0 只)"。
+        # save_snapshot 本身只读 quotes 算市值, 跟下面 K 线大循环无依赖, 提前到这里成本 0。
+        try:
+            import portfolio_snapshot as _ps
+            _ps.save_snapshot(datetime.now().strftime('%Y-%m-%d'))
+        except Exception as e:
+            print(f'[portfolio_indicator_snapshot] save_snapshot 失败: {type(e).__name__}: {str(e)[:80]}')
+
         fetcher = StockDataFetcher()
         ok, fail = 0, 0
         risk_rows = []      # (name, sym, var95, mdd) 仅持仓
@@ -360,12 +370,8 @@ def task_portfolio_indicator_snapshot():
                 ok += 1
             except Exception:
                 fail += 1
-        # 顺带落一条股票组合净值快照(供 UI 画组合净值曲线,借鉴 portfolio-tracker)
-        try:
-            import portfolio_snapshot
-            portfolio_snapshot.save_snapshot(datetime.now().strftime('%Y-%m-%d'))
-        except Exception:
-            pass
+        # 2026-06-18: save_snapshot 已挪到循环开头先执行(防循环卡死导致当日 row 不写),
+        # 这里不再重复调。
 
         # ── 风险聚合预警（原 wf_portfolio_risk）:VaR95>5% 或 最大回撤<-40% ──
         try:
