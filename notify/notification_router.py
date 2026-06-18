@@ -288,7 +288,7 @@ def _get_routes_for(category: str) -> List[str]:
 
 def send(category: str, title: str, content: str,
          only_channels: Optional[List[str]] = None,
-         fallback: Optional[str] = 'email') -> Dict[str, Tuple[bool, str]]:
+         fallback: Optional[str] = None) -> Dict[str, Tuple[bool, str]]:
     """统一发送入口(所有业务推送都应走这里,不要在业务代码里直连 webhook)
 
     Args:
@@ -296,7 +296,9 @@ def send(category: str, title: str, content: str,
         title: 消息标题
         content: 消息内容（支持 markdown）
         only_channels: 强制使用某些渠道（覆盖路由配置）
-        fallback: 主渠道全部失败时的兜底渠道(默认 email;传 None 关闭兜底)
+        fallback: 主渠道全部失败时的兜底渠道。⚠️ 2026-06-18 默认从 'email' 改为 None:
+                  之前 QQ 偶发失败会自动补发邮件, 用户看到"QQ+邮件都收到"误以为双推。
+                  现在严格按路由配置, 要兜底显式传 fallback='email'。
 
     Returns:
         {channel_name: (ok, message)} 每个渠道的发送结果
@@ -313,13 +315,17 @@ def send(category: str, title: str, content: str,
         except Exception as e:
             results[ch] = (False, str(e))
 
-    # 兜底:主渠道全军覆没(如 QQ 代理没开)→ 试邮件,保证消息不丢
+    # 兜底:主渠道全军覆没 → 尝试 fallback。默认 None(不兜底, 保持路由约定)。
     if (fallback and fallback in CHANNELS and fallback not in results
             and results and not any(ok for ok, _ in results.values())):
         try:
             results[fallback] = CHANNELS[fallback](title, content)
         except Exception as e:
             results[fallback] = (False, str(e))
+
+    # 审计日志:让"实际发到哪些渠道 / 哪些成功"可观察(否则无法验证路由配置生效)
+    audit = ' '.join(f'{ch}={"ok" if ok else "❌"}' for ch, (ok, _) in results.items())
+    print(f'[notify] {category} "{title[:40]}" → {audit}', flush=True)
     return results
 
 

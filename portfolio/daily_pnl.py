@@ -52,13 +52,28 @@ def merge_save(snap_date: str) -> Optional[Dict]:
 
     # ─── 股票：从本轮 snapshot 取 daily_mv_change ───
     stock_count = stock_mv = stock_daily_pnl = stock_daily_pct = 0
-    try:
+
+    def _read_today_snapshot():
         cur.execute(
             """SELECT snap_date, total_mv, n_stocks, daily_mv_change, total_cost
                FROM stock_portfolio_snapshots WHERE snap_date=? ORDER BY snap_date DESC LIMIT 1""",
             (snap_date,),
         )
-        row = cur.fetchone()
+        return cur.fetchone()
+
+    try:
+        row = _read_today_snapshot()
+        # ⭐ 2026-06-18 兜底:portfolio_indicator_snapshot(15:45) 卡死被杀时, stock_portfolio_snapshots
+        # 不会写当日 row → 这里读到 None → 推送显示"股票 +0(0只)"虚假数据。
+        # 缺当日快照时立即调 portfolio_snapshot.save_snapshot 现场算一份, 再读。
+        if row is None or row[3] is None:
+            try:
+                from portfolio.portfolio_snapshot import save_snapshot as _save_snap
+                print(f'[daily_pnl] 当日 stock_portfolio_snapshots 缺失, 兜底现场算({snap_date})')
+                _save_snap(snap_date)
+                row = _read_today_snapshot()
+            except Exception as e:
+                print(f'[daily_pnl] 兜底 save_snapshot 失败: {type(e).__name__}: {str(e)[:80]}')
         if row and row[3] is not None:
             stock_mv = float(row[1])
             stock_count = int(row[2] or 0)
