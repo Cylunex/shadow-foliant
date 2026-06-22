@@ -47,7 +47,7 @@ python mcp_server.py
 ## 🏛️ 架构要点
 
 - **统一数据层 `data/datahub.py`**:全项目取外部数据的唯一门面,自适应多源路由(按健康度升降级)+ **三级缓存**(进程内存 → Redis → 本地文件 pickle),削外部调用、优雅降级。
-- **后端**:FastAPI(`webui/api_server.py`,~90 路由)· 多数据源兜底(东财/腾讯/新浪/同花顺/akshare/tushare/mootdx)· PG 主库 + SQLite 兜底 · Redis 缓存 · BGE-M3 + pgvector RAG。
+- **后端**:FastAPI(`webui/api_server.py`,~110 路由)· 多数据源兜底(东财/腾讯/新浪/同花顺/akshare/tushare/mootdx)· PG 主库 + SQLite 兜底 · Redis 缓存 · BGE-M3 + pgvector RAG。
 - **前端**:Vue3 SPA(`webui/static/`,A股红涨绿跌/中文表头);**手机版 H5**(汉堡抽屉导航)· **PWA**(可装主屏幕,API 不缓存)· 亮/暗主题。
 - **Agent 接入**:`mcp_server.py`(FastMCP)暴露行情/分析/选股/回测/持仓/基金/可转债/语义搜索/任务触发等 80+ 工具。
 - **通知驱动**:晨报/选股/盯盘/今日盈亏/任务失败 等推送(默认 QQ webhook,可配邮件)。
