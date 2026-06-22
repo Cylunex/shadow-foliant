@@ -801,6 +801,18 @@ def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[st
 
 
 @mcp.tool()
+def portfolio_health_check(max_stocks: int = 15) -> Dict[str, Any]:
+    """持仓 AI 体检:融合每只持仓的破位/风险/浮亏/异动信号 → 单股 持有/减仓/清仓 动作 + 理由 + 信心。
+    只对风险/浮亏子集做(token 可控)。动作会写决策信号(source_type=portfolio_health)进方向后验环。"""
+    from jobs_hub import _scan_holdings_with_snapshot
+    from portfolio_health_ai import run_health_check
+    scans = _scan_holdings_with_snapshot()
+    if not scans:
+        return {'ok': False, 'summary': '无持仓数据'}
+    return run_health_check(scans, max_stocks=max_stocks, record_signals=True)
+
+
+@mcp.tool()
 def decision_signals(code: str = '', status: str = 'active', action: str = '',
                      source_type: str = '', days: int = 0, limit: int = 50) -> Any:
     """决策信号列表(统一信号层:每次分析/选股/盯盘的结构化操作建议,8态动作+生命周期+去重)。

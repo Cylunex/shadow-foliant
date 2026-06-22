@@ -3620,6 +3620,43 @@ def task_afternoon_portfolio():
         print(f'[afternoon_portfolio] 减仓信号子任务失败: {e}')
 
 
+def task_portfolio_health_ai():
+    """🧠 持仓 AI 体检官(14:35 尾盘):融合每只持仓的多维规则信号 → 单股 持有/减仓/清仓 动作 + 理由。
+    动作写 decision_signal(source_type='portfolio_health')→ 16:10 自动方向后验,形成可验证胜率环。
+    开关 portfolio_health_ai(默认开;只对风险/浮亏子集做,token 可控)。"""
+    job = 'portfolio_health_ai'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        scans = _scan_holdings_with_snapshot()
+        if not scans:
+            _log_run(job, 'success', error='no_holdings',
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        from portfolio_health_ai import run_health_check
+        res = run_health_check(scans, max_stocks=15, record_signals=True)
+        if res.get('ok') and res.get('text'):
+            try:
+                from notification_router import send
+                send('report', '🧠 持仓 AI 体检', res['text'])
+            except Exception as ne:
+                print(f'[portfolio_health_ai] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_mx_selection_review():
     """🆕 选股结果过妙想——对 unified_selection TOP 逐个过妙想诊断"""
     job = 'mx_selection_review'
@@ -3957,6 +3994,7 @@ def register_default_jobs():
     hub.register('stock_monitor_check', 'every:30:minutes', task_stock_monitor_check)
     # ---- 14:30 尾盘持仓分析 ----
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
+    hub.register('portfolio_health_ai',          '14:35', task_portfolio_health_ai)
 
     # ---- 🔴 盘后 ----
     hub.register('kline_prefetch',              '15:35', task_kline_prefetch)

@@ -151,6 +151,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
         'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
     },
+    'portfolio_health_ai': {
+        'cn': '🧠 持仓 AI 体检官',
+        'schedule': '14:35 每日',
+        'category': '核心',
+        'default': True,  # 融合规则信号给单股动作建议;只对风险/浮亏子集做,token 可控;动作进 decision_signal 后验
+        'description': '尾盘对持仓(风险/浮亏子集)做 AI 体检,给 持有/减仓/清仓 动作+理由,动作进决策信号后验环',
+    },
     'stock_monitor_check': {
         'cn': '📊 持仓进场区间监控',
         'schedule': 'every:30:min 交易时段(09:30-15:00)',
