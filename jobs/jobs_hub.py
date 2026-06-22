@@ -1057,7 +1057,8 @@ def task_daily_pnl_snapshot():
             try:
                 tp = r.get('total_daily_pnl', 0) or 0
                 tpct = r.get('total_daily_pct', 0) or 0
-                emoji = '🟢' if tp > 0 else ('🔴' if tp < 0 else '⚪')
+                # A 股惯例:红涨绿跌(盈利红, 亏损绿)
+                emoji = '🔴' if tp > 0 else ('🟢' if tp < 0 else '⚪')
                 s = get_summary(60) or {}
                 lines = [
                     f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%)",
@@ -1757,7 +1758,8 @@ def task_morning_strategy():
                     sell = (row.get('BILLBOARD_SELL_AMT') or 0) / 10000
                     chg = round(float(row.get('CHANGE_RATE') or 0), 2)
                     reason = (row.get('EXPLANATION') or '')[:20]
-                    emoji = '🟢' if net > 5000 else ('⚪' if net > 0 else '🔴')
+                    # A 股惯例:红涨绿跌, 净流入大额 → 红(利好), 净流出 → 绿
+                    emoji = '🔴' if net > 5000 else ('⚪' if net > 0 else '🟢')
                     dt_lines.append(f'  {i}. {code} {name} {emoji}净{net:.0f}万 涨{chg}% — {reason}')
                 # 净卖出 TOP 5
                 sorted_sell = sorted(dt_data, key=lambda x: (x.get('BILLBOARD_NET_AMT') or 0))
@@ -1767,7 +1769,8 @@ def task_morning_strategy():
                     code = row.get('SECURITY_CODE', '')
                     name = row.get('SECURITY_NAME_ABBR', '')
                     net = (row.get('BILLBOARD_NET_AMT') or 0) / 10000
-                    dt_lines.append(f'  {i}. {code} {name} 🔴净{net:.0f}万')
+                    # A 股惯例:净卖出 = 利空 = 绿
+                    dt_lines.append(f'  {i}. {code} {name} 🟢净{net:.0f}万')
                 dragon_tiger_detailed = '\n'.join(dt_lines)
         except Exception as e:
             dragon_tiger_summary = f'(拉取失败: {e})'
@@ -3260,7 +3263,8 @@ def task_unified_selection():
                 fpct = float(pct) if pct and pct != 'N/A' and pct != '?' else None
             except (ValueError, TypeError):
                 fpct = None
-            arrow = '🟢' if fpct and fpct > 0 else ('🔴' if fpct and fpct < 0 else '⚪')
+            # A 股惯例:红涨绿跌
+            arrow = '🔴' if fpct and fpct > 0 else ('🟢' if fpct and fpct < 0 else '⚪')
             held = '💼' if code in held_codes else ''
 
             pct_s = f'{fpct:+.2f}%' if fpct is not None else '-'
