@@ -825,6 +825,15 @@ def research_digest(codes: List[str], days: int = 10) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def exit_advice(target_positions: int = 10) -> Dict[str, Any]:
+    """清仓决策助手:对全部持仓打"清仓紧迫分"(割肉止损/止盈锁定/破位减仓/死钱调出)排序,
+    持仓过度分散时给"目标持仓数"瘦身建议(先清哪几只),并给 AI 整体瘦身策略。
+    回答"买太多了不知道什么时候清"。清仓/减仓建议写决策信号(source_type=exit_advice)进后验。"""
+    from exit_advisor import run_exit_advice
+    return run_exit_advice(target_positions=target_positions, record_signals=True)
+
+
+@mcp.tool()
 def portfolio_health_check(max_stocks: int = 15) -> Dict[str, Any]:
     """持仓 AI 体检:融合每只持仓的破位/风险/浮亏/异动信号 → 单股 持有/减仓/清仓 动作 + 理由 + 信心。
     只对风险/浮亏子集做(token 可控)。动作会写决策信号(source_type=portfolio_health)进方向后验环。"""

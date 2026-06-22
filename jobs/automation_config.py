@@ -172,6 +172,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 研报端点已有却零调用;AI 提炼评级方向+核心逻辑,强看多进 decision_signal 后验
         'description': '对持仓+当日选股拉近10天券商研报,AI 提炼评级方向/核心逻辑,强看多写决策信号后验',
     },
+    'exit_advice': {
+        'cn': '🧹 清仓决策助手',
+        'schedule': '14:40 每日',
+        'category': '核心',
+        'default': True,  # 解决"买太多不知何时清":全持仓清仓紧迫分排序+过度分散瘦身+AI策略;清仓建议进后验
+        'description': '尾盘对全部持仓打清仓紧迫分(割肉/止盈锁定/破位/死钱)排序,过度分散给瘦身目标,AI 出整体策略',
+    },
     'portfolio_health_ai': {
         'cn': '🧠 持仓 AI 体检官',
         'schedule': '14:35 每日',

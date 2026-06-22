@@ -2077,6 +2077,17 @@ def history_eval_by(dim: str = "source", days: int = 90):
         return _err(e)
 
 
+# ============================ 清仓决策助手 ============================
+@app.get("/api/portfolio/exit-advice")
+def portfolio_exit_advice(target: int = 10):
+    """清仓决策助手:全持仓清仓紧迫分排序 + 过度分散瘦身建议 + AI 整体策略。回答"买太多何时清"。"""
+    try:
+        from exit_advisor import run_exit_advice
+        return _ok(run_exit_advice(target_positions=target, record_signals=True))
+    except Exception as e:
+        return _err(e)
+
+
 # ============================ LLM 用量遥测 ============================
 @app.get("/api/llm/usage")
 def llm_usage_summary(days: int = 30):

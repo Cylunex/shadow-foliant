@@ -3723,6 +3723,39 @@ def task_portfolio_stress_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_exit_advice():
+    """🧹 清仓决策助手(14:40 尾盘):对全部持仓打"清仓紧迫分"排序 + 过度分散瘦身建议 + AI 整体策略。
+    清仓/减仓结论写 decision_signal(source_type='exit_advice')→ 16:10 方向后验。开关 exit_advice(默认开)。"""
+    job = 'exit_advice'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        import os as _os5
+        target = int(_os5.getenv('EXIT_TARGET_POSITIONS', '10'))
+        from exit_advisor import run_exit_advice
+        res = run_exit_advice(target_positions=target, record_signals=True)
+        if res.get('ok') and res.get('text'):
+            try:
+                from notification_router import send
+                send('report', '🧹 清仓决策助手', res['text'])
+            except Exception as ne:
+                print(f'[exit_advice] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_research_digest():
     """📑 研报增量解读(16:05 盘后):对 持仓+当日综合选股 拉近 10 天券商研报 → AI 提炼核心逻辑+评级方向。
     强看多+隐含空间>8% 写 decision_signal(source_type='research')→ 16:10 方向后验。
@@ -4108,6 +4141,7 @@ def register_default_jobs():
     # ---- 14:30 尾盘持仓分析 ----
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
     hub.register('portfolio_health_ai',          '14:35', task_portfolio_health_ai)
+    hub.register('exit_advice',                  '14:40', task_exit_advice)
 
     # ---- 🔴 盘后 ----
     hub.register('kline_prefetch',              '15:35', task_kline_prefetch)
