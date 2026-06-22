@@ -432,7 +432,7 @@ def task_ai_rec_check():
     """盘中每 30 分钟跑：对所有已启用监控的 AI 推荐对比实时价，触发回填+推送
 
     仅在交易日交易时段执行（09:30-15:00），其他时段静默跳过。
-    受开关 ai_rec_check 控制（默认关）。
+    受开关 ai_rec_check 控制（默认开）。
     """
     job = 'ai_rec_check'
     try:
@@ -520,7 +520,7 @@ def task_stock_monitor_check():
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
 
-    # ── 持仓加仓审核（原 wf_position_guard_check,开关控制,默认关;自带交易时段判断）──
+    # ── 持仓加仓审核（原 wf_position_guard_check,开关控制,默认开;自带交易时段判断）──
     try:
         _position_guard_check()
     except Exception as e:
@@ -866,7 +866,7 @@ def task_daily_backtest():
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
 
-    # ── 8. 策略命中扫描 → AI 深析 → 推荐池（原 wf_daily_strategy_scan,开关控制,默认关）──
+    # ── 8. 策略命中扫描 → AI 深析 → 推荐池（原 wf_daily_strategy_scan,开关控制,默认开）──
     # 放在进化之后:扫描时注入的是刚更新的基因组情报
     try:
         _daily_strategy_scan()
@@ -886,7 +886,7 @@ def task_daily_backtest():
 
 
 def task_ai_eval_weekly():
-    """每周一 09:30：对过去 30 天 AI 推荐做评估，推送报告（开关 ai_eval_weekly，默认关）"""
+    """每周一 09:30：对过去 30 天 AI 推荐做评估，推送报告（开关 ai_eval_weekly，默认开）"""
     job = 'ai_eval_weekly'
     try:
         from automation_config import is_enabled
@@ -1053,7 +1053,7 @@ def task_fund_nav_refresh():
 
 def task_fund_dca_reminder():
     """🏦 到期定投处理:开了 auto_record 的计划**自动记账**(按最新确认净值,幂等防重);
-    其余只提醒,需手动申购+记账(开关 fund_dca_reminder,默认关)。"""
+    其余只提醒,需手动申购+记账(开关 fund_dca_reminder,默认开)。"""
     job = 'fund_dca_reminder'
     if _fund_gate(job):
         return
@@ -1127,7 +1127,7 @@ def task_daily_pnl_snapshot():
 
 
 def task_fund_target_check():
-    """🏦 对设了止盈目标的定投计划,按最新净值算持有浮盈,达标则提醒赎回(开关 fund_target_check,默认关)。"""
+    """🏦 对设了止盈目标的定投计划,按最新净值算持有浮盈,达标则提醒赎回(开关 fund_target_check,默认开)。"""
     job = 'fund_target_check'
     if _fund_gate(job):
         return
@@ -1163,7 +1163,7 @@ def task_fund_target_check():
 
 
 def task_fund_valuation_signal():
-    """🏦 宽基指数估值分位播报:扫常用指数,低估(分位<50%,倍数≥1.5)的提示加投(开关 fund_valuation_signal,默认关)。"""
+    """🏦 宽基指数估值分位播报:扫常用指数,低估(分位<50%,倍数≥1.5)的提示加投(开关 fund_valuation_signal,默认开)。"""
     job = 'fund_valuation_signal'
     if _fund_gate(job):
         return
@@ -1195,7 +1195,7 @@ def task_fund_valuation_signal():
 
 
 def task_rag_ingest():
-    """🔎 每日把历史分析/新闻/推荐 嵌入入 pgvector(语义检索语料保鲜)。开关 rag_ingest,默认关。"""
+    """🔎 每日把历史分析/新闻/推荐 嵌入入 pgvector(语义检索语料保鲜)。开关 rag_ingest,默认开。"""
     job = 'rag_ingest'
     try:
         from automation_config import is_enabled
@@ -1217,7 +1217,7 @@ def task_rag_ingest():
 
 
 def task_pg_backup():
-    """💾 每日把生产 PG 全量备份到本地 SQLite(db/pg_backup.db)。开关 pg_backup,默认关。"""
+    """💾 每日把生产 PG 全量备份到本地 SQLite(db/pg_backup.db)。开关 pg_backup,默认开。"""
     job = 'pg_backup'
     try:
         from automation_config import is_enabled
@@ -2315,7 +2315,7 @@ def _daily_strategy_scan():
     股票池：持仓 + 当日强势股 TOP 30 + 当日龙虎榜 TOP 20（去重）
     命中策略 ≥1 套的股票按命中数排序，对 TOP N 跑 plan_execute AI 分析
     AI 给出 "buy/strong_buy" 评级时入 ai_recommendations + 启用监控
-    受开关 wf_daily_strategy_scan 控制（默认关）。
+    受开关 wf_daily_strategy_scan 控制（默认开;生产以 DB automation_switches 为准）。
     （2026-06-12 整合:并入 daily_backtest 之后执行——回测进化完基因组,再用最新策略情报扫描,不再独立调度）
     """
     job = 'wf_daily_strategy_scan'
@@ -2836,7 +2836,7 @@ def task_weekly_backtest():
 
     池：持仓 + 强势股 TOP 20（轻量化避免太重）
     每只跑 10 套策略过去 30 天回测，汇总胜率 → 推送 TOP 5 策略
-    受开关 wf_weekly_backtest 控制（默认关）。
+    受开关 wf_weekly_backtest 控制（默认开）。
     """
     job = 'wf_weekly_backtest'
     try:
@@ -2988,7 +2988,7 @@ def task_weekly_db_cleanup():
 
 
 def task_kline_prefetch():
-    """📥 盘后预热 K线缓存(开关 kline_prefetch,默认关)。
+    """📥 盘后预热 K线缓存(开关 kline_prefetch,默认开)。
     全量预拉 持仓 + 监测 + 沪深300成分 的日线写入共享磁盘缓存(db/kline_cache),
     让 16:30 回测 / 因子IC / 晨报 / 持仓守卫 命中暖缓存(0ms),避免逐只冷拉外部源。
     实测主源每次返回的是已按当日复权因子重算的完整序列 → 全量拉即天然无复权漂移,
@@ -3382,7 +3382,7 @@ def task_unified_selection():
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
 
-    # ── 个人口味候选池（原 wf_daily_candidate_pool,开关控制,默认关）──
+    # ── 个人口味候选池（原 wf_daily_candidate_pool,开关控制,默认开）──
     try:
         _daily_candidate_pool()
     except Exception as e:
@@ -3529,7 +3529,7 @@ def task_afternoon_portfolio():
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
 
-    # ── 止盈阶梯/破位减仓信号（原 wf_position_profit_check,开关控制,默认关）──
+    # ── 止盈阶梯/破位减仓信号（原 wf_position_profit_check,开关控制,默认开）──
     try:
         _position_profit_check()
     except Exception as e:

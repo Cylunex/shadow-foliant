@@ -8,7 +8,7 @@
 用法:
     python jobs/pg_backup.py                 # 备份到 db/pg_backup.db
     python jobs/pg_backup.py path/to/x.db    # 指定输出
-由 jobs_hub 的 task_pg_backup 每日调用(开关 pg_backup,默认关)。
+由 jobs_hub 的 task_pg_backup 每日调用(开关 pg_backup,默认开)。
 """
 
 from __future__ import annotations
