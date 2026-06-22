@@ -801,6 +801,14 @@ def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[st
 
 
 @mcp.tool()
+def selection_debate(codes: List[str], max_stocks: int = 10) -> Dict[str, Any]:
+    """选股红蓝对抗:对候选股逐只跑 多头/空头/裁判 结构化对抗(空头专攻估值透支/题材退潮/财务雷),
+    给"对抗后结论(买入/谨慎/否决)+置信+主因"。结论写决策信号(source_type=selection_debate)进后验。"""
+    from selection_debate import run_selection_debate
+    return run_selection_debate([c for c in (codes or []) if c], max_stocks=max_stocks, record_signals=True)
+
+
+@mcp.tool()
 def portfolio_stress_narrative() -> Dict[str, Any]:
     """组合压力情景叙事:跑全 8 宏观情景(加息/贬值/大盘暴跌/流动性危机…)压力 + 集中度 →
     AI 风险预案(最脆弱情景/跨情景风险担当持仓/具体减仓对冲建议)。复用 scenario_stress 引擎。"""

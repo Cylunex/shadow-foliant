@@ -3657,6 +3657,43 @@ def task_portfolio_health_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_selection_debate():
+    """⚔️ 选股红蓝对抗(10:00):对当日综合选股 TOP10 逐只跑 多头/空头/裁判 对抗,给"对抗后结论"。
+    结论写 decision_signal(source_type='selection_debate')→ 16:10 方向后验,可与未经对抗的选股 source
+    做胜率对比验证增量价值。开关 selection_debate(默认开)。"""
+    job = 'selection_debate'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        picks = _last_selection_picks()
+        if not picks:
+            _log_run(job, 'success', error='no_selection',
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        from selection_debate import run_selection_debate
+        res = run_selection_debate(picks, max_stocks=10, record_signals=True)
+        if res.get('ok') and res.get('text'):
+            try:
+                from notification_router import send
+                send('report', '⚔️ 选股红蓝对抗', res['text'])
+            except Exception as ne:
+                print(f'[selection_debate] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_portfolio_stress_ai():
     """🛡️ 组合压力情景叙事官(周日 16:00):跑全 8 宏观情景压力 + 集中度 → AI 风险预案
     (最脆弱情景/风险担当持仓/具体减仓对冲建议)。开关 portfolio_stress_ai(默认开)。周末照跑(静态分析)。"""
@@ -4059,6 +4096,8 @@ def register_default_jobs():
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 09:50 早盘持仓分析 ----
     hub.register('morning_portfolio',           '09:50', task_morning_portfolio)
+    # ---- 10:00 选股红蓝对抗证伪 ----
+    hub.register('selection_debate',            '10:00', task_selection_debate)
     # ---- 10:30 选股过妙想 ----
     hub.register('mx_selection_review',         '10:30', task_mx_selection_review)
 

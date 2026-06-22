@@ -151,6 +151,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
         'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
     },
+    'selection_debate': {
+        'cn': '⚔️ 选股红蓝对抗证伪',
+        'schedule': '10:00 每日',
+        'category': '核心',
+        'default': True,  # 给综合选股 TOP10 加证伪闸门;空头专攻,结论进 decision_signal 可对比验证增量
+        'description': '对当日综合选股 TOP10 跑多头/空头/裁判对抗,给对抗后结论,结论进决策信号后验',
+    },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',
         'schedule': '周日 16:00',
