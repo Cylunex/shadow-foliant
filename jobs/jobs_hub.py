@@ -3723,6 +3723,101 @@ def task_portfolio_stress_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def _holdings_plus_selection() -> list:
+    """持仓 + 当日综合选股 代码并集(供事件/公告扫描)。"""
+    codes = []
+    try:
+        from portfolio_db import portfolio_db
+        codes += [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
+                  if s.get('code') and float(s.get('quantity') or s.get('shares') or 0) > 0]
+    except Exception:
+        pass
+    codes += _last_selection_picks()
+    return list(dict.fromkeys([c for c in codes if c]))
+
+
+def task_announcement_scan():
+    """📢 公告事件分级(16:02 盘后):对 持仓+选股 拉近 5 天公告 → AI 分类+重大性分级(利好/利空+强度)。
+    利空强 → decision_signal(action=reduce,source_type=announcement_risk)+告警;利好强 → buy 信号。
+    开关 announcement_scan(默认开)。"""
+    job = 'announcement_scan'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        codes = _holdings_plus_selection()
+        if not codes:
+            _log_run(job, 'success', error='no_codes', started_at=started,
+                     finished_at=datetime.now().isoformat())
+            return
+        from announcement_scan import run_announcement_scan
+        res = run_announcement_scan(codes, days=5, record_signals=True)
+        try:
+            from notification_router import send
+            if res.get('alerts'):   # 利空高分走告警渠道
+                bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in res['alerts'])
+                send('alert', '⚠️ 公告利空预警', bad)
+            elif res.get('ok') and res.get('text'):
+                send('report', '📢 公告事件分级', res['text'])
+        except Exception as ne:
+            print(f'[announcement_scan] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'), started_at=started,
+                 finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e), started_at=started,
+                 finished_at=datetime.now().isoformat())
+
+
+def task_lockup_radar():
+    """⏳ 持仓解禁雷达(15:48 盘后):查持仓未来 60 天限售解禁(占比≥3%)→ AI 给解禁前减仓研判。
+    减仓/清仓 → decision_signal(source_type=lockup_risk)+告警。开关 lockup_radar(默认开)。"""
+    job = 'lockup_radar'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        codes = []
+        try:
+            from portfolio_db import portfolio_db
+            codes = [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
+                     if s.get('code') and float(s.get('quantity') or s.get('shares') or 0) > 0]
+        except Exception:
+            pass
+        if not codes:
+            _log_run(job, 'success', error='no_holdings', started_at=started,
+                     finished_at=datetime.now().isoformat())
+            return
+        from lockup_radar import run_lockup_radar
+        res = run_lockup_radar(codes, forward_days=60, min_ratio=0.03, record_signals=True)
+        if res.get('items'):
+            try:
+                from notification_router import send
+                send('alert', '⏳ 持仓解禁预警', res['text'])
+            except Exception as ne:
+                print(f'[lockup_radar] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'), started_at=started,
+                 finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e), started_at=started,
+                 finished_at=datetime.now().isoformat())
+
+
 def task_exit_advice():
     """🧹 清仓决策助手(14:40 尾盘):对全部持仓打"清仓紧迫分"排序 + 过度分散瘦身建议 + AI 整体策略。
     清仓/减仓结论写 decision_signal(source_type='exit_advice')→ 16:10 方向后验。开关 exit_advice(默认开)。"""
@@ -4148,7 +4243,9 @@ def register_default_jobs():
     hub.register('portfolio_indicator_snapshot','15:45', task_portfolio_indicator_snapshot)
     hub.register('daily_market_snapshot',       '15:50', task_daily_market_snapshot)
     hub.register('factor_collection',           '15:55', task_factor_collection)
+    hub.register('lockup_radar',                '15:48', task_lockup_radar)
     hub.register('dragon_tiger_archive',        '16:00', task_dragon_tiger_archive)
+    hub.register('announcement_scan',           '16:02', task_announcement_scan)
     hub.register('research_digest',             '16:05', task_research_digest)
     hub.register('decision_signal_outcomes',    '16:10', task_decision_signal_outcomes)
 

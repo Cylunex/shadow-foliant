@@ -817,6 +817,22 @@ def portfolio_stress_narrative() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def announcement_scan(codes: List[str], days: int = 5) -> Dict[str, Any]:
+    """公告事件分级:对给定股票拉近 days 天公告 → AI 提炼最具影响事件 + 方向(利好/利空/中性)+ 强度(1-5)。
+    利空强→reduce 信号(source_type=announcement_risk)、利好强→buy 信号,进方向后验。黑天鹅预警。"""
+    from announcement_scan import run_announcement_scan
+    return run_announcement_scan([c for c in (codes or []) if c], days=days, record_signals=True)
+
+
+@mcp.tool()
+def lockup_radar(codes: List[str], forward_days: int = 60) -> Dict[str, Any]:
+    """持仓解禁雷达:查给定股票未来 forward_days 天限售解禁(datahub.lockup_expiry,占比≥3%)→
+    AI 给解禁前减仓研判。减仓/清仓写决策信号(source_type=lockup_risk)。补持仓事件型风控盲区。"""
+    from lockup_radar import run_lockup_radar
+    return run_lockup_radar([c for c in (codes or []) if c], forward_days=forward_days, record_signals=True)
+
+
+@mcp.tool()
 def research_digest(codes: List[str], days: int = 10) -> Dict[str, Any]:
     """研报增量解读:对给定股票拉近 days 天券商研报 → AI 提炼核心催化逻辑 + 评级方向(强看多/看多/中性/看空)
     + 隐含目标空间。强看多会写决策信号(source_type=research)进方向后验环。"""

@@ -165,6 +165,20 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # scenario_stress 已写好8情景却无人调;AI 翻译成最脆弱情景+风险担当+减仓对冲预案
         'description': '周末跑全8宏观情景压力+集中度,AI 给最脆弱情景/风险担当持仓/具体减仓对冲建议',
     },
+    'announcement_scan': {
+        'cn': '📢 公告事件分级',
+        'schedule': '16:02 每日',
+        'category': '核心',
+        'default': True,  # announcements 端点零调用;AI 分类+重大性分级,利空强→reduce信号+告警(黑天鹅预警)
+        'description': '对持仓+选股拉近5天公告,AI 分类+利好利空强度分级,利空强即时告警并写决策信号',
+    },
+    'lockup_radar': {
+        'cn': '⏳ 持仓解禁雷达',
+        'schedule': '15:48 每日',
+        'category': '核心',
+        'default': True,  # 补持仓事件型风控盲区;datahub.lockup_expiry 查未来解禁,AI 给解禁前减仓研判
+        'description': '查持仓未来60天限售解禁(占比≥3%),AI 给解禁前减仓研判,减仓→告警+决策信号',
+    },
     'research_digest': {
         'cn': '📑 研报增量解读',
         'schedule': '16:05 每日',
