@@ -271,18 +271,55 @@ DEFAULT_ROUTES: Dict[str, List[str]] = {
 }
 
 
-def _get_routes_for(category: str) -> List[str]:
-    """获取某类别的目的渠道列表:env 覆盖 > 内置默认 > qq 兜底"""
-    env_key = f'NOTIFICATION_ROUTE_{category.upper()}'
-    raw = os.getenv(env_key, '').strip()
+def _parse_channels(raw: str) -> List[str]:
+    """逗号分隔字符串 → 已注册渠道列表(过滤未知)。"""
+    return [c.strip() for c in raw.split(',') if c.strip() in CHANNELS]
+
+
+def _get_routes_for(category: str, title: str = '') -> List[str]:
+    """获取某类别的目的渠道列表。优先级(高 → 低):
+      1. title 关键字路由 NOTIFICATION_ROUTE_<CAT>__KW_<词>=ch1,ch2 (title 含"词"则用)
+      2. 整 category 覆盖 NOTIFICATION_ROUTE_<CAT>=ch1,ch2
+      3. 内置默认 DEFAULT_ROUTES[category]
+      4. ['qq'] 兜底
+
+    关键字路由示例(2026-06-22): 大部分通知只 QQ, 特定几个标题额外发邮件:
+      NOTIFICATION_ROUTE_REPORT=dingtalk                    # 默认 report 只 QQ
+      NOTIFICATION_ROUTE_REPORT__KW_选股=email,dingtalk      # title 含"选股"额外发邮件
+      NOTIFICATION_ROUTE_REPORT__KW_进化=email,dingtalk      # 含"进化"也发邮件
+    一条消息匹配多个关键字时, 取**字典序第一个命中**的 env(行为可预测)。
+    """
+    cat_upper = category.upper()
+
+    # 1) title 关键字路由
+    if title:
+        prefix = f'NOTIFICATION_ROUTE_{cat_upper}__KW_'
+        matched = []
+        for env_name, env_val in os.environ.items():
+            if not env_name.startswith(prefix):
+                continue
+            keyword = env_name[len(prefix):]
+            if keyword and keyword in title:
+                channels = _parse_channels(env_val)
+                if channels:
+                    matched.append((env_name, channels))
+        if matched:
+            matched.sort(key=lambda x: x[0])
+            return matched[0][1]
+
+    # 2) 整 category 覆盖
+    raw = os.getenv(f'NOTIFICATION_ROUTE_{cat_upper}', '').strip()
     if raw:
-        return [c.strip() for c in raw.split(',') if c.strip() in CHANNELS]
+        return _parse_channels(raw)
+
+    # 3) 内置默认
     routes = DEFAULT_ROUTES.get(category)
     if routes:
-        # 只保留已配置就绪的渠道;一个都不可用时仍返回原列表(让失败显式暴露,而非静默)
         avail = set(list_available_channels())
         ready = [c for c in routes if c in avail]
         return ready or list(routes)
+
+    # 4) 兜底
     return ['qq']
 
 
@@ -303,7 +340,7 @@ def send(category: str, title: str, content: str,
     Returns:
         {channel_name: (ok, message)} 每个渠道的发送结果
     """
-    targets = only_channels or _get_routes_for(category)
+    targets = only_channels or _get_routes_for(category, title)
     results: Dict[str, Tuple[bool, str]] = {}
     for ch in targets:
         sender = CHANNELS.get(ch)
@@ -337,9 +374,19 @@ if __name__ == '__main__':
     print('=== Notification Router 自检 ===')
     print('可用渠道:', list_available_channels())
     print()
+    print('默认路由 (category 级):')
     for cat in CATEGORIES:
-        print(f'  {cat} -> {_get_routes_for(cat)}')
-    print()
-    print('Channels 注册表:')
-    for k in CHANNELS:
-        print(f'  - {k}')
+        print(f'  {cat:14s} -> {_get_routes_for(cat)}')
+    # title 关键字路由
+    kw_envs = [k for k in os.environ if '__KW_' in k and k.startswith('NOTIFICATION_ROUTE_')]
+    if kw_envs:
+        print('\n关键字路由 (title 命中关键字时优先):')
+        for k in sorted(kw_envs):
+            print(f'  {k}={os.environ[k]}')
+    else:
+        print('\n关键字路由: (未配置)')
+    print('\nChannels 注册表:', list(CHANNELS.keys()))
+    print('\n实际路由演示(假定 category=report):')
+    for title in ['🎯 综合选股 TOP 15', '💰 今日盈亏 +1234', '📊 尾盘持仓分析',
+                  '🌙 妙想收盘复盘', '🧬 策略进化日报', '基金止盈提醒']:
+        print(f'  "{title}" -> {_get_routes_for("report", title)}')
