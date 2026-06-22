@@ -1138,8 +1138,9 @@ def task_daily_pnl_snapshot():
                 # A 股惯例:红涨绿跌(盈利红, 亏损绿)
                 emoji = '🔴' if tp > 0 else ('🟢' if tp < 0 else '⚪')
                 s = get_summary(60) or {}
+                _fund_note = ' ⚠️基金数据缺失未计入' if r.get('fund_pending') else ''
                 lines = [
-                    f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%)",
+                    f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}",
                     f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · 基金 {r.get('fund_daily_pnl', 0):+,.0f}({r.get('fund_count', 0)}只)",
                 ]
                 if s.get('mtd_pnl') is not None:
@@ -2443,8 +2444,13 @@ def _daily_strategy_scan():
         scan_results.sort(key=lambda x: x['matched_count'], reverse=True)
         top_n = scan_results[:5]  # 仅 TOP 5 跑 AI
 
-        # 3. AI 深度分析（plan_execute）—— 闭合反馈环:注入本策略历史真实战绩
+        # 3. AI 深度分析（plan_execute）—— 闭合反馈环:注入本策略历史真实战绩 + 决策信号后验
         fb = _source_feedback('wf_daily_strategy_scan')
+        try:
+            from decision_signal import feedback_text as _ds_feedback
+            _ds_fb = _ds_feedback(days=120)
+        except Exception:
+            _ds_fb = ''
         ai_inserted = 0
         for r in top_n:
             try:
@@ -2456,6 +2462,8 @@ def _daily_strategy_scan():
                      f'给出 buy/strong_buy/hold 评级 + 目标价 + 止损价。')
                 if fb['text']:
                     q += f'\n【历史反馈】{fb["text"]}'
+                if _ds_fb:   # 决策信号后验回喂(全 source 各动作历史方向命中率),闭合 decision_signal 反馈环
+                    q += f'\n{_ds_fb}'
                 # 注入策略基因组情报（跨股横截面 + 个股适配度）
                 try:
                     from analysis.strategy_genome import get_strategy_intelligence, format_intelligence_for_ai

@@ -548,12 +548,42 @@ class StockAnalysisAgents:
         
         # 组合所有报告
         all_reports = "\n\n".join(reports)
-        
+
+        # ── 交叉验证层:抽取各分析师方向倾向,显式标注冲突,强制讨论针对分歧表态 ──
+        # 原讨论只是把各报告拼接让 LLM 复述;各 agent 并行独立、互不知彼此结论,矛盾(技术看多 vs 资金派发
+        # vs 风险高回撤)只能寄望讨论 LLM 自己在长文里发现。这里加规则层冲突检测,逼讨论正面回应分歧。
+        import re as _re_cv
+
+        def _lean(txt):
+            t = str(txt or '')
+            bull = len(_re_cv.findall(r'买入|看多|上涨|突破|增持|利好|强势|低估|金叉|底背离|净流入', t))
+            bear = len(_re_cv.findall(r'卖出|看空|下跌|破位|减持|利空|弱势|高估|死叉|顶背离|净流出|出货', t))
+            if bull >= bear + 2:
+                return '偏多'
+            if bear >= bull + 2:
+                return '偏空'
+            return '中性'
+
+        _leans = {}
+        for _k, _lb in (('technical', '技术'), ('fundamental', '基本面'), ('fund_flow', '资金面'),
+                        ('risk_management', '风险'), ('market_sentiment', '情绪'), ('news', '新闻')):
+            if _k in agents_results:
+                _leans[_lb] = _lean(agents_results[_k].get('analysis', ''))
+        _bulls = [k for k, v in _leans.items() if v == '偏多']
+        _bears = [k for k, v in _leans.items() if v == '偏空']
+        if _bulls and _bears:
+            conflict_block = (
+                f"\n⚠️ **检测到维度分歧** —— 偏多:{'/'.join(_bulls)};偏空:{'/'.join(_bears)}。"
+                f"请在讨论中**优先针对该分歧表态**:哪一方证据更硬?是否存在『技术看多但资金在派发』"
+                f"『题材热但基本面恶化』这类诱多/背离结构?不要回避冲突,给出明确权衡结论。\n")
+        else:
+            conflict_block = f"\n各维度方向倾向:{'、'.join(f'{k}{v}' for k, v in _leans.items()) or '(无)'}(方向较一致)。\n"
+
         discussion_prompt = f"""
 现在进行投资决策团队会议，参会人员包括：{', '.join(participants)}。
 
 股票：{stock_info.get('name', 'N/A')} ({stock_info.get('symbol', 'N/A')})
-
+{conflict_block}
 各分析师报告：
 
 {all_reports}

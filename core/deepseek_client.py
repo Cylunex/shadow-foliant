@@ -602,7 +602,11 @@ class DeepSeekClient:
             {"role": "user", "content": prompt}
         ]
         
-        response = self.call_api(messages, temperature=0.3, max_tokens=4000, call_type='decision')
+        # final_decision 是唯一直接产出 rating/目标价/止损并被盈亏比硬约束校验的环节,最该用推理模型做
+        # "多空对称权衡 + 盈亏比推算"。env DECISION_THINKING 控制(默认开;无 thinking_model 时 router 自动回退)。
+        _think = os.getenv('DECISION_THINKING', 'true').lower() not in ('false', '0', 'no', 'off')
+        response = self.call_api(messages, temperature=0.3, max_tokens=4000,
+                                 call_type='decision', thinking=_think)
         
         try:
             # 解析JSON响应:取最后一个配平 JSON(应对 reasoner 把 JSON 写进【推理过程】导致贪婪正则错位)

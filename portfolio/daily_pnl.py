@@ -91,6 +91,20 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         (snap_date,),
     )
     existing = cur.fetchone()
+    fund_pending = False
+    if existing is None:
+        # fund_nav_refresh(22:00)没写(失败/迟到/净值源抖动)→ 现场补算一次基金当日(与股票侧兜底对称),
+        # 避免把"基金数据缺失"静默写成"基金 0 收益"并推送虚假数字。
+        try:
+            from fund_db import save_portfolio_snapshot as _fund_snap
+            _fund_snap(snap_date)
+            cur.execute(
+                """SELECT fund_count, fund_mv, fund_daily_pnl, fund_daily_pct
+                   FROM daily_pnl_snapshots WHERE snap_date=?""", (snap_date,))
+            existing = cur.fetchone()
+        except Exception as _fe:
+            print(f'[daily_pnl] 基金当日兜底现场算失败: {type(_fe).__name__}: {str(_fe)[:80]}')
+            fund_pending = True   # 取数异常 → 基金数据确实缺失,标注供推送提示,而非按 0
     if existing:
         fund_count = int(existing[0] or 0)
         fund_mv = float(existing[1] or 0)
@@ -136,6 +150,7 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         "fund_daily_pct": round(fund_daily_pct, 4),
         "total_daily_pnl": round(total_daily_pnl, 2),
         "total_daily_pct": round(total_daily_pct, 4),
+        "fund_pending": fund_pending,   # True=基金数据缺失,推送/展示应标注而非当真 0
     }
 
 

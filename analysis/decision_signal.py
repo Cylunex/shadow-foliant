@@ -504,6 +504,24 @@ def outcome_stats(dimension: str = 'action', days: int = 180) -> Dict[str, Any]:
     return out
 
 
+def feedback_text(days: int = 120, min_n: int = 3) -> str:
+    """给 AI prompt 注入的一行决策信号后验战绩:各动作历史方向命中率。
+    让 decision_signal 从"测量环"变"反馈环"——选股/决策环节读回它,对历史 miss 率高的动作更审慎。
+    无足够样本返回空串(不打扰)。"""
+    try:
+        st = outcome_stats('action', days=days)
+        rows = [b for b in st.get('buckets', [])
+                if (b.get('hit', 0) + b.get('miss', 0)) >= min_n and b.get('win_rate_pct') is not None]
+        if not rows:
+            return ''
+        rows.sort(key=lambda x: -(x.get('hit', 0) + x.get('miss', 0)))
+        parts = [f"{b.get('bucket_cn', b['bucket'])}方向命中{b['win_rate_pct']}%(n={b['hit'] + b['miss']})"
+                 for b in rows[:4]]
+        return '【决策信号历史后验】各动作真实方向命中率:' + '、'.join(parts) + ';命中率低的动作请更审慎。'
+    except Exception:
+        return ''
+
+
 if __name__ == '__main__':
     import io, json
     _sys.stdout = io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace')
