@@ -310,21 +310,15 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
                         (price, rec['id']))
             tp, sl = rec.get('take_profit'), rec.get('stop_loss')
             if tp and price >= tp:
+                # AI 推荐池(ai_recommendations)只做后台 paper-trading 跟踪 / 胜率统计,
+                # 不推送通知(用户没真买, 没必要打扰)。采纳的推荐会被用户加入持仓,
+                # 持仓的止盈止损走下面 monitored_stocks 那段的"持仓止盈"通知。
+                # 2026-06-22: 用户明确要求 "AI推荐不要通知, 只通知持仓的"。
                 _close(rec['id'], 'target', 'hit_target_at', _pnl_pct(ref, price))
                 stats['hit_target'] += 1
-                # 文案明确这是"AI 推荐池跟踪"的 paper-trading 通知, 不是用户的持仓止盈
-                # (source 标签: overnight_strategy / wf_daily_strategy_scan / unified_selection)
-                src = rec.get('source', 'unknown')
-                _notify(notify_fn, symbol, rec['name'],
-                        f"🎯 [AI 推荐止盈] {rec['name']}({symbol}) 达到目标价 {tp}（现价 {price}）"
-                        f"\n来源:{src}  原因:{rec.get('reason', '')[:80]}")
             elif sl and price <= sl:
                 _close(rec['id'], 'stop', 'hit_stop_at', _pnl_pct(ref, price))
                 stats['hit_stop'] += 1
-                src = rec.get('source', 'unknown')
-                _notify(notify_fn, symbol, rec['name'],
-                        f"⛔ [AI 推荐止损] {rec['name']}({symbol}) 跌破止损 {sl}（现价 {price}）"
-                        f"\n来源:{src}  原因:{rec.get('reason', '')[:80]}")
             else:
                 # 超期未触发 → 按当前浮盈浮亏了结,计入评估(消除"永远 pending"的幸存者偏差)
                 try:
