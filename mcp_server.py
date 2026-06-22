@@ -152,13 +152,14 @@ def portfolio_backtest(codes: List[str], strategy: str = 'enter',
                        hold_days: int = 10, stop_pct: float = 8.0, target_pct: float = 15.0,
                        max_positions: int = 5, initial_cash: float = 1000000.0,
                        allocation: str = 'equal', use_live: bool = False,
-                       benchmark: str = '000300') -> Dict[str, Any]:
+                       benchmark: str = '000300', attribution: bool = False) -> Dict[str, Any]:
     """组合级回测(实盘口径,优于单股回测):给一组股票按**一个现金账户**逐日撮合——
     并发持仓上限 max_positions、每根bar先卖(止损/止盈/到期)再买、含佣金+印花税+滑点、
     无前视(信号次日开盘建仓)。输出组合 CAGR/最大回撤/夏普/年化波动/胜率/盈亏比/净值曲线,
     并对比沪深300(超额收益)。
     codes: 6位代码列表(如 ['600519','000858']);start/end 空=近2年。
     allocation: equal等权 / signal按信号强度;use_live=True 用策略基因组进化出的最优参数集。
+    attribution=True 附**分层归因**(交易归因/β回归α显著性/市况/蒙特卡洛)判断业绩是真本事还是运气。
     单股回测(backtest_strategy)各信号独立全仓→系统性高估;要评估"这套策略实际能赚多少"用本工具。"""
     from datetime import datetime, timedelta
     from portfolio_backtest import portfolio_backtest as _pbt, portfolio_backtest_live as _pbt_live
@@ -173,8 +174,15 @@ def portfolio_backtest(codes: List[str], strategy: str = 'enter',
     r = (_pbt_live(stocks, start, end, **common) if use_live
          else _pbt(stocks, start, end, strategy_id=strategy, **common))
     # MCP 返回精简:摘要 + 配置 + 最近10笔(完整曲线对 Agent 噪声大)
-    return {'summary': r.get('summary', {}), 'config': r.get('config', {}),
-            'recent_trades': r.get('trades', [])[-10:]}
+    out = {'summary': r.get('summary', {}), 'config': r.get('config', {}),
+           'recent_trades': r.get('trades', [])[-10:]}
+    if attribution and not r.get('error'):
+        try:
+            from backtest_attribution import attribute
+            out['attribution'] = attribute(r)
+        except Exception as ae:
+            out['attribution'] = {'ok': False, 'error': str(ae)[:120]}
+    return out
 
 
 @mcp.tool()

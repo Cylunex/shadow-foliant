@@ -325,6 +325,7 @@ class PortfolioBacktestReq(BaseModel):
     initial_cash: float = 1_000_000.0
     allocation: str = "equal"      # equal 等权 | signal 信号强度加权
     benchmark: str = "000300"
+    attribution: bool = False      # True=附分层归因(交易/β回归/市况/蒙特卡洛)
 
 
 @app.post("/api/backtest/portfolio")
@@ -367,6 +368,13 @@ def backtest_portfolio(req: PortfolioBacktestReq):
             r = portfolio_backtest(stocks, start, end, strategy_id=req.strategy, **common)
         if "error" in r:
             return _err(r.get("error"))
+        # 分层归因须在裁剪 trades 前算(用全量成交)
+        if req.attribution:
+            try:
+                from backtest_attribution import attribute
+                r["attribution"] = attribute(r)
+            except Exception as ae:
+                r["attribution"] = {"ok": False, "error": str(ae)[:120]}
         # trades 可能很多,只回最近 60 笔(摘要+曲线为主)
         r["trades"] = r.get("trades", [])[-60:]
         return _ok(r)

@@ -115,6 +115,7 @@ export default {
         <div><label>止盈%</label><input type="number" v-model.number="p.target" style="width:60px"/></div>
         <div><label>分配</label><select v-model="p.alloc" style="width:90px"><option value="equal">等权</option><option value="signal">信号加权</option></select></div>
         <div><label>初始资金</label><input type="number" v-model.number="p.cash" style="width:100px"/></div>
+        <div><label style="cursor:pointer" title="附交易/β回归/市况/蒙特卡洛分层归因,判断业绩是真本事还是运气"><input type="checkbox" v-model="p.attribution" style="vertical-align:middle"/>分层归因</label></div>
         <button :disabled="p.loading" @click="runPortfolio">{{p.loading?'回测中…(逐股拉K线,稍候)':'跑组合回测'}}</button>
       </div>
       <p class="sub" style="margin-top:6px">区间默认近2年。注:行情主源单次约返回~1年日线,实际回测深度受数据源限制。</p>
@@ -152,6 +153,42 @@ export default {
           <td align=center>{{REASON[t.exit_reason]||t.exit_reason}}</td>
         </tr>
       </table>
+
+      <!-- 分层归因 -->
+      <div v-if="attr && attr.ok" style="margin-top:16px;border-top:1px solid var(--bdr);padding-top:12px">
+        <h4 style="margin:0 0 6px">🔬 分层归因</h4>
+        <div :class="attr.verdict && attr.verdict.indexOf('✅')>=0 ? 'green':'red'" style="font-weight:600;margin-bottom:10px">{{attr.verdict}}</div>
+        <div class="row" style="gap:24px;flex-wrap:wrap;align-items:flex-start">
+          <div v-if="attr.beta_regression" style="min-width:240px">
+            <div class="sub" style="margin-bottom:4px">β回归 vs 沪深300</div>
+            <div style="font-size:13px;line-height:1.7">
+              年化α <b :class="cls(attr.beta_regression.alpha_annual_pct)">{{fmtPct(attr.beta_regression.alpha_annual_pct)}}</b> ·
+              β {{attr.beta_regression.beta}} · R² {{attr.beta_regression.r_squared}} · t(α) {{attr.beta_regression.t_alpha}}
+              <div :class="attr.beta_regression.alpha_significant?'green':'red'" style="font-size:12px">{{attr.beta_regression.note}}</div>
+            </div>
+          </div>
+          <div v-if="attr.monte_carlo" style="min-width:240px">
+            <div class="sub" style="margin-bottom:4px">蒙特卡洛({{attr.monte_carlo.n_shuffles}}次置换)</div>
+            <div style="font-size:13px;line-height:1.7">
+              MaxDD {{fmtPct(attr.monte_carlo.maxdd_actual_pct)}} (p={{attr.monte_carlo.maxdd_permutation_p}}) ·
+              Sharpe {{attr.monte_carlo.sharpe_annual}} (t={{attr.monte_carlo.sharpe_t_stat}})
+              <div :class="attr.monte_carlo.sharpe_significant?'green':'red'" style="font-size:12px">{{attr.monte_carlo.sharpe_note}}</div>
+            </div>
+          </div>
+        </div>
+        <div v-if="attr.regime_attribution" style="margin-top:10px">
+          <div class="sub" style="margin-bottom:4px">市况归因</div>
+          <span v-for="r in attr.regime_attribution.by_regime" :key="r.regime" style="margin-right:16px;font-size:13px">
+            {{r.regime}}: {{r.trades}}笔 胜率{{r.win_rate_pct}}% <span :class="cls(r.total_pnl)">{{fmtPct0(r.total_pnl)}}</span>
+          </span>
+          <div class="sub" style="font-size:12px;margin-top:2px">{{attr.regime_attribution.note}}</div>
+        </div>
+        <div v-if="attr.trade_attribution && attr.trade_attribution.robustness" class="sub" style="font-size:12px;margin-top:8px">
+          鲁棒性:Top5盈利单占总盈利 {{attr.trade_attribution.robustness.top5_pnl_share_pct ?? '--'}}%,
+          剔除后<span :class="attr.trade_attribution.robustness.profitable_ex_top5?'green':'red'">{{attr.trade_attribution.robustness.profitable_ex_top5?'仍盈利':'转亏'}}</span>
+        </div>
+      </div>
+      <div v-else-if="p.res.attribution && !p.res.attribution.ok" class="sub" style="margin-top:12px;color:var(--muted)">归因不可用:{{p.res.attribution.error}}</div>
     </div>
   </div>`,
 
@@ -224,6 +261,7 @@ export default {
       universe:'holdings', codes:'', limit:50,
       strategy:'enter', useLive:false,
       maxPos:5, hold:10, stop:8, target:15, alloc:'equal', cash:1000000,
+      attribution:false,
       loading:false, err:'', res:null
     })
 
@@ -235,7 +273,8 @@ export default {
           codes: p.universe==='custom' ? p.codes.split(/[,，\s]+/).map(x=>x.trim()).filter(Boolean) : [],
           strategy:p.strategy, use_live:p.useLive,
           hold_days:p.hold, stop_pct:p.stop, target_pct:p.target,
-          max_positions:p.maxPos, initial_cash:p.cash, allocation:p.alloc, benchmark:'000300'
+          max_positions:p.maxPos, initial_cash:p.cash, allocation:p.alloc, benchmark:'000300',
+          attribution:p.attribution
         }
         p.res = await api('/api/backtest/portfolio', {
           method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -281,6 +320,9 @@ export default {
       }
     })
 
-    return { s, p, STRATEGIES, CATEGORIES, CN, REASON, fmtPct, cls, runAll, runBatch, runPortfolio, metrics, curve }
+    const attr = computed(()=> p.res?.attribution || null)
+    function fmtPct0(v){ return v!=null ? (v>0?'+':'')+Math.round(v).toLocaleString('en-US') : '--' }
+
+    return { s, p, STRATEGIES, CATEGORIES, CN, REASON, fmtPct, fmtPct0, cls, runAll, runBatch, runPortfolio, metrics, curve, attr }
   }
 }
