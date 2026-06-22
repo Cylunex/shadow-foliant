@@ -801,6 +801,37 @@ def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[st
 
 
 @mcp.tool()
+def decision_signals(code: str = '', status: str = 'active', action: str = '',
+                     source_type: str = '', days: int = 0, limit: int = 50) -> Any:
+    """决策信号列表(统一信号层:每次分析/选股/盯盘的结构化操作建议,8态动作+生命周期+去重)。
+    code 指定股票;status 空=全部;action∈buy/add/hold/reduce/sell/watch/avoid/alert;days>0 限近N天。"""
+    from decision_signal import list_signals
+    return list_signals(code=code or None, status=status or None, action=action or None,
+                        source_type=source_type or None, days=days or None, limit=limit)
+
+
+@mcp.tool()
+def decision_signal_latest(code: str) -> Any:
+    """某股最新活跃决策信号(看 AI 当前对该股的操作主张:动作/进出场/止损/信心/理由)。"""
+    from decision_signal import get_latest_active
+    return get_latest_active(code) or {'note': f'{code} 无活跃决策信号'}
+
+
+@mcp.tool()
+def decision_signal_outcomes(days: int = 60, force: bool = False) -> Any:
+    """后验校验决策信号:对近 days 天、已过持有周期的信号用 K线判 hit/miss/neutral 并落库。"""
+    from decision_signal import run_outcomes
+    return run_outcomes(days=days, force=force)
+
+
+@mcp.tool()
+def decision_signal_winrate(dimension: str = 'action', days: int = 180) -> Any:
+    """决策信号已评胜率按维度分桶(dimension: action/source_type/horizon)。看"哪类信号真准"。"""
+    from decision_signal import outcome_stats
+    return outcome_stats(dimension=dimension, days=days)
+
+
+@mcp.tool()
 def industry_reports(industry_code: str = '*', pages: int = 5, begin: str = '2024-01-01') -> Any:
     """东财行业研报列表(走 datahub:industry_reports)。industry_code='*' 取全行业,或传具体行业代码。每条含发布日/行业/标题/机构/评级。"""
     import datahub

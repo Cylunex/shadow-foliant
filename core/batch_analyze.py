@@ -118,7 +118,7 @@ def analyze_single_stock_for_batch(symbol, period, enabled_analysts_config=None,
         discussion_result = agents.conduct_team_discussion(agents_results, stock_info)
         final_decision = agents.make_final_decision(discussion_result, stock_info, indicators)
 
-        saved_to_db, db_error = False, None
+        saved_to_db, db_error, record_id = False, None, None
         try:
             record_id = db.save_analysis(
                 symbol=stock_info.get('symbol', ''), stock_name=stock_info.get('name', ''),
@@ -131,11 +131,18 @@ def analyze_single_stock_for_batch(symbol, period, enabled_analysts_config=None,
             db_error = str(e)
             print(f"❌ {symbol} 保存失败: {db_error}")
 
-        return {
+        result = {
             "symbol": symbol, "success": True, "stock_info": stock_info,
             "indicators": indicators, "agents_results": agents_results,
             "discussion_result": discussion_result, "final_decision": final_decision,
             "saved_to_db": saved_to_db, "db_error": db_error,
         }
+        # 抽一条决策信号(统一信号层;旁路,失败不影响分析返回)
+        try:
+            from decision_signal import extract_from_analysis
+            extract_from_analysis(result, source_ref=str(record_id or ''))
+        except Exception as _dse:
+            print(f"[decision_signal] 抽取跳过: {type(_dse).__name__}: {str(_dse)[:80]}")
+        return result
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "success": False}

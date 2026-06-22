@@ -2100,6 +2100,65 @@ def research_industry_reports(industry_code: str = "*", pages: int = 5, begin: s
         return _err(e)
 
 
+# ============================ 决策信号(统一信号层)============================
+@app.get("/api/signals")
+def signals_list(code: str = "", status: str = "active", action: str = "",
+                 source_type: str = "", days: int = 0, limit: int = 100):
+    """决策信号列表(每次分析/选股/盯盘的结构化操作建议,带生命周期+去重)。
+    status 传空=全部状态;days>0 限近 N 天。"""
+    try:
+        from decision_signal import list_signals
+        return _ok(list_signals(code=code or None, status=status or None,
+                                action=action or None, source_type=source_type or None,
+                                days=days or None, limit=limit))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/signals/latest/{code}")
+def signals_latest(code: str):
+    """某股最新活跃决策信号(给持仓/盯盘联动用)。"""
+    try:
+        from decision_signal import get_latest_active
+        return _ok(get_latest_active(code) or {})
+    except Exception as e:
+        return _err(e)
+
+
+class SignalStatusReq(BaseModel):
+    status: str   # closed / archived / invalidated / expired
+
+
+@app.post("/api/signals/{signal_id}/status")
+def signals_set_status(signal_id: int, req: SignalStatusReq):
+    """手动改信号状态(closed/archived 等;终态不可逆回 active)。"""
+    try:
+        from decision_signal import update_status
+        return _ok({"updated": update_status(signal_id, req.status)})
+    except Exception as e:
+        return _err(e)
+
+
+@app.post("/api/signals/outcomes/run")
+def signals_run_outcomes(days: int = 60, force: bool = False):
+    """后验校验:对近 days 天、已过持有周期的信号用 K线判 hit/miss/neutral。"""
+    try:
+        from decision_signal import run_outcomes
+        return _ok(run_outcomes(days=days, force=force))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/signals/outcomes/stats")
+def signals_outcome_stats(dimension: str = "action", days: int = 180):
+    """已评信号按维度(action/source_type/horizon)分桶胜率。"""
+    try:
+        from decision_signal import outcome_stats
+        return _ok(outcome_stats(dimension=dimension, days=days))
+    except Exception as e:
+        return _err(e)
+
+
 # ============================ 设置:定时任务开关 ============================
 @app.get("/api/jobs")
 def jobs_list():

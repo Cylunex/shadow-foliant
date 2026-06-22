@@ -942,6 +942,34 @@ def task_ai_eval_weekly():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_decision_signal_outcomes():
+    """每日盘后:对已过持有周期的决策信号做后验校验(K线判 hit/miss),让胜率统计持续累积。
+    开关 decision_signal_outcomes(默认开,无 LLM 调用、纯库+K线缓存,开销低)。"""
+    job = 'decision_signal_outcomes'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled by automation_config',
+                     started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):   # 非交易日不跑(K线无新 bar)
+        return
+    started = datetime.now().isoformat()
+    try:
+        from decision_signal import run_outcomes
+        r = run_outcomes(days=90)
+        _log_run(job, 'success',
+                 error=f"evaluated={r.get('evaluated')} hit={r.get('hit')} "
+                       f"miss={r.get('miss')} unable={r.get('unable')}",
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def _fund_gate(job: str) -> bool:
     """基金任务统一开关 + 交易日守卫。返回 True 表示应跳过。"""
     try:
@@ -3859,6 +3887,7 @@ def register_default_jobs():
     hub.register('daily_market_snapshot',       '15:50', task_daily_market_snapshot)
     hub.register('factor_collection',           '15:55', task_factor_collection)
     hub.register('dragon_tiger_archive',        '16:00', task_dragon_tiger_archive)
+    hub.register('decision_signal_outcomes',    '16:10', task_decision_signal_outcomes)
 
     # ---- 📐 盘后回测 ----
     hub.register('daily_backtest',             '16:30', task_daily_backtest)

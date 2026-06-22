@@ -144,6 +144,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 盈利反馈环:按 source 出真实盈亏评估,回喂选股决策;无 AI 调用,开销低
         'description': '按 source 评估过去 30 天推荐真实盈亏(胜率/平均收益/盈亏比)',
     },
+    'decision_signal_outcomes': {
+        'cn': '🎯 决策信号后验校验',
+        'schedule': '16:10 每日',
+        'category': '数据',
+        'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
+        'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
+    },
     'stock_monitor_check': {
         'cn': '📊 持仓进场区间监控',
         'schedule': 'every:30:min 交易时段(09:30-15:00)',

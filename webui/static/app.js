@@ -19,6 +19,7 @@ import Trade from './pages/trade.js'
 import Backtest from './pages/backtest.js'
 import Genome from './pages/genome.js'
 import Convertible from './pages/convertible.js'
+import Signals from './pages/signals.js'
 
 const NAV = [
   { k:'briefing', ic:'☀️', t:'晨报', comp:Briefing },
@@ -34,6 +35,7 @@ const NAV = [
   { k:'convertible', ic:'💎', t:'可转债', comp:Convertible },
   { k:'mx',    ic:'🧠', t:'妙想AI',   comp:Miaoxiang },
   { k:'reco',  ic:'⭐', t:'AI推荐',   comp:Reco },
+  { k:'signals', ic:'🎯', t:'决策信号', comp:Signals },
   { k:'workflow', ic:'🧩', t:'AI工作流', comp:Workflow },
   // 行情 / 监测
   { k:'market', ic:'📡', t:'市场',     comp:Market },
