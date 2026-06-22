@@ -97,7 +97,7 @@ def _fetch_period(days: int, source: Optional[str] = None) -> List[Dict[str, Any
         SELECT id, symbol, name, source, target_price, take_profit, stop_loss,
                hit_target_at, hit_stop_at, recommended_at,
                ref_price, last_price, realized_pnl_pct, close_reason,
-               confidence, rating
+               confidence, rating, closed_at
         FROM ai_recommendations
         WHERE recommended_at >= ?
     '''
@@ -113,7 +113,7 @@ def _fetch_period(days: int, source: Optional[str] = None) -> List[Dict[str, Any
     keys = ['id', 'symbol', 'name', 'source', 'target_price', 'take_profit',
             'stop_loss', 'hit_target_at', 'hit_stop_at', 'recommended_at',
             'ref_price', 'last_price', 'realized_pnl_pct', 'close_reason',
-            'confidence', 'rating']
+            'confidence', 'rating', 'closed_at']
     return [dict(zip(keys, r)) for r in rows]
 
 
@@ -144,10 +144,13 @@ def _evaluate(recs: List[Dict[str, Any]], days: int, source: str = '') -> Evalua
     n_ret = len(rets)
     no_price = n - n_ret  # 既无 ref_price 又无 last_price 的老数据,无法计真实收益
     if n_ret:
-        wins = [x for x in rets if x > 0]
-        losses = [x for x in rets if x <= 0]
-        win_rate = len(wins) / n_ret * 100
-        avg_ret = sum(rets) / n_ret
+        # 收益≈0(|ret|<0.1%,如候选首轮刷价 last≈ref)视为"未表态"中性,不计入胜负分母 →
+        # 否则把这些 0 当亏损会系统性低估 win_rate / profit_factor(_source_feedback 的输入)。
+        wins = [x for x in rets if x > 0.1]
+        losses = [x for x in rets if x < -0.1]
+        decided = len(wins) + len(losses)
+        win_rate = len(wins) / decided * 100 if decided else 0.0
+        avg_ret = sum(rets) / n_ret    # 平均收益仍用全样本(含中性),反映真实浮盈浮亏
         srt = sorted(rets)
         median_ret = srt[n_ret // 2] if n_ret % 2 else (srt[n_ret // 2 - 1] + srt[n_ret // 2]) / 2
         max_loss = min(rets)
@@ -221,7 +224,9 @@ def _holding_days(r: Dict[str, Any]) -> Optional[int]:
         start = _parse_dt(rec_at)
     except Exception:
         return None
-    end_raw = r.get('hit_target_at') or r.get('hit_stop_at')
+    # 了结时刻:止盈/止损时间 > 了结时间(到期 expired 只有 closed_at,无 hit_*_at);
+    # 三者皆空才是真 pending → 用 now()。否则 expired 用 now() 会让持有天数随天数漂移、恒归"中长线"。
+    end_raw = r.get('hit_target_at') or r.get('hit_stop_at') or r.get('closed_at')
     try:
         end = _parse_dt(end_raw) if end_raw else datetime.now()
     except Exception:

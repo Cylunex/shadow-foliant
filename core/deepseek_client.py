@@ -64,6 +64,36 @@ def _enforce_risk_reward(decision: Dict[str, Any], current_price=None,
     return decision
 
 
+def _extract_last_json(text: str):
+    """从文本中提取**最后一个花括号配平**的 JSON 对象并解析,失败返回 None。
+
+    替代贪婪 `\\{.*\\}`:reasoner/思考模型会把 JSON 样例写进【推理过程】,贪婪匹配会把推理段的 {
+    当起点、正式答案的 } 当终点 → 拼出错位非法 JSON → json.loads 失败 → rating/目标价/止损全丢、
+    盈亏比硬约束形同虚设。真正答案通常在末尾,故从最后一个 } 反向找配平的 {,逐候选尝试解析。"""
+    if not text:
+        return None
+    end = text.rfind('}')
+    while end != -1:
+        depth, i, start = 0, end, -1
+        while i >= 0:
+            c = text[i]
+            if c == '}':
+                depth += 1
+            elif c == '{':
+                depth -= 1
+                if depth == 0:
+                    start = i
+                    break
+            i -= 1
+        if start != -1:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+        end = text.rfind('}', 0, end)
+    return None
+
+
 class DeepSeekClient:
     """DeepSeek API客户端"""
     
@@ -575,11 +605,9 @@ class DeepSeekClient:
         response = self.call_api(messages, temperature=0.3, max_tokens=4000, call_type='decision')
         
         try:
-            # 尝试解析JSON响应
-            import re
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                decision_json = json.loads(json_match.group())
+            # 解析JSON响应:取最后一个配平 JSON(应对 reasoner 把 JSON 写进【推理过程】导致贪婪正则错位)
+            decision_json = _extract_last_json(response)
+            if decision_json is not None:
                 # 盈亏比硬约束:买入但 R:R<2 → 程序化降为持有(不只靠 prompt)
                 decision_json = _enforce_risk_reward(decision_json, stock_info.get('current_price'))
                 # 阶段决策护栏:盘前/非交易时段的"立即买卖"→ 加开盘确认 caveat + 降信心(随行情调整)

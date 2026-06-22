@@ -302,10 +302,27 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
             sets.insert(0, f'{hit_field}={NOW}')
         cur.execute(f'UPDATE ai_recommendations SET {", ".join(sets)} WHERE id=?', tuple(params) + (rec_id,))
 
+    # 一次批量取价(对齐下方 candidate 分支):原来逐只 _current_price → 监控池满时每轮最多 500 次
+    # 串行单股 HTTP 往返、每 30min 一轮、全交易时段约 11 轮/日。批量 datahub.quotes 压成 1 次请求。
+    _qmap = {}
+    try:
+        import datahub
+        _qmap = datahub.quotes([r['symbol'] for r in active]) or {}
+    except Exception:
+        _qmap = {}
+
+    def _price_of(sym):
+        q = _qmap.get(str(sym).zfill(6)) or _qmap.get(str(sym)) or {}
+        p = q.get('price') if isinstance(q, dict) else None
+        try:
+            return float(p) if p not in (None, '', 0, '0') else _current_price(sym)
+        except (TypeError, ValueError):
+            return _current_price(sym)
+
     for rec in active:
         symbol = rec['symbol']
         try:
-            price = _current_price(symbol)
+            price = _price_of(symbol)
             if price is None:
                 continue
             stats['checked'] += 1

@@ -158,6 +158,25 @@ def get_indicator_snapshot(symbol: str, date: str = None) -> Optional[Dict]:
     return _coerce_json(row[0]) if row else None
 
 
+def _last_selection_picks() -> List[str]:
+    """读今日综合选股(unified_selection 09:45)的 TOP 代码列表,统一收口。
+
+    ⚠️ 关键坑:`save_indicator_snapshot('_last_selection', {'picks':[...]})` 把 dict 直接存进
+    indicators 列,`get_indicator_snapshot` 返回的就是该列反序列化结果 = {'picks':[...]} 本身,
+    **没有 'indicators' 外层包裹**。历史上多处消费者误写 `snap.get('indicators')` → 恒 None →
+    死分支(盘后扫描并入/妙想复核 当日选股 都因此恒空)。一律走本函数取 picks,别再裸读。"""
+    try:
+        snap = get_indicator_snapshot('_last_selection')
+        if isinstance(snap, dict):
+            picks = snap.get('picks')
+            return [str(c).strip() for c in picks if c] if isinstance(picks, list) else []
+        if isinstance(snap, list):
+            return [str(c).strip() for c in snap if c]
+    except Exception:
+        pass
+    return []
+
+
 def save_market_snapshot(payload: Dict):
     today = datetime.now().strftime('%Y-%m-%d')
     conn = db_connect(_SNAPSHOT_DB_PATH)
@@ -185,16 +204,30 @@ def get_market_snapshot(date: str = None) -> Optional[Dict]:
 
 def _log_run(job_name: str, status: str, error: str = None,
              started_at: str = None, finished_at: str = None):
-    conn = _get_log_db()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO job_runs(job_name, started_at, finished_at, status, error)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (job_name, started_at or datetime.now().isoformat(), finished_at, status, error))
-    conn.commit()
-    # 任务失败自动推送告警
+    # 整个 jobs_hub 的可观测性靠这一个 DB 写入点,它被成功/失败/跳过三条路径调用。
+    # 必须设防:SQLite 写锁(database is locked)或连接失效时,遥测写失败绝不能击穿任务执行/调度
+    # (尤其 except 路径与 _skip_if_not_trading 内的调用,二次抛出会丢日志/让静默跳过变异常)。
+    try:
+        conn = _get_log_db()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO job_runs(job_name, started_at, finished_at, status, error)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (job_name, started_at or datetime.now().isoformat(), finished_at, status, error))
+        conn.commit()
+        try:
+            conn.close()
+        except Exception:
+            pass
+    except Exception as _le:
+        print(f'[_log_run] 写 job_runs 失败(忽略,不阻断任务): {type(_le).__name__}: {str(_le)[:80]}',
+              flush=True)
+    # 任务失败自动推送告警(本身已设防,不让推送失败再冒泡)
     if status == 'error' and error:
-        _push_error(f'⚠️ 任务异常: {job_name}', f'{error[:500]}')
+        try:
+            _push_error(f'⚠️ 任务异常: {job_name}', f'{error[:500]}')
+        except Exception:
+            pass
 
 
 # --- 交易日历（节假日感知） ---
@@ -741,11 +774,14 @@ def task_daily_backtest():
                 from concurrent.futures import ProcessPoolExecutor
                 from genome_bt_worker import run_stock as _gbt
                 _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
+                # 整体超时:单 worker 在 numpy/pandas 卡死时,map 无 timeout 会无限阻塞 →
+                # 只能等 deadman 90min 硬杀(连累并发任务)。给整体上限,超时则回退串行收尾。
+                _bt_timeout = max(600, 8 * len(_bt_tasks))   # 每股~8s 上限,至少 10min
                 with ProcessPoolExecutor(max_workers=_nw) as _ex:
-                    _per_stock = list(_ex.map(_gbt, _bt_tasks))
+                    _per_stock = list(_ex.map(_gbt, _bt_tasks, timeout=_bt_timeout))
                 print(f'[daily_backtest] 进程池并行回测: {len(valid_stocks)}股 × {len(all_variants)}变体, {_nw} 进程')
             except Exception as _pe:
-                print(f'[daily_backtest] 进程池不可用,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
+                print(f'[daily_backtest] 进程池不可用/超时,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
                 _per_stock = None
         if _per_stock is None:
             from genome_bt_worker import run_stock as _gbt
@@ -2363,14 +2399,8 @@ def _daily_strategy_scan():
         # 并入今日 unified_selection(09:45 综合选股)的 TOP 选股 —— 让早盘多因子/主力选出的候选
         # 也走"策略命中 → AI 深析 → 推荐池 + 决策信号"全流程被追踪(此前它们只零成本到期了结)。
         try:
-            _snap = get_indicator_snapshot('_last_selection')
-            _picks = []
-            if _snap and _snap.get('indicators'):
-                _ind = _snap['indicators']
-                _picks = _ind if isinstance(_ind, list) else _ind.get('picks', [])
             _us_added = 0
-            for _c in _picks:
-                _c = str(_c).strip()
+            for _c in _last_selection_picks():
                 if _c and _c not in pool:
                     pool[_c] = ''
                     _us_added += 1
@@ -2437,9 +2467,13 @@ def _daily_strategy_scan():
                     pass
                 ar = agent_run(q, symbol=r['symbol'], prefer_mode='plan_execute')
                 answer = ar.get('answer', '')
-                low_ans = answer.lower()
-                is_strong = 'strong_buy' in low_ans or 'strong buy' in low_ans
-                is_buy = is_strong or 'buy' in low_ans
+                # 买入判定:弃用脆弱的 'buy' 子串(会把"不建议买/avoid buy/选项回显 buy/strong_buy/hold"全误判为买入,
+                # 污染推荐池与真实胜率反馈)。plan_execute 输出以中文结论为主 → 用中文正向词 + 否定优先门。
+                import re as _re2
+                _neg = bool(_re2.search(r'不建议买|不宜买|不要买|回避|规避|观望|暂不|avoid', answer, _re2.I))
+                is_strong = bool(_re2.search(r'强烈买入|强买|strong[\s_]?buy', answer, _re2.I))
+                is_buy = (not _neg) and (is_strong or bool(
+                    _re2.search(r'买入|买进|逢低买|逢低吸|建仓|增持|加仓', answer)))
                 ref = _current_price(r['symbol'])
                 tp, sl, tgt = _parse_tp_sl(answer, ref)
 
@@ -2481,8 +2515,10 @@ def _daily_strategy_scan():
                         reason=f'命中 {len(r["matched"])} 策略({hits[:120]}) + AI 综合分析',
                     )
                     if rid:
-                        if not fb['conservative']:
-                            enable_monitor(rid)
+                        # conservative 的买入也启监控:让带 tp/sl 的买入统一走"监控止盈止损了结"分支,
+                        # 否则它落入 candidate 分支只按 90 天浮盈了结、忽略止损 → 同 source 两套了结口径、
+                        # 扭曲 evaluate_by_source 真实胜率(_source_feedback 的输入)。监控≠推送(AI推荐本就不推)。
+                        enable_monitor(rid)
                         ai_inserted += 1
             except Exception as e:
                 print(f'[wf_daily_strategy_scan] {r["symbol"]} AI 失败: {e}')
@@ -3583,15 +3619,8 @@ def task_mx_selection_review():
         return
     started = datetime.now().isoformat()
     try:
-        # 读缓存的选股结果
-        top_list = []
-        try:
-            snap = get_indicator_snapshot('_last_selection')
-            if snap and snap.get('indicators'):
-                top_list = (snap['indicators'] if isinstance(snap['indicators'], list)
-                           else snap['indicators'].get('picks', []))
-        except Exception:
-            pass
+        # 读缓存的选股结果(统一走 _last_selection_picks,修复原 snap.get('indicators') 死分支)
+        top_list = _last_selection_picks()
 
         if not top_list:
             _log_run(job, 'success', error='no selection cache', started_at=started,
