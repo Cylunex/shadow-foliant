@@ -312,16 +312,19 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
             if tp and price >= tp:
                 _close(rec['id'], 'target', 'hit_target_at', _pnl_pct(ref, price))
                 stats['hit_target'] += 1
-                # body 自带股票名+代码: QQ 等渠道可能不显示 title, 单看 body 也得知道是哪只
+                # 文案明确这是"AI 推荐池跟踪"的 paper-trading 通知, 不是用户的持仓止盈
+                # (source 标签: overnight_strategy / wf_daily_strategy_scan / unified_selection)
+                src = rec.get('source', 'unknown')
                 _notify(notify_fn, symbol, rec['name'],
-                        f"🎯 {rec['name']}({symbol}) 触发止盈 {tp}（现价 {price}）"
-                        f"— {rec.get('reason', '')[:80]}")
+                        f"🎯 [AI 推荐止盈] {rec['name']}({symbol}) 达到目标价 {tp}（现价 {price}）"
+                        f"\n来源:{src}  原因:{rec.get('reason', '')[:80]}")
             elif sl and price <= sl:
                 _close(rec['id'], 'stop', 'hit_stop_at', _pnl_pct(ref, price))
                 stats['hit_stop'] += 1
+                src = rec.get('source', 'unknown')
                 _notify(notify_fn, symbol, rec['name'],
-                        f"⛔ {rec['name']}({symbol}) 触发止损 {sl}（现价 {price}）"
-                        f"— {rec.get('reason', '')[:80]}")
+                        f"⛔ [AI 推荐止损] {rec['name']}({symbol}) 跌破止损 {sl}（现价 {price}）"
+                        f"\n来源:{src}  原因:{rec.get('reason', '')[:80]}")
             else:
                 # 超期未触发 → 按当前浮盈浮亏了结,计入评估(消除"永远 pending"的幸存者偏差)
                 try:
