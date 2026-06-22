@@ -20,12 +20,14 @@ import Backtest from './pages/backtest.js'
 import Genome from './pages/genome.js'
 import Convertible from './pages/convertible.js'
 import Signals from './pages/signals.js'
+import Exit from './pages/exit.js'
 
 const NAV = [
   { k:'briefing', ic:'☀️', t:'晨报', comp:Briefing },
   // 个人持仓(置顶)
   { k:'port',  ic:'📊', t:'持仓总览', comp:Portfolio },
   { k:'trade', ic:'📋', t:'成交记录', comp:Trade },
+  { k:'exit', ic:'🧹', t:'清仓助手', comp:Exit },
   { k:'backtest', ic:'📐', t:'回测', comp:Backtest },
   { k:'genome', ic:'🧬', t:'策略进化', comp:Genome },
   { k:'fund',  ic:'🏦', t:'基金定投', comp:Fund },
