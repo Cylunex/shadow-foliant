@@ -21,6 +21,60 @@ except Exception:
     def _throttle(*a, **k):
         return 0.0
 
+
+def _fetch_via_akshare_fund_flow(min_market_cap: float = None,
+                                 max_market_cap: float = None,
+                                 top_n: int = 100):
+    """**带主力资金数据的兜底源**(2026-06-22): pywencai 卡死时, 走 akshare
+    stock_individual_fund_flow_rank 拉今日资金流排名, 字段对齐成 pywencai 同款
+    中文列, 让后续 _convert_to_dataframe / get_top_stocks 零改动可用。
+
+    akshare 此接口:
+      - 一次返回全市场 A 股(~5500 只)的资金流(代码/名称/最新价/今日涨跌幅/
+        主力净流入-净额/主力净流入-净占比/超大单/大单/中单/小单)
+      - 走 akshare_safe.call 30s 硬超时(不会卡死)
+      - 跟 pywencai 同源(都是东财数据), 但纯 HTTP+JSON, 不走 JS exec, 远稳定
+
+    返回 DataFrame(同 pywencai 格式) 或 None。
+    """
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+    except Exception as e:
+        print(f"  ❌ akshare 资金流兜底不可用: {type(e).__name__}: {e}")
+        return None
+    try:
+        _throttle('akshare')
+        # 兼容老版本 akshare 不接受 market 参数
+        try:
+            df = ak_call(ak.stock_individual_fund_flow_rank, timeout=30, indicator='今日')
+        except TypeError:
+            df = ak_call(ak.stock_individual_fund_flow_rank, timeout=30)
+    except Exception as e:
+        print(f"  ❌ akshare 资金流兜底失败: {type(e).__name__}: {str(e)[:120]}")
+        return None
+    if df is None or df.empty:
+        print('  ❌ akshare 资金流兜底返回空')
+        return None
+    # 字段对齐:akshare 列名 → pywencai 风格中文列 (后续 _convert_to_dataframe 不用改)
+    # akshare 字段: 代码/名称/最新价/今日涨跌幅/今日主力净流入-净额/...
+    rename = {
+        '代码': '股票代码', '名称': '股票简称',
+        '最新价': '最新价', '今日涨跌幅': '区间涨跌幅',
+        '今日主力净流入-净额': '主力资金流向',
+        '今日主力净流入-净占比': '主力资金流向占比',
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    if '股票代码' not in df.columns or '主力资金流向' not in df.columns:
+        print(f'  ❌ akshare 资金流字段异常: {list(df.columns)[:10]}')
+        return None
+    # 主力净额降序 → 取前 top_n
+    df = df.copy()
+    df['主力资金流向'] = pd.to_numeric(df['主力资金流向'], errors='coerce').fillna(0)
+    df = df.sort_values('主力资金流向', ascending=False).head(top_n).reset_index(drop=True)
+    print(f'  ✅ akshare 资金流兜底成功: 取主力净流入前 {len(df)} 只')
+    return df
+
 class MainForceStockSelector:
     """主力选股类"""
     
@@ -118,11 +172,25 @@ class MainForceStockSelector:
                     print(f"  ❌ 方案{i}失败: {str(e)}")
                     time.sleep(2)  # 失败后稍等再试，避免触发反爬
             
-            # 所有方案都失败 → 降级到东财选股器兜底
-            error_msg = "所有pywencai查询方案都失败，降级到东财选股器"
+            # 所有 pywencai 方案都失败 → 走兜底链
+            error_msg = "所有pywencai查询方案都失败，启动兜底链"
             print(f"\n⚠️ {error_msg}")
             fallback_df = None
-            # 第1层: push2
+
+            # ⭐ 第 0 层: akshare stock_individual_fund_flow_rank (带主力资金数据!)
+            # 2026-06-22 新增: 之前 pywencai 卡死后只能降级到 push2/dataapi, 但那两个没主力
+            # 资金字段, 主力选股变成"按市值选股"。akshare 同样东财源头但纯 HTTP, 稳定。
+            try:
+                ak_df = _fetch_via_akshare_fund_flow(
+                    min_market_cap=min_market_cap, max_market_cap=max_market_cap, top_n=100)
+                if ak_df is not None and not ak_df.empty:
+                    fallback_df = ak_df
+                    self.raw_data = fallback_df
+                    return True, fallback_df, f'兜底成功(akshare 资金流): {len(fallback_df)} 只(含主力数据)'
+            except Exception as fe:
+                print(f"  ❌ akshare 资金流降级失败: {fe}")
+
+            # 第1层: push2 (无主力资金数据, 仅按市值/价格)
             try:
                 from selection.data_source_config import fetch_stocks_push2
                 fallback = fetch_stocks_push2(mcap_min=min_market_cap, mcap_max=max_market_cap, top_n=100)
