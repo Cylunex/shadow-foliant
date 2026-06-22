@@ -32,6 +32,37 @@ from db_compat import connect as db_connect, USE_POSTGRES
 _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
 
+# source / status 字段的中文映射 — 给推送报告显示用(未匹配的原样返回)
+SOURCE_CN = {
+    'overnight_strategy':     '凌晨综合策略',
+    'wf_daily_strategy_scan': '盘后策略扫描',
+    'wf_overnight_to_rec':    '隔夜入池',
+    'wf_selection_to_rec':    '选股入池',
+    'unified_selection':      '综合选股',
+    'main_force':             '主力资金',
+    'low_price_bull':         '低价擒牛',
+    'small_cap':              '小市值',
+    'profit_growth':          '净利增长',
+    'value':                  '低估值',
+    '(unknown)':              '未知',
+    '':                       '未知',
+}
+STATUS_CN = {
+    'pending':  '持有中',
+    'target':   '止盈',
+    'stop':     '止损',
+    'expired':  '到期',
+}
+
+
+def _src_cn(s: str) -> str:
+    return SOURCE_CN.get(s or '', s or '未知')
+
+
+def _st_cn(s: str) -> str:
+    return STATUS_CN.get(s or '', s or '持有中')
+
+
 @dataclass
 class EvaluationResult:
     score: float = 0.0
@@ -179,7 +210,7 @@ def format_report(result_or_dict) -> str:
         results = result_or_dict
     lines = ['=== AI 推荐评估报告 ===']
     for src, r in results.items():
-        lines.append(f'\n[{src}]  样本={r.sample_size} 期间={r.period_days}天')
+        lines.append(f'\n[{_src_cn(src)}]  样本={r.sample_size} 期间={r.period_days}天')
         if r.sample_size == 0:
             lines.append('  (无样本)')
             continue
@@ -235,7 +266,8 @@ def format_unowned_picks(held_codes: set, days: int = 30,
             if r['return_pct'] <= 0:
                 break
             lines.append(f"  {r['symbol']}  {r['name'][:8]:<8s}  "
-                         f"{r['source'][:20]:<20s}  {r['status']:<8s}  {r['return_pct']:+6.2f}%")
+                         f"{_src_cn(r['source']):<12s}  {_st_cn(r['status']):<6s}  "
+                         f"{r['return_pct']:+6.2f}%")
     losers = [x for x in unowned if x['return_pct'] < 0]
     if losers:
         losers.sort(key=lambda x: x['return_pct'])  # 跌幅最大在前
@@ -243,7 +275,8 @@ def format_unowned_picks(held_codes: set, days: int = 30,
         lines.append(f'\n📉 幸亏没买 Top {n_l} (跌幅最大):')
         for r in losers[:n_l]:
             lines.append(f"  {r['symbol']}  {r['name'][:8]:<8s}  "
-                         f"{r['source'][:20]:<20s}  {r['status']:<8s}  {r['return_pct']:+6.2f}%")
+                         f"{_src_cn(r['source']):<12s}  {_st_cn(r['status']):<6s}  "
+                         f"{r['return_pct']:+6.2f}%")
     return '\n'.join(lines)
 
 
