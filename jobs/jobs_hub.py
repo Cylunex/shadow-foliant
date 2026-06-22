@@ -1493,12 +1493,36 @@ def task_dragon_tiger_archive():
                  finished_at=datetime.now().isoformat())
 
 
+_STRATEGY_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def _call_with_hard_timeout(label: str, fn: Callable, timeout: int = 120):
+    """套硬超时调 fn() — 不论内部 pywencai/akshare/socket 如何卡死, timeout 秒后必抛 TimeoutError。
+    背景: pywencai_safe 内部已 90s 超时, 但实测 unified_selection 仍出现单策略卡 30 分钟,
+    可能是底层 socket/lock/线程池死锁绕开了内层超时。在调用层加外层 future timeout 兜底,
+    任何"莫名卡"都被切断 → 5 大策略中坏掉一两个也不拖死整个选股流程。"""
+    global _STRATEGY_TIMEOUT_POOL
+    if _STRATEGY_TIMEOUT_POOL is None:
+        _STRATEGY_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=5, thread_name_prefix='strategy-timeout')
+    fut = _STRATEGY_TIMEOUT_POOL.submit(fn)
+    try:
+        return fut.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        fut.cancel()
+        raise TimeoutError(f'{label} 超时 {timeout}s (孤儿线程留给底层自然结束)')
+
+
 def _run_strategy_scans() -> dict:
-    """执行5大策略扫描，返回汇总结果。单个策略失败不影响其他，并推送告警。"""
+    """执行5大策略扫描，返回汇总结果。单个策略失败不影响其他，并推送告警。
+    每个策略调用都套 120s 硬超时(外层兜底, 防底层卡死绕过内部超时)。"""
     results = {}
     try:
         from low_price_bull_selector import LowPriceBullSelector
-        ok, df, msg = LowPriceBullSelector().get_low_price_stocks(top_n=5)
+        ok, df, msg = _call_with_hard_timeout(
+            '低价擒牛',
+            lambda: LowPriceBullSelector().get_low_price_stocks(top_n=5),
+            timeout=120)
         results['低价擒牛'] = (ok, df, msg)
         if not ok:
             _push_error('策略扫描失败-低价擒牛', msg)
@@ -1507,7 +1531,10 @@ def _run_strategy_scans() -> dict:
         _push_error('策略扫描失败-低价擒牛', str(e))
     try:
         from small_cap_selector import SmallCapSelector
-        ok, df, msg = SmallCapSelector().get_small_cap_stocks(top_n=5)
+        ok, df, msg = _call_with_hard_timeout(
+            '小市值',
+            lambda: SmallCapSelector().get_small_cap_stocks(top_n=5),
+            timeout=120)
         results['小市值'] = (ok, df, msg)
         if not ok:
             _push_error('策略扫描失败-小市值', msg)
@@ -1516,7 +1543,10 @@ def _run_strategy_scans() -> dict:
         _push_error('策略扫描失败-小市值', str(e))
     try:
         from profit_growth_selector import ProfitGrowthSelector
-        ok, df, msg = ProfitGrowthSelector().get_profit_growth_stocks(top_n=5)
+        ok, df, msg = _call_with_hard_timeout(
+            '净利增长',
+            lambda: ProfitGrowthSelector().get_profit_growth_stocks(top_n=5),
+            timeout=120)
         results['净利增长'] = (ok, df, msg)
         if not ok:
             _push_error('策略扫描失败-净利增长', msg)
@@ -1525,7 +1555,10 @@ def _run_strategy_scans() -> dict:
         _push_error('策略扫描失败-净利增长', str(e))
     try:
         from value_stock_selector import ValueStockSelector
-        ok, df, msg = ValueStockSelector().get_value_stocks(top_n=5)
+        ok, df, msg = _call_with_hard_timeout(
+            '低估值',
+            lambda: ValueStockSelector().get_value_stocks(top_n=5),
+            timeout=120)
         results['低估值'] = (ok, df, msg)
         if not ok:
             _push_error('策略扫描失败-低估值', msg)
@@ -1534,10 +1567,13 @@ def _run_strategy_scans() -> dict:
         _push_error('策略扫描失败-低估值', str(e))
     try:
         from main_force_selector import MainForceStockSelector
-        _mf = MainForceStockSelector()
-        ok, df, msg = _mf.get_main_force_stocks(days_ago=5)
-        if ok and df is not None and len(df) > 0:
-            df = _mf.get_top_stocks(df, top_n=5)
+        def _do_main_force():
+            mf = MainForceStockSelector()
+            r_ok, r_df, r_msg = mf.get_main_force_stocks(days_ago=5)
+            if r_ok and r_df is not None and len(r_df) > 0:
+                r_df = mf.get_top_stocks(r_df, top_n=5)
+            return r_ok, r_df, r_msg
+        ok, df, msg = _call_with_hard_timeout('主力资金', _do_main_force, timeout=120)
         results['主力资金'] = (ok, df, msg)
         if not ok:
             _push_error('策略扫描失败-主力资金', msg)
