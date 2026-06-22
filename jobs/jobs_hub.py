@@ -899,7 +899,7 @@ def task_ai_eval_weekly():
         pass
     started = datetime.now().isoformat()
     try:
-        from ai_evaluation import evaluate_by_source, evaluate_all, format_report
+        from ai_evaluation import evaluate_by_source, evaluate_all, format_report, format_unowned_picks
         overall = evaluate_all(days=30)
         by_src = evaluate_by_source(days=30)
         report_text = (
@@ -907,6 +907,19 @@ def task_ai_eval_weekly():
             f'\n样本: {overall.sample_size}  综合得分: {overall.score}  等级: {overall.grade}\n'
             f'\n{format_report(by_src)}\n'
         )
+
+        # ⭐ 追加"推荐但未持仓"明细(具体票名 + 真实收益), 让用户看错过的机会 / 幸亏没买的雷
+        try:
+            from portfolio_db import portfolio_db
+            held = {str(s.get('code') or '').zfill(6)
+                    for s in (portfolio_db.get_all_stocks() or [])
+                    if s.get('code')}
+            unowned_section = format_unowned_picks(held, days=30, top_winners=10, top_losers=5)
+            if unowned_section:
+                report_text += '\n' + unowned_section + '\n'
+        except Exception as ue:
+            print(f'[ai_eval_weekly] 未持仓明细拼接失败: {type(ue).__name__}: {str(ue)[:80]}')
+
         try:
             from notification_router import send
             send('archive', 'AI 推荐周报', report_text)

@@ -194,6 +194,59 @@ def format_report(result_or_dict) -> str:
     return '\n'.join(lines)
 
 
+def format_unowned_picks(held_codes: set, days: int = 30,
+                         top_winners: int = 10, top_losers: int = 5) -> str:
+    """列出"推荐了但用户没买"的票, 按真实收益排序 — 让用户看到错过的机会 + 幸亏没买的雷。
+
+    Args:
+        held_codes: 用户当前持仓代码集合(6 位 zfill)。空集合表示完全没持仓 → 列出所有。
+        days: 评估区间(天)
+        top_winners: 涨幅 Top N(错过的机会)
+        top_losers: 跌幅 Top N(幸亏没买)
+
+    Returns:
+        Markdown 文本块, 无未持仓样本返回空字符串。
+    """
+    recs = _fetch_period(days)
+    unowned = []
+    for r in recs:
+        sym = str(r.get('symbol') or '').zfill(6)
+        if not sym or sym in held_codes:
+            continue
+        ret = _rec_return(r)
+        if ret is None:
+            continue
+        unowned.append({
+            'symbol': sym,
+            'name': r.get('name', '') or '',
+            'source': r.get('source', '') or '(unknown)',
+            'status': r.get('close_reason') or 'pending',
+            'return_pct': ret,
+        })
+    if not unowned:
+        return ''
+    unowned.sort(key=lambda x: -x['return_pct'])
+
+    lines = ['', '=== 推荐但未持仓(按真实收益排序) ===']
+    n_w = min(top_winners, len(unowned))
+    if n_w > 0 and unowned[0]['return_pct'] > 0:
+        lines.append(f'\n📈 错过的机会 Top {n_w}:')
+        for r in unowned[:n_w]:
+            if r['return_pct'] <= 0:
+                break
+            lines.append(f"  {r['symbol']}  {r['name'][:8]:<8s}  "
+                         f"{r['source'][:20]:<20s}  {r['status']:<8s}  {r['return_pct']:+6.2f}%")
+    losers = [x for x in unowned if x['return_pct'] < 0]
+    if losers:
+        losers.sort(key=lambda x: x['return_pct'])  # 跌幅最大在前
+        n_l = min(top_losers, len(losers))
+        lines.append(f'\n📉 幸亏没买 Top {n_l} (跌幅最大):')
+        for r in losers[:n_l]:
+            lines.append(f"  {r['symbol']}  {r['name'][:8]:<8s}  "
+                         f"{r['source'][:20]:<20s}  {r['status']:<8s}  {r['return_pct']:+6.2f}%")
+    return '\n'.join(lines)
+
+
 if __name__ == '__main__':
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -205,3 +258,7 @@ if __name__ == '__main__':
     print('\n按 source 拆分:')
     by_src = evaluate_by_source(days=30)
     print(format_report(by_src))
+
+    # 自检:未持仓明细(用空集合 = 全部都算"未持仓")
+    print('\n未持仓推荐明细(测试用空持仓集合):')
+    print(format_unowned_picks(held_codes=set(), days=30))
