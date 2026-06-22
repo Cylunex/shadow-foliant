@@ -151,6 +151,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
         'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
     },
+    'portfolio_stress_ai': {
+        'cn': '🛡️ 组合压力情景叙事官',
+        'schedule': '周日 16:00',
+        'category': '核心',
+        'default': True,  # scenario_stress 已写好8情景却无人调;AI 翻译成最脆弱情景+风险担当+减仓对冲预案
+        'description': '周末跑全8宏观情景压力+集中度,AI 给最脆弱情景/风险担当持仓/具体减仓对冲建议',
+    },
     'research_digest': {
         'cn': '📑 研报增量解读',
         'schedule': '16:05 每日',

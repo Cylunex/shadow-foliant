@@ -3657,6 +3657,35 @@ def task_portfolio_health_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_portfolio_stress_ai():
+    """🛡️ 组合压力情景叙事官(周日 16:00):跑全 8 宏观情景压力 + 集中度 → AI 风险预案
+    (最脆弱情景/风险担当持仓/具体减仓对冲建议)。开关 portfolio_stress_ai(默认开)。周末照跑(静态分析)。"""
+    job = 'portfolio_stress_ai'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    started = datetime.now().isoformat()
+    try:
+        from portfolio_stress_ai import run_stress_narrative
+        res = run_stress_narrative(include_funds=True)
+        if res.get('ok') and res.get('text'):
+            try:
+                from notification_router import send
+                send('report', '🛡️ 组合压力预案', res['text'])
+            except Exception as ne:
+                print(f'[portfolio_stress_ai] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_research_digest():
     """📑 研报增量解读(16:05 盘后):对 持仓+当日综合选股 拉近 10 天券商研报 → AI 提炼核心逻辑+评级方向。
     强看多+隐含空间>8% 写 decision_signal(source_type='research')→ 16:10 方向后验。
@@ -4079,6 +4108,15 @@ def register_default_jobs():
         })
     except Exception as e:
         print(f'[jobs_hub] weekly_analysis 注册失败: {e}')
+
+    try:
+        wrapped = hub._wrap('portfolio_stress_ai', task_portfolio_stress_ai)
+        job = schedule.every().sunday.at('16:00').do(wrapped)
+        hub._registered.append({
+            'name': 'portfolio_stress_ai', 'when': 'sun 16:00 CST', 'job': job,
+        })
+    except Exception as e:
+        print(f'[jobs_hub] portfolio_stress_ai 注册失败: {e}')
 
     try:
         wrapped = hub._wrap('weekly_db_cleanup', task_weekly_db_cleanup)

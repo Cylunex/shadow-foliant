@@ -801,6 +801,14 @@ def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[st
 
 
 @mcp.tool()
+def portfolio_stress_narrative() -> Dict[str, Any]:
+    """组合压力情景叙事:跑全 8 宏观情景(加息/贬值/大盘暴跌/流动性危机…)压力 + 集中度 →
+    AI 风险预案(最脆弱情景/跨情景风险担当持仓/具体减仓对冲建议)。复用 scenario_stress 引擎。"""
+    from portfolio_stress_ai import run_stress_narrative
+    return run_stress_narrative(include_funds=True)
+
+
+@mcp.tool()
 def research_digest(codes: List[str], days: int = 10) -> Dict[str, Any]:
     """研报增量解读:对给定股票拉近 days 天券商研报 → AI 提炼核心催化逻辑 + 评级方向(强看多/看多/中性/看空)
     + 隐含目标空间。强看多会写决策信号(source_type=research)进方向后验环。"""
