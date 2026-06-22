@@ -289,9 +289,14 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
     conn = db_connect(_DB_PATH)
     cur = conn.cursor()
 
+    _INA = 'FALSE' if USE_POSTGRES else '0'
+
     def _close(rec_id, kind, hit_field, realized):
-        """了结一条推荐:写 hit_*_at(若有) + closed_at/close_reason/realized_pnl_pct。"""
-        sets = [f'closed_at={NOW}', 'close_reason=?', 'realized_pnl_pct=?', f'updated_at={NOW}']
+        """了结一条推荐:写 hit_*_at(若有) + closed_at/close_reason/realized_pnl_pct + is_active=0。
+        ⚠️ 必须置 is_active=0:否则到期了结(无 hit_*_at)的推荐仍被 list_active 反复捞回重复处理,
+           active 表里堆积"僵尸已了结"行,每轮 check 都白跑一遍。"""
+        sets = [f'closed_at={NOW}', 'close_reason=?', 'realized_pnl_pct=?',
+                f'is_active={_INA}', f'updated_at={NOW}']
         params: List[Any] = [kind, realized]
         if hit_field:
             sets.insert(0, f'{hit_field}={NOW}')
@@ -361,7 +366,8 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
                     if age >= PENDING_EXPIRE_DAYS:
                         cur3.execute(
                             f'UPDATE ai_recommendations SET closed_at={NOW}, close_reason=?, '
-                            f'realized_pnl_pct=?, updated_at={NOW} WHERE id=?',
+                            f'realized_pnl_pct=?, is_active={"FALSE" if USE_POSTGRES else "0"}, '
+                            f'updated_at={NOW} WHERE id=?',
                             ('expired', _pnl_pct(_ref_of(rec), price), rec['id']))
                         stats['expired'] += 1
                 except Exception:

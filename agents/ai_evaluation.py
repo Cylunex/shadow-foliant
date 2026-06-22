@@ -206,7 +206,9 @@ CONFIDENCE_CN = {'高': '高信心', '中': '中信心', '低': '低信心', '':
 _BUCKET_ORDER = {
     'confidence': {'高': 0, '中': 1, '低': 2, '': 9},
     'horizon': {'短线(≤3日)': 0, '波段(4-10日)': 1, '中长线(>10日)': 2, '持有中': 8, '无数据': 9},
-    'outcome': {'止盈': 0, '止损': 3, '到期': 2, '持有中': 1},
+    # ⚠️ 键用 close_reason 原始英文值(target/stop/expired/pending),与 _bucket_key('outcome') 返回值一致;
+    #    曾误写中文(止盈/止损…)→ 永不匹配 → 排序全落默认值。展示名由 _st_cn 在 _bucket_label 里翻译。
+    'outcome': {'target': 0, 'pending': 1, 'expired': 2, 'stop': 3},
 }
 
 

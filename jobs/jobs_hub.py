@@ -2378,16 +2378,25 @@ def _daily_strategy_scan():
         fetcher = StockDataFetcher()
 
         scan_results = []
-        for code, name in list(pool.items())[:100]:  # 上限 100 防过载
+        scan_pool = list(pool.items())
+        if len(scan_pool) > 100:   # 截断不再静默:让"被丢弃的候选"可见,排查"为何漏了某票"
+            print(f'[wf_daily_strategy_scan] 股票池 {len(scan_pool)} 超上限,只扫前 100(丢弃 {len(scan_pool)-100})')
+        scan_fail = 0
+        for code, name in scan_pool[:100]:  # 上限 100 防过载
             try:
-                df = fetcher.get_stock_data(code, '2y')
+                df = fetcher.get_stock_data(code, '2y')  # 已共享 datahub 磁盘缓存,kline_prefetch 焐热
                 if df is None or len(df) == 0:
+                    scan_fail += 1
                     continue
                 r = run_one(code, df, name=name, evolved=True)
                 if r['matched_count'] > 0:
                     scan_results.append(r)
-            except Exception:
+            except Exception as _e:
+                scan_fail += 1
                 continue
+        if scan_fail:   # 批量取数失败不再无声:>1/3 失败往往是数据源抖动/被墙,值得告警排查
+            print(f'[wf_daily_strategy_scan] 扫描取数失败 {scan_fail}/{min(len(scan_pool),100)} 只'
+                  + ('(失败过半,疑数据源异常)' if scan_fail > min(len(scan_pool), 100) / 2 else ''))
 
         scan_results.sort(key=lambda x: x['matched_count'], reverse=True)
         top_n = scan_results[:5]  # 仅 TOP 5 跑 AI
@@ -2419,12 +2428,31 @@ def _daily_strategy_scan():
                 low_ans = answer.lower()
                 is_strong = 'strong_buy' in low_ans or 'strong buy' in low_ans
                 is_buy = is_strong or 'buy' in low_ans
+                ref = _current_price(r['symbol'])
+                tp, sl, tgt = _parse_tp_sl(answer, ref)
+
+                # ── 决策信号(统一信号层):捕获 TOP5 的**完整结论**(含非买入),source_type='selection' ──
+                # 与推荐池分工:推荐池只装被监控的买入+真实P&L;信号层是"广度索引",存全 8 态结论 + 方向后验,
+                # 让"扫到但 AI 说别买"的否决也可回溯,并支持 selection vs analysis 跨来源胜率对比。失败不影响主流程。
+                try:
+                    from decision_signal import create_signal, normalize_action
+                    _act = 'buy' if is_buy else normalize_action('hold', answer)
+                    _score = 85 if is_strong else (70 if is_buy else (40 if _act == 'avoid' else 50))
+                    create_signal(
+                        code=r['symbol'], name=r['name'], action=_act,
+                        source_type='selection', source_ref=f'strat:{hits[:60]}',
+                        confidence=('低' if fb['conservative'] else '中'), score=_score,
+                        horizon='swing', ref_price=ref,
+                        stop_loss=sl if is_buy else None,
+                        target_price=(tp or tgt) if is_buy else None,
+                        reason=f'命中 {len(r["matched"])} 策略({hits[:100]}) + AI 研判')
+                except Exception as _se:
+                    print(f'[wf_daily_strategy_scan] 决策信号落库跳过: {type(_se).__name__}: {str(_se)[:60]}')
+
                 # 反馈门槛:本策略历史战绩差(conservative)时,只收 strong_buy 且不自动启用监控
                 if fb['conservative'] and not is_strong:
                     continue
                 if is_buy:
-                    ref = _current_price(r['symbol'])
-                    tp, sl, tgt = _parse_tp_sl(answer, ref)
                     # 买入无止损 → 按默认止损(现价×0.92,即8%)兜底:确保有风险边界 + 监控能触发止损,杜绝"无止损绕过盈亏比"
                     if ref and (not sl or sl <= 0 or sl >= ref):
                         sl = round(ref * 0.92, 2)
