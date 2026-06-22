@@ -727,41 +727,34 @@ def task_daily_backtest():
             wr = sum(1 for x in rets if x > 0) / len(rets) * 100
             return (round(wr, 1), round(sum(rets) / len(rets), 2), len(rets))
 
+        # N² 回测(股 × 变体)是全任务最重的一段,纯 CPU(pandas/numpy 在内存 df 上算)。
+        # 用**进程池按股并行**(每 worker 跑该股全部变体):结果与串行逐位一致,实测多核 ~Nx 提速,
+        # 把原 45~60min 压到个位数分钟、不再踩 deadline。受限环境(无法 fork/spawn)自动回退串行。
         total_backtests = 0
-        for code, name, df in valid_stocks:
-            for v in all_variants:
-                sid = v['base_strategy']
-                vid = v['id']
-                params = v['params'] if isinstance(v['params'], dict) else json.loads(v['params'])
-                params = coerce_params(sid, params)  # 旧库浮点参数对齐网格(天数/周期转int)
-                key = f"{sid}:{vid}"
-                hd = int(params.get('hold_days') or 10)  # 持有期跟变体走(进化参数)
-                try:
-                    r = backtest_one(code, sid, df, None, None, hold_days=hd,
-                                     stop_pct=8, target_pct=15, params=params)
-                    if r.get('error'):
-                        continue
-                    ws = r.get('summary', {}) or {}
-                    trades = r.get('trades') or []
-                    tr_trades = [t for t in trades if (t.get('trigger_date') or '') < _split_date]
-                    ho_trades = [t for t in trades if (t.get('trigger_date') or '') >= _split_date]
-                    tr_wr, tr_ar, tr_n = _agg_trades(tr_trades)   # 训练集
-                    ho_wr, ho_ar, ho_n = _agg_trades(ho_trades)   # 样本外
-                    strategy_results[key]['results'].append({
-                        'code': code, 'name': name,
-                        'win_rate': tr_wr,       # 训练集驱动适应度/进化(holdout 真·样本外)
-                        'avg_ret': tr_ar,
-                        'max_dd': ws.get('avg_max_dd_pct', 0) or 0,
-                        'best_ret': ws.get('max_win_pct', 0) or 0,
-                        'worst_ret': ws.get('max_loss_pct', 0) or 0,
-                        'trigger_count': tr_n,
-                        'ho_wr': ho_wr, 'ho_ar': ho_ar, 'ho_n': ho_n,
-                        'score': compute_strategy_score(tr_wr, tr_ar, tr_n,
-                                                        max_trigger=n_pool, sample_stocks=1),
-                    })
+        _bt_tasks = [(code, name, df, all_variants, _split_date, n_pool)
+                     for code, name, df in valid_stocks]
+        _per_stock = None
+        _workload = len(valid_stocks) * max(1, len(all_variants))
+        if len(valid_stocks) > 1 and _workload >= 200:
+            try:
+                import os as _os4
+                from concurrent.futures import ProcessPoolExecutor
+                from genome_bt_worker import run_stock as _gbt
+                _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
+                with ProcessPoolExecutor(max_workers=_nw) as _ex:
+                    _per_stock = list(_ex.map(_gbt, _bt_tasks))
+                print(f'[daily_backtest] 进程池并行回测: {len(valid_stocks)}股 × {len(all_variants)}变体, {_nw} 进程')
+            except Exception as _pe:
+                print(f'[daily_backtest] 进程池不可用,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
+                _per_stock = None
+        if _per_stock is None:
+            from genome_bt_worker import run_stock as _gbt
+            _per_stock = [_gbt(t) for t in _bt_tasks]
+        for _stock_out in _per_stock:
+            for key, res in (_stock_out or []):
+                if key in strategy_results:
+                    strategy_results[key]['results'].append(res)
                     total_backtests += 1
-                except Exception:
-                    continue
 
         # ── 5. 横截面聚合 & 入库 ──
         # 变体适应度逐个更新;strategy_scores/个股适配 每策略只写"最优变体"的结果
@@ -2366,6 +2359,25 @@ def _daily_strategy_scan():
                             pool[code] = name
         except Exception as e:
             print(f'[wf_daily_strategy_scan] 龙虎榜加载失败(池子可能偏小): {e}')
+
+        # 并入今日 unified_selection(09:45 综合选股)的 TOP 选股 —— 让早盘多因子/主力选出的候选
+        # 也走"策略命中 → AI 深析 → 推荐池 + 决策信号"全流程被追踪(此前它们只零成本到期了结)。
+        try:
+            _snap = get_indicator_snapshot('_last_selection')
+            _picks = []
+            if _snap and _snap.get('indicators'):
+                _ind = _snap['indicators']
+                _picks = _ind if isinstance(_ind, list) else _ind.get('picks', [])
+            _us_added = 0
+            for _c in _picks:
+                _c = str(_c).strip()
+                if _c and _c not in pool:
+                    pool[_c] = ''
+                    _us_added += 1
+            if _us_added:
+                print(f'[wf_daily_strategy_scan] 并入 unified_selection 今日选股 {_us_added} 只')
+        except Exception as e:
+            print(f'[wf_daily_strategy_scan] unified_selection 池并入失败: {e}')
 
         if not pool:
             _log_run(job, 'success', error='empty_pool',
