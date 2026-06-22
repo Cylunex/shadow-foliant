@@ -136,6 +136,28 @@ def f_mom_accel(df):
     return m - m.shift(20)
 
 
+def f_high_52w(df):
+    """52周高点占比(George-Hwang 2004):close / 252日最高。越接近1越强,方向+1。
+
+    经典「52周高点」异常:股价逼近一年高点时,投资者锚定旧高点而对利好反应不足,
+    随后继续上行 → 该比值高的未来收益更好。借鉴 Vibe-Trading academic_high52w。"""
+    c = _close(df)
+    if c is None:
+        return None
+    return c / c.rolling(252).max().replace(0, np.nan)
+
+
+def f_ret_skew(df):
+    """收益偏度(Harvey-Siddique 2000):日收益 60日滚动偏度,方向-1。
+
+    特质偏度异常:高(右)偏度的股票像彩票被高估、未来收益更差 → 方向-1。
+    借鉴 Vibe-Trading academic_retskew(其取 -skew 后正向,这里用原始偏度 + 方向-1,等价)。"""
+    c = _close(df)
+    if c is None:
+        return None
+    return c.pct_change().rolling(60).skew()
+
+
 # key: (中文名, 类别, 方向, fn)
 FACTORS: Dict[str, Tuple[str, str, int, Callable]] = {
     "mom_20":        ("20日动量",     "动量", +1, f_mom_20),
@@ -147,9 +169,11 @@ FACTORS: Dict[str, Tuple[str, str, int, Callable]] = {
     "max_ret_20":    ("彩票(最大日涨)", "波动", -1, f_max_ret_20),
     "ma_bias_20":    ("乖离MA20",     "位置", +1, f_ma_bias_20),
     "close_pos_20":  ("20日价格分位", "位置", +1, f_close_position_20),
+    "high_52w":      ("52周高点占比", "位置", +1, f_high_52w),
     "rsi_14":        ("RSI14",        "动量", +1, f_rsi_14),
     "vol_trend":     ("量能趋势",     "量能", +1, f_vol_trend),
     "amihud":        ("非流动性",     "流动性", -1, f_amihud),
+    "ret_skew":      ("收益偏度",     "波动", -1, f_ret_skew),
 }
 
 

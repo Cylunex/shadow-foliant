@@ -436,16 +436,39 @@ def _kline_ttl() -> int:
 
 
 def _sanitize_kline(df: pd.DataFrame) -> pd.DataFrame:
-    """K线数据质量护栏:丢弃收盘价 NaN / 非正(<=0)的脏行(会污染回测/因子/指标)。
-    只清明确无效的行,不动复权跳变等正常波动。列名兼容大小写。"""
+    """K线数据质量护栏:丢弃违反 OHLC 不变量的脏行(会污染回测/因子/指标)。
+    借鉴 Vibe-Trading 的 loader 边界校验:除收盘价 NaN/非正外,还查
+      high>=low · high>=max(open,close) · low<=min(open,close) · 各价 >0,
+    源断线重传偶发的错位/倒挂 bar(high<low、close 漂 0 等)一并清除。
+    只清明确无效的行,不动复权跳变等正常波动;列名兼容大小写。任何异常原样返回。"""
     if not isinstance(df, pd.DataFrame) or df.empty:
         return df
     try:
-        close_col = "Close" if "Close" in df.columns else ("close" if "close" in df.columns else None)
-        if close_col is None:
+        def _col(*names):
+            for n in names:
+                if n in df.columns:
+                    return pd.to_numeric(df[n], errors="coerce")
+            return None
+        c = _col("close", "Close", "收盘")
+        if c is None:
             return df
-        c = pd.to_numeric(df[close_col], errors="coerce")
         good = c.notna() & (c > 0)
+        o = _col("open", "Open", "开盘")
+        h = _col("high", "High", "最高")
+        lo = _col("low", "Low", "最低")
+        for col in (o, h, lo):                      # 在场的 OHL 价也须 >0
+            if col is not None:
+                good &= col.notna() & (col > 0)
+        if h is not None and lo is not None:
+            good &= h >= lo                          # 最高 ≥ 最低
+        if h is not None:                            # 最高须 ≥ 开/收
+            if o is not None:
+                good &= h >= o
+            good &= h >= c
+        if lo is not None:                           # 最低须 ≤ 开/收
+            if o is not None:
+                good &= lo <= o
+            good &= lo <= c
         return df[good] if not good.all() else df
     except Exception:
         return df
@@ -718,9 +741,12 @@ def sector_spot(top_n: int = 8, bottom_n: int = 5) -> dict:
 
 
 def sector_fund_flow(sector_type: str = "industry", top_n: int = 50) -> List[dict]:
-    """板块资金流(行业/概念)。list[dict]。"""
+    """板块资金流(行业/概念)。list[dict]。
+    主源东财 push2;push2 被墙时自动降级到 datacenter getbkzj(非 push2,借鉴 go-stock)。"""
     return _route(f"sector_fund_flow_{sector_type}",
-                  [("a_stock", lambda: _adapter().get_sector_fund_flow(sector_type, top_n))], empty=[]) or []
+                  [("push2", lambda: _adapter().get_sector_fund_flow(sector_type, top_n)),
+                   ("bkzj", lambda: _adapter().get_sector_fund_flow_bkzj(sector_type, top_n))],
+                  empty=[]) or []
 
 
 def concept_blocks(code: str) -> dict:

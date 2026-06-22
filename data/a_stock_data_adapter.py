@@ -614,6 +614,40 @@ def _sector_fund_flow_push2(sector_type: str = "industry", top_n: int = 50) -> l
         return []
 
 
+def _sector_fund_flow_bkzj(sector_type: str = "industry", top_n: int = 50) -> list[dict]:
+    """行业/概念板块资金流 —— 东财 datacenter `getbkzj`(**非 push2**,借鉴 go-stock)。
+
+    作为 `_sector_fund_flow_push2` 的跨源兜底:push2.eastmoney 在受限网络被墙时,
+    data.eastmoney(datacenter,本项目龙虎榜/解禁等已在用,不被墙)仍可取板块主力净流入。
+    该端点字段较少(只给 code/name/主力净流入 f62),richer 分档字段补 0,口径与 push2 版一致(元)。
+    """
+    code = "m:90+t:2" if sector_type == "industry" else "m:90+t:3"
+    url = "https://data.eastmoney.com/dataapi/bkzj/getbkzj"
+    headers = {"User-Agent": UA, "Referer": "https://data.eastmoney.com/"}
+    try:
+        r = _session.get(url, params={"key": "f62", "code": code}, headers=headers, timeout=15)
+        items = (r.json().get("data") or {}).get("diff") or []
+        if not items:
+            return []
+        items = sorted(items, key=lambda x: (x.get("f62") or 0), reverse=True)
+        rows = []
+        for item in items[:top_n]:
+            rows.append({
+                "name": item.get("f14", ""),
+                "code": item.get("f12", ""),
+                "change_pct": item.get("f3") or 0,
+                "main_net_inflow": item.get("f62") or 0,
+                "main_net_inflow_pct": item.get("f184") or 0,
+                "super_large_net_inflow": 0, "large_net_inflow": 0,
+                "medium_net_inflow": 0, "small_net_inflow": 0,
+                "leader": "", "leader_change": 0,
+            })
+        return rows
+    except Exception as e:
+        print(f"[a-stock] 板块资金流(bkzj兜底)请求失败({sector_type}): {e}")
+        return []
+
+
 def _dragon_tiger_board(code: str, trade_date: str, look_back: int = 30) -> dict:
     """龙虎榜数据聚合"""
     code = _normalize_code(code)
@@ -1142,6 +1176,10 @@ class AStockDataAdapter:
         sector_type: 'industry' 行业 / 'concept' 概念
         """
         return _sector_fund_flow_push2(sector_type, top_n)
+
+    def get_sector_fund_flow_bkzj(self, sector_type: str = "industry", top_n: int = 50) -> list[dict]:
+        """板块资金流 —— 非 push2 兜底源（东财 datacenter getbkzj，受限网络下 push2 被墙时用）"""
+        return _sector_fund_flow_bkzj(sector_type, top_n)
 
     def get_dragon_tiger(self, symbol: str, trade_date: str = None, look_back: int = 30) -> dict:
         """龙虎榜数据"""
