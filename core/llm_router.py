@@ -206,13 +206,15 @@ class LLMRouter:
              temperature: float = 0.7, max_tokens: int = 2000,
              thinking: bool = False,
              prefer: Optional[str] = None,
-             timeout: Optional[float] = None) -> Tuple[str, str]:
+             timeout: Optional[float] = None,
+             call_type: str = 'misc') -> Tuple[str, str]:
         """调用 LLM; 返回 (response_text, used_provider_name)
 
         Args:
             messages: OpenAI 格式
             thinking: True 时优先用 thinking_model(如 R1/QwQ/Sonnet-Thinking)
             prefer: 强制指定 provider 名(仍带降级 fallback)
+            call_type: 用量遥测的归类标签(technical/fundamental/fund_flow/discussion/decision/...)
             timeout: 单 provider 调用超时(秒)。None→env LLM_TIMEOUT(默认40);thinking 取 max(timeout,120)。
                      ⚠️ 关键:openai SDK 默认超时 ~10min, 无超时会让"挂起的 provider"阻塞调用方主路径
                      (选股 job/持仓建议/离场)。这里强制有界:超时即抛错 → 降级下一 provider。
@@ -260,6 +262,13 @@ class LLMRouter:
                 if msg.content:
                     result += msg.content
                 if result:
+                    # 旁路用量遥测(失败绝不影响返回)
+                    try:
+                        import llm_usage
+                        llm_usage.record_from_resp(call_type, f'{p.name}:{model}', resp,
+                                                   thinking=thinking)
+                    except Exception:
+                        pass
                     return result, f'{p.name}:{model}'
                 errors.append(f'{p.name}:empty')
                 # empty 也按错误对待, 走下一行的失败日志

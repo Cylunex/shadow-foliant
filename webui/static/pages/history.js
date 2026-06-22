@@ -3,6 +3,10 @@ import { api } from '../lib.js'
 
 const RATINGS = ['', '买入', '持有', '卖出']
 const RATING_LABELS = { '': '全部评级', '买入': '买入', '持有': '持有', '卖出': '卖出' }
+const DIMS = [
+  { k:'source', t:'来源' }, { k:'confidence', t:'信心度' },
+  { k:'horizon', t:'持有周期' }, { k:'outcome', t:'了结方式' }, { k:'month', t:'月份' },
+]
 
 export default {
   template: `
@@ -11,6 +15,7 @@ export default {
     <div class="tabs" style="margin-bottom:18px">
       <div class="tab" :class="{active:tab==='records'}" @click="tab='records'">📋 深度分析记录</div>
       <div class="tab" :class="{active:tab==='eval'}" @click="switchEval">⭐ AI推荐战绩</div>
+      <div class="tab" :class="{active:tab==='usage'}" @click="switchUsage">🔢 Token用量</div>
     </div>
 
     <!-- 深度分析记录 -->
@@ -46,9 +51,16 @@ export default {
       <div v-if="!r.loading && r.searched && !r.list.length" class="sub" style="margin-top:12px">暂无记录</div>
     </div>
 
-    <!-- AI推荐战绩 (原功能) -->
+    <!-- AI推荐战绩 + 维度分桶 -->
     <div v-if="tab==='eval'">
-      <p class="sub">盈利反馈环:按来源统计 AI 推荐的真实胜率 / 平均收益 / 盈亏比(近 90 天)。需生产 PG 数据。</p>
+      <p class="sub">盈利反馈环:统计 AI 推荐的真实胜率 / 平均收益 / 盈亏比(近 90 天)。可按维度分桶看"哪种推荐真能赚"。需生产 PG 数据。</p>
+      <div class="row" style="gap:8px;align-items:flex-end;margin-bottom:10px">
+        <div><label>分桶维度</label>
+          <select v-model="h.dim" @change="loadDim" style="width:120px">
+            <option v-for="d in DIMS" :value="d.k">{{d.t}}</option>
+          </select>
+        </div>
+      </div>
       <div v-if="h.err" class="err">{{h.err}}(本地 SQLite 无 ai_recommendations 表属正常,生产 PG 下可用)</div>
       <div v-if="h.loading" class="loading">加载中…</div>
       <div v-if="h.data" class="card">
@@ -57,7 +69,51 @@ export default {
           <div class="metric"><div class="k">综合得分</div><div class="v">{{h.data.overall.score}}</div></div>
           <div class="metric"><div class="k">等级</div><div class="v"><span class="grade">{{h.data.overall.grade}}</span></div></div>
         </div>
-        <pre style="white-space:pre-wrap;color:var(--muted);margin-top:14px;font:13px/1.6 inherit">{{h.data.report}}</pre>
+        <pre style="white-space:pre-wrap;color:var(--muted);margin-top:14px;font:13px/1.6 inherit">{{h.dimReport||h.data.report}}</pre>
+      </div>
+    </div>
+
+    <!-- Token 用量 -->
+    <div v-if="tab==='usage'">
+      <p class="sub">LLM Token 用量遥测:多智能体每天/每环节烧了多少 token、走哪个 provider/model(近 {{u.days}} 天)。</p>
+      <div class="row" style="gap:8px;align-items:flex-end;margin-bottom:10px">
+        <div><label>区间(天)</label>
+          <select v-model.number="u.days" @change="loadUsage" style="width:90px">
+            <option :value="7">7</option><option :value="30">30</option><option :value="90">90</option>
+          </select>
+        </div>
+      </div>
+      <div v-if="u.err" class="err">{{u.err}}</div>
+      <div v-if="u.loading" class="loading">加载中…</div>
+      <div v-if="u.data" class="card">
+        <div class="metrics">
+          <div class="metric"><div class="k">调用次数</div><div class="v">{{u.data.totals.calls}}</div></div>
+          <div class="metric"><div class="k">总 Token</div><div class="v">{{fmt(u.data.totals.total_tokens)}}</div></div>
+          <div class="metric"><div class="k">输入</div><div class="v">{{fmt(u.data.totals.prompt_tokens)}}</div></div>
+          <div class="metric"><div class="k">输出</div><div class="v">{{fmt(u.data.totals.completion_tokens)}}</div></div>
+        </div>
+        <div v-if="!u.data.totals.calls" class="sub" style="margin-top:12px">暂无用量数据(尚未发生 LLM 调用,或遥测表未建)。</div>
+        <div v-if="u.data.by_model.length" class="row" style="gap:24px;flex-wrap:wrap;margin-top:16px;align-items:flex-start">
+          <div style="flex:1;min-width:280px">
+            <div class="sub" style="margin-bottom:6px">按模型</div>
+            <table style="width:100%">
+              <thead><tr><th>provider:model</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th></tr></thead>
+              <tbody><tr v-for="m in u.data.by_model" :key="m.model">
+                <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{m.model}}</td>
+                <td style="text-align:right">{{m.calls}}</td><td style="text-align:right">{{fmt(m.total_tokens)}}</td>
+              </tr></tbody>
+            </table>
+          </div>
+          <div style="flex:1;min-width:280px">
+            <div class="sub" style="margin-bottom:6px">按环节(call_type)</div>
+            <table style="width:100%">
+              <thead><tr><th>环节</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th></tr></thead>
+              <tbody><tr v-for="c in u.data.by_call_type" :key="c.call_type">
+                <td>{{c.call_type}}</td><td style="text-align:right">{{c.calls}}</td><td style="text-align:right">{{fmt(c.total_tokens)}}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>`,
@@ -65,7 +121,10 @@ export default {
     const r = reactive({ code:'', list:[], err:'', loading:false, searched:false, mode:'all',
                          date_from:'', date_to:'', rating:'' })
     const tab = ref('records')
-    const h = reactive({ data:null, err:'', loading:false })
+    const h = reactive({ data:null, err:'', loading:false, dim:'source', dimReport:'' })
+    const u = reactive({ data:null, err:'', loading:false, days:30 })
+
+    function fmt(n){ n = Number(n)||0; return n>=1000 ? n.toLocaleString('en-US') : ''+n }
 
     function _buildParams(){
       let qs = 'limit=50'
@@ -96,7 +155,28 @@ export default {
       }
     }
 
+    async function loadDim(){
+      h.dimReport=''
+      if(h.dim==='source') return  // 默认报告即按来源,直接复用 h.data.report
+      try{
+        const d = await api('/api/history/eval/by?dim='+h.dim+'&days=90')
+        h.dimReport = d.report || ''
+      }catch(e){ h.dimReport = '加载失败: '+e }
+    }
+
+    async function switchUsage(){
+      tab.value = 'usage'
+      if(!u.data && !u.loading) loadUsage()
+    }
+
+    async function loadUsage(){
+      u.loading=true; u.err=''
+      try{ u.data = await api('/api/llm/usage?days='+u.days) }
+      catch(e){ u.err=''+e }finally{ u.loading=false }
+    }
+
     onMounted(doSearch)
-    return { tab, r, h, doSearch, switchEval, RATINGS, RATING_LABELS }
+    return { tab, r, h, u, doSearch, switchEval, switchUsage, loadDim, loadUsage, fmt,
+             RATINGS, RATING_LABELS, DIMS }
   }
 }

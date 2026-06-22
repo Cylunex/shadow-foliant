@@ -96,7 +96,8 @@ def _fetch_period(days: int, source: Optional[str] = None) -> List[Dict[str, Any
     sql = '''
         SELECT id, symbol, name, source, target_price, take_profit, stop_loss,
                hit_target_at, hit_stop_at, recommended_at,
-               ref_price, last_price, realized_pnl_pct, close_reason
+               ref_price, last_price, realized_pnl_pct, close_reason,
+               confidence, rating
         FROM ai_recommendations
         WHERE recommended_at >= ?
     '''
@@ -111,7 +112,8 @@ def _fetch_period(days: int, source: Optional[str] = None) -> List[Dict[str, Any
     conn.close()
     keys = ['id', 'symbol', 'name', 'source', 'target_price', 'take_profit',
             'stop_loss', 'hit_target_at', 'hit_stop_at', 'recommended_at',
-            'ref_price', 'last_price', 'realized_pnl_pct', 'close_reason']
+            'ref_price', 'last_price', 'realized_pnl_pct', 'close_reason',
+            'confidence', 'rating']
     return [dict(zip(keys, r)) for r in rows]
 
 
@@ -195,12 +197,115 @@ def evaluate_all(days: int = 30) -> EvaluationResult:
     return _evaluate(_fetch_period(days), days, source='ALL')
 
 
-def evaluate_by_source(days: int = 30) -> Dict[str, EvaluationResult]:
+# ── 维度分桶(借鉴 DecisionSignal 的"按维度冻结统计胜率"思路)─────────────
+# 回答:不只"整体胜率多少",而是"哪个来源/哪种信心度/哪种持有周期真正赚钱"→ 回喂选股门槛。
+VALID_DIMENSIONS = ['source', 'confidence', 'horizon', 'outcome', 'month']
+
+CONFIDENCE_CN = {'高': '高信心', '中': '中信心', '低': '低信心', '': '未标信心'}
+# 桶排序权重(越小越靠前);未列出的桶排末尾按样本量
+_BUCKET_ORDER = {
+    'confidence': {'高': 0, '中': 1, '低': 2, '': 9},
+    'horizon': {'短线(≤3日)': 0, '波段(4-10日)': 1, '中长线(>10日)': 2, '持有中': 8, '无数据': 9},
+    'outcome': {'止盈': 0, '止损': 3, '到期': 2, '持有中': 1},
+}
+
+
+def _holding_days(r: Dict[str, Any]) -> Optional[int]:
+    """推荐到了结(或到现在)的持有天数;无入场时间返回 None。"""
+    rec_at = r.get('recommended_at')
+    if not rec_at:
+        return None
+    try:
+        start = _parse_dt(rec_at)
+    except Exception:
+        return None
+    end_raw = r.get('hit_target_at') or r.get('hit_stop_at')
+    try:
+        end = _parse_dt(end_raw) if end_raw else datetime.now()
+    except Exception:
+        end = datetime.now()
+    return max(0, (end - start).days)
+
+
+def _bucket_key(r: Dict[str, Any], dim: str) -> str:
+    """把一条推荐归到指定维度的桶。返回桶的原始键(展示名在 _bucket_label 里转)。"""
+    if dim == 'source':
+        return r.get('source') or '(unknown)'
+    if dim == 'confidence':
+        return str(r.get('confidence') or '')
+    if dim == 'outcome':
+        return r.get('close_reason') or 'pending'
+    if dim == 'month':
+        return str(r.get('recommended_at') or '')[:7] or '(unknown)'
+    if dim == 'horizon':
+        cr = r.get('close_reason')
+        if not cr:
+            return '持有中'
+        d = _holding_days(r)
+        if d is None:
+            return '无数据'
+        if d <= 3:
+            return '短线(≤3日)'
+        if d <= 10:
+            return '波段(4-10日)'
+        return '中长线(>10日)'
+    return '(unknown)'
+
+
+def _bucket_label(key: str, dim: str) -> str:
+    if dim == 'source':
+        return _src_cn(key)
+    if dim == 'confidence':
+        return CONFIDENCE_CN.get(key, key or '未标信心')
+    if dim == 'outcome':
+        return _st_cn(key)
+    return key or '(unknown)'
+
+
+def evaluate_by(dim: str = 'source', days: int = 30) -> Dict[str, EvaluationResult]:
+    """按维度分桶评估。dim ∈ VALID_DIMENSIONS。返回 {桶键: EvaluationResult}(已按维度排序)。"""
+    if dim not in VALID_DIMENSIONS:
+        raise ValueError(f'不支持的维度 {dim};可用:{VALID_DIMENSIONS}')
     recs = _fetch_period(days)
-    by_src: Dict[str, List] = {}
+    by_bucket: Dict[str, List] = {}
     for r in recs:
-        by_src.setdefault(r['source'] or '(unknown)', []).append(r)
-    return {src: _evaluate(rs, days, source=src) for src, rs in by_src.items()}
+        by_bucket.setdefault(_bucket_key(r, dim), []).append(r)
+    results = {k: _evaluate(rs, days, source=k) for k, rs in by_bucket.items()}
+    order = _BUCKET_ORDER.get(dim)
+    if order is not None:
+        keys = sorted(results, key=lambda k: (order.get(k, 5), -results[k].sample_size))
+    else:  # source/month:source 按样本量,month 按时间
+        keys = (sorted(results) if dim == 'month'
+                else sorted(results, key=lambda k: -results[k].sample_size))
+    return {k: results[k] for k in keys}
+
+
+def evaluate_by_source(days: int = 30) -> Dict[str, EvaluationResult]:
+    """按来源分桶(evaluate_by('source') 的兼容别名)。"""
+    return evaluate_by('source', days)
+
+
+_DIM_CN = {'source': '来源', 'confidence': '信心度', 'horizon': '持有周期',
+           'outcome': '了结方式', 'month': '推荐月份'}
+
+
+def format_buckets(results: Dict[str, EvaluationResult], dim: str = 'source') -> str:
+    """把分桶评估结果格式化成文本块(桶标签按维度翻译)。"""
+    lines = [f'=== AI 推荐评估 · 按{_DIM_CN.get(dim, dim)}分桶 ===']
+    for key, r in results.items():
+        label = _bucket_label(key, dim)
+        lines.append(f'\n[{label}]  样本={r.sample_size} 期间={r.period_days}天')
+        if r.sample_size == 0:
+            lines.append('  (无样本)')
+            continue
+        m = r.metrics
+        if not m.get('n_with_return'):
+            lines.append('  (样本无入场价,无法计真实收益)')
+            continue
+        lines.append(f"  综合得分: {r.score}  等级: {r.grade}")
+        lines.append(f"  真实胜率: {m['win_rate_pct']}%  平均收益: {m['avg_return_pct']:+}%  "
+                     f"盈亏比: {m['profit_factor']}  (已了结{m['closed']}/持有中{m['pending']})")
+    return '\n'.join(lines)
 
 
 def format_report(result_or_dict) -> str:

@@ -272,6 +272,44 @@ def _eastmoney_reports(code: str, max_pages: int = 3) -> list[dict]:
     return all_records
 
 
+def _eastmoney_industry_reports(industry_code: str = "*", max_pages: int = 5,
+                                begin: str = "2024-01-01") -> list[dict]:
+    """东财行业研报列表(qType=1)。industry_code='*' 取全行业,或传具体行业代码(如 '1238')。
+
+    与个股研报(_eastmoney_reports, qType=0)同端点不同 qType。每条含
+    publishDate/industryName/industryCode/orgSName/title/emRatingName/reportType 等。
+    """
+    REPORT_API = "https://reportapi.eastmoney.com/report/list"
+    session = requests.Session()
+    session.headers.update({"User-Agent": UA, "Referer": "https://data.eastmoney.com/"})
+    try:
+        from rate_limiter import throttled_session
+        throttled_session(session)  # 研报分页请求自限流
+    except Exception:
+        pass
+    all_records = []
+    for page in range(1, max_pages + 1):
+        params = {
+            "industryCode": industry_code or "*", "pageSize": "100", "industry": "*",
+            "rating": "*", "ratingChange": "*",
+            "beginTime": begin, "endTime": "2030-01-01",
+            "pageNo": str(page), "fields": "", "qType": "1",
+        }
+        try:
+            r = session.get(REPORT_API, params=params, timeout=30)
+            d = r.json()
+            rows = d.get("data") or []
+            if not rows:
+                break
+            all_records.extend(rows)
+            if page >= (d.get("TotalPage", 1) or 1):
+                break
+        except Exception as e:
+            print(f"[a-stock] 行业研报请求失败: {e}")
+            break
+    return all_records
+
+
 def _ths_eps_forecast(code: str) -> pd.DataFrame:
     """同花顺机构一致预期EPS"""
     code = _normalize_code(code)
@@ -1051,6 +1089,11 @@ class AStockDataAdapter:
     def get_reports(self, symbol: str, max_pages: int = 3) -> list[dict]:
         """获取个股研报列表"""
         return _eastmoney_reports(symbol, max_pages)
+
+    def get_industry_reports(self, industry_code: str = "*", max_pages: int = 5,
+                             begin: str = "2024-01-01") -> list[dict]:
+        """获取东财行业研报列表(industry_code='*' 全行业)"""
+        return _eastmoney_industry_reports(industry_code, max_pages, begin)
 
     def get_eps_forecast(self, symbol: str) -> pd.DataFrame:
         """获取同花顺机构一致预期EPS"""

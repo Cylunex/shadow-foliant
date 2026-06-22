@@ -899,7 +899,8 @@ def task_ai_eval_weekly():
         pass
     started = datetime.now().isoformat()
     try:
-        from ai_evaluation import evaluate_by_source, evaluate_all, format_report, format_unowned_picks
+        from ai_evaluation import (evaluate_by_source, evaluate_all, format_report,
+                                    format_unowned_picks, evaluate_by, format_buckets)
         overall = evaluate_all(days=30)
         by_src = evaluate_by_source(days=30)
         report_text = (
@@ -907,6 +908,13 @@ def task_ai_eval_weekly():
             f'\n样本: {overall.sample_size}  综合得分: {overall.score}  等级: {overall.grade}\n'
             f'\n{format_report(by_src)}\n'
         )
+
+        # ⭐ 维度分桶:信心度 / 持有周期 — 看"高信心是否真更准""短线 vs 中长线哪个赚"
+        try:
+            for _dim in ('confidence', 'horizon'):
+                report_text += '\n' + format_buckets(evaluate_by(_dim, days=30), _dim) + '\n'
+        except Exception as de:
+            print(f'[ai_eval_weekly] 维度分桶拼接失败: {type(de).__name__}: {str(de)[:80]}')
 
         # ⭐ 追加"推荐但未持仓"明细(具体票名 + 真实收益), 让用户看错过的机会 / 幸亏没买的雷
         try:

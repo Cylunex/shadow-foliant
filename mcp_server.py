@@ -766,5 +766,39 @@ def datahub_health() -> Dict[str, Any]:
     return {'sources': datahub.source_stats(), 'cache': datahub.cache_stats()}
 
 
+@mcp.tool()
+def llm_token_usage(days: int = 30) -> Dict[str, Any]:
+    """LLM Token 用量遥测:近 N 天总量 + 按 model/call_type/天分布 + 最近调用。看多智能体烧了多少 token、走了哪个 provider。"""
+    import llm_usage
+    return llm_usage.summary(days=days)
+
+
+@mcp.tool()
+def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[str, Any]:
+    """AI 推荐胜率按维度分桶(dimension: source/confidence/horizon/outcome/month)。回答"哪个来源/哪种信心度/哪种持有周期真正赚钱"。⚠️需 PG。"""
+    from ai_evaluation import evaluate_by, format_buckets, VALID_DIMENSIONS
+    if dimension not in VALID_DIMENSIONS:
+        return {'error': f'不支持的维度 {dimension};可用:{VALID_DIMENSIONS}'}
+    results = evaluate_by(dimension, days=days)
+    return {
+        'dimension': dimension, 'days': days,
+        'report': format_buckets(results, dimension),
+        'buckets': [{
+            'bucket': k, 'sample': r.sample_size, 'score': r.score, 'grade': r.grade,
+            'win_rate_pct': r.metrics.get('win_rate_pct'),
+            'avg_return_pct': r.metrics.get('avg_return_pct'),
+            'profit_factor': r.metrics.get('profit_factor'),
+        } for k, r in results.items()],
+    }
+
+
+@mcp.tool()
+def industry_reports(industry_code: str = '*', pages: int = 5, begin: str = '2024-01-01') -> Any:
+    """东财行业研报列表(走 datahub:industry_reports)。industry_code='*' 取全行业,或传具体行业代码。每条含发布日/行业/标题/机构/评级。"""
+    import datahub
+    rows = datahub.industry_reports(industry_code=industry_code, max_pages=pages, begin=begin)
+    return {'industry_code': industry_code, 'count': len(rows or []), 'reports': rows or []}
+
+
 if __name__ == '__main__':
     mcp.run()

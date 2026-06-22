@@ -183,6 +183,8 @@ _CACHE_TTL: Dict[str, Any] = {
     "valuation": (3600, 43200),
     "full_valuation": (3600, 43200),
     "eps_forecast": 86400,
+    "stock_reports": 86400,
+    "industry_reports": 86400,
     "concept_blocks": 604800,
     "margin": 86400,
     "block_trade": 86400,
@@ -751,6 +753,20 @@ def eps_forecast(code: str) -> pd.DataFrame:
     return _route("eps_forecast", [("ths", lambda: _adapter().get_eps_forecast(code))], empty=pd.DataFrame())
 
 
+def stock_reports(code: str, max_pages: int = 3) -> List[dict]:
+    """个股研报列表(东财 qType=0)。list[dict]。"""
+    return _route("stock_reports",
+                  [("a_stock", lambda: _adapter().get_reports(code, max_pages))], empty=[]) or []
+
+
+def industry_reports(industry_code: str = "*", max_pages: int = 5,
+                     begin: str = "2024-01-01") -> List[dict]:
+    """东财行业研报列表(qType=1)。industry_code='*' 全行业,或具体行业代码。list[dict]。"""
+    return _route("industry_reports",
+                  [("a_stock", lambda: _adapter().get_industry_reports(industry_code, max_pages, begin))],
+                  empty=[]) or []
+
+
 # ══════════════════════════════════════════════════════════
 #  新闻/公告域
 # ══════════════════════════════════════════════════════════
@@ -1001,6 +1017,7 @@ for _name in ("quotes", "indices", "capital_flow_minute", "kline_with_indicators
               "margin", "block_trade", "holder_num_change", "dividend_history", "lockup_expiry",
               "hot_stocks", "sector_ranking", "sector_spot", "sector_fund_flow", "concept_blocks",
               "financials", "valuation", "full_valuation", "eps_forecast",
+              "stock_reports", "industry_reports",
               "stock_news", "market_news", "announcements", "screen", "convertible_bonds",
               "fund_nav_history"):
     globals()[_name] = _dh_cache(_name if _name != "fund_nav_history" else "fund_nav")(globals()[_name])
@@ -1038,6 +1055,8 @@ class _Hub:
     valuation = staticmethod(valuation)
     full_valuation = staticmethod(full_valuation)
     eps_forecast = staticmethod(eps_forecast)
+    stock_reports = staticmethod(stock_reports)
+    industry_reports = staticmethod(industry_reports)
     stock_news = staticmethod(stock_news)
     market_news = staticmethod(market_news)
     announcements = staticmethod(announcements)

@@ -2049,6 +2049,49 @@ def history_eval(days: int = 90):
         return _err(e)
 
 
+@app.get("/api/history/eval/by")
+def history_eval_by(dim: str = "source", days: int = 90):
+    """AI 推荐胜率按维度分桶(source/confidence/horizon/outcome/month)。⚠️ 需 PG(ai_recommendations 表)。"""
+    try:
+        from ai_evaluation import evaluate_by, format_buckets, VALID_DIMENSIONS
+        if dim not in VALID_DIMENSIONS:
+            return _err(f"不支持的维度 {dim};可用:{', '.join(VALID_DIMENSIONS)}")
+        results = evaluate_by(dim, days=days)
+        buckets = [{
+            "bucket": k, "sample": r.sample_size, "score": r.score, "grade": r.grade,
+            "win_rate_pct": r.metrics.get("win_rate_pct"),
+            "avg_return_pct": r.metrics.get("avg_return_pct"),
+            "profit_factor": r.metrics.get("profit_factor"),
+        } for k, r in results.items()]
+        return _ok({"dimension": dim, "days": days,
+                    "report": format_buckets(results, dim), "buckets": buckets})
+    except Exception as e:
+        return _err(e)
+
+
+# ============================ LLM 用量遥测 ============================
+@app.get("/api/llm/usage")
+def llm_usage_summary(days: int = 30):
+    """LLM Token 用量汇总:总量 / 按 model / 按 call_type / 按天 / 最近调用。"""
+    try:
+        import llm_usage
+        return _ok(llm_usage.summary(days=days))
+    except Exception as e:
+        return _err(e)
+
+
+# ============================ 研报:东财行业研报 ============================
+@app.get("/api/research/industry-reports")
+def research_industry_reports(industry_code: str = "*", pages: int = 5, begin: str = "2024-01-01"):
+    """东财行业研报列表(走 datahub:industry_reports;industry_code='*' 取全行业)。"""
+    try:
+        import datahub
+        rows = datahub.industry_reports(industry_code=industry_code, max_pages=pages, begin=begin)
+        return _ok({"industry_code": industry_code, "count": len(rows or []), "reports": rows or []})
+    except Exception as e:
+        return _err(e)
+
+
 # ============================ 设置:定时任务开关 ============================
 @app.get("/api/jobs")
 def jobs_list():

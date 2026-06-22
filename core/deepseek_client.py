@@ -79,7 +79,7 @@ class DeepSeekClient:
     def call_api(self, messages: List[Dict[str, str]], model: Optional[str] = None,
                  temperature: float = 0.7, max_tokens: int = 2000,
                  thinking: bool = False, use_router: bool = True,
-                 timeout: Optional[float] = None) -> str:
+                 timeout: Optional[float] = None, call_type: str = 'misc') -> str:
         """调用 LLM。默认走 llm_router（多 provider 自动降级），保留 OpenAI 直连兜底。
 
         Args:
@@ -107,7 +107,7 @@ class DeepSeekClient:
                 if router.providers:
                     text, used = router.call(messages, temperature=temperature,
                                              max_tokens=max_tokens, thinking=thinking,
-                                             timeout=timeout)
+                                             timeout=timeout, call_type=call_type)
                     if text and not text.startswith('[LLM-Router]'):
                         self.last_used_provider = used
                         return text
@@ -129,6 +129,12 @@ class DeepSeekClient:
             if message.content:
                 result += message.content
             self.last_used_provider = f'deepseek-direct:{model_to_use}'
+            try:  # 直连兜底路径的用量遥测(router 路径已在 llm_router 内记录)
+                import llm_usage
+                llm_usage.record_from_resp(call_type, f'deepseek-direct:{model_to_use}',
+                                           response, thinking=thinking)
+            except Exception:
+                pass
             return result if result else "API返回空响应"
         except Exception as e:
             return f"API调用失败: {str(e)}"
@@ -191,8 +197,8 @@ class DeepSeekClient:
             {"role": "system", "content": "你是一名经验丰富的股票技术分析师，具有深厚的技术分析功底。"},
             {"role": "user", "content": prompt}
         ]
-        
-        return self.call_api(messages)
+
+        return self.call_api(messages, call_type='technical')
     
     def fundamental_analysis(self, stock_info: Dict, financial_data: Dict = None, quarterly_data: Dict = None) -> str:
         """基本面分析"""
@@ -344,8 +350,8 @@ class DeepSeekClient:
             {"role": "system", "content": "你是一名经验丰富的股票基本面分析师，擅长公司财务分析和行业研究。"},
             {"role": "user", "content": prompt}
         ]
-        
-        return self.call_api(messages)
+
+        return self.call_api(messages, call_type='fundamental')
     
     def fund_flow_analysis(self, stock_info: Dict, indicators: Dict, fund_flow_data: Dict = None) -> str:
         """资金面分析"""
@@ -458,8 +464,8 @@ class DeepSeekClient:
             {"role": "system", "content": "你是一名经验丰富的资金面分析师，擅长市场资金流向和主力行为分析，能够深入解读资金数据背后的投资逻辑。"},
             {"role": "user", "content": prompt}
         ]
-        
-        return self.call_api(messages, max_tokens=3000)
+
+        return self.call_api(messages, max_tokens=3000, call_type='fund_flow')
     
     def comprehensive_discussion(self, technical_report: str, fundamental_report: str, 
                                fund_flow_report: str, stock_info: Dict) -> str:
@@ -497,8 +503,8 @@ class DeepSeekClient:
             {"role": "system", "content": "你是一名资深的首席投资分析师，擅长综合不同维度的分析形成投资判断。"},
             {"role": "user", "content": prompt}
         ]
-        
-        return self.call_api(messages, max_tokens=6000)
+
+        return self.call_api(messages, max_tokens=6000, call_type='discussion')
     
     def final_decision(self, comprehensive_discussion: str, stock_info: Dict,
                       indicators: Dict, philosophy: str = None) -> Dict[str, Any]:
@@ -566,7 +572,7 @@ class DeepSeekClient:
             {"role": "user", "content": prompt}
         ]
         
-        response = self.call_api(messages, temperature=0.3, max_tokens=4000)
+        response = self.call_api(messages, temperature=0.3, max_tokens=4000, call_type='decision')
         
         try:
             # 尝试解析JSON响应
