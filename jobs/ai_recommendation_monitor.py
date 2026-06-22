@@ -331,15 +331,14 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
             cur.execute(f'UPDATE ai_recommendations SET last_price=?, last_price_at={NOW} WHERE id=?',
                         (price, rec['id']))
             tp, sl = rec.get('take_profit'), rec.get('stop_loss')
+            # realized 用**委托价(tp/sl)**口径而非 30min 快照价:盘中两次快照间跳空穿越 tp/sl 时,
+            # 快照价可能远低于 sl(或高于 tp)→ 把"纸面止损"记成更大亏损,系统性下偏该 source 的 avg_return。
             if tp and price >= tp:
-                # AI 推荐池(ai_recommendations)只做后台 paper-trading 跟踪 / 胜率统计,
-                # 不推送通知(用户没真买, 没必要打扰)。采纳的推荐会被用户加入持仓,
-                # 持仓的止盈止损走下面 monitored_stocks 那段的"持仓止盈"通知。
-                # 2026-06-22: 用户明确要求 "AI推荐不要通知, 只通知持仓的"。
-                _close(rec['id'], 'target', 'hit_target_at', _pnl_pct(ref, price))
+                # AI 推荐池(ai_recommendations)只做后台 paper-trading 跟踪 / 胜率统计,不推送通知。
+                _close(rec['id'], 'target', 'hit_target_at', _pnl_pct(ref, float(tp)))
                 stats['hit_target'] += 1
             elif sl and price <= sl:
-                _close(rec['id'], 'stop', 'hit_stop_at', _pnl_pct(ref, price))
+                _close(rec['id'], 'stop', 'hit_stop_at', _pnl_pct(ref, float(sl)))
                 stats['hit_stop'] += 1
             else:
                 # 超期未触发 → 按当前浮盈浮亏了结,计入评估(消除"永远 pending"的幸存者偏差)

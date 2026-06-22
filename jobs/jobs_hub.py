@@ -13,7 +13,7 @@ Jobs Hub — 统一的后台任务注册与管理
 
 用法：
     from jobs_hub import hub
-    hub.register('daily_market_snapshot', '07:30', task_market_snapshot)
+    hub.register('daily_market_snapshot', '15:50', task_daily_market_snapshot)
     hub.start()
     # ...
     hub.stop()
@@ -989,7 +989,7 @@ def task_decision_signal_outcomes():
     started = datetime.now().isoformat()
     try:
         from decision_signal import run_outcomes
-        r = run_outcomes(days=90)
+        r = run_outcomes(days=35)   # 35天足覆盖最长 horizon(long=20交易日)+缓冲;窄窗免每日重扫全量空转
         _log_run(job, 'success',
                  error=f"evaluated={r.get('evaluated')} hit={r.get('hit')} "
                        f"miss={r.get('miss')} unable={r.get('unable')}",
@@ -2095,7 +2095,7 @@ def task_morning_strategy():
             {'role': 'system', 'content': '你是资深 A 股策略分析师，擅长综合多维数据给出实操开盘建议。'},
             {'role': 'user', 'content': prompt},
         ]
-        raw = client.call_api(messages, max_tokens=2000)
+        raw = client.call_api(messages, max_tokens=2000, call_type='morning')
 
         # 解析 JSON
         import re

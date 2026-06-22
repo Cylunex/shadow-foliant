@@ -76,7 +76,7 @@ def _react_run(question: str, symbol: Optional[str],
             {'role': 'system', 'content': '你是 A 股资深分析师，回答精炼、有数据支撑。'},
             {'role': 'user', 'content': '\n'.join(prompt_lines)},
         ],
-        temperature=0.5, max_tokens=800,
+        temperature=0.5, max_tokens=800, call_type='react',
     )
     return {
         'mode': 'react',
@@ -120,7 +120,7 @@ def _plan_execute_run(question: str, symbol: Optional[str],
             {'role': 'user', 'content': '\n'.join(plan_prompt)},
         ],
         temperature=0.6, max_tokens=2500,
-        thinking=False,
+        thinking=False, call_type='plan_execute',
     )
     return {
         'mode': 'plan_execute',

@@ -25,6 +25,7 @@ _RATING_MAP = {
     'strong_buy': '强烈买入', 'strong buy': '强烈买入', 'strongbuy': '强烈买入',
     'buy': '买入', '增持': '买入', '推荐': '买入',
     'hold': '持有', 'neutral': '持有', '中性': '持有', '观望': '持有',
+    'candidate': '持有',  # unified_selection 选股候选(只追踪非操作建议)显式归"持有",免走 default 静默改写
     'sell': '卖出', '减持': '卖出', 'reduce': '卖出',
     'strong_sell': '强烈卖出', 'strong sell': '强烈卖出',
 }
