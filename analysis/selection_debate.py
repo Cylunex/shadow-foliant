@@ -18,7 +18,9 @@ import _bootstrap  # noqa: F401  路径引导
 import re
 from typing import Any, Dict, List, Optional
 
-_VERDICT_ACTION = {'买入': 'buy', '谨慎': 'watch', '否决': 'avoid'}
+# 否决→sell(期望跌):让"证伪闸门"的否决可被方向后验(否对了=该股随后跌),从而量化闸门增量价值;
+# 谨慎→watch(中性,不计胜负)。买入→buy。
+_VERDICT_ACTION = {'买入': 'buy', '谨慎': 'watch', '否决': 'sell'}
 
 
 def _f(v) -> Optional[float]:
@@ -34,7 +36,7 @@ def _context(code: str) -> Dict[str, Any]:
         q = datahub.quote(code) or {}
         return {'name': q.get('name', ''), 'price': _f(q.get('price')),
                 'change': _f(q.get('change_pct') or q.get('change')),
-                'pe': _f(q.get('pe') or q.get('pe_ttm')), 'mcap': q.get('market_cap')}
+                'pe': _f(q.get('pe') or q.get('pe_ttm')), 'mcap': q.get('mcap_yi')}
     except Exception:
         return {'name': '', 'price': None, 'change': None, 'pe': None, 'mcap': None}
 

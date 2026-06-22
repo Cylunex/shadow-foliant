@@ -62,7 +62,7 @@ def _ai_review(flagged: List[Dict[str, Any]]) -> Dict[str, str]:
         return {}
     out = {}
     for line in (ans or '').splitlines():
-        m = re.match(r'\s*(\d{6})\D.*?动作[:：]\s*(减仓|清仓|持有观察)', line)
+        m = re.search(r'(\d{6})\D.*?动作[:：]\s*(减仓|清仓|持有观察)', line)
         if m:
             why = (re.search(r'理由[:：]\s*(.+)$', line) or [None, ''])[1].strip()[:30]
             out[m.group(1)] = {'action_cn': m.group(2), 'reason': why}

@@ -40,7 +40,7 @@ def _build_prompt(targets: List[Dict[str, Any]]) -> str:
         reasons = '/'.join(s.get('sell_reasons') or []) or '无'
         lines.append(
             f"{s.get('code')} {s.get('name','')}: 现价{s.get('price','?')} 今日{(s.get('change') or 0):+.2f}% "
-            f"浮盈亏{(s.get('pnl') or 0):+.2f}% 风险分{s.get('sell_score',0)}(信号:{reasons}) 市值{s.get('mv',0):.0f}")
+            f"浮盈亏{(s.get('pnl') or 0):+.2f}% 风险分{s.get('sell_score',0)}(信号:{reasons}) 市值{(s.get('mv') or 0):.0f}")
     body = '\n'.join(lines)
     return f"""你是持仓风控官。下面是某账户**当前持仓**的多维信号(技术破位/量化风险/浮盈亏/异动)。
 请逐只融合判断,给出明确动作。**只看风险与持有性价比,不做无依据乐观**。
@@ -58,7 +58,7 @@ def _parse(answer: str) -> Dict[str, Dict[str, str]]:
     """解析 LLM 的逐行结论 → {code: {action_cn, confidence, reason}}。"""
     out: Dict[str, Dict[str, str]] = {}
     for line in (answer or '').splitlines():
-        m = re.match(r'\s*(\d{6})\D.*?动作[:：]\s*([清减持加][仓有])', line)
+        m = re.search(r'(\d{6})\D.*?动作[:：]\s*([清减持加][仓有])', line)
         if not m:
             continue
         code = m.group(1)

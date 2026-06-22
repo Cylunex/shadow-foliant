@@ -104,7 +104,7 @@ def _llm_batch(summaries: List[Dict[str, Any]], names: Dict[str, str]) -> Dict[s
         return {}
     out: Dict[str, Dict[str, str]] = {}
     for line in (ans or '').splitlines():
-        m = re.match(r'\s*(\d{6})\D.*?方向[:：]\s*(强烈看多|看多|中性|看空)', line)
+        m = re.search(r'(\d{6})\D.*?方向[:：]\s*(强烈看多|看多|中性|看空)', line)
         if not m:
             continue
         logic = (re.search(r'逻辑[:：]\s*(.+)$', line) or [None, ''])[1].strip()[:30]

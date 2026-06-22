@@ -74,7 +74,7 @@ def _llm_classify(blocks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         return {}
     out: Dict[str, Dict[str, Any]] = {}
     for line in (ans or '').splitlines():
-        m = re.match(r'\s*(\d{6})\D', line)
+        m = re.search(r'(\d{6})\D', line)
         if not m:
             continue
         code = m.group(1)
