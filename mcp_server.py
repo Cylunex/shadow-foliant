@@ -801,6 +801,14 @@ def recommendation_winrate(dimension: str = 'source', days: int = 90) -> Dict[st
 
 
 @mcp.tool()
+def research_digest(codes: List[str], days: int = 10) -> Dict[str, Any]:
+    """研报增量解读:对给定股票拉近 days 天券商研报 → AI 提炼核心催化逻辑 + 评级方向(强看多/看多/中性/看空)
+    + 隐含目标空间。强看多会写决策信号(source_type=research)进方向后验环。"""
+    from research_digest import run_research_digest
+    return run_research_digest([c for c in (codes or []) if c], days=days, record_signals=True)
+
+
+@mcp.tool()
 def portfolio_health_check(max_stocks: int = 15) -> Dict[str, Any]:
     """持仓 AI 体检:融合每只持仓的破位/风险/浮亏/异动信号 → 单股 持有/减仓/清仓 动作 + 理由 + 信心。
     只对风险/浮亏子集做(token 可控)。动作会写决策信号(source_type=portfolio_health)进方向后验环。"""

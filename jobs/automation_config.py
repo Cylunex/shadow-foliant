@@ -151,6 +151,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
         'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
     },
+    'research_digest': {
+        'cn': '📑 研报增量解读',
+        'schedule': '16:05 每日',
+        'category': '核心',
+        'default': True,  # 研报端点已有却零调用;AI 提炼评级方向+核心逻辑,强看多进 decision_signal 后验
+        'description': '对持仓+当日选股拉近10天券商研报,AI 提炼评级方向/核心逻辑,强看多写决策信号后验',
+    },
     'portfolio_health_ai': {
         'cn': '🧠 持仓 AI 体检官',
         'schedule': '14:35 每日',

@@ -3657,6 +3657,51 @@ def task_portfolio_health_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_research_digest():
+    """📑 研报增量解读(16:05 盘后):对 持仓+当日综合选股 拉近 10 天券商研报 → AI 提炼核心逻辑+评级方向。
+    强看多+隐含空间>8% 写 decision_signal(source_type='research')→ 16:10 方向后验。
+    开关 research_digest(默认开)。"""
+    job = 'research_digest'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        codes = []
+        try:
+            from portfolio_db import portfolio_db
+            codes += [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
+                      if s.get('code')]
+        except Exception:
+            pass
+        codes += _last_selection_picks()
+        codes = list(dict.fromkeys([c for c in codes if c]))
+        if not codes:
+            _log_run(job, 'success', error='no_codes',
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        from research_digest import run_research_digest
+        res = run_research_digest(codes, days=10, max_llm=24, record_signals=True)
+        if res.get('ok') and res.get('text'):
+            try:
+                from notification_router import send
+                send('report', '📑 研报增量解读', res['text'])
+            except Exception as ne:
+                print(f'[research_digest] 推送失败: {ne}')
+        _log_run(job, 'success', error=res.get('summary'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_mx_selection_review():
     """🆕 选股结果过妙想——对 unified_selection TOP 逐个过妙想诊断"""
     job = 'mx_selection_review'
@@ -4002,6 +4047,7 @@ def register_default_jobs():
     hub.register('daily_market_snapshot',       '15:50', task_daily_market_snapshot)
     hub.register('factor_collection',           '15:55', task_factor_collection)
     hub.register('dragon_tiger_archive',        '16:00', task_dragon_tiger_archive)
+    hub.register('research_digest',             '16:05', task_research_digest)
     hub.register('decision_signal_outcomes',    '16:10', task_decision_signal_outcomes)
 
     # ---- 📐 盘后回测 ----
