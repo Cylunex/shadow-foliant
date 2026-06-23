@@ -279,10 +279,13 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
 
     每轮:更新 last_price;命中止盈/止损或超期(PENDING_EXPIRE_DAYS) → 了结并写 realized_pnl_pct。
     """
+    import time as _time
+    _t_total = _time.time()
     _ensure_perf_columns()
     active = list_active(only_monitored=True, limit=500)
     if not active:
         return {'checked': 0, 'hit_target': 0, 'hit_stop': 0, 'expired': 0}
+    print(f'[ai_rec_check] 活跃推荐 {len(active)} 条, 开始批量拉价', flush=True)
 
     stats = {'checked': 0, 'hit_target': 0, 'hit_stop': 0, 'expired': 0}
     NOW = 'NOW()' if USE_POSTGRES else 'CURRENT_TIMESTAMP'
@@ -418,6 +421,9 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
     except Exception:
         pass
 
+    print(f'[ai_rec_check] 完成 耗时 {_time.time()-_t_total:.1f}s | '
+          f'checked={stats["checked"]} target={stats["hit_target"]} '
+          f'stop={stats["hit_stop"]} expired={stats["expired"]}', flush=True)
     return stats
 
 

@@ -555,13 +555,17 @@ def task_stock_monitor_check():
 
     # ── 持仓加仓审核（原 wf_position_guard_check,开关控制,默认开;自带交易时段判断）──
     try:
+        _t = time.time()
         _position_guard_check()
+        print(f'[stock_monitor_check] 加仓审核完成 ({time.time()-_t:.1f}s)', flush=True)
     except Exception as e:
         print(f'[stock_monitor_check] 加仓审核子任务失败: {e}')
 
     # ── 持仓盘中急跌监控(2026-06-12,原 W8"方案B"):跌≥5% 立即推,每股每日只报一次 ──
     try:
+        _t = time.time()
         _intraday_plunge_check()
+        print(f'[stock_monitor_check] 急跌监控完成 ({time.time()-_t:.1f}s)', flush=True)
     except Exception as e:
         print(f'[stock_monitor_check] 急跌监控子任务失败: {e}')
 
@@ -1201,10 +1205,18 @@ def task_fund_valuation_signal():
     try:
         import fund_valuation
         rows = []
+        # 加进度日志: 每个指数耗时 / 成败, 卡死时一眼能看出卡在哪只
         for idx in fund_valuation.COMMON_INDEXES:
-            v = fund_valuation.index_pe_percentile(idx)
-            if v:
-                rows.append(v)
+            _t0 = time.time()
+            try:
+                v = fund_valuation.index_pe_percentile(idx)
+                if v:
+                    rows.append(v)
+                    print(f'[fund_valuation] ✅ {idx} 耗时 {time.time()-_t0:.1f}s', flush=True)
+                else:
+                    print(f'[fund_valuation] ⚠️ {idx} 返回空 ({time.time()-_t0:.1f}s)', flush=True)
+            except Exception as e:
+                print(f'[fund_valuation] ❌ {idx} {type(e).__name__}: {str(e)[:80]} ({time.time()-_t0:.1f}s)', flush=True)
         cheap = [v for v in rows if v['multiplier'] >= 1.5]
         if rows:
             lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}] {v['multiplier']}x"
@@ -3243,15 +3255,19 @@ def _scan_holdings_with_snapshot():
     try:
         from portfolio_db import portfolio_db as _pdb
         holds = [h for h in (_pdb.get_all_stocks() or []) if isinstance(h, dict) and h.get('code')]
-    except Exception:
+    except Exception as e:
+        print(f'[_scan_holdings] 读取持仓失败: {type(e).__name__}: {str(e)[:80]}', flush=True)
         return []
     codes = [str(h['code']) for h in holds]
+    print(f'[_scan_holdings] 持仓 {len(codes)} 只, 开始批量拉行情', flush=True)
     quotes = {}
+    _qt0 = time.time()
     try:
         for i in range(0, len(codes), 20):
             quotes.update(datahub.quotes(codes[i:i + 20]) or {})
-    except Exception:
-        pass
+    except Exception as e:
+        print(f'[_scan_holdings] 批量行情失败: {type(e).__name__}', flush=True)
+    print(f'[_scan_holdings] 行情拿到 {len(quotes)} 只, 耗时 {time.time()-_qt0:.1f}s, 开始逐只算指标', flush=True)
 
     def _snapf(snap, *keys):
         for k in keys:
@@ -3694,11 +3710,15 @@ def task_selection_debate():
     try:
         picks = _last_selection_picks()
         if not picks:
+            print('[selection_debate] 没有上一次综合选股结果, 跳过', flush=True)
             _log_run(job, 'success', error='no_selection',
                      started_at=started, finished_at=datetime.now().isoformat())
             return
+        print(f'[selection_debate] 开始对抗, picks={len(picks)} → 处理上限 10 只', flush=True)
         from selection_debate import run_selection_debate
+        _t0 = time.time()
         res = run_selection_debate(picks, max_stocks=10, record_signals=True)
+        print(f'[selection_debate] 对抗完成, 耗时 {time.time()-_t0:.1f}s, summary={res.get("summary", "")[:80]}', flush=True)
         if res.get('ok') and res.get('text'):
             try:
                 from notification_router import send
