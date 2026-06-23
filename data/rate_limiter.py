@@ -15,10 +15,13 @@ from collections import defaultdict
 _lock = threading.Lock()
 _last_call: dict[str, float] = defaultdict(float)
 
-_DEFAULT_GAP = 1.0  # 默认最小间隔(秒): 批量实时行情等"按惯例" ≥1s
+# 惯例基线(秒): 任何源的最小间隔都不得低于此值。
+# ⭐ 间隔只增不减: _gap_for 最终返回 max(_DEFAULT_GAP, 该源配置), 杜绝任何源低于 1s。
+_DEFAULT_GAP = 1.0
 
 # 按源覆盖最小间隔(秒)。键 = throttle(source) 传入的 source 名(支持 host 前缀近似匹配)。
-# 2026-06-23: akshare 反爬最严, 提到 3s; 同花顺(pywencai)次之 2s; 其余走默认 1s。
+# 只填"按惯例需要比 1s 更宽"的源; 低于 1s 的值会被下限钳制无效。
+# 2026-06-23: akshare 反爬最严 3s; 同花顺(pywencai)次之 2s; 实时行情/其余走 1s 惯例。
 _GAP_BY_SOURCE: dict[str, float] = {
     'akshare': 3.0,
     'pywencai': 2.0,
@@ -28,14 +31,18 @@ _GAP_BY_SOURCE: dict[str, float] = {
 
 
 def _gap_for(source: str) -> float:
-    """取某源的最小间隔: 精确命中 > 子串命中(host 场景) > 默认。"""
+    """取某源的最小间隔: 精确命中 > 子串命中(host 场景) > 默认; 并以 _DEFAULT_GAP 为下限。
+    ⭐ 只增不减: 配置值若 < 1s, 一律按 1s 处理(惯例基线不可破)。"""
+    gap = _DEFAULT_GAP
     if source in _GAP_BY_SOURCE:
-        return _GAP_BY_SOURCE[source]
-    s = source.lower()
-    for key, gap in _GAP_BY_SOURCE.items():
-        if key in s:
-            return gap
-    return _DEFAULT_GAP
+        gap = _GAP_BY_SOURCE[source]
+    else:
+        s = source.lower()
+        for key, g in _GAP_BY_SOURCE.items():
+            if key in s:
+                gap = g
+                break
+    return max(_DEFAULT_GAP, gap)
 
 
 def throttle(source: str = "default") -> float:
