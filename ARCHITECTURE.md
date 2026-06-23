@@ -11,10 +11,10 @@
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
-| Python 模块 | 106 | 全部 import 测试通过（101 主模块 + 5 命令行/入口） |
-| SQLite DB | 11 | 本地缓存与历史归档（PG 模式下仍保留为备份） |
-| 文档 | 5+ | README.md / ARCHITECTURE.md / docs/* |
-| 总文件数 | 135 | |
+| Python 模块 | ~200 | 按功能分子目录(core/data/agents/analysis/selection/portfolio/jobs/fund/…) |
+| MCP 工具 | 80+ | `mcp_server.py` 暴露 |
+| API 路由 | ~110 | `webui/api_server.py` |
+| 文档 | 30+ | README / ARCHITECTURE / 交接说明 / AGENT_SKILL / docs/* |
 
 ---
 
@@ -88,7 +88,22 @@
 | 🤖 AI 盯盘 | `smart_monitor_*.py` | DeepSeek 自动决策 + miniQMT 交易 |
 | 📡 实时监测 | `monitor_*.py` | 价格阈值告警 + 进场/止盈/止损 |
 
-### 4. 基础设施
+### 4. 决策信号 + AI 赋能（2026-06）
+| 模块 | 入口文件 | 功能 |
+|---|---|---|
+| 🎯 决策信号统一层 | `analysis/decision_signal.py` | 每次分析/选股/盯盘/AI能力的操作主张抽成结构化信号(8 态动作 + 生命周期 + 去重 + 反向作废);K线方向后验真实胜率,按 source/动作/周期分桶。**全项目 AI 信号的后验底座** |
+| 🧹 尾盘持仓总结 | `portfolio/eod_review.py` | 尾盘三合一:瘦身策略 + 逐只融合动作(割肉/止盈/破位/死钱)+ 尾盘机会(整合原 持仓分析/AI体检/清仓助手) |
+| 📑 研报增量解读 | `analysis/research_digest.py` | 券商研报评级方向 + 隐含目标空间 → 强看多信号 |
+| ⏳ 持仓解禁雷达 | `analysis/lockup_radar.py` | 未来 60 天限售解禁 → 解禁前减仓研判 |
+| 📢 公告事件分级 | `analysis/announcement_scan.py` | 公告利好/利空 + 重大性分级 → 利空即时告警 |
+| ⚔️ 选股红蓝对抗 | `analysis/selection_debate.py` | 选股候选 多头/空头/裁判 证伪闸门 |
+| 🛡️ 组合压力叙事 | `analysis/portfolio_stress_ai.py` | 8 宏观情景压力 → AI 风险预案 |
+| 📐 回测分层归因 | `analysis/backtest_attribution.py` | 交易归因/β回归/市况/蒙特卡洛 判业绩真伪 |
+| 🧬 策略基因组 | `analysis/strategy_genome.py` + `genome_bt_worker.py` | 变体进化 + 样本外部署门;N² 回测进程池并行 |
+| 🔢 LLM 用量遥测 | `core/llm_usage.py` | 按 call_type/model/天 记 token |
+> 共性:这些 AI 能力的结论都写 `decision_signal`,每日 16:10 自动方向后验,`outcome_stats(source_type)` 可查各能力真实胜率(可证伪是否有增量)。
+
+### 5. 基础设施
 | 模块 | 功能 |
 |---|---|
 | `stock_data.py` | 行情数据获取 + 技术指标计算（TA + MyTT 12 个通达信指标） |
@@ -102,8 +117,9 @@
 | `agent_tool_groups.py` | 6 类业务域数据采集器（base/kline/fund/fund_amentals/sentiment/risk） |
 | `portfolio_insights.py` | 持仓估值/变动时间线/持有时长/交易频次 4 大报表 + AI 诊断 |
 | `db_compat.py` | SQLite/PG 透明路由（? 自动转 %s + lastrowid 模拟） |
-| `jobs_hub.py` | 后台任务调度中心（10 个默认任务） |
-| `notification_router.py` | 多渠道推送路由 |
+| `data/datahub.py` | **统一数据层**:全项目取外部数据的唯一门面 + 自适应多源健康度路由 + 三级缓存(内存/Redis/文件) |
+| `jobs_hub.py` | 后台任务调度中心(~35 个任务,权威列表见 `jobs/automation_config.py` REGISTRY) |
+| `notification_router.py` | 多渠道推送路由(按 category 分流:alert/report/archive) |
 | `bot_dispatcher.py` | Bot 命令分发（含 Telegram poller） |
 | `autostart.py` | 项目启动时自动拉起后台服务和调度 |
 
@@ -248,30 +264,29 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 
 ---
 
-## ⏰ 定时任务表（10 个默认任务）
+## ⏰ 定时任务节奏（~35 个任务）
 
-由 `jobs_hub` 自动调度，**仅交易日触发**（周末/节假日 skip）。
+由 `jobs_hub.register_default_jobs()` 调度,开关闸门走 `automation_config`(默认全开,生产以 DB `automation_switches` 为准)。**权威清单(名称/时间/开关/说明)见 `jobs/automation_config.py` 的 REGISTRY**;下面只给交易日主节奏(✅=调 AI):
 
-| 时间 | 任务 | 来源 | 内容 | 调 AI |
-|---|---|---|---|---|
-| **06:30** | **`overnight_ai_strategy`** | **jobs_hub** | **🌙 综合昨日龙虎榜+美股隔夜+新闻+北向资金 AI 分析今日开盘策略** | ✅ |
-| 08:00 | `morning_warmup` | jobs_hub | 持仓+监测股票指标预热（MyTT 12 项） | ❌ |
-| 08:30 | `dragon_tiger_report` | scripts/daily_signal_scan.py | 🐉 龙虎榜盘前邮件报告 | ❌ |
-| 09:10 | `strategy_screening` | jobs_hub | 4 大策略扫描汇总 → 邮件 | ❌ |
-| 09:45 | `morning_picks` | scripts/daily_signal_scan.py | 🔍 早盘 10 只精选 + 持仓 → 邮件 | ❌ |
-| 12:00 | `noon_report` | scripts/daily_signal_scan.py | 📊 午盘市场简报 → 邮件 | ❌ |
-| 14:30 | `afternoon_picks` | scripts/daily_signal_scan.py | 🔍 尾盘 10 只精选 + 持仓 → 邮件 | ❌ |
-| 15:30 | `portfolio_indicator_snapshot` | jobs_hub | 持仓当日指标快照存库 | ❌ |
-| 15:35 | `daily_market_snapshot` | jobs_hub | 大盘+北向+龙虎榜列表快照 | ❌ |
-| 16:00 | `dragon_tiger_archive` | jobs_hub | 龙虎榜数据归档入库 | ❌ |
-| 周一 03:00 | `weekly_db_cleanup` | jobs_hub | 数据库清理 + VACUUM | ❌ |
-| **周一 09:00** | **`weekly_portfolio_analysis`** | **jobs_hub** | **AI 批量分析持仓 + 自动同步监测列表** | ✅ |
+| 时间 | 任务 | 内容 | AI |
+|---|---|---|---|
+| 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
+| 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
+| 09:50 | `morning_portfolio` | 📊 早盘持仓分析 | ❌ |
+| 10:00 | `selection_debate` | ⚔️ 选股红蓝对抗证伪 | ✅ |
+| 10:30 | `mx_selection_review` | 🧠 选股过妙想第二意见 | ✅ |
+| 12:00 | `noon_report` | 📊 午盘简报 | ❌ |
+| 每30分 | `ai_rec_check` / `stock_monitor_check` | 推荐追价(不推) / 监测触发(alert) | ❌ |
+| 14:40 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(瘦身策略+逐只动作+尾盘机会,eod_review) | ✅ |
+| 15:35–16:10 | `kline_prefetch`/`portfolio_indicator_snapshot`/`lockup_radar`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/`announcement_scan`/`research_digest`/`decision_signal_outcomes` | K线预热/指标快照/⏳解禁雷达/大盘快照/因子采集/龙虎榜归档/📢公告分级/📑研报解读/信号后验 | 部分✅ |
+| 16:30 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
+| 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
+| 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
+| 周日 | `mx_weekend_outlook`(10:00)/`weekly_analysis`(15:00)/`portfolio_stress_ai`(16:00)/`wf_weekly_backtest`(20:00) | 周末研判/周报/🛡️压力预案/周回测 | 部分✅ |
+| 周一 | `weekly_db_cleanup`(03:00)/`ai_eval_weekly`(09:30) | DB 清理 / AI 推荐周评估 | ❌ |
+| 夜间 | `pg_backup`(02:00)/`rag_ingest`(02:30) | PG 备份 / RAG 入库 | ❌ |
 
-**额外的独立调度器**（按需手动启用，AI 调用消耗 token）：
-- `news_flow_scheduler` — 30/60/120 分钟轮询热点/预警/深度
-- `portfolio_scheduler` — 持仓 AI 批量分析（用户配置时间点）
-- `sector_strategy_scheduler` — 智策板块 AI 分析（每日一次）
-- `monitor_scheduler` — 实时监测在交易时段（09:30-11:30 / 13:00-15:00）自动启停
+> 通知分类:`report`(日常报告)/`alert`(事件告警,有事才响)/`archive`(归档)。可用 env `NOTIFICATION_ROUTE_<CATEGORY>` 把不同类别分流到不同渠道。
 
 ---
 
@@ -356,7 +371,7 @@ pip install -r requirements.txt
 
 # 2. 配置 .env（参考 .env.example）
 
-# 3. 启动 (默认端口 8503)
+# 3. 启动 (默认端口 8601)
 python run.py
 # 或
 streamlit run app.py
@@ -596,12 +611,10 @@ shadow-foliant/
 
 | 项目 | 状态 |
 |---|---|
-| 总文件数 | 135 |
-| Python 模块 | 106（101 主模块 + 5 命令行） |
-| 全模块 import 体检 | ✅ 101/101 OK |
-| Streamlit 服务 | http://127.0.0.1:8503（运行中） |
-| PostgreSQL | ✅ 127.0.0.1:55432, 持仓 40 条已读到 |
-| jobs_hub | ✅ 10 个任务已注册，自动启动 |
+| Python 模块 | ~200（含 analysis/portfolio/jobs 等子目录） |
+| WebUI | FastAPI + Vue3 SPA,http://127.0.0.1:8601(非 Streamlit,早已迁移) |
+| PostgreSQL | 主库(USE_POSTGRES=true);SQLite 本地兜底/缓存 |
+| jobs_hub | ~35 个任务(automation_config REGISTRY),自动启动 |
 | monitor_service | ✅ autostart 已接入，交易时段自动启停 |
 
 ---

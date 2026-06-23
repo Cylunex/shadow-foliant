@@ -185,6 +185,28 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - 后台任务(`jobs_hub`,默认全关):`fund_nav_refresh`(盘后净值入库+组合快照)/`fund_dca_reminder`(定投到期**自动记账/提醒**)/`fund_target_check`(止盈检查)/`fund_valuation_signal`(宽基估值分位播报)。
 - MCP 工具(14):`fund_info`/`fund_nav_history`/`fund_metrics`/`fund_score`/`fund_dca_backtest`/`fund_index_valuation`/`fund_screen`/`fund_portfolio_diagnose`/`fund_ai_panel`/`fund_ai_research`/`fund_holdings`/`asset_overview` + 新增 `fund_compare`/`fund_detail`。
 
+### I. 决策信号 + AI 赋能(2026-06;每个 AI 结论都进 decision_signal 方向后验)
+**决策信号统一层**——全项目 AI 信号的后验底座。MCP 工具:
+- `decision_signals(code,status,action,source_type,days)` — 信号列表(8 态动作/生命周期)
+- `decision_signal_latest(code)` — 某股最新活跃信号
+- `decision_signal_outcomes(days,force)` — 跑 K线方向后验(hit/miss)
+- `decision_signal_winrate(dimension,days)` — 按 action/source_type/horizon 分桶真实胜率
+
+**持仓 / 卖出侧 AI**(回答"该卖什么、何时清"):
+- `exit_advice(target_positions)` — 清仓决策助手:全持仓清仓紧迫分(割肉/止盈/破位/死钱)+ 过度分散瘦身 + AI 策略
+- `portfolio_health_check(max_stocks)` — 持仓 AI 体检:单股 持有/减仓/清仓 + 理由
+- `lockup_radar(codes,forward_days)` — 持仓解禁雷达:未来解禁 → 解禁前减仓研判
+- `announcement_scan(codes,days)` — 公告事件分级:利好/利空 + 重大性,利空预警
+- `portfolio_stress_narrative()` — 组合压力情景叙事:8 情景风险预案
+> 注:`exit_advice`/`portfolio_health_check` 的定时版已并入"尾盘持仓总结"(14:40 `afternoon_portfolio`),这俩仍供按需调用。
+
+**选股 / 研报 / 观测**:
+- `research_digest(codes,days)` — 研报增量解读:评级方向 + 隐含目标空间
+- `selection_debate(codes,max_stocks)` — 选股红蓝对抗证伪(多空裁判)
+- `recommendation_winrate(dimension,days)` — AI 推荐胜率按维度分桶
+- `llm_token_usage(days)` — LLM token 用量(按 model/call_type/天)
+- `industry_reports(industry_code,pages)` — 东财行业研报列表
+
 ---
 
 ## 三、使用约束(给 Agent 的提示)
@@ -199,7 +221,7 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 ## 四、MCP 适配落地(✅ 已建)
 MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(stdio),
 客户端配 `{ "command":"python", "args":["<项目根>/mcp_server.py"] }`,env 传 `DEEPSEEK_API_KEY`/`EM_API_KEY`/`USE_POSTGRES` 等。
-已封装:A–E 的数据/计算/选股/组合函数 + F(`deep_analysis` 重工具)+ G(妙想 `mx_*` 外部服务)+ H(基金 `fund_*`/`asset_*` 12 工具)。
+已封装:A–E 的数据/计算/选股/组合函数 + F(`deep_analysis` 重工具)+ G(妙想 `mx_*` 外部服务)+ H(基金 `fund_*`/`asset_*` 14 工具)+ I(决策信号 + AI 赋能 ~15 工具)。共 **80+ 工具**。
 - miniQMT 实盘下单**未**暴露;UI/调度器**不封**。
 
 ## 五、相关待办
