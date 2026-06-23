@@ -183,6 +183,61 @@ class DataSourceManager:
             
         return None
 
+    # ===== ETF 专用日线获取(独立路径,失败不进股票降级链) ============================
+    @staticmethod
+    def _is_etf_code(symbol: str) -> bool:
+        """ETF / LOF 代码识别:
+          51xxxx 沪市 ETF (51 开头, 如 510300/510880)
+          56xxxx 沪市 ETF (科创/创业等部分)
+          58xxxx 沪市科创 ETF (58 开头)
+          15xxxx 深市 ETF (15 开头, 如 159732/159825)
+          16xxxx 深市 LOF / 部分基金 (16 开头, 如 162411)
+        """
+        s = str(symbol).strip()
+        if not s.isdigit() or len(s) != 6:
+            return False
+        return s[:2] in ('51', '56', '58', '15', '16')
+
+    def _fetch_etf_hist(self, symbol: str, start_date, end_date, adjust):
+        """ETF / LOF 日 K — 走 akshare.fund_etf_hist_em(东财 ETF 专用 JSON), 30s 硬超时。
+        新浪日 K / curl-东财对 ETF 反爬严格, 老是失败拖主流程; 这里独立成 ETF 通道。
+        失败立即返回 None, 调用方按"无 K 线"处理(不进 Akshare/Pywencai/Yahoo 降级链)。"""
+        try:
+            import akshare as ak
+            from data.akshare_safe import call as ak_call
+        except Exception as e:
+            print(f"[ETF] {symbol} akshare 不可用: {type(e).__name__}")
+            return None
+        try:
+            _throttle('akshare')
+            df = ak_call(
+                ak.fund_etf_hist_em,
+                timeout=30,
+                symbol=str(symbol).zfill(6),
+                period='daily',
+                start_date=start_date or '20200101',
+                end_date=end_date or datetime.now().strftime('%Y%m%d'),
+                adjust=adjust or 'qfq',
+            )
+        except Exception as e:
+            print(f"[ETF-东财] ⚠️ {symbol} 失败: {type(e).__name__}: {str(e)[:80]}")
+            return None
+        if df is None or df.empty:
+            print(f"[ETF-东财] ⚠️ {symbol} 返回空(可能新 ETF / 代码错误)")
+            return None
+        df = df.rename(columns={
+            '日期': 'date', '开盘': 'open', '收盘': 'close',
+            '最高': 'high', '最低': 'low', '成交量': 'volume',
+            '成交额': 'amount', '振幅': 'amplitude',
+            '涨跌幅': 'pct_change', '涨跌额': 'change', '换手率': 'turnover',
+        })
+        try:
+            df['date'] = pd.to_datetime(df['date'])
+        except Exception:
+            pass
+        return df
+    # ================================================================================
+
     def get_stock_hist_data(self, symbol, start_date=None, end_date=None, adjust='qfq'):
         """
         获取股票历史数据（A股优先腾讯/EastMoney HTTP → akshare/tushare → pywencai → yahoo）
@@ -202,9 +257,15 @@ class DataSourceManager:
         proxy_url = self._get_proxy_url()
         if not end_date:
             end_date = datetime.now().strftime('%Y%m%d')
-        
+
         # ⭐ A股判别：6位数字=沪深京，Yahoo对A股没有数据直接跳过
         is_a_stock = bool(re.match(r'^[0-9]{6}$', str(symbol)))
+
+        # ⭐ ETF / LOF 走专用源(2026-06-23): 新浪 / curl-东财 对 ETF 反爬严格, 老失败拖主流程。
+        # ak.fund_etf_hist_em 是东财 ETF 专用 JSON 接口, 稳定。失败直接返回 None,
+        # 不进股票的 Akshare/Pywencai/Yahoo 降级链 — 避免 ETF 失败拉爆整个调用栈。
+        if is_a_stock and self._is_etf_code(str(symbol)):
+            return self._fetch_etf_hist(str(symbol), start_date, end_date, adjust)
         
         # ========== 策略1: 新浪日K（curl无代理，已验证可用）==========
         # ETF 代码(51xxxx/15xxxx)和股票一样走这条; 6 位数字 prefix 规则 sh/sz 也覆盖
