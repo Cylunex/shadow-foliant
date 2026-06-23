@@ -64,10 +64,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '大盘/板块/热门股 + 持仓盘中概况(红绿/领涨领跌)',
     },
     'afternoon_portfolio': {
-        'cn': '📊 尾盘持仓分析',
-        'schedule': '14:30 每日',
+        'cn': '🧹 尾盘持仓总结',
+        'schedule': '14:40 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '风险分+浮盈卖出建议 + 尾盘强势机会;尾接止盈阶梯减仓[开关]',
+        'description': '尾盘持仓三合一(原 持仓分析+AI体检+清仓助手):一次AI出 瘦身策略+逐只融合动作+尾盘机会;尾接止盈阶梯减仓[alert]',
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',
@@ -186,20 +186,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 研报端点已有却零调用;AI 提炼评级方向+核心逻辑,强看多进 decision_signal 后验
         'description': '对持仓+当日选股拉近10天券商研报,AI 提炼评级方向/核心逻辑,强看多写决策信号后验',
     },
-    'exit_advice': {
-        'cn': '🧹 清仓决策助手',
-        'schedule': '14:40 每日',
-        'category': '核心',
-        'default': True,  # 解决"买太多不知何时清":全持仓清仓紧迫分排序+过度分散瘦身+AI策略;清仓建议进后验
-        'description': '尾盘对全部持仓打清仓紧迫分(割肉/止盈锁定/破位/死钱)排序,过度分散给瘦身目标,AI 出整体策略',
-    },
-    'portfolio_health_ai': {
-        'cn': '🧠 持仓 AI 体检官',
-        'schedule': '14:35 每日',
-        'category': '核心',
-        'default': True,  # 融合规则信号给单股动作建议;只对风险/浮亏子集做,token 可控;动作进 decision_signal 后验
-        'description': '尾盘对持仓(风险/浮亏子集)做 AI 体检,给 持有/减仓/清仓 动作+理由,动作进决策信号后验环',
-    },
+    # exit_advice / portfolio_health_ai 已并入 afternoon_portfolio(尾盘持仓总结 eod_review),
+    # 不再单独定时;模块仍供 MCP(exit_advice/portfolio_health_check)与前端"🧹清仓助手"页按需调用。
     'stock_monitor_check': {
         'cn': '📊 持仓进场区间监控',
         'schedule': 'every:30:min 交易时段(09:30-15:00)',

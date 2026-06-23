@@ -3562,58 +3562,28 @@ def task_morning_portfolio():
 
 
 def task_afternoon_portfolio():
-    """🆕 尾盘持仓分析（重点卖出:多因子风险分+浮盈 + 尾盘强势机会;数据全现成,共用扫描器）"""
+    """🧹 尾盘持仓总结(14:40)—— 整合原「尾盘持仓分析 + 持仓AI体检 + 清仓助手」三条重叠推送为一条。
+    一次取数 + 一次 LLM → 整体瘦身策略 + 逐只**融合**动作(每只一个结论,不再三处口径打架)+ 尾盘机会;
+    清仓/减仓写 decision_signal(source_type='eod_review')。详见 `portfolio/eod_review.py`。
+    末尾仍跑 止盈阶梯/破位减仓信号 子任务(alert 渠道,按需,保留不并)。"""
     job = 'afternoon_portfolio'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
     try:
-        scans = _scan_holdings_with_snapshot()
-        if not scans:
-            _log_run(job, 'success', error='no holdings', started_at=started,
-                     finished_at=datetime.now().isoformat())
-            return
-
-        # 卖出:风险分排序,同分按当日跌幅排(尾盘临近收盘,破位即将坐实,优先处理)
-        sell_list = sorted([s for s in scans if s['sell_score'] > 0],
-                           key=lambda x: (x['sell_score'], -(x.get('change') or 0)), reverse=True)
-        # 尾盘强势机会:涨>3%(实时量比快照里没有,以涨幅为主)
-        buy_notes = sorted([s for s in scans if (s.get('change') or 0) > 3],
-                           key=lambda x: x['change'], reverse=True)[:5]
-
-        lines = [f'## 📊 尾盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
-
-        lines.append('### 🔴 卖出建议')
-        if sell_list:
-            for s in sell_list[:5]:
-                emoji = '🔴' if s['sell_score'] >= 2 else '🟡'
-                pnl_s = f"  浮盈{s['pnl']}%" if s['pnl'] is not None else ''
-                price_s = f"¥{s['price']}" if s['price'] else ''
-                lines.append(f"  {emoji} {s['name']} {s['code']} {price_s} 风险分{s['sell_score']}: "
-                             f"{'/'.join(s['sell_reasons'])}{pnl_s}")
-            if len(sell_list) > 5:
-                lines.append(f'  ... 共 {len(sell_list)} 个信号，仅显示前 5')
-        else:
-            lines.append('  （暂无卖出信号）')
-
-        lines.append('')
-        lines.append('### 🟢 尾盘机会')
-        if buy_notes:
-            for s in buy_notes:
-                price_s = f"¥{s['price']}" if s['price'] else ''
-                lines.append(f"  • {s['name']} {s['code']} {price_s} — 尾盘强势 {s['change']:+.1f}%")
-        else:
-            lines.append('  （暂无）')
-
-        _push_daily('📊 尾盘持仓分析', '\n'.join(lines))
-        _log_run(job, 'success', error=f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_notes)}',
+        import os as _os6
+        target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '10'))
+        from eod_review import run_eod_review
+        res = run_eod_review(target_positions=target, record_signals=True)
+        if res.get('ok') and res.get('text'):
+            _push_daily('🧹 尾盘持仓总结', res['text'])
+        _log_run(job, 'success', error=res.get('summary'),
                  started_at=started, finished_at=datetime.now().isoformat())
-
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
 
-    # ── 止盈阶梯/破位减仓信号（原 wf_position_profit_check,开关控制,默认开）──
+    # ── 止盈阶梯/破位减仓信号(alert,按需,保留;不并入尾盘总结)──
     try:
         _position_profit_check()
     except Exception as e:
@@ -4234,9 +4204,9 @@ def register_default_jobs():
     hub.register('ai_rec_check', 'every:30:minutes', task_ai_rec_check)
     hub.register('stock_monitor_check', 'every:30:minutes', task_stock_monitor_check)
     # ---- 14:30 尾盘持仓分析 ----
-    hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
-    hub.register('portfolio_health_ai',          '14:35', task_portfolio_health_ai)
-    hub.register('exit_advice',                  '14:40', task_exit_advice)
+    # 尾盘持仓总结(14:40):整合原 尾盘持仓/AI体检/清仓助手 三合一(eod_review)。
+    # portfolio_health_ai / exit_advice 不再单独定时推送(内容已并入);其模块仍供 MCP/前端按需调用。
+    hub.register('afternoon_portfolio',          '14:40', task_afternoon_portfolio)
 
     # ---- 🔴 盘后 ----
     hub.register('kline_prefetch',              '15:35', task_kline_prefetch)
