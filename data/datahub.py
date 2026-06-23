@@ -106,16 +106,38 @@ def _record(key: str, ok: bool, latency: float):
         s.streak_fail += 1
 
 
-def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None):
+import os as _os_route
+import concurrent.futures as _cf
+
+# ⭐ 每个数据源的硬超时(秒, 2026-06-23): 这是全项目外部数据的总闸门。
+# 任何源(腾讯/东财/新浪/akshare/...)的单次取数超过这个时间, 一律当失败切断 → 试下一个源,
+# 都没有就返回 empty。彻底根治"外部接口卡死拖垮整个任务"(quotes/kline/资金流 等无差别覆盖)。
+# 可用 env DATAHUB_SOURCE_TIMEOUT 调整。
+_SOURCE_TIMEOUT = int(_os_route.getenv("DATAHUB_SOURCE_TIMEOUT", "20"))
+# 独立线程池跑源调用; 不用 with(__exit__ 会 wait 卡死的孤儿线程)。max_workers 给足并发。
+_ROUTE_POOL = _cf.ThreadPoolExecutor(max_workers=16, thread_name_prefix="datahub-route")
+
+
+def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
+           timeout: int = None):
     """按健康度动态排序源链,依次试,返回第一个"非空"结果并记录统计(供自动升降级)。
-    sources: [(源名, 无参thunk), ...]。DataFrame 用 not empty 判空,其余用 truthy。单源异常被吞续试下一个。"""
+    sources: [(源名, 无参thunk), ...]。DataFrame 用 not empty 判空,其余用 truthy。
+    ⭐ 每源套硬超时(默认 _SOURCE_TIMEOUT): 源卡死 timeout 秒后强制当失败 → 试下一个源,
+       不会无限等(根治 datahub.quotes 等卡死拖垮 jobs)。单源异常/超时被吞续试下一个。"""
+    to = timeout or _SOURCE_TIMEOUT
     now = _time.time()
     ordered = sorted(sources, key=lambda ns: -_health(f"{capability}:{ns[0]}", now))
     for name, fn in ordered:
         key = f"{capability}:{name}"
         t0 = _time.time()
         try:
-            v = fn()
+            fut = _ROUTE_POOL.submit(fn)
+            v = fut.result(timeout=to)
+        except _cf.TimeoutError:
+            fut.cancel()  # 孤儿线程留底层自然结束, 不阻塞
+            _record(key, False, _time.time() - t0)
+            print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源", flush=True)
+            continue
         except Exception:
             _record(key, False, _time.time() - t0)
             continue
@@ -491,7 +513,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     def _f():
         df = _fetcher().get_stock_data(code, period, interval)
         return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
-    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame())
+    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
     df = _sanitize_kline(df)
     if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
         try:
@@ -545,7 +567,7 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
     def _f():
         d = _fetcher().get_stock_data(code, base, interval)
         return pd.DataFrame() if isinstance(d, dict) else (d if isinstance(d, pd.DataFrame) else pd.DataFrame())
-    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame())
+    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
     if not isinstance(df, pd.DataFrame) or df.empty:
         return {"code": code, "bars": 0, "wrote": 0}
     wrote = 0
