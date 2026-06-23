@@ -1339,6 +1339,27 @@ def _notify_task_error(name: str, exc: Exception, tb: str):
         pass  # 通知失败绝不影响主流程
 
 
+def _notify_data_unavailable(name: str, detail: str = ''):
+    """全靠外部数据的任务因数据源不可用/超时而结束 → 推一条平和提示(非告警, 不带 traceback)。
+    按用户要求:"外部接口失败了就提示, 然后任务结束"。同任务 2h 内限一条(复用告警限频表)。"""
+    try:
+        now = time.time()
+        if now - _ERR_NOTIFY_LAST.get(name, 0) < _ERR_NOTIFY_COOLDOWN:
+            return
+        _ERR_NOTIFY_LAST[name] = now
+        cn = name
+        try:
+            from automation_config import REGISTRY
+            cn = REGISTRY.get(name, {}).get('cn', name)
+        except Exception:
+            pass
+        body = f"任务「{cn}」({name}) 因外部数据源暂不可用而结束本次{('(' + detail + ')') if detail else ''}, 已自动跳过, 下个周期重试。"
+        from notification_router import send
+        send('report', f"📡 数据源暂不可用: {cn}", body)
+    except Exception:
+        pass
+
+
 # ─── 任务运行时长追踪 + deadman switch (2026-06-15, 06-17 调方案) ─────────────
 # 背景:6/14 夜里 pywencai 卡死, 整个线程池被 6 个僵尸任务堵满, 调度器主线程还活着
 #       但 supervisor 看 PID 在不重启 → 09:45 选股没跑。
@@ -1420,7 +1441,10 @@ def _run_with_log(name, func, *a, **kw):
         msg = f'task 超过硬超时 {timeout}s 被切断(孤儿线程留底层)'
         print(f'[jobs_hub] ⏱️ {name} 超时切断 (耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
         _log_run(name, 'error', error=msg)
-        _notify_task_error(name, TimeoutError(msg), msg)
+        # 超时基本都是"外部数据源卡死/不可用"导致(datahub 源级已 20s 兜底, 任务级超时
+        # 通常意味数据源整体抽风)。按用户要求: 发一条平和"数据源不可用"提示, 任务正常结束,
+        # 不发吓人的"⚠️任务失败+traceback"告警(避免误以为代码崩了)。限频同 _notify_task_error。
+        _notify_data_unavailable(name, f'运行 {elapsed:.0f}s 超时(阈值 {timeout}s)')
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
