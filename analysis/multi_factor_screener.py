@@ -237,6 +237,12 @@ def build_factor_frame(symbols: List[str], progress: bool = True,
     Returns: index=股票代码，columns=因子名 的 DataFrame（缺失为 NaN）。
     """
     from fundamental_scoring import collect_factors
+    import time as _time
+
+    # 慢股阈值(秒): 单只取因子超过这个时间打 ⚠️, 方便定位"卡因子"的元凶。
+    # collect_factors 内部对每只调 pywencai(单只最多 30s), 60 只串行最坏 30 分钟 —— 这是
+    # unified_selection "取因子" 卡死的根因, 以前只有每 25 步粗进度, 看不出卡哪只。
+    _SLOW = 5.0
 
     def _one(sym):
         try:
@@ -245,6 +251,7 @@ def build_factor_frame(symbols: List[str], progress: bool = True,
             return sym, {}
 
     rows = {}
+    _t_all = _time.time()
     if workers and workers > 1 and len(symbols) > 1:
         from concurrent.futures import ThreadPoolExecutor
         done = 0
@@ -253,12 +260,18 @@ def build_factor_frame(symbols: List[str], progress: bool = True,
                 rows[sym] = fac
                 done += 1
                 if progress and done % 25 == 0:
-                    print(f"   取因子 {done}/{len(symbols)} ...(并发{workers})")
+                    print(f"   取因子 {done}/{len(symbols)} ...(并发{workers}, 累计{_time.time()-_t_all:.0f}s)", flush=True)
     else:
         for i, sym in enumerate(symbols):
             if progress and i % 25 == 0:
-                print(f"   取因子 {i}/{len(symbols)} ...")
+                print(f"   取因子 {i}/{len(symbols)} ...(累计{_time.time()-_t_all:.0f}s)", flush=True)
+            _t0 = _time.time()
             rows[sym] = _one(sym)[1]
+            _dt = _time.time() - _t0
+            if progress and _dt >= _SLOW:
+                print(f"   ⚠️ 取因子慢: {sym} 耗时 {_dt:.1f}s", flush=True)
+    if progress:
+        print(f"   取因子完成 {len(symbols)}/{len(symbols)} (总耗时 {_time.time()-_t_all:.0f}s)", flush=True)
     # 保持入参顺序（线程池乱序返回 → 按 symbols 重排，不影响打分但利于复现）
     return pd.DataFrame.from_dict({s: rows.get(s, {}) for s in symbols}, orient='index')
 
