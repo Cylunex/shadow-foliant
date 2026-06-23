@@ -1346,21 +1346,69 @@ HARD_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_HARD_DEADLINE_SEC',
 # 兼容旧变量名(配置 / 文档引用过 TASK_DEADLINE_SEC, 不破坏)
 TASK_DEADLINE_SEC = SOFT_DEADLINE_SEC
 
+# ─── 全局任务硬超时(2026-06-23): 任何任务超过阈值都被外层 future 切断 ────────
+# 背景:不少任务(fund_valuation_signal / morning_portfolio / selection_debate /
+# InStock 取因子 等)就算我加了内层 timeout, 实际还是被某些底层 socket / lock
+# 卡 30+ 分钟, 拖累后续任务窗口。最稳:在 _run_with_log 调用 func 时套外层 future,
+# 任意任务超 _TASK_HARD_TIMEOUTS[name] 必抛 TimeoutError(孤儿线程留底层自然结束)。
+#
+# 配置默认每任务 10 分钟(_DEFAULT_TASK_TIMEOUT), 慢任务用 _TASK_HARD_TIMEOUTS 单独
+# 调高(rag_ingest / daily_backtest 等)。可通过 env JOBS_HUB_DEFAULT_TASK_TIMEOUT 覆盖。
+_DEFAULT_TASK_TIMEOUT = int(_os.environ.get('JOBS_HUB_DEFAULT_TASK_TIMEOUT', '600'))   # 10 分钟
+_TASK_HARD_TIMEOUTS: Dict[str, int] = {
+    # 慢任务的专属超时(秒)
+    'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
+    'daily_backtest':            3600,   # 历史回测
+    'factor_collection':         1200,
+    'kline_prefetch':            900,
+    'mx_daily_analysis':         1500,   # LLM 慢
+    'mx_selection_review':       1500,
+    'overnight_strategy':        2400,   # 隔夜大批 AI 分析
+    'unified_selection':         1200,   # 综合选股(内含 5 大策略+InStock+多因子)
+    'morning_portfolio':         900,
+    'afternoon_portfolio':       900,
+    'portfolio_indicator_snapshot': 1200,
+    'selection_debate':          900,
+    'fund_valuation_signal':     300,    # 6 个指数, 5 分钟够
+    'fund_dca_reminder':         300,
+    'fund_target_check':         600,
+    'fund_nav_refresh':          900,
+    'pg_backup':                 600,
+}
+_TASK_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
 
 def _run_with_log(name, func, *a, **kw):
     """Run task in thread pool and log result (module-level, usable by _wrap)。
-    任务抛异常 → ① job_runs 记 error(带 traceback 尾,便于修复)② 推告警通知(限频)。
-    进 / 出 / 失败时都在 stdout 打一行带耗时的标识, 方便 grep 出某任务的执行窗口。"""
+
+    1. 进 / 出 / 失败时都在 stdout 打一行带耗时的标识, 方便 grep 出某任务的执行窗口。
+    2. 套全局外层 future 硬超时(_DEFAULT_TASK_TIMEOUT, 慢任务在 _TASK_HARD_TIMEOUTS 覆盖):
+       任何任务超时一律切断, 不再卡 30 分钟拖累后续。孤儿线程留底层自然结束。
+    3. 异常 → 记 job_runs(带 traceback 尾) + 推 alert 告警(限频)。
+    """
+    global _TASK_TIMEOUT_POOL
+    if _TASK_TIMEOUT_POOL is None:
+        _TASK_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=24, thread_name_prefix='task-hard-timeout')
+
     t0 = time.time()
-    # 顺手把线程池里"在跑"的任务数也打出来, 出现僵尸/堵塞时一眼能看出
-    pool_busy = len(_TASK_START_TS) + 1  # +1: 本任务马上登记
-    print(f'[jobs_hub] ▶ {name} 开始 (pool={pool_busy}/6)', flush=True)
+    pool_busy = len(_TASK_START_TS) + 1
+    timeout = _TASK_HARD_TIMEOUTS.get(name, _DEFAULT_TASK_TIMEOUT)
+    print(f'[jobs_hub] ▶ {name} 开始 (pool={pool_busy}/6, 超时{timeout}s)', flush=True)
     with _TASK_LOCK:
         _TASK_START_TS[name] = t0
+    fut = _TASK_TIMEOUT_POOL.submit(func, *a, **kw)
     try:
-        func(*a, **kw)
+        fut.result(timeout=timeout)
         elapsed = time.time() - t0
         print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
+    except concurrent.futures.TimeoutError:
+        fut.cancel()
+        elapsed = time.time() - t0
+        msg = f'task 超过硬超时 {timeout}s 被切断(孤儿线程留底层)'
+        print(f'[jobs_hub] ⏱️ {name} 超时切断 (耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
+        _log_run(name, 'error', error=msg)
+        _notify_task_error(name, TimeoutError(msg), msg)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
