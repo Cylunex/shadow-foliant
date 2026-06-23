@@ -260,7 +260,7 @@ export default {
     }
     const { sortBy, arrow, sorted: sortedStocks } = useSort(()=> p.stocks, 'mv', -1)
     // 今日股票盈亏(盘中实时):Σ 持仓股 数量×(现价-昨收)
-    const todayStock = computed(()=> (p.stocks||[]).reduce((a,s)=> a + (Number(s.qty)||0)*(Number(s.today_change)||0), 0))
+    const todayStock = computed(()=> (p.stocks||[]).reduce((a,s)=> a + (Number(s.today_change)||0), 0))   // today_change 已是持仓口径(×数量)
 
     async function load(){
       p.err=''; p.busy=true

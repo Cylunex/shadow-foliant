@@ -1121,11 +1121,12 @@ def portfolio_stocks():
             # 适配器返回字段是 last_close(昨收);原取 prev_close 永远 None→退回成本价,今日涨跌算错
             prev_close = q.get("last_close") or q.get("prev_close") or cost
             change_pct = round((price - prev_close) / prev_close, 4) if prev_close else None
-            change_amt = round(price - prev_close, 2) if prev_close else None
+            # 今日收益 = 每股涨跌 × 持仓数量(持仓口径,直观);原来只给每股涨跌额、看着不直观
+            today_change = round(qty * (price - prev_close), 2) if prev_close else None
             out.append({"code": code, "name": s.get("name"), "qty": qty, "cost": cost,
                         "price": price, "mv": round(qty * price, 2),
                         "pnl_pct": round((price - cost) / cost, 4) if cost else None,
-                        "today_change": change_amt, "today_change_pct": change_pct,
+                        "today_change": today_change, "today_change_pct": change_pct,
                         "quotes_ok": bool(q)})
         return _ok(out)
     except Exception as e:
