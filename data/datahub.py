@@ -447,16 +447,19 @@ def _fetcher():
 
 def quotes(codes: List[str]) -> Dict[str, dict]:
     """批量实时行情。返回 {code(6位): 标准quote dict}。
-    datahub 级并列双源(2026-06-24,根治"腾讯卡满超时被砍→东财兜底没轮到→全空"):
+    datahub 级并列三源(2026-06-24,根治"腾讯卡满超时被砍→东财兜底没轮到→全空"):
       - a_stock:腾讯主 + 东财补缺(逐代码互补,处理"腾讯偶尔缺几只冷门票")
       - eastmoney:纯东财 ulist(腾讯整体卡死/被 _route 砍掉时的独立兜底,独立超时+健康度记账)
-    _route 按健康度排序:腾讯连续卡死会降级,东财自动上位,不再让单点拖垮取数。"""
+      - sina:纯新浪 hq(真·独立源,非东财非腾讯;腾讯+东财同公司都挂时的最后底。
+        只有行情无 PE/PB/市值,这些字段 0,但 name/价/涨跌核心字段保住,报告不至全空)
+    _route 按健康度排序:某源连续卡死会降级,其余自动上位,不再让单点拖垮取数。"""
     codes = [str(c) for c in (codes or []) if c]
     if not codes:
         return {}
     raw = _route("quotes",
                  [("a_stock", lambda: _adapter().get_quotes(codes)),
-                  ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes))],
+                  ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes)),
+                  ("sina", lambda: _adapter().get_quotes_sina(codes))],
                  empty={}) or {}
     norm = {_norm_code(k): v for k, v in raw.items()}
     _name_remember(norm)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)

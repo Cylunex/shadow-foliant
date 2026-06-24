@@ -197,6 +197,58 @@ def _eastmoney_ulist_quote(codes: list[str]) -> dict[str, dict]:
     return result
 
 
+def _sina_quote(codes: list[str]) -> dict[str, dict]:
+    """新浪 hq.sinajs.cn 批量实时行情(GBK)——真·独立源(非东财非腾讯)。
+    供 datahub 作 quotes 第三兜底:腾讯+东财都挂时的最后底。⚠️ 新浪只有行情
+    (name/价/涨跌/开高低/额),无 PE/PB/市值/换手/涨跌停 → 这些字段填 0(与东财 ulist
+    缺失口径一致),但 key 集与 _tencent_quote 完全相同,下游不会 KeyError。"""
+    prefixed = []
+    for c in codes:
+        if re.match(r'^(sh|sz|bj)\d+$', c.lower()):
+            prefixed.append(c.lower())
+        else:
+            code = _normalize_code(c)
+            prefixed.append(f"{_get_prefix(code)}{code}")
+    url = "https://hq.sinajs.cn/list=" + ",".join(prefixed)
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", UA)
+    req.add_header("Referer", "https://finance.sina.com.cn")  # 新浪行情必须带 Referer,否则 403
+    try:
+        _throttle('sina')
+        raw = urllib.request.urlopen(req, timeout=6).read().decode("gbk", "replace")  # 6s 快速失败
+    except Exception as e:
+        print(f"[a-stock] 新浪行情请求失败: {type(e).__name__}")
+        return {}
+    result = {}
+    for line in raw.strip().split("\n"):
+        m = re.search(r'hq_str_([a-z]{2}\d{6})="([^"]*)"', line)
+        if not m:
+            continue
+        code = m.group(1)[2:]
+        f = m.group(2).split(",")          # 名称,今开,昨收,现价,最高,最低,买一,卖一,量(股),额(元),...
+        if len(f) < 10 or not f[0]:
+            continue
+        try:
+            open_ = float(f[1]); last = float(f[2]); price = float(f[3])
+            high = float(f[4]); low = float(f[5]); amount = float(f[9])
+        except (ValueError, IndexError):
+            continue
+        if price <= 0:                     # 停牌/集合竞价前现价 0 → 用昨收兜
+            price = last
+        chg = price - last
+        pct = (chg / last * 100) if last else 0.0
+        result[code] = {
+            "name": f[0], "price": price, "last_close": last, "open": open_,
+            "change_amt": round(chg, 2), "change_pct": round(pct, 2),
+            "high": high, "low": low, "amount_wan": amount / 1e4,
+            "turnover_pct": 0.0, "pe_ttm": 0.0,
+            "amplitude_pct": round((high - low) / last * 100, 2) if last else 0.0,
+            "mcap_yi": 0.0, "float_mcap_yi": 0.0, "pb": 0.0,
+            "limit_up": 0.0, "limit_down": 0.0, "vol_ratio": 0.0, "pe_static": 0.0,
+        }
+    return result
+
+
 def _batch_quote(codes: list[str]) -> dict[str, dict]:
     """批量实时行情:腾讯主源,缺失的代码用东财 ulist 兜底(跨源容灾)。"""
     out = _tencent_quote(codes)
@@ -1109,6 +1161,11 @@ class AStockDataAdapter:
         """纯东财 ulist 批量行情(与腾讯同构 dict)——供 datahub 作并列独立兜底源,
         腾讯整体卡死/被砍时由 datahub._route 独立超时切到这里。"""
         return _eastmoney_ulist_quote(symbols)
+
+    def get_quotes_sina(self, symbols: list[str]) -> dict[str, dict]:
+        """纯新浪 hq 批量行情(真·独立源,与腾讯同 key 集但无 PE/PB/市值)——供 datahub 作
+        quotes 第三兜底:腾讯+东财(同公司)都挂时,新浪是唯一的非东财非腾讯独立源。"""
+        return _sina_quote(symbols)
 
     def get_quote_dataframe(self, symbols: list[str]) -> pd.DataFrame:
         """批量获取行情并返回DataFrame"""

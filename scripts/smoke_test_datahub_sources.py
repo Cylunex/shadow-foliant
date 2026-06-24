@@ -60,36 +60,48 @@ def _cmp(domain, main_rows, alt_rows, alt_name='akshare'):
             print('  ❌ akshare 北向不是按日序列(日期全同=当日汇总表)→ 已被防御拦截,符合预期')
 
 
+GAP = 6   # 每个外部接口之间至少间隔 6s(>5s 防封,尤其东财各子域共用 IP)
+
+
 def main():
     codes = sys.argv[1:] or ['600519']
-    print(f'datahub 多源 smoke-test  codes={codes}')
+    print(f'datahub 多源 smoke-test  codes={codes}  (每个接口间隔 {GAP}s)')
+    _state = {'first': True}
+
+    def fetch(fn):
+        """取一个源:除第一次外,调用前先 sleep GAP 秒;异常返回 None。"""
+        if not _state['first']:
+            time.sleep(GAP)
+        _state['first'] = False
+        try:
+            return fn()
+        except Exception as e:
+            print(f'  [取数异常] {type(e).__name__}: {str(e)[:80]}')
+            return None
 
     for code in codes:
         print(f'\n########## {code} ##########')
-        # 1. quotes:腾讯主 vs 东财 ulist
-        try:
-            _cmp('quotes', adapter.get_quotes([code]), adapter.get_quotes_eastmoney([code]), '东财ulist')
-        except Exception as e:
-            print(f'  quotes 测试异常: {type(e).__name__}: {e}')
-        # 2. capital_flow:东财 push2his 主 vs akshare
-        try:
-            _cmp('capital_flow', adapter.get_fund_flow_history(code, 120),
-                 datahub._capital_flow_akshare(code, 120))
-        except Exception as e:
-            print(f'  capital_flow 测试异常: {type(e).__name__}: {e}')
+        # 1. quotes:腾讯(a_stock)主 vs 东财 ulist vs 新浪(三源,逐个间隔取)
+        q_main = fetch(lambda: adapter.get_quotes([code]))
+        q_em = fetch(lambda: adapter.get_quotes_eastmoney([code]))
+        q_sina = fetch(lambda: adapter.get_quotes_sina([code]))
+        _cmp('quotes vs 东财ulist', q_main, q_em, '东财ulist')
+        _cmp('quotes vs 新浪', q_main, q_sina, '新浪')
+        print('    (新浪 PE/PB/市值 恒 0,属预期;只看 key 集是否一致)')
+        # 2. capital_flow:东财 push2his 主 vs akshare(实测同源)
+        cf_main = fetch(lambda: adapter.get_fund_flow_history(code, 120))
+        cf_ak = fetch(lambda: datahub._capital_flow_akshare(code, 120))
+        _cmp('capital_flow', cf_main, cf_ak)
         # 3. stock_news:东财搜索(dsm)主 vs akshare
-        try:
-            _cmp('stock_news', dsm.get_stock_news_a_stock(code, 20),
-                 datahub._stock_news_akshare(code, 20))
-        except Exception as e:
-            print(f'  stock_news 测试异常: {type(e).__name__}: {e}')
+        sn_main = fetch(lambda: dsm.get_stock_news_a_stock(code, 20))
+        sn_ak = fetch(lambda: datahub._stock_news_akshare(code, 20))
+        _cmp('stock_news', sn_main, sn_ak)
 
     # 4. north_flow:全市场,只测一次
     print('\n########## 北向(全市场) ##########')
-    try:
-        _cmp('north_flow', dsm.get_north_flow_a_data(30), datahub._north_flow_akshare(30))
-    except Exception as e:
-        print(f'  north_flow 测试异常: {type(e).__name__}: {e}')
+    nf_main = fetch(lambda: dsm.get_north_flow_a_data(30))
+    nf_ak = fetch(lambda: datahub._north_flow_akshare(30))
+    _cmp('north_flow', nf_main, nf_ak)
 
     # 5. kline:东财 vs mootdx 同日 Close/Volume 量级核对(验证 mootdx 单位自适应是否正确)
     print(f'\n########## K线源核对(东财 vs 通达信 mootdx)code={codes[0]} ##########')
@@ -99,10 +111,8 @@ def main():
             print('  ⚠️ mootdx 未安装或无可连服务器 → datahub.kline 第三源占位(无害);'
                   '装了再测:pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"')
         else:
-            time.sleep(6)
-            em = datahub._kline_eastmoney(codes[0])
-            time.sleep(6)
-            mx = datahub._kline_mootdx(codes[0])
+            em = fetch(lambda: datahub._kline_eastmoney(codes[0]))
+            mx = fetch(lambda: datahub._kline_mootdx(codes[0]))
             if em is None or em.empty or mx is None or mx.empty:
                 print(f'  ⚠️ 东财 {0 if em is None else len(em)} 行 / mootdx {0 if mx is None else len(mx)} 行,'
                       '至少一源空,无法核对')
