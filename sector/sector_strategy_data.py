@@ -629,7 +629,8 @@ class SectorStrategyDataFetcher:
 """)
             sorted_flow = sorted(flow, key=lambda x: x["main_net_inflow"], reverse=True)
             for item in sorted_flow[:15]:
-                text_parts.append(f"  {item['sector']}: {item['main_net_inflow']:.2f}万 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}%")
+                # main_net_inflow 单位"元",÷1e8 显示"亿"(原误标"万"虚标1e4倍)
+                text_parts.append(f"  {item['sector']}: {item['main_net_inflow']/1e8:.2f}亿 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}%")
         
         # 重要新闻（前20条）
         if data.get("news"):

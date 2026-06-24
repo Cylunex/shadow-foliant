@@ -258,7 +258,8 @@ class SectorStrategyAgents:
 主力资金净流入 TOP15:
 """
             for idx, item in enumerate(sorted_inflow[:15], 1):
-                fund_flow_summary += f"{idx}. {item['sector']}: {item['main_net_inflow']:.2f}万 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}% | 超大单: {item['super_large_net_inflow']:.2f}万\n"
+                # main_net_inflow/super_large 单位是"元"(datahub.sector_fund_flow),÷1e8 显示"亿"(原误标"万"虚标1e4倍)
+                fund_flow_summary += f"{idx}. {item['sector']}: {item['main_net_inflow']/1e8:.2f}亿 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}% | 超大单: {item['super_large_net_inflow']/1e8:.2f}亿\n"
             
             # 净流出前10
             sorted_outflow = sorted(flow_list, key=lambda x: x["main_net_inflow"])
@@ -266,7 +267,7 @@ class SectorStrategyAgents:
 主力资金净流出 TOP10:
 """
             for idx, item in enumerate(sorted_outflow[:10], 1):
-                fund_flow_summary += f"{idx}. {item['sector']}: {item['main_net_inflow']:.2f}万 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}%\n"
+                fund_flow_summary += f"{idx}. {item['sector']}: {item['main_net_inflow']/1e8:.2f}亿 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}%\n"
         
         # 构建北向资金数据
         north_summary = ""
