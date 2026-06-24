@@ -610,8 +610,10 @@ _EM_INDEX_CODES = frozenset({
 })
 
 
-def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """东财 push2his 日线(**不复权 raw**, 与 fetcher 主源新浪同口径)。
+def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d",
+                     adjust: str = "raw") -> pd.DataFrame:
+    """东财 push2his 日线。adjust='raw'→fqt=0(不复权,与 fetcher 主源新浪同口径)/
+    'qfq'→fqt=1(前复权,供技术分析两套缓存的 qfq 源)。
     返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。仅日线。"""
     if interval not in ('1d', 'daily', '101'):
         return pd.DataFrame()                  # 非日线交回主 fetcher 处理
@@ -628,11 +630,12 @@ def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d") -> pd.
     import json as _json
     lmt = int(_period_days(period) * 0.72) + 30   # 自然日→交易日约 ×0.72, 多取 30 根冗余
     secid = _em_secid(c)
-    # ⚠️ fqt=0 不复权: 实测新浪 scale=240&ma=no 返回 raw 价(2025-06-13 茅台 1426.95 两源一致),
-    # 三方共享同一缓存文件, east 必须与主源同口径, 否则历史价跳变一个累计分红额污染回测/因子。
+    # fqt=0 不复权(raw,与新浪主源 scale=240&ma=no 同口径,2025-06-13 茅台两源一致);
+    # fqt=1 前复权(qfq,技术分析两套缓存的 qfq 源)。raw 缓存须 fqt=0,否则历史价跳变污染。
+    _fqt = '1' if adjust == 'qfq' else '0'
     url = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
            f'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'
-           f'&klt=101&fqt=0&end=20500101&lmt={lmt}')
+           f'&klt=101&fqt={_fqt}&end=20500101&lmt={lmt}')
     try:
         _throttle('eastmoney')
         req = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -710,14 +713,52 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     return _slice_by_days(out, _period_days(period))
 
 
-def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True) -> pd.DataFrame:
-    """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume,不复权 raw)。
-    源链(datahub 级多源, 健康度自适应):StockDataFetcher(主源新浪日K, 服务器实测可达)
-    → 东财 push2his(干净 JSON 备援)→ mootdx 通达信公网(真·独立协议源, 需 pip install mootdx,
-    新浪/东财等 HTTP 源全被机房墙时的最后兜底; 未装则返回空被跳过)。健康度路由自动把可达源排前、
-    被封源排后。磁盘缓存日线提速。失败返回空 DF。
+def _kline_akshare_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """akshare 前复权(qfq)日线,datahub.kline qfq 源之一。返回 fetcher 同款格式
+    (DatetimeIndex='Date' + 大写 OCHLV, Volume 单位'股')或空 DF。仅日线。
+    ⚠️ akshare stock_zh_a_hist 走东财,东财封时取不到(返回空,_route 跳过/上层 fallback raw)。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    cmap = {'日期': 'Date', '开盘': 'Open', '收盘': 'Close', '最高': 'High', '最低': 'Low', '成交量': 'Volume'}
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        from datetime import datetime as _dt, timedelta as _td
+        start = (_dt.now() - _td(days=_period_days(period) + 15)).strftime('%Y%m%d')
+        df = ak_call(ak.stock_zh_a_hist, symbol=_norm_code(code), period='daily',
+                     start_date=start, end_date='20500101', adjust='qfq', timeout=20)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in cmap):
+        return pd.DataFrame()
+    try:
+        out = pd.DataFrame({
+            'Date': pd.to_datetime(df['日期'], errors='coerce').dt.normalize(),
+            'Open': pd.to_numeric(df['开盘'], errors='coerce'),
+            'Close': pd.to_numeric(df['收盘'], errors='coerce'),
+            'High': pd.to_numeric(df['最高'], errors='coerce'),
+            'Low': pd.to_numeric(df['最低'], errors='coerce'),
+            'Volume': pd.to_numeric(df['成交量'], errors='coerce') * 100,  # akshare 成交量"手"→"股"对齐
+        }).dropna(subset=['Date']).set_index('Date').sort_index()
+    except Exception:
+        return pd.DataFrame()
+    return _slice_by_days(out, _period_days(period))
+
+
+def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
+          adjust: str = "raw") -> pd.DataFrame:
+    """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
+    ⭐ 两套复权缓存(2026-06-24):
+      adjust='raw'(默认):不复权,真实成交价 —— 回测/持仓盈亏/决策后验/显示真实价 用。
+        源链:StockDataFetcher(新浪 raw 主源)→ 东财 push2his fqt=0 → mootdx 通达信。缓存键无后缀。
+      adjust='qfq':前复权,消除除权跳空 —— InStock/形态/缠论/因子/技术指标 用(行业标准)。
+        源链:东财 push2his fqt=1 → akshare qfq(均走东财,东财封时取不到 → fallback raw,**不写 qfq 缓存**)。
+        新浪只能 raw 不入 qfq 源;mootdx 只 raw 不入 qfq 源。缓存键 _qfq 后缀,与 raw 互不污染。
+    健康度路由自动把可达源排前。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
-    cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}.pkl")
+    adjust = 'qfq' if str(adjust) == 'qfq' else 'raw'
+    suffix = '_qfq' if adjust == 'qfq' else ''
+    cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}{suffix}.pkl")
     if use_cache:
         try:
             if _os.path.isfile(cache_f) and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl():
@@ -727,17 +768,25 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         except Exception:
             pass
 
-    def _f():
-        df = _fetcher().get_stock_data(code, period, interval)
-        return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
-    # fetcher(新浪)在前(服务器实测可达), east(东财)兜底 — 部分机房 IP 被东财 push2 封,
-    # east 放第一位会每次先吃一次失败。健康度路由也会动态调整, 但默认顺序按"可达性"排。
-    df = _route("kline",
-                [("fetcher", _f),
-                 ("east", lambda: _kline_eastmoney(code, period, interval)),
-                 ("mootdx", lambda: _kline_mootdx(code, period, interval))],
-                empty=pd.DataFrame(), timeout=45)
+    if adjust == 'raw':
+        def _f():
+            df = _fetcher().get_stock_data(code, period, interval)   # StockDataFetcher 默认 raw
+            return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
+        # fetcher(新浪 raw)在前(服务器实测可达), east(东财 fqt=0)兜底, mootdx 最后(独立协议)
+        df = _route("kline",
+                    [("fetcher", _f),
+                     ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
+                     ("mootdx", lambda: _kline_mootdx(code, period, interval))],
+                    empty=pd.DataFrame(), timeout=45)
+    else:  # qfq:独立源(都走东财),绕开只能 raw 的新浪/mootdx
+        df = _route("kline_qfq",
+                    [("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq')),
+                     ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval))],
+                    empty=pd.DataFrame(), timeout=45)
     df = _sanitize_kline(df)
+    # qfq 源全失败(典型:东财被封)→ 退回 raw(技术分析有数据胜过无),但**绝不写进 qfq 缓存**(防污染)
+    if adjust == 'qfq' and (not isinstance(df, pd.DataFrame) or df.empty):
+        return kline(code, period, interval, use_cache=use_cache, adjust='raw')
     if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
         try:
             _os.makedirs(_KLINE_DIR, exist_ok=True)
@@ -826,9 +875,10 @@ def kline_akshare_compat(code: str, period: str = "1y") -> pd.DataFrame:
 
 
 def kline_with_indicators(code: str, period: str = "1y") -> pd.DataFrame:
-    """K线 + MyTT 技术指标(MA/MACD/KDJ/RSI/BOLL...)。失败返回空 DF。"""
+    """K线 + MyTT 技术指标(MA/MACD/KDJ/RSI/BOLL...)。失败返回空 DF。
+    ⭐ 技术指标用前复权 qfq(除权跳空会让均线/MACD 失真);qfq 取不到时内部 fallback raw。"""
     f = _fetcher()
-    df = f.get_stock_data(code, period)
+    df = kline(code, period, adjust='qfq')   # qfq:技术指标行业标准
     if isinstance(df, dict) or df is None or len(df) == 0:
         return pd.DataFrame()
     ind = f.calculate_technical_indicators(df)

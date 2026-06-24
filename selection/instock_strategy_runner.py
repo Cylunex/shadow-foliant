@@ -200,9 +200,11 @@ def run_batch(stocks: List[Tuple[str, str]],
         date / strategies / period / evolved: 同 run_one
     """
     if df_fetcher is None:
-        from stock_data import StockDataFetcher
-        fetcher = StockDataFetcher()
-        df_fetcher = lambda s, p: fetcher.get_stock_data(s, p)
+        # ⭐ InStock 形态/均线/突破/KDJ 策略须用前复权(qfq):raw 在除权除息日有假跳空,
+        # 破坏均线连续性与形态判断(高送转小盘股尤甚)。走 datahub.kline(adjust='qfq')统一 qfq 源
+        # (东财封等取不到时其内部 fallback raw,有数据胜过无)。格式与 StockDataFetcher 同(大写 OCHLV)。
+        import datahub
+        df_fetcher = lambda s, p: datahub.kline(s, p, adjust='qfq')
 
     results = []
     for symbol, name in stocks:

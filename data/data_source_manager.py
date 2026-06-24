@@ -138,12 +138,15 @@ class DataSourceManager:
         start = start_date.replace('-', '') if start_date else '20250101'
         end = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
         
+        # fqt 跟随 adjust(修 fqt=1 硬编码):raw=0/qfq=1/hfq=2。此源作新浪(raw)的备援时
+        # 必须 fqt=0 对齐,否则新浪挂时 curl 给 qfq、与 raw 共享缓存 → 历史价跳变污染。
+        _fqt = {'': '0', 'raw': '0', None: '0', 'qfq': '1', 'hfq': '2'}.get(adjust, '1')
         url = (
             f'https://push2his.eastmoney.com/api/qt/stock/kline/get'
             f'?fields1=f1,f2,f3,f4,f5,f6'
             f'&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116'
             f'&ut=7eea3edcaed734bea9cbfc24409ed989'
-            f'&klt=101&fqt=1'
+            f'&klt=101&fqt={_fqt}'
             f'&secid={secid_prefix}.{symbol}'
             f'&beg={start}&end={end}'
         )

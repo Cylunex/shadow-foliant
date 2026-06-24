@@ -34,11 +34,13 @@ class StockDataFetcher:
         except Exception as e:
             return {"error": f"获取股票信息失败: {str(e)}"}
     
-    def get_stock_data(self, symbol, period="1y", interval="1d"):
-        """获取股票历史数据"""
+    def get_stock_data(self, symbol, period="1y", interval="1d", adjust="raw"):
+        """获取股票历史数据。adjust='raw'(默认,不复权,回测/持仓/真实价)/'qfq'(前复权,技术分析)。
+        ⭐ 两套缓存(2026-06-24):qfq 委托 datahub.kline(adjust='qfq') 统一 qfq 源,避开
+        本函数主源新浪只能 raw 的陷阱。raw 走原逻辑。"""
         try:
             if self._is_chinese_stock(symbol):
-                return self._get_chinese_stock_data(symbol, period)
+                return self._get_chinese_stock_data(symbol, period, adjust)
             elif self._is_hk_stock(symbol):
                 return self._get_hk_stock_data(symbol, period)
             else:
@@ -591,16 +593,24 @@ class StockDataFetcher:
         except Exception as e:
             return {"error": f"获取美股信息失败: {str(e)}"}
     
-    def _get_chinese_stock_data(self, symbol, period="1y"):
+    def _get_chinese_stock_data(self, symbol, period="1y", adjust="raw"):
         """获取中国股票历史数据(支持akshare和tushare数据源自动切换)。
 
         ⭐ 共享 datahub.kline 的磁盘缓存(2026-06-17):
         selection / instock_strategies / multi_factor / pattern_recognition 都走这个函数,
         以前每次实时拉(单次 ~100ms × 30+ 只 ≈ 3-5s + 网络抖动). 现在和 datahub.kline
-        共用 db/kline_cache/{symbol}_{period}_1d.pkl, TTL 盘中 1h / 盘外 12h, 同一只股票
-        同一周期 1h 内多次调用直接秒读, unified_selection 等多任务级联调用大幅提速。
+        共用 db/kline_cache/{symbol}_{period}_1d{后缀}.pkl, TTL 盘中 1h / 盘外 12h。
+        ⭐ adjust='raw'(默认)走本函数(新浪 raw 主源);'qfq' 委托 datahub.kline 统一 qfq 源。
         """
-        # === 共享缓存读 ===
+        adjust = 'qfq' if str(adjust) == 'qfq' else 'raw'
+        # qfq:委托 datahub.kline 的 qfq 源(东财 fqt=1 / akshare qfq),避开本函数新浪主源只能 raw
+        if adjust == 'qfq':
+            try:
+                import datahub
+                return datahub.kline(symbol, period, '1d', adjust='qfq')
+            except Exception:
+                adjust = 'raw'   # qfq 失败兜底走 raw
+        # === 共享缓存读(raw 无后缀, 与 datahub.kline raw 同键) ===
         import os as _os
         import time as _time
         try:
@@ -619,23 +629,22 @@ class StockDataFetcher:
             pass
 
         try:
-            # 计算日期范围
+            # 计算日期范围。⭐ 修原 else=365 的 bug:2y/3y 曾被退化成 1 年,InStock 长周期策略
+            # (min_days 接近 250)缓冲不足。按 period 真实天数算(新浪源 datalen=365 仍是其单源上限,
+            # 但 akshare 降级路径能据此取满 2y/3y)。
             end_date = datetime.now().strftime('%Y%m%d')
-            if period == "1y":
-                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
-            elif period == "6mo":
-                start_date = (datetime.now() - timedelta(days=180)).strftime('%Y%m%d')
-            elif period == "3mo":
-                start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
-            else:
-                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+            _pdays = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095}.get(period, 365)
+            start_date = (datetime.now() - timedelta(days=_pdays)).strftime('%Y%m%d')
 
             # 使用数据源管理器获取数据（自动切换akshare和tushare）
+            # ⭐ adjust='' (raw 不复权):本函数只服务 raw 路径(qfq 已在上方委托 datahub.kline)。
+            # 原写死 'qfq' 是 bug —— 新浪主源无视它返 raw、但降级 curl东财/akshare 返 qfq,
+            # 口径随源漂移并污染与 datahub.kline 共享的 raw 缓存。统一 raw 根治。
             df = self.data_source_manager.get_stock_hist_data(
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
-                adjust='qfq'
+                adjust=''
             )
 
             if df is not None and not df.empty:
