@@ -585,9 +585,10 @@ def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d") -> pd.
 
 
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True) -> pd.DataFrame:
-    """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
-    源链(datahub 级多源, 健康度自适应):东财 push2his(干净 JSON, 快) → StockDataFetcher
-    (内部再多源:新浪/东财curl/akshare/Ashare/mootdx)。磁盘缓存日线提速。失败返回空 DF。
+    """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume,不复权 raw)。
+    源链(datahub 级多源, 健康度自适应):StockDataFetcher(主源新浪日K, 服务器实测可达)
+    → 东财 push2his(干净 JSON 备援)。健康度路由会自动把可达源排前、被封源(如部分机房
+    IP 被东财 push2 拒)排后。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
     cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}.pkl")
     if use_cache:
@@ -602,9 +603,11 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     def _f():
         df = _fetcher().get_stock_data(code, period, interval)
         return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
+    # fetcher(新浪)在前(服务器实测可达), east(东财)兜底 — 部分机房 IP 被东财 push2 封,
+    # east 放第一位会每次先吃一次失败。健康度路由也会动态调整, 但默认顺序按"可达性"排。
     df = _route("kline",
-                [("east", lambda: _kline_eastmoney(code, period, interval)),
-                 ("fetcher", _f)],
+                [("fetcher", _f),
+                 ("east", lambda: _kline_eastmoney(code, period, interval))],
                 empty=pd.DataFrame(), timeout=45)
     df = _sanitize_kline(df)
     if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
