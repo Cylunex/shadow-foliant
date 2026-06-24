@@ -1397,7 +1397,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
-    'unified_selection':         1200,   # 综合选股(内含 5 大策略+InStock+多因子)
+    'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
+    'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
     'portfolio_indicator_snapshot': 1200,
@@ -3470,11 +3471,24 @@ def task_unified_selection():
         except Exception:
             name_map = {}
 
-        # 输出（Markdown 表格,含来源列;💼=已持仓）
+        # 红蓝对抗整合(2026-06-24):上午不再单独推一条,TOP10 的多空对抗结论直接并进本表
+        # (妙想第二意见 10:30 仍独立)。best-effort:LLM 挂了红蓝列留空,不影响选股表;
+        # 决策信号在此写(record_signals=True),原 selection_debate 独立任务因此跳过不重复。
+        debate_map = {}
+        try:
+            from selection_debate import run_selection_debate
+            _dres = run_selection_debate(top_list[:10], max_stocks=10, record_signals=True)
+            for _it in (_dres.get('items') or []):
+                debate_map[str(_it.get('code'))] = _it
+        except Exception as _de:
+            print(f'[unified_selection] 红蓝对抗整合失败(不影响选股): {type(_de).__name__}: {str(_de)[:60]}')
+
+        # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
         body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n\n'
-        body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 分 | 来源 |\n'
-        body += '|:-:|:---------|:---:|:---:|:---:|:-:|:----|\n'
+        body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 分 | 红蓝 | 来源 |\n'
+        body += '|:-:|:---------|:---:|:---:|:---:|:-:|:--:|:----|\n'
+        _debate_tag = {'买入': '🔴可买', '谨慎': '🟡观望', '否决': '🟢避开'}
         for i, code in enumerate(top_list, 1):
             cinfo = candidates.get(code) or {'score': 0, 'src': []}
             score = round(cinfo['score'], 1)
@@ -3497,8 +3511,19 @@ def task_unified_selection():
             pct_s = f'{fpct:+.2f}%' if fpct is not None else '-'
             pe_s = f'{float(pe):.1f}' if pe and pe != 'N/A' and pe != '?' and float(pe) > 0 else '-'
             price_s = f'{price}' if price and price != 'N/A' and price != '?' else '-'
+            _dv = debate_map.get(code)
+            debate_s = _debate_tag.get(_dv['verdict'], '') if _dv else '-'
 
-            body += f'| {i} | {arrow}{held} {code} {name} | ¥{price_s} | {pct_s} | {pe_s} | {score} | {src_s} |\n'
+            body += f'| {i} | {arrow}{held} {code} {name} | ¥{price_s} | {pct_s} | {pe_s} | {score} | {debate_s} | {src_s} |\n'
+
+        # 红蓝对抗速览(结论先行):被否决的直接点名"避开"
+        if debate_map:
+            _rej = [debate_map[c] for c in top_list[:10]
+                    if debate_map.get(c, {}).get('verdict') == '否决']
+            _pass_n = sum(1 for v in debate_map.values() if v.get('verdict') == '买入')
+            body += (f'\n\n⚔️ 红蓝对抗:{_pass_n} 只可买、{len(_rej)} 只建议避开')
+            if _rej:
+                body += '\n🟢 避开:' + '、'.join((r.get('name') or r['code']) for r in _rej)
 
         # 附：策略基因组热度摘要
         if strategy_weights:
@@ -3722,44 +3747,13 @@ def task_portfolio_health_ai():
 
 
 def task_selection_debate():
-    """⚔️ 选股红蓝对抗(10:00):对当日综合选股 TOP10 逐只跑 多头/空头/裁判 对抗,给"对抗后结论"。
-    结论写 decision_signal(source_type='selection_debate')→ 16:10 方向后验,可与未经对抗的选股 source
-    做胜率对比验证增量价值。开关 selection_debate(默认开)。"""
+    """⚔️ 选股红蓝对抗 —— 2026-06-24 已并入晨间综合选股(unified_selection 9:45):红蓝结论直接
+    进选股表(一条推送一眼看完),决策信号也在 unified 内写(record_signals=True)。本任务保留仅作
+    兼容/手动触发,默认跳过不重复(避免上午连发多条 + 决策信号重复写)。"""
     job = 'selection_debate'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
-                     finished_at=datetime.now().isoformat())
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):
-        return
-    started = datetime.now().isoformat()
-    try:
-        picks = _last_selection_picks()
-        if not picks:
-            print('[selection_debate] 没有上一次综合选股结果, 跳过', flush=True)
-            _log_run(job, 'success', error='no_selection',
-                     started_at=started, finished_at=datetime.now().isoformat())
-            return
-        print(f'[selection_debate] 开始对抗, picks={len(picks)} → 处理上限 10 只', flush=True)
-        from selection_debate import run_selection_debate
-        _t0 = time.time()
-        res = run_selection_debate(picks, max_stocks=10, record_signals=True)
-        print(f'[selection_debate] 对抗完成, 耗时 {time.time()-_t0:.1f}s, summary={res.get("summary", "")[:80]}', flush=True)
-        if res.get('ok') and res.get('text'):
-            try:
-                from notification_router import send
-                send('report', '⚔️ 选股红蓝对抗', res['text'])
-            except Exception as ne:
-                print(f'[selection_debate] 推送失败: {ne}')
-        _log_run(job, 'success', error=res.get('summary'),
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
+    _log_run(job, 'skipped', error='merged_into_unified_selection(9:45)',
+             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+    return
 
 
 def task_portfolio_stress_ai():
@@ -3805,8 +3799,9 @@ def _holdings_plus_selection() -> list:
 
 
 def task_announcement_scan():
-    """📢 公告事件分级(16:02 盘后):对 持仓+选股 拉近 5 天公告 → AI 分类+重大性分级(利好/利空+强度)。
-    利空强 → decision_signal(action=reduce,source_type=announcement_risk)+告警;利好强 → buy 信号。
+    """⚠️ 盘后风险预警(16:02 三合一,2026-06-24):解禁雷达 + 公告分级 + 研报解读 合并成一条推送
+    (原 15:48 解禁 / 16:05 研报 已并入,不再单独推 → 盘后从 3 条变 1 条;三者各自仍写 decision_signal,
+    16:10 后验不变)。有解禁/公告利空 → 走 alert(结论先行、优先看);否则中性内容走 report。
     开关 announcement_scan(默认开)。"""
     job = 'announcement_scan'
     try:
@@ -3822,22 +3817,62 @@ def task_announcement_scan():
     started = datetime.now().isoformat()
     try:
         codes = _holdings_plus_selection()
+        hold_codes = []
+        try:
+            from portfolio_db import portfolio_db
+            hold_codes = [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
+                          if s.get('code') and float(s.get('quantity') or s.get('shares') or 0) > 0]
+        except Exception:
+            pass
         if not codes:
             _log_run(job, 'success', error='no_codes', started_at=started,
                      finished_at=datetime.now().isoformat())
             return
-        from announcement_scan import run_announcement_scan
-        res = run_announcement_scan(codes, days=5, record_signals=True)
+        risk_parts, info_parts, summ = [], [], []
+        # ① 解禁雷达(仅持仓,未来60天)
+        try:
+            if hold_codes:
+                from lockup_radar import run_lockup_radar
+                lr = run_lockup_radar(hold_codes, forward_days=60, min_ratio=0.03, record_signals=True)
+                if lr.get('items'):
+                    risk_parts.append('【⏳ 解禁风险】\n' + (lr.get('text') or ''))
+                    summ.append(f"解禁{len(lr['items'])}")
+        except Exception as e:
+            print(f'[eod_risk] 解禁失败: {type(e).__name__}: {str(e)[:60]}')
+        # ② 公告分级(持仓+选股,近5天)
+        try:
+            from announcement_scan import run_announcement_scan
+            an = run_announcement_scan(codes, days=5, record_signals=True)
+            if an.get('alerts'):
+                bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in an['alerts'])
+                risk_parts.append('【📢 公告利空】\n' + bad)
+                summ.append(f"公告利空{len(an['alerts'])}")
+            elif an.get('ok') and an.get('text'):
+                info_parts.append('【📢 公告事件】\n' + an['text'])
+        except Exception as e:
+            print(f'[eod_risk] 公告失败: {type(e).__name__}: {str(e)[:60]}')
+        # ③ 研报解读(持仓+选股,近10天)
+        try:
+            from research_digest import run_research_digest
+            rd = run_research_digest(codes, days=10, max_llm=24, record_signals=True)
+            if rd.get('ok') and rd.get('text'):
+                info_parts.append('【📑 研报解读】\n' + rd['text'])
+                summ.append('研报')
+        except Exception as e:
+            print(f'[eod_risk] 研报失败: {type(e).__name__}: {str(e)[:60]}')
+        # 合并推送:结论先行——有风险走 alert 一条,否则中性走 report 一条
         try:
             from notification_router import send
-            if res.get('alerts'):   # 利空高分走告警渠道
-                bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in res['alerts'])
-                send('alert', '⚠️ 公告利空预警', bad)
-            elif res.get('ok') and res.get('text'):
-                send('report', '📢 公告事件分级', res['text'])
+            if risk_parts:
+                body = '⚠️ 盘后风险预警 — 解禁/公告利空优先看\n\n' + '\n\n'.join(risk_parts)
+                if info_parts:
+                    body += '\n\n——以下中性参考——\n\n' + '\n\n'.join(info_parts)
+                send('alert', '⚠️ 盘后风险预警', body)
+            elif info_parts:
+                send('report', '📑 盘后盘点(公告/研报)', '\n\n'.join(info_parts))
         except Exception as ne:
-            print(f'[announcement_scan] 推送失败: {ne}')
-        _log_run(job, 'success', error=res.get('summary'), started_at=started,
+            print(f'[eod_risk] 推送失败: {ne}')
+        _log_run(job, 'success', error='|'.join(summ) or 'no_risk', started_at=started,
                  finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
@@ -3845,45 +3880,12 @@ def task_announcement_scan():
 
 
 def task_lockup_radar():
-    """⏳ 持仓解禁雷达(15:48 盘后):查持仓未来 60 天限售解禁(占比≥3%)→ AI 给解禁前减仓研判。
-    减仓/清仓 → decision_signal(source_type=lockup_risk)+告警。开关 lockup_radar(默认开)。"""
+    """⏳ 持仓解禁雷达 —— 2026-06-24 已并入盘后风险预警三合一(announcement_scan 16:02),不再单独跑/推
+    (避免盘后连发多条;解禁决策信号在合并任务内写)。保留本函数仅作兼容/手动触发。"""
     job = 'lockup_radar'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
-                     finished_at=datetime.now().isoformat())
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):
-        return
-    started = datetime.now().isoformat()
-    try:
-        codes = []
-        try:
-            from portfolio_db import portfolio_db
-            codes = [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
-                     if s.get('code') and float(s.get('quantity') or s.get('shares') or 0) > 0]
-        except Exception:
-            pass
-        if not codes:
-            _log_run(job, 'success', error='no_holdings', started_at=started,
-                     finished_at=datetime.now().isoformat())
-            return
-        from lockup_radar import run_lockup_radar
-        res = run_lockup_radar(codes, forward_days=60, min_ratio=0.03, record_signals=True)
-        if res.get('items'):
-            try:
-                from notification_router import send
-                send('alert', '⏳ 持仓解禁预警', res['text'])
-            except Exception as ne:
-                print(f'[lockup_radar] 推送失败: {ne}')
-        _log_run(job, 'success', error=res.get('summary'), started_at=started,
-                 finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e), started_at=started,
-                 finished_at=datetime.now().isoformat())
+    _log_run(job, 'skipped', error='merged_into_announcement_scan(16:02)',
+             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+    return
 
 
 def task_exit_advice():
@@ -3920,48 +3922,12 @@ def task_exit_advice():
 
 
 def task_research_digest():
-    """📑 研报增量解读(16:05 盘后):对 持仓+当日综合选股 拉近 10 天券商研报 → AI 提炼核心逻辑+评级方向。
-    强看多+隐含空间>8% 写 decision_signal(source_type='research')→ 16:10 方向后验。
-    开关 research_digest(默认开)。"""
+    """📑 研报增量解读 —— 2026-06-24 已并入盘后风险预警三合一(announcement_scan 16:02),不再单独跑/推
+    (研报决策信号在合并任务内写)。保留本函数仅作兼容/手动触发。"""
     job = 'research_digest'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
-                     finished_at=datetime.now().isoformat())
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):
-        return
-    started = datetime.now().isoformat()
-    try:
-        codes = []
-        try:
-            from portfolio_db import portfolio_db
-            codes += [str(s.get('code')) for s in (portfolio_db.get_all_stocks() or [])
-                      if s.get('code')]
-        except Exception:
-            pass
-        codes += _last_selection_picks()
-        codes = list(dict.fromkeys([c for c in codes if c]))
-        if not codes:
-            _log_run(job, 'success', error='no_codes',
-                     started_at=started, finished_at=datetime.now().isoformat())
-            return
-        from research_digest import run_research_digest
-        res = run_research_digest(codes, days=10, max_llm=24, record_signals=True)
-        if res.get('ok') and res.get('text'):
-            try:
-                from notification_router import send
-                send('report', '📑 研报增量解读', res['text'])
-            except Exception as ne:
-                print(f'[research_digest] 推送失败: {ne}')
-        _log_run(job, 'success', error=res.get('summary'),
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
+    _log_run(job, 'skipped', error='merged_into_announcement_scan(16:02)',
+             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+    return
 
 
 def task_mx_selection_review():
