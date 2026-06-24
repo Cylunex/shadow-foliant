@@ -113,10 +113,12 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     req.add_header("User-Agent", UA)
     try:
         _throttle('tencent')  # 腾讯行情 urlopen 自限流
-        resp = urllib.request.urlopen(req, timeout=10)
+        # 6s 短超时(2026-06-24): 行情源健康时 <1s 返回, 6s 足够; 死源 6s 快速失败,
+        # 让 get_quotes 的东财兜底尽快接手, 不拖满 datahub 的 20s 源超时。
+        resp = urllib.request.urlopen(req, timeout=6)
         data = resp.read().decode("gbk")
     except Exception as e:
-        print(f"[a-stock] 腾讯行情请求失败: {e}")
+        print(f"[a-stock] 腾讯行情请求失败: {type(e).__name__}")
         return {}
 
     result = {}
@@ -166,7 +168,7 @@ def _eastmoney_ulist_quote(codes: list[str]) -> dict[str, dict]:
     try:
         _throttle('eastmoney')
         req = urllib.request.Request(url, headers={'User-Agent': UA})
-        raw = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+        raw = urllib.request.urlopen(req, timeout=6).read().decode('utf-8')  # 6s 快速失败(同腾讯)
         diff = (json.loads(raw).get('data') or {}).get('diff') or []
     except Exception as e:
         print(f'[a-stock] 东财 ulist 批量行情失败: {type(e).__name__}')

@@ -18,8 +18,8 @@ import pywencai
 
 # 不能用 `with ThreadPoolExecutor()` —— __exit__ 会 shutdown(wait=True) 阻塞等
 # 卡死的孤儿线程跑完, 失去超时意义。同 api_server._DEADLINE_POOL 的处理方式。
-# max_workers=4: 同时 4 个 pywencai 查询并发上限(实际很难同时超过 2 个)。
-_POOL = _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix='pywencai-safe')
+# max_workers=12(2026-06-24: 4→12): 死源挂满 timeout 时小池易饱和 → 排队被算成假超时。
+_POOL = _cf.ThreadPoolExecutor(max_workers=12, thread_name_prefix='pywencai-safe')
 
 
 def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):

@@ -18,7 +18,9 @@ from typing import Any, Callable
 
 # 不能用 `with ThreadPoolExecutor()` —— __exit__ 会 shutdown(wait=True) 阻塞等
 # 卡死的孤儿线程跑完, 失去超时意义。
-_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix='akshare-safe')
+# max_workers=24(2026-06-24: 8→24): 外网抽风时死源挂满 timeout, 8 槽易被占满 →
+# 后续 submit 排队也被 result(timeout) 算成假超时级联。线程只是 IO 等待, 给足。
+_POOL = _cf.ThreadPoolExecutor(max_workers=24, thread_name_prefix='akshare-safe')
 
 
 def call(fn: Callable[..., Any], *args, timeout: int = 30, **kwargs) -> Any:

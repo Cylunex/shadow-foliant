@@ -114,8 +114,14 @@ import concurrent.futures as _cf
 # 都没有就返回 empty。彻底根治"外部接口卡死拖垮整个任务"(quotes/kline/资金流 等无差别覆盖)。
 # 可用 env DATAHUB_SOURCE_TIMEOUT 调整。
 _SOURCE_TIMEOUT = int(_os_route.getenv("DATAHUB_SOURCE_TIMEOUT", "20"))
-# 独立线程池跑源调用; 不用 with(__exit__ 会 wait 卡死的孤儿线程)。max_workers 给足并发。
-_ROUTE_POOL = _cf.ThreadPoolExecutor(max_workers=16, thread_name_prefix="datahub-route")
+# 独立线程池跑源调用; 不用 with(__exit__ 会 wait 卡死的孤儿线程)。
+# ⭐ max_workers 给足(2026-06-24: 16→64): 外网整体抽风时, 死源每次挂满 timeout 秒,
+# 选股因子循环(60 只)+ 多监控任务并发会把池占满 → 后续 submit 排队也被 result(timeout)
+# 算成"假超时"级联。给到 64, 让"线程多到不排队"(线程只是 IO 等待, 廉价)。
+_ROUTE_POOL = _cf.ThreadPoolExecutor(max_workers=64, thread_name_prefix="datahub-route")
+# 超时日志限频: 同一 (域:源) 60s 内最多打一条, 避免外网全挂时刷几百行。
+_TO_LOG_LAST: Dict[str, float] = {}
+_TO_LOG_GAP = 60.0
 
 
 def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
@@ -136,7 +142,10 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
         except _cf.TimeoutError:
             fut.cancel()  # 孤儿线程留底层自然结束, 不阻塞
             _record(key, False, _time.time() - t0)
-            print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源", flush=True)
+            _t = _time.time()
+            if _t - _TO_LOG_LAST.get(key, 0) >= _TO_LOG_GAP:
+                _TO_LOG_LAST[key] = _t
+                print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源(60s 内同源仅提示一次)", flush=True)
             continue
         except Exception:
             _record(key, False, _time.time() - t0)
