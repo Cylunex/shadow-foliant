@@ -1043,16 +1043,44 @@ def sector_ranking(sector_type: str = "industry", top_n: int = 20) -> dict:
                   empty={"top": [], "bottom": [], "total": 0}) or {"top": [], "bottom": [], "total": 0}
 
 
-def sector_spot(top_n: int = 8, bottom_n: int = 5) -> dict:
-    """新浪行业板块快照(涨跌排序)。返回 {top:[{板块,涨跌幅,领涨}], bottom:[...]}。源:akshare 新浪行业。"""
-    def _sina_ak():
+def _sector_spot_sina() -> List[dict]:
+    """板块快照新浪行业源,产出 [{板块,涨跌幅,领涨}](涨幅降序)。列对不齐/空/异常→[]。"""
+    try:
         import akshare as ak
-        df = ak.stock_sector_spot(indicator="新浪行业")
-        return sorted([{"板块": r.get("板块"), "涨跌幅": round(float(r.get("涨跌幅") or 0), 2),
-                        "领涨": r.get("股票名称")} for _, r in df.iterrows()],
-                      key=lambda x: x["涨跌幅"], reverse=True)
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_sector_spot, indicator="新浪行业", timeout=20)
+    except Exception:
+        return []
+    if df is None or getattr(df, 'empty', True) or '板块' not in df.columns or '涨跌幅' not in df.columns:
+        return []
+    rows = [{"板块": r.get("板块"), "涨跌幅": round(float(r.get("涨跌幅") or 0), 2),
+             "领涨": r.get("股票名称") or ""} for _, r in df.iterrows()]
+    return sorted(rows, key=lambda x: x["涨跌幅"], reverse=True)
 
-    rows = _route("sector_spot", [("sina_ak", _sina_ak)], empty=[]) or []
+
+def _sector_spot_ths() -> List[dict]:
+    """板块快照同花顺行业源(真跨源:不走东财/新浪),产出与新浪源逐字段同构。列对不齐/空/异常→[]。"""
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_board_industry_summary_ths, timeout=20)
+    except Exception:
+        return []
+    if df is None or getattr(df, 'empty', True) or '板块' not in df.columns or '涨跌幅' not in df.columns:
+        return []
+    rows = [{"板块": r.get("板块"), "涨跌幅": round(float(r.get("涨跌幅") or 0), 2),
+             "领涨": r.get("领涨股") or ""} for _, r in df.iterrows()]
+    return sorted(rows, key=lambda x: x["涨跌幅"], reverse=True)
+
+
+def sector_spot(top_n: int = 8, bottom_n: int = 5) -> dict:
+    """行业板块快照(涨跌排序)。返回 {top:[{板块,涨跌幅,领涨}], bottom:[...]}。
+    并列双源(2026-06-24):新浪行业(主)→ 同花顺行业(真跨源兜底,不走东财/新浪)。
+    注:两家行业分类体系不同(新浪~49个/同花顺~90个),兜底时板块名会变成对应家的分类,
+    但用途是"看哪些行业强/弱",两套都成立;key 集一致,下游不受影响。"""
+    rows = _route("sector_spot",
+                  [("sina", _sector_spot_sina), ("ths", _sector_spot_ths)],
+                  empty=[]) or []
     return {"top": rows[:top_n], "bottom": rows[-bottom_n:]} if rows else {"top": [], "bottom": []}
 
 

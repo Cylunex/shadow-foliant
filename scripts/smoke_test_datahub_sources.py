@@ -7,9 +7,15 @@ import _bootstrap  # noqa: F401  路径引导
 _route 只会返回第一个成功的源,平时跑不到第二源,所以**必须单独把每个源各调一次、比对字段集**,
 否则某天主源挂、备源顶上时字段对不齐会污染回测/因子(177 处调用方依赖逐字段一致)。
 
-⚠️ 本脚本要在**能连行情、装了 akshare/pandas 的环境**(生产服务器)跑:
+⚠️ 本脚本要在**能连行情、装了 akshare/pandas 的环境**跑:
     python scripts/smoke_test_datahub_sources.py            # 默认 600519
     python scripts/smoke_test_datahub_sources.py 000001 600036
+本地(mac/开发机)自建验证环境(venv 已 .gitignore):
+    python3 -m venv venv && venv/bin/pip install -U pip
+    venv/bin/pip install akshare adata mootdx yfinance pywencai python-dotenv pytz ta jieba
+    venv/bin/python scripts/smoke_test_datahub_sources.py 600519
+  注:本机网络通腾讯/新浪/同花顺,但东财对部分出口 IP 时封 → 东财段可能空(无害);
+     字段同构/单位(环境无关)能验,可达性(环境相关)以生产服务器为准。
 
 判读:
   ✅ 两源 keys 完全一致 = 安全,备源可放心顶上。
@@ -102,6 +108,12 @@ def main():
     nf_main = fetch(lambda: dsm.get_north_flow_a_data(30))
     nf_ak = fetch(lambda: datahub._north_flow_akshare(30))
     _cmp('north_flow', nf_main, nf_ak)
+
+    # 4b. sector_spot:新浪行业 vs 同花顺行业(真跨源,逐字段同构)
+    print('\n########## 板块快照(新浪行业 vs 同花顺行业) ##########')
+    ss_sina = fetch(lambda: datahub._sector_spot_sina())
+    ss_ths = fetch(lambda: datahub._sector_spot_ths())
+    _cmp('sector_spot', ss_sina, ss_ths, '同花顺')
 
     # 5. kline:新浪 fetcher(主源,最可达)vs mootdx 核对 同日 收盘/成交量单位 + 日期对齐
     #    用新浪而非东财作对照:东财 push2his 常被机房 IP 封,新浪更稳;且能直接验
