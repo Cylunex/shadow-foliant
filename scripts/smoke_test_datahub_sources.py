@@ -1,4 +1,4 @@
-import os, sys, io  # noqa: E401
+import os, sys, io, time  # noqa: E401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: F401  路径引导
 """datahub 并列多源 smoke-test —— 校验"新增第二源"与"主源"格式逐字段一致。
