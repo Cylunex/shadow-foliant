@@ -117,7 +117,7 @@
 | `agent_tool_groups.py` | 6 类业务域数据采集器（base/kline/fund/fund_amentals/sentiment/risk） |
 | `portfolio_insights.py` | 持仓估值/变动时间线/持有时长/交易频次 4 大报表 + AI 诊断 |
 | `db_compat.py` | SQLite/PG 透明路由（? 自动转 %s + lastrowid 模拟） |
-| `data/datahub.py` | **统一数据层**:全项目取外部数据的唯一门面 + 自适应多源健康度路由 + 三级缓存(内存/Redis/文件) |
+| `data/datahub.py` | **统一数据层**:全项目取外部数据的唯一门面 + 自适应多源健康度路由(每源 20s 硬超时、未知源 0.5 不抢主位、连续失败冷却沉底)+ 三级缓存(内存/Redis/文件)。kline 多源 = 新浪(主)→ 东财 push2his(兜底,raw/手→股×100) |
 | `jobs_hub.py` | 后台任务调度中心(~35 个任务,权威列表见 `jobs/automation_config.py` REGISTRY) |
 | `notification_router.py` | 多渠道推送路由(按 category 分流:alert/report/archive) |
 | `bot_dispatcher.py` | Bot 命令分发（含 Telegram poller） |
