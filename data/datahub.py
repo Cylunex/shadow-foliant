@@ -72,15 +72,23 @@ class _Stat:
 _STATS: Dict[str, _Stat] = {}
 
 
+_UNKNOWN_SCORE = 0.5   # 未知/未试过的源评分(中性)
+
+
 def _health(key: str, now: float) -> float:
-    """源健康度评分(越高越优先)。未知源给中性偏高分(鼓励探索);
+    """源健康度评分(越高越优先)。
+    ⚠️ 2026-06-24 关键修正:未知源给 0.5(中性), **不再给 1.0**。
+    原先未知源=1.0 会盖过"已验证健康"的源(rate=1.0 但有延迟惩罚 → 仅 0.97),导致
+    新加的源一上来就抢主位。正好踩上"新源把限流接口(东财)打到 IP 被封"的雷。
+    改 0.5 后:已验证健康源(>0.5)稳居主位、未试源仅作兜底、连续失败源(冷却 -1.0)沉底,
+    且静态源链顺序(列在前的)在同分时通过 stable sort 生效 —— 手动把可达源列前真正起作用。
     成功率为主导,平均延迟轻微扣分;连续失败且在冷却期 → 重罚沉底。"""
     s = _STATS.get(key)
     if s is None:
-        return 1.0
+        return _UNKNOWN_SCORE
     total = s.ok + s.fail
     if total == 0:
-        return 1.0
+        return _UNKNOWN_SCORE
     rate = s.ok / total
     avg_lat = (s.lat_sum / s.lat_n) if s.lat_n else 1.0
     score = rate - min(avg_lat, 10.0) / 50.0   # 延迟最多扣 0.2
