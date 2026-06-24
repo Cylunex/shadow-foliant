@@ -408,111 +408,30 @@ class SectorStrategyDataFetcher:
             return {}
     
     def _get_north_money_flow(self):
-        """获取北向资金流向（优先使用Tushare，失败时使用Akshare）"""
-        # 优先使用Tushare获取沪深港通资金流向
-        self.ts_pro = None
-        tushare_token = os.getenv('TUSHARE_TOKEN', '')
+        """北向资金近 N 日。⭐ 2026-06-24 统一走 datahub.north_flow(单位规范:净额一律"亿元"),
+        不再各自调 tushare(north_money 百万元)/akshare(亿元) —— 两源单位互相矛盾、且都已停披露。
+        返回 {date, north_net_inflow, hgt_net_inflow, sgt_net_inflow, north_total_amount(均"亿元"),
+        history:[{date, net_inflow("亿元")}]}。⚠️ 北向 2024-08 起官方停实时披露,可能为空/陈旧。"""
         try:
-            # 初始化Tushare（如果尚未初始化）
-            if not hasattr(self, '_tushare_api'):
-                TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN', '')
-                if TUSHARE_TOKEN:
-                    try:
-                        import tushare as ts
-                        ts.set_token(tushare_token)
-                        self.ts_pro = ts.pro_api()
-                        print("    [Tushare] ✅ 初始化成功")
-                    except Exception as e:
-                        print(f"    [Tushare] 初始化失败: {e}")
-                        self._tushare_api = None
-                else:
-                    print("    [Tushare] 未配置Token")
-                    self._tushare_api = None
-            
-            
-            # 如果Tushare可用，获取数据
-            if hasattr(self, '_tushare_api') and self._tushare_api:
-                print("    [Tushare] 正在获取沪深港通资金流向...")
-                
-                # 获取最近30天的数据
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=20)
-                
-                df = self._tushare_api.moneyflow_hsgt(
-                    start_date=start_date.strftime('%Y%m%d'),
-                    end_date=end_date.strftime('%Y%m%d')
-                )
-                
-                if df is not None and not df.empty:
-                    print("    [Tushare] ✅ 成功获取数据")
-                    
-                    # 按日期降序排列，获取最新数据
-                    df = df.sort_values('trade_date', ascending=False)
-                    latest = df.iloc[0]
-                    
-                    # 转换数据格式以匹配原有结构
-                    north_flow = {
-                        "date": str(latest['trade_date']),
-                        "north_net_inflow": float(latest['north_money']),
-                        "hgt_net_inflow": float(latest['hgt']),
-                        "sgt_net_inflow": float(latest['sgt']),
-                        "north_total_amount": float(latest['north_money'])  # Tushare没有总成交金额，使用净流入作为近似值
-                    }
-                    
-                    # 获取历史趋势（最近20天）
-                    history = []
-                    for idx, row in df.head(20).iterrows():
-                        history.append({
-                            "date": str(row['trade_date']),
-                            "net_inflow": float(row['north_money'])
-                        })
-                    north_flow["history"] = history
-                    
-                    return north_flow
-                else:
-                    print("    [Tushare] ❌ 未获取到数据")
-            else:
-                print("    [Tushare] 不可用")
+            import datahub
+            rows = datahub.north_flow(days=20)   # list[dict] 按 trade_date 降序(最新在前),净额单位亿元
+            if not rows:
+                print("    ❌ 北向资金无数据(官方 2024-08 起已停实时披露?)")
+                return {}
+            latest = rows[0]
+            north_flow = {
+                "date": latest.get('trade_date', ''),
+                "north_net_inflow": latest.get('net_total', 0),   # 亿元
+                "hgt_net_inflow": latest.get('hgt_yi', 0),        # 亿元
+                "sgt_net_inflow": latest.get('sgt_yi', 0),        # 亿元
+                "north_total_amount": latest.get('net_total', 0), # 亿元(datahub 无总成交额,用净额近似)
+                "history": [{"date": r.get('trade_date', ''),
+                             "net_inflow": r.get('net_total', 0)} for r in rows],
+            }
+            return north_flow
         except Exception as e:
-            print(f"    [Tushare] 获取北向资金失败: {e}")
-        
-        # Tushare失败，尝试使用Akshare
-        try:
-            print("    [Akshare] 正在获取沪深港通资金流向（备用数据源）...")
-            df = self._safe_request(ak.stock_hsgt_fund_flow_summary_em)
-            
-            if df is not None and not df.empty:
-                print("    [Akshare] ✅ 成功获取数据")
-                
-                # 获取最新数据
-                latest = df.iloc[0]
-                
-                north_flow = {
-                    "date": str(latest.get('日期', '')),
-                    "north_net_inflow": latest.get('北向资金-成交净买额', 0),
-                    "hgt_net_inflow": latest.get('沪股通-成交净买额', 0),
-                    "sgt_net_inflow": latest.get('深股通-成交净买额', 0),
-                    "north_total_amount": latest.get('北向资金-成交金额', 0)
-                }
-                
-                # 获取历史趋势（最近20天）
-                history = []
-                for idx, row in df.head(20).iterrows():
-                    history.append({
-                        "date": str(row.get('日期', '')),
-                        "net_inflow": row.get('北向资金-成交净买额', 0)
-                    })
-                north_flow["history"] = history
-                
-                return north_flow
-            else:
-                print("    [Akshare] ❌ 未获取到数据")
-        except Exception as e:
-            print(f"    [Akshare] 获取北向资金失败: {e}")
-        
-        # 所有数据源都失败
-        print("    ❌ 所有数据源均获取失败")
-        return {}
+            print(f"    ❌ 北向资金获取失败: {e}")
+            return {}
     
     def _get_financial_news(self):
         """获取财经新闻"""
@@ -584,9 +503,9 @@ class SectorStrategyDataFetcher:
             text_parts.append(f"""
 【北向资金流向】
 日期: {north.get('date', 'N/A')}
-北向资金净流入: {north.get('north_net_inflow', 0):.2f} 万元
-  沪股通: {north.get('hgt_net_inflow', 0):.2f} 万元
-  深股通: {north.get('sgt_net_inflow', 0):.2f} 万元
+北向资金净流入: {north.get('north_net_inflow', 0):.2f} 亿元
+  沪股通: {north.get('hgt_net_inflow', 0):.2f} 亿元
+  深股通: {north.get('sgt_net_inflow', 0):.2f} 亿元
 """)
         
         # 行业板块表现（前20）

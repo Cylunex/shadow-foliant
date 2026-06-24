@@ -275,14 +275,14 @@ class SectorStrategyAgents:
             north_summary = f"""
 【北向资金】
 日期: {north_flow_data.get('date', 'N/A')}
-今日北向资金净流入: {north_flow_data.get('north_net_inflow', 0):.2f} 万元
-  沪股通净流入: {north_flow_data.get('hgt_net_inflow', 0):.2f} 万元
-  深股通净流入: {north_flow_data.get('sgt_net_inflow', 0):.2f} 万元
+今日北向资金净流入: {north_flow_data.get('north_net_inflow', 0):.2f} 亿元
+  沪股通净流入: {north_flow_data.get('hgt_net_inflow', 0):.2f} 亿元
+  深股通净流入: {north_flow_data.get('sgt_net_inflow', 0):.2f} 亿元
 """
             if north_flow_data.get('history'):
                 north_summary += "\n近10日北向资金流向:\n"
                 for item in north_flow_data['history'][:10]:
-                    north_summary += f"  {item['date']}: {item['net_inflow']:.2f}万\n"
+                    north_summary += f"  {item['date']}: {item['net_inflow']:.2f}亿\n"
         
         prompt = f"""
 你是一名资深的资金流向分析师，拥有15年的市场资金研究经验，擅长从资金流向中洞察主力意图和市场趋势。
