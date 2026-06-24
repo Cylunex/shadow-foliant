@@ -696,7 +696,9 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
             vol_mult = 100.0
     try:
         out = pd.DataFrame({
-            'Date': pd.to_datetime(df['date'], errors='coerce'),
+            # ⚠️ 通达信日线 date 带收盘时间 15:00:00,必须 normalize 到纯日期(00:00:00)对齐
+            # 新浪/东财,否则 DatetimeIndex 对不上 → 污染三方共享 K线缓存、回测按日期取值错位
+            'Date': pd.to_datetime(df['date'], errors='coerce').dt.normalize(),
             'Open': pd.to_numeric(df['open'], errors='coerce'),
             'Close': pd.to_numeric(df['close'], errors='coerce'),
             'High': pd.to_numeric(df['high'], errors='coerce'),

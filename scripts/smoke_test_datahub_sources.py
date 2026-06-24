@@ -103,33 +103,41 @@ def main():
     nf_ak = fetch(lambda: datahub._north_flow_akshare(30))
     _cmp('north_flow', nf_main, nf_ak)
 
-    # 5. kline:东财 vs mootdx 同日 Close/Volume 量级核对(验证 mootdx 单位自适应是否正确)
-    print(f'\n########## K线源核对(东财 vs 通达信 mootdx)code={codes[0]} ##########')
+    # 5. kline:新浪 fetcher(主源,最可达)vs mootdx 核对 同日 收盘/成交量单位 + 日期对齐
+    #    用新浪而非东财作对照:东财 push2his 常被机房 IP 封,新浪更稳;且能直接验
+    #    mootdx 日期是否归一化(带 15:00:00 会与共享缓存错位)。本机实测 2026-06-24:
+    #    600519 近5日 收盘 5/5 一致、成交量比值 1.000(单位自适应 ×100 手→股判对)。
+    print(f'\n########## K线源核对(新浪 fetcher vs 通达信 mootdx)code={codes[0]} ##########')
     try:
         import tdx_mootdx
         if not tdx_mootdx.available():
             print('  ⚠️ mootdx 未安装或无可连服务器 → datahub.kline 第三源占位(无害);'
                   '装了再测:pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"')
         else:
-            em = fetch(lambda: datahub._kline_eastmoney(codes[0]))
-            mx = fetch(lambda: datahub._kline_mootdx(codes[0]))
-            if em is None or em.empty or mx is None or mx.empty:
-                print(f'  ⚠️ 东财 {0 if em is None else len(em)} 行 / mootdx {0 if mx is None else len(mx)} 行,'
-                      '至少一源空,无法核对')
+            ref = fetch(lambda: datahub._fetcher().get_stock_data(codes[0], '6mo', '1d'))  # 新浪主源
+            mx = fetch(lambda: datahub._kline_mootdx(codes[0], '6mo'))
+            n_ref = 0 if ref is None else len(ref)
+            n_mx = 0 if mx is None else len(mx)
+            if not n_ref or not n_mx:
+                print(f'  ⚠️ 新浪 {n_ref} 行 / mootdx {n_mx} 行,至少一源空,无法核对')
             else:
-                common = em.index.intersection(mx.index)
+                common = ref.index.intersection(mx.index)
                 if len(common) == 0:
-                    print('  ⚠️ 两源无共同交易日,无法核对')
+                    print('  ❌ 两源无共同交易日 → mootdx 日期可能没归一化(带 15:00:00),'
+                          '查 _kline_mootdx 的 .dt.normalize()')
                 else:
-                    d = common[-1]
-                    ec, mc = float(em.loc[d, 'Close']), float(mx.loc[d, 'Close'])
-                    ev, mv = float(em.loc[d, 'Volume']), float(mx.loc[d, 'Volume'])
-                    price_ok = abs(ec - mc) / max(ec, 1e-9) < 0.01
-                    vol_ratio = mv / ev if ev else 0
-                    vol_ok = 0.8 < vol_ratio < 1.25   # mootdx 单位正确则量级应≈东财(已×100对齐"股")
-                    print(f'  {d.date()}  收盘 东财{ec} / mootdx{mc}  {"✅" if price_ok else "❌价差大"}')
-                    print(f'            成交量 东财{ev:.0f} / mootdx{mv:.0f}  比值{vol_ratio:.2f}  '
-                          f'{"✅单位对" if vol_ok else "❌单位可能错(查 _kline_mootdx 的 vol_mult)"}')
+                    print(f'  共同交易日 {len(common)}(对齐 OK)')
+                    pe = ve = 0
+                    for d in list(common)[-5:]:
+                        rc, mc = float(ref.loc[d, 'Close']), float(mx.loc[d, 'Close'])
+                        rv, mv = float(ref.loc[d, 'Volume']), float(mx.loc[d, 'Volume'])
+                        r = mv / rv if rv else 0
+                        p_ok = abs(rc - mc) / max(rc, 1e-9) < 0.01
+                        v_ok = 0.8 < r < 1.25     # 单位对则量级≈新浪(已×100对齐"股")
+                        pe += p_ok; ve += v_ok
+                        print(f'    {d.date()}  收盘 新浪{rc}/mootdx{mc} {"✅" if p_ok else "❌价差大"}  '
+                              f'量比值{r:.3f} {"✅单位对" if v_ok else "❌单位可能错(查 vol_mult)"}')
+                    print(f'  小结:收盘 {pe}/5 一致、成交量单位 {ve}/5 对')
     except Exception as e:
         print(f'  kline 核对异常: {type(e).__name__}: {e}')
 
