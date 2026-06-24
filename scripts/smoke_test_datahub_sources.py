@@ -91,7 +91,39 @@ def main():
     except Exception as e:
         print(f'  north_flow 测试异常: {type(e).__name__}: {e}')
 
-    print('\n判读:✅一致=安全 / ⚠️空=暂不可达无害 / ❌不一致=摘掉该备源或修映射')
+    # 5. kline:东财 vs mootdx 同日 Close/Volume 量级核对(验证 mootdx 单位自适应是否正确)
+    print(f'\n########## K线源核对(东财 vs 通达信 mootdx)code={codes[0]} ##########')
+    try:
+        import tdx_mootdx
+        if not tdx_mootdx.available():
+            print('  ⚠️ mootdx 未安装或无可连服务器 → datahub.kline 第三源占位(无害);'
+                  '装了再测:pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"')
+        else:
+            time.sleep(6)
+            em = datahub._kline_eastmoney(codes[0])
+            time.sleep(6)
+            mx = datahub._kline_mootdx(codes[0])
+            if em is None or em.empty or mx is None or mx.empty:
+                print(f'  ⚠️ 东财 {0 if em is None else len(em)} 行 / mootdx {0 if mx is None else len(mx)} 行,'
+                      '至少一源空,无法核对')
+            else:
+                common = em.index.intersection(mx.index)
+                if len(common) == 0:
+                    print('  ⚠️ 两源无共同交易日,无法核对')
+                else:
+                    d = common[-1]
+                    ec, mc = float(em.loc[d, 'Close']), float(mx.loc[d, 'Close'])
+                    ev, mv = float(em.loc[d, 'Volume']), float(mx.loc[d, 'Volume'])
+                    price_ok = abs(ec - mc) / max(ec, 1e-9) < 0.01
+                    vol_ratio = mv / ev if ev else 0
+                    vol_ok = 0.8 < vol_ratio < 1.25   # mootdx 单位正确则量级应≈东财(已×100对齐"股")
+                    print(f'  {d.date()}  收盘 东财{ec} / mootdx{mc}  {"✅" if price_ok else "❌价差大"}')
+                    print(f'            成交量 东财{ev:.0f} / mootdx{mv:.0f}  比值{vol_ratio:.2f}  '
+                          f'{"✅单位对" if vol_ok else "❌单位可能错(查 _kline_mootdx 的 vol_mult)"}')
+    except Exception as e:
+        print(f'  kline 核对异常: {type(e).__name__}: {e}')
+
+    print('\n判读:✅一致=安全 / ⚠️空=暂不可达无害 / ❌不一致=摘掉该备源或修映射/修单位')
 
 
 if __name__ == '__main__':

@@ -662,11 +662,55 @@ def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d") -> pd.
     return df
 
 
+def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """mootdx 通达信公网日线(raw)——真·独立协议源:东财/新浪等 HTTP 源全被机房墙时的最后兜底
+    (走通达信二进制协议、非 HTTP)。返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV,
+    Volume 单位"股")或空 DF。仅日线。
+    ⚠️ 需 `pip install mootdx`(httpx pin 与 mcp 冲突,已移出主依赖);未装/连不上 → 返回空 DF
+       让 _route 跳过,无害。
+    ⚠️ 成交量单位自适应:通达信日线 volume 多为"手",但为防版本差异污染**三方共享的 K线缓存**,
+       用 amount/volume/close 反推均价倍率(≈100=手→×100, ≈1=股→×1),不靠外部源对比。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    try:
+        from tdx_mootdx import get_kline as _tdx_k
+        df = _tdx_k(_norm_code(code), frequency='day', count=800, adjust='')
+    except Exception:
+        return pd.DataFrame()
+    if df is None or len(df) == 0 or not {'date', 'open', 'high', 'low', 'close', 'volume'}.issubset(df.columns):
+        return pd.DataFrame()
+    vol_mult = 100.0   # 默认"手"→"股"
+    if 'amount' in df.columns:
+        try:
+            v = pd.to_numeric(df['volume'], errors='coerce')
+            a = pd.to_numeric(df['amount'], errors='coerce')
+            c = pd.to_numeric(df['close'], errors='coerce')
+            m = (v > 0) & (a > 0) & (c > 0)
+            if int(m.sum()) >= 5:
+                ratio = float((a[m] / v[m] / c[m]).median())   # 手≈100, 股≈1
+                vol_mult = 1.0 if abs(ratio - 1) < abs(ratio - 100) else 100.0
+        except Exception:
+            vol_mult = 100.0
+    try:
+        out = pd.DataFrame({
+            'Date': pd.to_datetime(df['date'], errors='coerce'),
+            'Open': pd.to_numeric(df['open'], errors='coerce'),
+            'Close': pd.to_numeric(df['close'], errors='coerce'),
+            'High': pd.to_numeric(df['high'], errors='coerce'),
+            'Low': pd.to_numeric(df['low'], errors='coerce'),
+            'Volume': pd.to_numeric(df['volume'], errors='coerce') * vol_mult,
+        }).dropna(subset=['Date']).set_index('Date').sort_index()
+    except Exception:
+        return pd.DataFrame()
+    return _slice_by_days(out, _period_days(period))
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True) -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume,不复权 raw)。
     源链(datahub 级多源, 健康度自适应):StockDataFetcher(主源新浪日K, 服务器实测可达)
-    → 东财 push2his(干净 JSON 备援)。健康度路由会自动把可达源排前、被封源(如部分机房
-    IP 被东财 push2 拒)排后。磁盘缓存日线提速。失败返回空 DF。
+    → 东财 push2his(干净 JSON 备援)→ mootdx 通达信公网(真·独立协议源, 需 pip install mootdx,
+    新浪/东财等 HTTP 源全被机房墙时的最后兜底; 未装则返回空被跳过)。健康度路由自动把可达源排前、
+    被封源排后。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
     cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}.pkl")
     if use_cache:
@@ -685,7 +729,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     # east 放第一位会每次先吃一次失败。健康度路由也会动态调整, 但默认顺序按"可达性"排。
     df = _route("kline",
                 [("fetcher", _f),
-                 ("east", lambda: _kline_eastmoney(code, period, interval))],
+                 ("east", lambda: _kline_eastmoney(code, period, interval)),
+                 ("mootdx", lambda: _kline_mootdx(code, period, interval))],
                 empty=pd.DataFrame(), timeout=45)
     df = _sanitize_kline(df)
     if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
