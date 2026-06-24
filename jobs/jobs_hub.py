@@ -3629,13 +3629,21 @@ def task_morning_portfolio():
         except Exception:
             pass
 
-        lines.append('### 🔴 建议关注卖出')
+        lines.append('### 🔴 该减/清的(结论先行,按紧迫度)')
+        # 术语翻人话:用户看"跌破60日线"比"破MA60(12.3)"懂
+        _RTERM = [('破MA60', '跌破60日线·中期破位'), ('破MA20', '跌破20日线·短期走弱'),
+                  ('VaR95', '短期波动风险偏高'), ('年回撤', '一年内回撤大')]
         if sell_list:
             for s in sell_list:
-                pnl_s = f"  浮盈{s['pnl']}%" if s['pnl'] is not None else ''
+                sc = s['sell_score']
+                # 风险分 → 动作+减仓比例(破MA60=+2,故 ≥4 多为破位+多重风险)
+                act = '🔴 清仓/大幅减' if sc >= 4 else ('🟡 减一半' if sc >= 2 else '⚪ 先关注')
+                pnl_s = f"，浮盈{s['pnl']}%" if s['pnl'] is not None else ''
                 price_s = f"¥{s['price']}" if s['price'] else ''
-                lines.append(f"  • {s['name']} {s['code']} {price_s} 风险分{s['sell_score']}: "
-                             f"{'/'.join(s['sell_reasons'])}{pnl_s}")
+                why = '、'.join(next((h for k, h in _RTERM if r.startswith(k)), r)
+                               for r in s['sell_reasons'])
+                lines.append(f"  • {act} ｜ {s['name']} {s['code']} {price_s}{pnl_s}")
+                lines.append(f"      为什么:{why}")
         else:
             lines.append('  （暂无预警）')
 
