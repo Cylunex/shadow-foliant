@@ -190,17 +190,17 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None,
 
     max_pos_pct = cfg.get('max_position_pct', 10.0)
     if position_pct >= max_pos_pct:
-        reasons.append(f'仓位已达 {position_pct:.1f}% (上限 {max_pos_pct}%)')
+        reasons.append(f'仓位已经太重({position_pct:.1f}%,超过上限{max_pos_pct}%)')
 
     max_add = cfg.get('max_add_times', 5)
     if add_times >= max_add:
-        reasons.append(f'已加仓 {add_times} 次 (上限 {max_add})')
+        reasons.append(f'已经加了{add_times}次(上限{max_add}次),别再摊')
 
     fund_min = cfg.get('fundamental_min_score', 50.0)
     if fund_score is not None and fund_score < fund_min:
-        reasons.append(f'基本面打分 {fund_score} 低于门槛 {fund_min} ({fund_grade})')
+        reasons.append(f'基本面太弱({fund_score}分,低于{fund_min})')
     elif fund and fund.get('low_coverage'):
-        reasons.append(f'基本面数据覆盖不足 — 谨慎')
+        reasons.append('基本面查不到足够数据,质地看不清')
 
     verdict = 'reject' if reasons else 'approve'
     return {
@@ -224,17 +224,25 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None,
 
 def _format_recommendation(symbol, name, verdict, reasons,
                            today_chg, holding_pnl, pos_pct, fund_grade, add_times) -> str:
+    head = f'{symbol} {name}'.strip()
+    stat = (f'  今日 {today_chg:+.2f}%，持仓 {holding_pnl:+.2f}%，'
+            f'仓位 {pos_pct:.1f}%，已加 {add_times} 次')
     if verdict == 'approve':
-        return (f'✅ [加仓建议] {symbol} {name}\n'
-                f'  当日 {today_chg:+.2f}% / 持仓盈亏 {holding_pnl:+.2f}%\n'
-                f'  基本面 {fund_grade} | 当前仓位 {pos_pct:.1f}% | 已加 {add_times} 次\n'
-                f'  👉 触发加仓条件，质地审核通过，可考虑加 1-2 手')
-    return (f'⚠️ [加仓警告] {symbol} {name}\n'
-            f'  当日 {today_chg:+.2f}% / 持仓盈亏 {holding_pnl:+.2f}%\n'
-            f'  基本面 {fund_grade} | 当前仓位 {pos_pct:.1f}% | 已加 {add_times} 次\n'
-            f'  ⛔ 触发加仓条件但被多项硬约束拒绝：\n'
-            + '\n'.join(f'     - {r}' for r in reasons) + '\n'
-            f'  👉 反向建议：考虑止损 30-50% 而非加仓')
+        return (f'✅ 可以加仓 ｜ {head}\n'
+                f'{stat}\n'
+                f'  跌到你的抄底点、质地也过关 → 可加 1-2 手')
+    why = '；'.join(reasons) if reasons else '触发多项风控'
+    # 仅"查不到基本面数据"——这是看不清、不是已知很差,别喊止损,先观望就好
+    only_coverage = bool(reasons) and all('查不到' in r for r in reasons)
+    if only_coverage:
+        return (f'🔻 先别加 ｜ {head}\n'
+                f'{stat}\n'
+                f'  为什么:{why}\n'
+                f'  → 看不清质地,先观望,别越跌越补')
+    return (f'🔻 别加仓,该减就减 ｜ {head}\n'
+            f'{stat}\n'
+            f'  为什么:{why}\n'
+            f'  → 越跌越买容易越套越深,建议减仓/止损,别补仓')
 
 
 def evaluate_all_triggered(max_workers: int = 8, limit: int = 0,
@@ -266,13 +274,14 @@ def format_alert(items: List[Dict[str, Any]]) -> str:
         return '当前无加仓触发的持仓股'
     approve = [x for x in items if x['verdict'] == 'approve']
     reject = [x for x in items if x['verdict'] == 'reject']
-    lines = [f'📊 持仓加仓信号扫描 — {datetime.now().strftime("%Y-%m-%d %H:%M")}']
+    lines = [f'📊 越跌越买·提示 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+             '_持仓里今天跌到你抄底点的票,哪些能补、哪些该减_']
     if approve:
-        lines.append(f'\n━━━ ✅ 建议加仓 ({len(approve)} 只) ━━━')
+        lines.append(f'\n━━━ ✅ 这些可以加 ({len(approve)} 只) ━━━')
         for x in approve:
             lines.append(x['recommendation'])
     if reject:
-        lines.append(f'\n━━━ ⚠️ 加仓警告 — 该止损不该加 ({len(reject)} 只) ━━━')
+        lines.append(f'\n━━━ 🔻 这些别加,该减就减 ({len(reject)} 只) ━━━')
         for x in reject:
             lines.append(x['recommendation'])
     return '\n'.join(lines)

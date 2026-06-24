@@ -3463,6 +3463,12 @@ def task_unified_selection():
                 quotes_cache = raw
         except Exception:
             pass
+        # 名字:独立于行情解析(开盘抢数据时行情源可能抽风,但中文名走持久缓存,
+        # 不至于退化成 "600595 600595" 代码当名字)
+        try:
+            name_map = datahub.stock_names(top_list)
+        except Exception:
+            name_map = {}
 
         # 输出（Markdown 表格,含来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
@@ -3475,7 +3481,7 @@ def task_unified_selection():
             src_s = '/'.join(cinfo['src'])[:24] or '-'
             # 行情优先用批量缓存，不再逐只调 get_stock_info（省 15 次网络请求）
             q = quotes_cache.get(code, {})
-            name = q.get('name', code)
+            name = q.get('name') or name_map.get(code) or code
             price = q.get('price', '?')
             pct = q.get('change_pct', '')
             pe = q.get('pe_ttm', '')
@@ -3522,7 +3528,7 @@ def task_unified_selection():
                     cinfo = candidates.get(code) or {}
                     try:
                         rid = save_recommendation(
-                            symbol=str(code), name=q.get('name', ''),
+                            symbol=str(code), name=q.get('name') or name_map.get(code, ''),
                             source='unified_selection', rating='candidate',
                             confidence='中',
                             ref_price=_safe_float(q.get('price')),
@@ -3974,15 +3980,21 @@ def task_mx_selection_review():
             return
 
         from analysis.miaoxiang import stock_diagnosis
+        try:
+            name_map = datahub.stock_names(top_list[:10])
+        except Exception:
+            name_map = {}
 
-        lines = [f'## 🔍 妙想第二意见 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
+        lines = [f'## 🔍 妙想第二意见 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                 '_东财妙想 AI 对今日入选股的独立看法,仅作交叉验证_', '']
         for code in top_list[:10]:
+            nm = name_map.get(code) or code
             try:
                 result = stock_diagnosis(code)
                 verdict = '✅ 买入' if 'buy' in str(result).lower() else '❌ 规避' if 'sell' in str(result).lower() else '⚠️ 观望'
-                lines.append(f'{code}: {verdict}')
+                lines.append(f'{nm} {code}: {verdict}')
             except Exception:
-                lines.append(f'{code}: ⚠️ 诊断失败')
+                lines.append(f'{nm} {code}: ⚠️ 诊断失败')
 
         _push_daily('🔍 妙想第二意见', '\n'.join(lines))
         _log_run(job, 'success', started_at=started,

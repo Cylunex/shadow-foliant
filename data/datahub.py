@@ -446,17 +446,87 @@ def _fetcher():
 # ══════════════════════════════════════════════════════════
 
 def quotes(codes: List[str]) -> Dict[str, dict]:
-    """批量实时行情。返回 {code(6位): 标准quote dict}。源:腾讯主→东财ulist(adapter 内置兜底)。"""
+    """批量实时行情。返回 {code(6位): 标准quote dict}。
+    datahub 级并列双源(2026-06-24,根治"腾讯卡满超时被砍→东财兜底没轮到→全空"):
+      - a_stock:腾讯主 + 东财补缺(逐代码互补,处理"腾讯偶尔缺几只冷门票")
+      - eastmoney:纯东财 ulist(腾讯整体卡死/被 _route 砍掉时的独立兜底,独立超时+健康度记账)
+    _route 按健康度排序:腾讯连续卡死会降级,东财自动上位,不再让单点拖垮取数。"""
     codes = [str(c) for c in (codes or []) if c]
     if not codes:
         return {}
-    raw = _route("quotes", [("a_stock", lambda: _adapter().get_quotes(codes))], empty={}) or {}
-    return {_norm_code(k): v for k, v in raw.items()}
+    raw = _route("quotes",
+                 [("a_stock", lambda: _adapter().get_quotes(codes)),
+                  ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes))],
+                 empty={}) or {}
+    norm = {_norm_code(k): v for k, v in raw.items()}
+    _name_remember(norm)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)
+    return norm
 
 
 def quote(code: str) -> dict:
     """单只实时行情(标准 quote dict)。"""
     return quotes([code]).get(_norm_code(code), {})
+
+
+# ── 股票名称解析(独立于实时行情) ─────────────────────────────
+# 中文名几乎是静态的。每次 quotes() 成功带名 → 落进持久 map(文件/Redis,TTL 默认30天)。
+# 之后即便行情源临时不可达(如开盘抢数据时腾讯/东财抽风),综合选股 / 红蓝对抗 /
+# 妙想第二意见 等仍能显示中文名,不再退化成 "600595 600595"(代码当名字)。
+_NAME_TTL = int(_os.environ.get("DATAHUB_NAME_TTL", str(30 * 86400)))
+_NAME_KEY = "names:_map"
+_NAME_LOCK = _threading.Lock()
+
+
+def _name_map() -> Dict[str, str]:
+    m = _cache_get(_NAME_KEY, _NAME_TTL)
+    return dict(m) if isinstance(m, dict) else {}
+
+
+def _name_remember(quote_map: Dict[str, dict]) -> None:
+    """从一批 quote dict 收割 code→name,合并进持久 map。纯数字名(=把代码当名)丢弃。"""
+    if not isinstance(quote_map, dict):
+        return
+    fresh: Dict[str, str] = {}
+    for code, q in quote_map.items():
+        if not isinstance(q, dict):
+            continue
+        nm = str(q.get("name") or "").strip()
+        c = _norm_code(code)
+        if nm and c and not nm.isdigit():
+            fresh[c] = nm
+    if not fresh:
+        return
+    with _NAME_LOCK:
+        m = _name_map()
+        if any(m.get(k) != v for k, v in fresh.items()):   # 有变化才落盘
+            m.update(fresh)
+            _cache_put(_NAME_KEY, m, _NAME_TTL)
+
+
+def stock_names(codes: List[str]) -> Dict[str, str]:
+    """批量解析中文名 {6位code: 名称}。优先持久缓存(行情源挂了也有名),
+    缺的才触发一次 quotes() 现拉(顺带把名字焐进缓存)。解析不到的不在返回里。"""
+    norm = [_norm_code(c) for c in (codes or []) if c]
+    if not norm:
+        return {}
+    m = _name_map()
+    out = {c: m[c] for c in norm if c in m}
+    missing = [c for c in norm if c not in out]
+    if missing:
+        try:
+            q = quotes(missing)   # quotes() 内部会 _name_remember
+            for c in missing:
+                nm = str(q.get(c, {}).get("name") or "").strip()
+                if nm and not nm.isdigit():
+                    out[c] = nm
+        except Exception:
+            pass
+    return out
+
+
+def stock_name(code: str) -> str:
+    """单只中文名;解析不到返回 ''(调用方自行决定是否回退成代码)。"""
+    return stock_names([code]).get(_norm_code(code), "")
 
 
 # ── K线磁盘缓存:日线日内不变,回测/因子/优化器反复拉同一批 → 缓存共享大幅提速 ──
@@ -781,16 +851,87 @@ def indices() -> List[dict]:
 #  资金域:北向 / 个股资金流 / 龙虎榜 / 融资融券
 # ══════════════════════════════════════════════════════════
 
+def _north_flow_akshare(days: int = 30) -> List[dict]:
+    """北向 akshare 兜底源,产出与主源逐字段同构
+    {trade_date/hgt_yi/sgt_yi/net_total(亿元)/source/net_hgt/net_sgt(元)/net_tgt}。
+    ⚠️ 北向 2024-08 起官方停实时披露,此源大概率已失效;列对不齐/空/异常/非日序列 → 返回 [] 让 _route 退回主源,无害。"""
+    need = ['日期', '北向资金-成交净买额', '沪股通-成交净买额', '深股通-成交净买额']
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_hsgt_fund_flow_summary_em, timeout=20)
+    except Exception:
+        return []
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
+        return []
+
+    def _yi(v):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+    out = []
+    for _, r in df.head(days).iterrows():
+        hgt, sgt = _yi(r['沪股通-成交净买额']), _yi(r['深股通-成交净买额'])
+        out.append({'trade_date': str(r['日期']), 'hgt_yi': hgt, 'sgt_yi': sgt,
+                    'net_total': _yi(r['北向资金-成交净买额']), 'source': 'akshare',
+                    'net_hgt': hgt * 1e8, 'net_sgt': sgt * 1e8, 'net_tgt': 0})
+    # 防误用:若不是"按日"序列(日期全同 = 当日各通道汇总表),弃用,避免重复同日污染
+    if len(out) > 1 and len({r['trade_date'] for r in out}) <= 1:
+        return []
+    return out
+
+
 def north_flow(days: int = 30) -> List[dict]:
-    """北向资金近 N 日。list[dict] 键:trade_date/hgt_yi/sgt_yi/net_total...
-    源:北向本地缓存(同花顺,读时自刷新)+ adata(走 data_source_manager 既有链)。"""
+    """北向资金近 N 日。list[dict] 键:trade_date/hgt_yi/sgt_yi/net_total(亿元)+ net_hgt/net_sgt(元)/net_tgt。
+    源:北向本地缓存(同花顺,主;dsm 内含 adata)→ akshare 沪深港通汇总(兜底,实质失效)。
+    ⚠️ 2026-06-24 实测:akshare 走的东财 datacenter 接口活着但 FUND_INFLOW=null(北向 2024-08 官方停实时
+    披露已坐实),拿不到有效净流入 → 真数据只能靠主源同花顺本地缓存(jobs 每日 15:40 入库)。akshare 留作
+    占位,值无效时被 _north_flow_akshare 的防御拦截、_route 退回主源,无害。"""
     from data_source_manager import data_source_manager as dsm
-    return _route("north_flow", [("dsm", lambda: dsm.get_north_flow_a_data(days))], empty=[]) or []
+    return _route("north_flow",
+                  [("dsm", lambda: dsm.get_north_flow_a_data(days)),
+                   ("akshare", lambda: _north_flow_akshare(days))],
+                  empty=[]) or []
+
+
+def _capital_flow_akshare(code: str, days: int = 120) -> List[dict]:
+    """个股资金流 akshare 兜底源,产出与主源逐字段同构 {date/main_net/small_net/mid_net/large_net/super_net}(元)。
+    列对不齐/空/异常 → 返回 [] 让 _route 跳过(绝不污染下游)。"""
+    cmap = {'日期': 'date', '主力净流入-净额': 'main_net', '小单净流入-净额': 'small_net',
+            '中单净流入-净额': 'mid_net', '大单净流入-净额': 'large_net', '超大单净流入-净额': 'super_net'}
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        mk = 'sh' if str(code).startswith('6') else 'sz'   # 北交所 akshare 不支持,主源已覆盖
+        df = ak_call(ak.stock_individual_fund_flow, stock=str(code), market=mk, timeout=20)
+    except Exception:
+        return []
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in cmap):
+        return []
+    out = []
+    for _, r in df.tail(days).iterrows():
+        row = {'date': str(r['日期'])}
+        for zh, en in cmap.items():
+            if en == 'date':
+                continue
+            try:
+                row[en] = float(r[zh])
+            except (ValueError, TypeError):
+                row[en] = 0.0
+        out.append(row)
+    return out
 
 
 def capital_flow(code: str, days: int = 120) -> List[dict]:
-    """个股历史资金流(日级)。list[dict]。源:a_stock_adapter(东财非push2)。"""
-    return _route("capital_flow", [("a_stock", lambda: _adapter().get_fund_flow_history(code, days))], empty=[]) or []
+    """个股历史资金流(日级)。list[dict] 键:date/main_net/small_net/mid_net/large_net/super_net(元)。
+    源:东财 push2his(主)→ akshare(弱兜底)。⚠️ 2026-06-24 实测:akshare stock_individual_fund_flow
+    底层与主源**同走东财 push2his fflow 端点**,非真跨源——东财 IP 级被封时主备同死,仅防东财子接口
+    偶发抽风+akshare 换解析路径恰好成功的弱场景。个股历史资金流东财近乎垄断,暂无真跨公司替代源。"""
+    return _route("capital_flow",
+                  [("a_stock", lambda: _adapter().get_fund_flow_history(code, days)),
+                   ("akshare", lambda: _capital_flow_akshare(code, days))],
+                  empty=[]) or []
 
 
 def capital_flow_minute(code: str) -> List[dict]:
@@ -922,10 +1063,37 @@ def industry_reports(industry_code: str = "*", max_pages: int = 5,
 #  新闻/公告域
 # ══════════════════════════════════════════════════════════
 
+def _stock_news_akshare(code: str, page_size: int = 20) -> List[dict]:
+    """个股新闻 akshare 兜底源,产出与主源逐字段同构 {title/content/time/source/url}。
+    列对不齐/空/异常 → 返回 [] 让 _route 跳过。"""
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_news_em, symbol=str(code), timeout=20)
+    except Exception:
+        return []
+    if df is None or getattr(df, 'empty', True) or '新闻标题' not in df.columns:
+        return []
+    out = []
+    for _, r in df.head(page_size).iterrows():
+        out.append({'title': str(r.get('新闻标题', '')),
+                    'content': str(r.get('新闻内容', ''))[:200],
+                    'time': str(r.get('发布时间', '')),
+                    'source': str(r.get('文章来源', '')),
+                    'url': str(r.get('新闻链接', ''))})
+    return out
+
+
 def stock_news(code: str, page_size: int = 20) -> List[dict]:
-    """个股新闻。list[dict] 键:title/time/url/...。"""
+    """个股新闻。list[dict] 键:title/content/time/source/url。
+    源:东财搜索(dsm 主)→ akshare stock_news_em(弱兜底)。⚠️ 2026-06-24 实测:akshare stock_news_em
+    底层与主源**同走东财 search-api-web 端点**,非真跨源。真跨源候选已实测排除:同花顺 news.10jqka
+    返回的是泛财经快讯(stock=[],非个股新闻)、新浪需中文名传参——故暂以东财同源弱兜底为准。"""
     from data_source_manager import data_source_manager as dsm
-    return _route("stock_news", [("dsm", lambda: dsm.get_stock_news_a_stock(code, page_size))], empty=[]) or []
+    return _route("stock_news",
+                  [("dsm", lambda: dsm.get_stock_news_a_stock(code, page_size)),
+                   ("akshare", lambda: _stock_news_akshare(code, page_size))],
+                  empty=[]) or []
 
 
 def _news_em(page_size):

@@ -34,7 +34,13 @@ def _context(code: str) -> Dict[str, Any]:
     try:
         import datahub
         q = datahub.quote(code) or {}
-        return {'name': q.get('name', ''), 'price': _f(q.get('price')),
+        name = q.get('name') or ''
+        if not name:                       # 行情没给名 → 走持久名缓存,别让报告退化成裸代码
+            try:
+                name = datahub.stock_name(code)
+            except Exception:
+                name = ''
+        return {'name': name, 'price': _f(q.get('price')),
                 'change': _f(q.get('change_pct') or q.get('change')),
                 'pe': _f(q.get('pe') or q.get('pe_ttm')), 'mcap': q.get('mcap_yi')}
     except Exception:
@@ -111,10 +117,11 @@ def _format(items: List[Dict[str, Any]]) -> str:
         return ''
     order = {'否决': 0, '谨慎': 1, '买入': 2}
     rows = sorted(items, key=lambda x: order.get(x['verdict'], 3))
-    lines = ['⚔️ 选股红蓝对抗(证伪闸门)']
-    tag = {'买入': '🔴通过', '谨慎': '🟡谨慎', '否决': '🟢否决'}
+    lines = ['⚔️ 选股红蓝对抗 — 给今日入选股做多空辩论,筛掉「看着好其实脆」的']
+    tag = {'买入': '🔴 可买', '谨慎': '🟡 观望', '否决': '🟢 别买·避开'}
     for it in rows:
-        lines.append(f"  {tag.get(it['verdict'], it['verdict'])} {it['name']} {it['code']}"
+        nm = it.get('name') or it['code']
+        lines.append(f"  {tag.get(it['verdict'], it['verdict'])} {nm} {it['code']}"
                      f"（置信{it['confidence']}）\n      {it['reason']}")
     return '\n'.join(lines)
 

@@ -1105,6 +1105,11 @@ class AStockDataAdapter:
         """批量获取实时行情(腾讯主源,缺失代码用东财 ulist 跨源兜底)。"""
         return _batch_quote(symbols)
 
+    def get_quotes_eastmoney(self, symbols: list[str]) -> dict[str, dict]:
+        """纯东财 ulist 批量行情(与腾讯同构 dict)——供 datahub 作并列独立兜底源,
+        腾讯整体卡死/被砍时由 datahub._route 独立超时切到这里。"""
+        return _eastmoney_ulist_quote(symbols)
+
     def get_quote_dataframe(self, symbols: list[str]) -> pd.DataFrame:
         """批量获取行情并返回DataFrame"""
         data = _batch_quote(symbols)
