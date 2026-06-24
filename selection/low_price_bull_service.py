@@ -156,143 +156,41 @@ class LowPriceBullService:
                 self.logger.info(f"{stock_code} MA5下穿MA20，生成卖出提醒")
     
     def _get_stock_data(self, stock_code: str) -> tuple:
-        """
-        获取股票数据（价格和均线）
-        
-        Args:
-            stock_code: 股票代码（可能带后缀，如002259.SZ）
-            
-        Returns:
-            (当前价格, MA5, MA20)
-        """
+        """获取 (当前价, MA5, MA20)。
+        ⭐ 2026-06-24 改走 datahub 统一数据层(不再依赖内网自建 TDX HTTP 服务):
+          - MA5/MA20:前复权 qfq(避除权跳空毁均线下穿信号)
+          - 当前价:raw 真实价(实时报价;挂了回退 qfq 最新)
+        失败返回 (None, None, None)。"""
         try:
-            import requests
+            import datahub
             import pandas as pd
-            
-            # 处理股票代码格式：去掉后缀，保留纯数字代码
-            # 例如：002259.SZ -> 002259
             clean_code = stock_code.split('.')[0] if '.' in stock_code else stock_code
-            
-            # 判断市场并添加前缀（TDX API可能需要）
-            # 深圳：0开头、3开头 -> SZ前缀
-            # 上海：6开头 -> SH前缀
-            if clean_code.startswith(('0', '3')):
-                api_code = f"SZ{clean_code}"
-            elif clean_code.startswith('6'):
-                api_code = f"SH{clean_code}"
-            else:
-                api_code = clean_code
-            
-            # 调用TDX API获取K线数据
-            url = f"{self.tdx_api_url}/api/kline"
-            params = {
-                'code': api_code,
-                'type': 'day'  # 日K线
-            }
-            
-            self.logger.debug(f"请求TDX API: code={stock_code} -> api_code={api_code}")
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code != 200:
-                self.logger.warning(f"获取 {stock_code} K线数据失败: HTTP {response.status_code}")
-                self.logger.warning(f"请求URL: {url}?code={api_code}&type=day")
-                
-                # 尝试使用纯数字代码重试
-                if api_code != clean_code:
-                    self.logger.info(f"尝试使用纯数字代码重试: {clean_code}")
-                    params['code'] = clean_code
-                    response = requests.get(url, params=params, timeout=10)
-                    
-                    if response.status_code != 200:
-                        self.logger.warning(f"重试失败: HTTP {response.status_code}")
-                        return None, None, None
-                else:
-                    return None, None, None
-            
-            data = response.json()
-            
-            # 检查数据格式
-            # 支持两种格式：
-            # 1. 直接返回数组: [{date, open, high, low, close, volume}, ...]
-            # 2. 嵌套格式: {code: 0, message: "success", data: {List: [...]}}
-            if isinstance(data, dict) and 'data' in data:
-                # 嵌套格式
-                if data.get('code') != 0:
-                    self.logger.warning(f"{stock_code} API返回错误: {data.get('message')}")
-                    return None, None, None
-                
-                data_obj = data.get('data', {})
-                kline_list = data_obj.get('List', [])
-                
-                if not kline_list or len(kline_list) < 20:
-                    self.logger.warning(f"{stock_code} K线数据不足，需要至少20天，当前{len(kline_list)}天")
-                    return None, None, None
-                
-                # 转换为DataFrame，字段名需要映射
-                # API返回：{Time, Open, High, Low, Close, Volume, Amount}
-                # 需要：{date, open, high, low, close, volume}
-                df = pd.DataFrame(kline_list)
-                
-                # 重命名字段（大小写转换）
-                if 'Time' in df.columns:
-                    df['date'] = df['Time']
-                if 'Open' in df.columns:
-                    df['open'] = df['Open']
-                if 'High' in df.columns:
-                    df['high'] = df['High']
-                if 'Low' in df.columns:
-                    df['low'] = df['Low']
-                if 'Close' in df.columns:
-                    df['close'] = df['Close']
-                if 'Volume' in df.columns:
-                    df['volume'] = df['Volume']
-                    
-            elif isinstance(data, list):
-                # 直接数组格式
-                if len(data) < 20:
-                    self.logger.warning(f"{stock_code} K线数据不足，需要至少20天")
-                    return None, None, None
-                
-                df = pd.DataFrame(data)
-            else:
-                self.logger.warning(f"{stock_code} K线数据格式错误")
+            # MA5/MA20 用前复权 3mo(≈60交易日,足够算 MA20)
+            df = datahub.kline(clean_code, '3mo', adjust='qfq')
+            if df is None or getattr(df, 'empty', True) or len(df) < 20:
+                self.logger.warning(f"{stock_code} K线数据不足(需≥20天)")
                 return None, None, None
-            
-            # 确保有close列
-            if 'close' not in df.columns:
-                self.logger.warning(f"{stock_code} K线数据缺少close字段")
+            close_col = 'Close' if 'Close' in df.columns else 'close'
+            closes = pd.to_numeric(df[close_col], errors='coerce')
+            ma5 = float(closes.rolling(window=5).mean().iloc[-1])
+            ma20 = float(closes.rolling(window=20).mean().iloc[-1])
+            # 当前价:实时 raw 真实价(MA 信号是 qfq,但展示/记录的现价用真实价)
+            current_price = None
+            try:
+                q = datahub.quote(clean_code)
+                if isinstance(q, dict) and q.get('price'):
+                    current_price = float(q['price'])
+            except Exception:
+                pass
+            if current_price is None:
+                current_price = float(closes.iloc[-1])   # 回退 qfq 最新(最新段≈raw)
+            if pd.isna(ma5) or pd.isna(ma20) or current_price is None:
+                self.logger.warning(f"{stock_code} 数据含 NaN")
                 return None, None, None
-            
-            # 转换为浮点数
-            df['close'] = pd.to_numeric(df['close'], errors='coerce')
-            
-            # 计算MA5和MA20
-            df['MA5'] = df['close'].rolling(window=5).mean()
-            df['MA20'] = df['close'].rolling(window=20).mean()
-            
-            # 获取最新数据
-            latest = df.iloc[-1]
-            current_price = latest['close']
-            ma5 = latest['MA5']
-            ma20 = latest['MA20']
-            
-            # 检查是否有效
-            if pd.isna(current_price) or pd.isna(ma5) or pd.isna(ma20):
-                self.logger.warning(f"{stock_code} 数据包含NaN值")
-                return None, None, None
-            
-            self.logger.info(f"{stock_code} 数据: 价格={current_price:.2f}, MA5={ma5:.2f}, MA20={ma20:.2f}")
+            self.logger.info(f"{stock_code} 价格={current_price:.2f} MA5={ma5:.2f}(qfq) MA20={ma20:.2f}(qfq)")
             return current_price, ma5, ma20
-            
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"请求TDX API失败 {stock_code}: {e}")
-            self.logger.error(f"请检查.env中的TDX_BASE_URL配置: {self.tdx_api_url}")
-            return None, None, None
         except Exception as e:
             self.logger.error(f"获取股票数据失败 {stock_code}: {e}")
-            import traceback
-            traceback.print_exc()
             return None, None, None
     
     def _process_alerts(self):
