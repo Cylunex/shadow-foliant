@@ -505,9 +505,89 @@ def _sanitize_kline(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
+# ── 东财历史K线原生源(2026-06-24 实测 push2his.eastmoney.com ~0.09s, 干净 JSON)──
+# 作为 datahub 级 kline 第一兜底, 不依赖 StockDataFetcher 单体。输出格式严格对齐 fetcher:
+# DatetimeIndex='Date' + 大写列 Open/Close/High/Low/Volume(177 处调用方依赖此格式)。
+def _em_secid(code: str) -> str:
+    """6 位代码 → 东财 secid('1.xxxxxx'=沪 / '0.xxxxxx'=深/京)。
+    沪(1):6 开头股票(60 主板/68 科创)、5 开头基金(50-58 ETF/LOF)、11/13 开头债、900 B股。
+    深/京(0):00/30(深股)、15/16/12(深基/债)、920/92/8x(北交所)、其余。
+    ⚠️ '9' 单独有歧义:900xxx 是沪 B 股(→1), 920xxx 是北交所(→0), 故只把 '900' 归沪。"""
+    c = _norm_code(code)
+    if c[:1] in ('6', '5') or c[:2] in ('11', '13') or c[:3] == '900':
+        return f'1.{c}'
+    return f'0.{c}'
+
+
+# 已知指数代码(与某些个股 6 位代码重码:000001=上证综指 vs 平安银行)。
+# east 走个股 secid 会静默返回"重码个股"的 K线 → 当指数基准用就拿到错票。
+# 对这些代码 east 直接放弃(返回空), 交回 fetcher / portfolio_backtest 的 akshare 指数路径。
+_EM_INDEX_CODES = frozenset({
+    '000001', '000010', '000016', '000300', '000688', '000852', '000903',
+    '000905', '000906', '000688',
+    '399001', '399005', '399006', '399300', '399905', '399852',
+})
+
+
+def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """东财 push2his 日线(**不复权 raw**, 与 fetcher 主源新浪同口径)。
+    返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。仅日线。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()                  # 非日线交回主 fetcher 处理
+    c = _norm_code(code)
+    if c in _EM_INDEX_CODES:
+        return pd.DataFrame()                  # 指数代码与个股重码, 放弃避免取到错票
+    # ⭐ 限流(2026-06-24 审查修复: 原先漏导致 NameError 被静默吞, east 源 100% 失效)
+    try:
+        from rate_limiter import throttle as _throttle
+    except Exception:
+        def _throttle(*a, **k):
+            return 0.0
+    import urllib.request as _ur
+    import json as _json
+    lmt = int(_period_days(period) * 0.72) + 30   # 自然日→交易日约 ×0.72, 多取 30 根冗余
+    secid = _em_secid(c)
+    # ⚠️ fqt=0 不复权: 实测新浪 scale=240&ma=no 返回 raw 价(2025-06-13 茅台 1426.95 两源一致),
+    # 三方共享同一缓存文件, east 必须与主源同口径, 否则历史价跳变一个累计分红额污染回测/因子。
+    url = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
+           f'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'
+           f'&klt=101&fqt=0&end=20500101&lmt={lmt}')
+    try:
+        _throttle('eastmoney')
+        req = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        raw = _ur.urlopen(req, timeout=6).read().decode('utf-8')   # 6s 短超时, 死源快失败
+        klines = ((_json.loads(raw).get('data') or {}).get('klines')) or []
+    except Exception:
+        return pd.DataFrame()
+    if not klines:
+        return pd.DataFrame()
+    rows = []
+    for line in klines:
+        p = line.split(',')             # date,open,close,high,low,volume(手),amount
+        if len(p) < 6:
+            continue
+        try:
+            # ⚠️ 东财成交量单位是"手"(100股), 而 fetcher 主源(新浪)是"股"。
+            # 实测同票同日: 新浪 4480330股 = 东财 44803手 ×100。这里 ×100 对齐"股",
+            # 否则量比/成交量均线/放量判断全缩 100 倍。
+            rows.append((p[0], float(p[1]), float(p[2]), float(p[3]), float(p[4]),
+                         float(p[5]) * 100))
+        except (ValueError, IndexError):
+            continue
+    # 解析完整性护栏: 成功解析行数 < 收到行数的 80% → 视为响应残缺/损坏, 放弃交回 fetcher,
+    # 避免 east 残缺数据通过 _route 的 non-empty 判定挤掉 fetcher 更完整的序列。
+    if not rows or len(rows) < len(klines) * 0.8:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=['Date', 'Open', 'Close', 'High', 'Low', 'Volume'])
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.dropna(subset=['Date']).set_index('Date').sort_index()
+    return df
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True) -> pd.DataFrame:
-    """K线 DataFrame(列 date/open/high/low/close/volume/p_change)。
-    内部走 StockDataFetcher(已多源:东财/akshare/Ashare/mootdx);磁盘缓存日线提速。失败返回空 DF。
+    """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
+    源链(datahub 级多源, 健康度自适应):东财 push2his(干净 JSON, 快) → StockDataFetcher
+    (内部再多源:新浪/东财curl/akshare/Ashare/mootdx)。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
     cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}.pkl")
     if use_cache:
@@ -522,7 +602,10 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     def _f():
         df = _fetcher().get_stock_data(code, period, interval)
         return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
-    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
+    df = _route("kline",
+                [("east", lambda: _kline_eastmoney(code, period, interval)),
+                 ("fetcher", _f)],
+                empty=pd.DataFrame(), timeout=45)
     df = _sanitize_kline(df)
     if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
         try:
@@ -534,8 +617,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
 
 
 # ── K线缓存预热(每日盘后焐热目标股票池,供回测/因子/晨报/持仓守卫命中暖缓存)──
-# 实测主源(新浪日K)无视 period、每次返回完整 ~365 根**已按当日复权因子重算**的日线序列。
-# 故"全量拉一次"既廉价(单次HTTP~88ms)又天然无复权漂移 → 不需增量追加/锚点校验/周末特判。
+# 主源(新浪日K / 东财 push2his)均返回**不复权(raw)**完整日线序列(2026-06-24 实测两源
+# 同票同日 raw 价一致, 见 _kline_eastmoney 注释)。全项目 K线统一 raw 口径。
 # 主拉 1y 写缓存,6mo/1mo 由切片派生(零额外外部调用),命名与 kline() 读路径一致即被其命中。
 _PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095}
 
