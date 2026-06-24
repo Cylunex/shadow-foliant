@@ -1393,7 +1393,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
     'factor_collection':         1200,
-    'kline_prefetch':            900,
+    'kline_prefetch':            1500,   # 焐 raw+qfq 两套缓存(2026-06-24),给足时间
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析

@@ -356,7 +356,7 @@ class NotificationService:
 - 当前价格: {notification.get('current_price', 'N/A')}元
 - 涨跌幅: {notification.get('change_pct', 'N/A')}%
 - 涨跌额: {notification.get('change_amount', 'N/A')}元
-- 成交量: {notification.get('volume', 'N/A')}手
+- 成交量: {notification.get('volume', 'N/A')}股
 - 换手率: {notification.get('turnover_rate', 'N/A')}%
 
 **🎯 AI决策**: {notification['type']}

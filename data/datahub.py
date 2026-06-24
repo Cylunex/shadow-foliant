@@ -819,35 +819,59 @@ def _slice_by_days(df: pd.DataFrame, days: int) -> pd.DataFrame:
         return df
 
 
-def _write_kline_cache(code: str, period: str, interval: str, df: pd.DataFrame) -> bool:
+def _write_kline_cache(code: str, period: str, interval: str, df: pd.DataFrame,
+                       adjust: str = "raw") -> bool:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return False
     try:
         _os.makedirs(_KLINE_DIR, exist_ok=True)
-        df.to_pickle(_os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}.pkl"))
+        suffix = '_qfq' if adjust == 'qfq' else ''
+        df.to_pickle(_os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}{suffix}.pkl"))
         return True
     except Exception:
         return False
 
 
-def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d") -> dict:
-    """预拉一只股票的 K线并写入各 period 磁盘缓存(全量,天然无复权漂移)。
-    主拉最长 period 一次,其余 period 由切片派生(不再额外请求外部源)。
-    返回 {code, bars, wrote}(bars=主序列条数,wrote=写入的缓存文件数)。失败 bars=0。"""
+def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d",
+                   adjust: str = "both") -> dict:
+    """预拉一只股票 K线写各 period 磁盘缓存。主拉最长 period 一次,短 period 切片派生(零额外请求)。
+    ⭐ adjust='both'(默认):同时焐 raw + qfq 两套缓存,供技术分析(qfq)和回测/持仓(raw)盘后命中暖缓存,
+    避免盘中逐只冷拉 qfq(akshare 慢/东财封 → 吃源超时拖垮 unified_selection 等任务)。
+      - raw:新浪主源(快,全量)
+      - qfq:**仅东财 push2his fqt=1**(快速源,6s 失败即跳过不写防污染;不挂 akshare 慢源以免拖垮预热;
+        东财封时焐不上 → 盘中 kline(qfq) 自会 fallback raw,有数据不崩)
+    返回 {code, bars, wrote}。失败 bars=0。"""
     base = max(periods, key=_period_days) if periods else "1y"
+    out = {"code": code, "bars": 0, "wrote": 0}
 
-    def _f():
-        d = _fetcher().get_stock_data(code, base, interval)
-        return pd.DataFrame() if isinstance(d, dict) else (d if isinstance(d, pd.DataFrame) else pd.DataFrame())
-    df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return {"code": code, "bars": 0, "wrote": 0}
-    wrote = 0
-    for p in periods:
-        sub = df if p == base else _slice_by_days(df, _period_days(p))
-        if _write_kline_cache(code, p, interval, sub):
-            wrote += 1
-    return {"code": code, "bars": int(len(df)), "wrote": wrote}
+    # ── raw(新浪全量)──
+    if adjust in ('raw', 'both'):
+        def _f():
+            d = _fetcher().get_stock_data(code, base, interval)
+            return pd.DataFrame() if isinstance(d, dict) else (d if isinstance(d, pd.DataFrame) else pd.DataFrame())
+        df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            out["bars"] = int(len(df))
+            for p in periods:
+                sub = df if p == base else _slice_by_days(df, _period_days(p))
+                if _write_kline_cache(code, p, interval, sub, adjust='raw'):
+                    out["wrote"] += 1
+
+    # ── qfq(仅东财快速源,焐技术分析两套缓存的 qfq 侧)──
+    if adjust in ('qfq', 'both'):
+        try:
+            qdf = _route("kline_qfq_prefetch",
+                         [("east_qfq", lambda: _kline_eastmoney(code, base, interval, 'qfq'))],
+                         empty=pd.DataFrame(), timeout=10)
+            qdf = _sanitize_kline(qdf)
+            if isinstance(qdf, pd.DataFrame) and not qdf.empty:
+                for p in periods:
+                    sub = qdf if p == base else _slice_by_days(qdf, _period_days(p))
+                    if _write_kline_cache(code, p, interval, sub, adjust='qfq'):
+                        out["wrote"] += 1
+        except Exception:
+            pass
+    return out
 
 
 def kline_akshare_compat(code: str, period: str = "1y") -> pd.DataFrame:
