@@ -117,7 +117,7 @@
 | `agent_tool_groups.py` | 6 类业务域数据采集器（base/kline/fund/fund_amentals/sentiment/risk） |
 | `portfolio_insights.py` | 持仓估值/变动时间线/持有时长/交易频次 4 大报表 + AI 诊断 |
 | `db_compat.py` | SQLite/PG 透明路由（? 自动转 %s + lastrowid 模拟） |
-| `data/datahub.py` | **统一数据层**:全项目取外部数据的唯一门面 + 自适应多源健康度路由(每源 20s 硬超时、未知源 0.5 不抢主位、连续失败冷却沉底)+ 三级缓存(内存/Redis/文件)。kline 多源 = 新浪(主)→ 东财 push2his(兜底,raw/手→股×100) |
+| `data/datahub.py` | **统一数据层**:全项目取外部数据的唯一门面 + 自适应多源健康度路由(每源 20s 硬超时、未知源 0.5 不抢主位、连续失败冷却沉底)+ 三级缓存(内存/Redis/文件)。**K线两套复权缓存**`kline(adjust='raw'/'qfq')`:raw=新浪+东财fqt0+通达信(回测/持仓)、qfq=东财fqt1+akshare(技术分析)。**真·跨源**:quotes 腾讯+东财+新浪、kline 新浪+东财+通达信。成交量统一"股" |
 | `jobs_hub.py` | 后台任务调度中心(~35 个任务,权威列表见 `jobs/automation_config.py` REGISTRY) |
 | `notification_router.py` | 多渠道推送路由(按 category 分流:alert/report/archive) |
 | `bot_dispatcher.py` | Bot 命令分发（含 Telegram poller） |
@@ -273,12 +273,12 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 | 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
 | 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
 | 09:50 | `morning_portfolio` | 📊 早盘持仓分析 | ❌ |
-| 10:00 | `selection_debate` | ⚔️ 选股红蓝对抗证伪 | ✅ |
+| (并入9:45) | `selection_debate` | ⚔️ 红蓝对抗已并入综合选股(表内「红蓝」列);妙想第二意见(10:30)仍独立 | ✅ |
 | 10:30 | `mx_selection_review` | 🧠 选股过妙想第二意见 | ✅ |
 | 12:00 | `noon_report` | 📊 午盘简报 | ❌ |
 | 每30分 | `ai_rec_check` / `stock_monitor_check` | 推荐追价(不推) / 监测触发(alert) | ❌ |
 | 14:40 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(瘦身策略+逐只动作+尾盘机会,eod_review) | ✅ |
-| 15:35–16:10 | `kline_prefetch`/`portfolio_indicator_snapshot`/`lockup_radar`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/`announcement_scan`/`research_digest`/`decision_signal_outcomes` | K线预热/指标快照/⏳解禁雷达/大盘快照/因子采集/龙虎榜归档/📢公告分级/📑研报解读/信号后验 | 部分✅ |
+| 15:35–16:10 | `kline_prefetch`(焐raw+qfq两套)/`portfolio_indicator_snapshot`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/**`announcement_scan`(三合一:解禁+公告+研报→一条⚠️盘后风险预警)**/`decision_signal_outcomes` | K线预热/指标快照/大盘快照/因子采集/龙虎榜归档/盘后风险预警/信号后验。`lockup_radar`/`research_digest` 已并入 announcement_scan | 部分✅ |
 | 16:30 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
 | 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
