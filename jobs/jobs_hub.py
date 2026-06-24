@@ -357,7 +357,7 @@ def task_portfolio_indicator_snapshot():
         pattern_alerts = []
         for sym, name in targets.items():
             try:
-                df = fetcher.get_stock_data(sym, '6mo')
+                df = fetcher.get_stock_data(sym, '6mo', adjust='qfq')  # 指标快照+缠论用前复权
                 if isinstance(df, dict) and df.get('error'):
                     fail += 1
                     continue
@@ -707,7 +707,7 @@ def task_daily_backtest():
         valid_stocks = []  # [(code, name, df)]
         for code, name in pool.items():
             try:
-                df = fetcher.get_stock_data(code, "2y")
+                df = fetcher.get_stock_data(code, "2y", adjust='qfq')  # 策略形态扫描用前复权
                 if df is not None and not isinstance(df, dict) and hasattr(df, '__len__') and len(df) > 60:
                     valid_stocks.append((code, name, df))
             except Exception:
@@ -2511,7 +2511,7 @@ def _daily_strategy_scan():
         scan_fail = 0
         for code, name in scan_pool[:100]:  # 上限 100 防过载
             try:
-                df = fetcher.get_stock_data(code, '2y')  # 已共享 datahub 磁盘缓存,kline_prefetch 焐热
+                df = fetcher.get_stock_data(code, '2y', adjust='qfq')  # 盘后策略扫描(形态)用前复权
                 if df is None or len(df) == 0:
                     scan_fail += 1
                     continue
@@ -2782,7 +2782,7 @@ def _daily_candidate_pool():
             # 买点判断
             buy_points = []
             try:
-                df = fetcher.get_stock_data(code, '1y')
+                df = fetcher.get_stock_data(code, '1y', adjust='qfq')  # 买点判断(均线/形态)用前复权
                 if df is None or len(df) < 60:
                     continue
                 close_col = 'Close' if 'Close' in df.columns else 'close'

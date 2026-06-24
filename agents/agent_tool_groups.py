@@ -84,7 +84,7 @@ def collect_kline_technical_context(symbol: str, period: str = '1y',
     try:
         from stock_data import StockDataFetcher
         fetcher = StockDataFetcher()
-        df = fetcher.get_stock_data(symbol, period)
+        df = fetcher.get_stock_data(symbol, period, adjust='qfq')  # 技术分析用前复权
         if isinstance(df, dict) and df.get('error'):
             ctx['errors'].append(f"get_stock_data: {df['error']}")
             return ctx
@@ -151,7 +151,7 @@ def collect_chan_theory_context(symbol: str, period: str = '1y') -> Dict[str, An
     try:
         from stock_data import StockDataFetcher
         from chan_theory import analyze_chan
-        df = StockDataFetcher().get_stock_data(symbol, period)
+        df = StockDataFetcher().get_stock_data(symbol, period, adjust='qfq')  # 缠论用前复权
         if isinstance(df, dict) and df.get('error'):
             ctx['errors'].append(f"get_stock_data: {df['error']}")
             return ctx
@@ -369,7 +369,7 @@ def collect_chipset_context(symbol: str) -> Dict[str, Any]:
     try:
         from stock_data import StockDataFetcher
         from chip_distribution import chip_distribution
-        df = StockDataFetcher().get_stock_data(symbol, '1y')
+        df = StockDataFetcher().get_stock_data(symbol, '1y', adjust='qfq')  # 筹码分布用前复权
         if not isinstance(df, dict):
             ctx['chip_distribution'] = chip_distribution(df)
     except Exception as e:

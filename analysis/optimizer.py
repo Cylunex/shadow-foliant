@@ -27,7 +27,7 @@ def _returns_matrix(codes: List[str], period: str = "6mo") -> Tuple[np.ndarray, 
     series = {}
     for c in codes:
         try:
-            df = datahub.kline(c, period)
+            df = datahub.kline(c, period, adjust='qfq')  # 因子/权重优化用前复权
             if df is None or len(df) < 30:
                 continue
             # 收盘列名兼容多源:close/Close/收盘

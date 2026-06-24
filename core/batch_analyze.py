@@ -21,7 +21,7 @@ def get_stock_data(symbol, period):
 
     def _fetch():
         info = fetcher.get_stock_info(symbol)
-        data = fetcher.get_stock_data(symbol, period)
+        data = fetcher.get_stock_data(symbol, period, adjust='qfq')  # 多智能体技术分析用前复权
         return info, data
 
     with concurrent.futures.ThreadPoolExecutor() as executor:

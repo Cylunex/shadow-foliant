@@ -37,7 +37,7 @@ def _check_trend_and_pattern(symbol: str) -> Dict[str, Any]:
     df = None
     try:
         from stock_data import StockDataFetcher
-        df = StockDataFetcher().get_stock_data(symbol, '1y')   # 抓一次,趋势+形态共用(原来抓了两次)
+        df = StockDataFetcher().get_stock_data(symbol, '1y', adjust='qfq')   # 趋势+形态共用,前复权
         if df is None or len(df) < 120:
             return result
         close_col = 'Close' if 'Close' in df.columns else 'close'

@@ -37,8 +37,8 @@ def _scan_holding(h):
         import datahub
         from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
         code = str(h.get("code"))
-        # 走 datahub.kline(磁盘缓存,与优化器/因子/MC共享提速);6mo≈120交易日,够算 regime/信号
-        df = datahub.kline(code, "6mo")
+        # 走 datahub.kline(磁盘缓存);6mo≈120交易日,够算 regime/信号。前复权 qfq:技术信号防除权跳空
+        df = datahub.kline(code, "6mo", adjust='qfq')
         if df is None or len(df) < 30:
             return None
         regime = detect_regime(df)

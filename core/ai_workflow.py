@@ -20,8 +20,9 @@ import _bootstrap  # noqa: F401  注入 sys.path
 # ============================ 数据块注册表 ============================
 def _stock_df(code, period="1y"):
     # 走 datahub.kline(复用磁盘缓存);失败返回 {"error"} 以保持各 provider 的 isinstance(df, dict) 错误契约
+    # 前复权 qfq:AI 工作流数据块多用于技术分析,防除权跳空
     import datahub
-    df = datahub.kline(code, period)
+    df = datahub.kline(code, period, adjust='qfq')
     return df if (df is not None and not getattr(df, "empty", True)) else {"error": "无行情"}
 
 

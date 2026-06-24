@@ -211,7 +211,7 @@ def stock_insights(code: str):
     def compute():
         import datahub
         from concurrent.futures import ThreadPoolExecutor
-        df = datahub.kline(code, "1y")   # 走 datahub:复用磁盘缓存
+        df = datahub.kline(code, "1y", adjust='qfq')   # 缠论/筹码/策略信号:前复权,复用磁盘缓存
         out = {}
         if df is None or getattr(df, "empty", True):
             return {"error": "无行情数据"}

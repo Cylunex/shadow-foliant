@@ -71,7 +71,7 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     panel = {}   # code -> {'fwd': Series, 'factors': {key: Series}, 'dates': Index}
     for code in uni:
         try:
-            df = _normalize_df(datahub.kline(code, period))
+            df = _normalize_df(datahub.kline(code, period, adjust='qfq'))  # 因子用前复权
             if df is None or len(df) < 120:
                 continue
             close = df["close"].astype(float).reset_index(drop=True)

@@ -309,7 +309,7 @@ def screen(conditions: List[str], universe: List[str],
         if verbose and i % 25 == 0:
             print(f"  筛选 {i}/{len(universe)} ...")
         try:
-            df = fetcher.get_stock_data(sym, period)
+            df = fetcher.get_stock_data(sym, period, adjust='qfq')  # 条件选股(技术形态)用前复权
             if isinstance(df, dict) or df is None or len(df) < 30:
                 continue
             ok = True
