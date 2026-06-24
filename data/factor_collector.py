@@ -56,16 +56,47 @@ def _yfinance_symbol(code: str) -> str:
     return f'{code}.SZ'
 
 
+def _days_to_period(days: int) -> str:
+    for p, d in (('1mo', 30), ('3mo', 90), ('6mo', 180), ('1y', 365), ('2y', 730), ('3y', 1095)):
+        if days <= d:
+            return p
+    return '3y'
+
+
 def fetch_kline(symbol: str, days: int = 120) -> List[Dict]:
-    """拉取单只股票日线数据（Yahoo V8 API，替代 yfinance）"""
+    """拉取单只股票日线 records [{trade_date,open,high,low,close,volume}]。
+    ⭐ 因子库须用**前复权 qfq**(raw 在除权日假跳空 → 动量/52周高/均线类因子失真)。
+    主源 datahub.kline(adjust='qfq')(标准 A股前复权,完整 OHLC,多源+磁盘缓存);
+    兜底 Yahoo(走代理,用 adjclose 比例把 OHLC 也复权,口径近似 qfq、至少消除除权跳空)。"""
+    # ── 主源:datahub 前复权(统一口径 + 复用缓存/多源)──
+    try:
+        import datahub
+        df = datahub.kline(symbol, _days_to_period(days), adjust='qfq')
+        if df is not None and not getattr(df, 'empty', True):
+            recs = []
+            for d, row in df.iterrows():
+                c = row.get('Close')
+                if c != c:   # NaN 跳过
+                    continue
+                recs.append({
+                    'trade_date': str(d)[:10],
+                    'open': _native(row.get('Open')), 'high': _native(row.get('High')),
+                    'low': _native(row.get('Low')), 'close': _native(c),
+                    'volume': int(_native(row.get('Volume')) or 0),
+                })
+            if recs:
+                recs.sort(key=lambda r: r['trade_date'])
+                return recs
+    except Exception as e:
+        print(f'  [kline] {symbol} datahub 取数失败, 转 Yahoo: {type(e).__name__}')
+
+    # ── 兜底:Yahoo V8(走代理)。用 adjclose/close 比例把 OHLC 一并复权 → 近似前复权 ──
     import requests
     headers = {'User-Agent': 'Mozilla/5.0'}
     import config as _cfg
     proxies = _cfg.PROXIES.copy()
-    # 仅当 PROXY_URL 环境变量设置时才用代理（fallback=空字符串时跳过）
     if not proxies.get('http') and not proxies.get('https'):
         proxies = None
-    # A股代码映射：6xxxxx.SS, 其余 .SZ
     suffix = '.SS' if symbol.startswith(('6', '9')) else '.SZ'
     yahoo_sym = f'{symbol}{suffix}'
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range={days}d&interval=1d'
@@ -88,15 +119,17 @@ def fetch_kline(symbol: str, days: int = 120) -> List[Dict]:
             for i in range(len(timestamps)):
                 if quote['close'][i] is not None:
                     d = datetime.fromtimestamp(timestamps[i]).strftime('%Y-%m-%d')
+                    raw_c = _native(quote['close'][i])
+                    # 复权因子 = adjclose/close;OHLC × 因子 → 复权 OHLC(消除除权跳空)
+                    f = (float(adj[i]) / raw_c) if (adj[i] is not None and raw_c) else 1.0
                     records.append({
                         'trade_date': d,
-                        'open': _native(quote['open'][i]),
-                        'high': _native(quote['high'][i]),
-                        'low': _native(quote['low'][i]),
-                        'close': _native(quote['close'][i]),
+                        'open': round(_native(quote['open'][i]) * f, 4),
+                        'high': round(_native(quote['high'][i]) * f, 4),
+                        'low': round(_native(quote['low'][i]) * f, 4),
+                        'close': round(raw_c * f, 4),
                         'volume': int(_native(quote['volume'][i])),
                     })
-            # 按日期升序（旧在前）
             records.sort(key=lambda r: r['trade_date'])
             return records
         except Exception as e:
