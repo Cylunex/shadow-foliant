@@ -139,11 +139,22 @@ def _action(score: float) -> str:
     return '基本面较差 — 不建议持有'
 
 
-def collect_factors(symbol: str) -> Dict[str, Optional[float]]:
+def collect_factors(symbol: str, use_cache: bool = True) -> Dict[str, Optional[float]]:
     """聚合 8 因子原始值，优先 a-stock full_valuation + 同花顺 EPS，备 pywencai
 
     返回的 dict 即使部分字段缺也返回，缺字段值为 None。
+    ⭐ 整体缓存 1 天(2026-06-25):基本面/一致预期/财务指标几天才变,但每只内部调 full_valuation
+    (同花顺,慢)+ pywencai(问财,限流2s+30s超时,**不受 datahub 全源熔断保护**)→ 盘中 60 只逐只现调
+    是取因子"累计156s"+池耗尽雪崩的真主因。盘后 kline_prefetch 焐热,盘中读缓存 0 调慢源。
     """
+    if use_cache:
+        try:
+            import datahub
+            _c = datahub._cache_get(f"factors:{symbol}", 86400)
+            if isinstance(_c, dict):
+                return _c
+        except Exception:
+            pass
     factors: Dict[str, Optional[float]] = {k: None for k in SUB_SCORERS}
 
     try:
@@ -190,6 +201,13 @@ def collect_factors(symbol: str) -> Dict[str, Optional[float]]:
     except Exception as e:
         pass
 
+    # 至少有一个因子非空才缓存(全空多是慢源/问财一起挂,别把"空"缓存1天)
+    if use_cache and any(v is not None for v in factors.values()):
+        try:
+            import datahub
+            datahub._cache_put(f"factors:{symbol}", factors, 86400)
+        except Exception:
+            pass
     return factors
 
 

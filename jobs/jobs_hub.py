@@ -3215,16 +3215,22 @@ def task_kline_prefetch():
                 pass
         msg = f'universe={len(pool)} warmed={ok} total_bars={bars}'
         print(f'[kline_prefetch] {msg}')
-        # 顺便焐 full_valuation(同花顺一致预期,慢源,TTL 1天)→ 盘中选股/取因子读暖缓存、0 调同花顺,
-        # 不再 09:45 逐只现调把线程池打满(雪崩另一半)。盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
+        # 顺便焐 collect_factors(内部含 full_valuation 同花顺 + pywencai 问财,都是慢源,TTL 1天)→
+        # 盘中选股/取因子读暖缓存、0 调慢源,不再 09:45 逐只现调把线程池打满(雪崩的真主因)。
+        # 盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
         vwarm = 0
-        for c in pool:
-            try:
-                if datahub.full_valuation(c):
-                    vwarm += 1
-            except Exception:
-                pass
-        print(f'[kline_prefetch] full_valuation 焐热 {vwarm}/{len(pool)}')
+        try:
+            from fundamental_scoring import collect_factors as _cf
+            for c in pool:
+                try:
+                    f = _cf(c)
+                    if f and any(v is not None for v in f.values()):
+                        vwarm += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f'[kline_prefetch] 因子焐热不可用: {e}')
+        print(f'[kline_prefetch] 因子(含估值/问财)焐热 {vwarm}/{len(pool)}')
         _log_run(job, 'success' if ok else 'error',
                  error=f'{msg} fv={vwarm}' if ok else f'no_kline_warmed; {msg}',
                  started_at=started, finished_at=datetime.now().isoformat())
