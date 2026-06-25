@@ -188,7 +188,11 @@ class StockDataFetcher:
                             row = df.iloc[0]
                             info['pe_ratio'] = row.get('pe', 'N/A')
                             info['pb_ratio'] = row.get('pb', 'N/A')
-                            info['market_cap'] = row.get('total_mv', 'N/A')
+                            _mv = row.get('total_mv', 'N/A')   # tushare total_mv 单位"万元"→元(对齐其余路径)
+                            try:
+                                info['market_cap'] = float(_mv) * 1e4 if _mv not in (None, 'N/A', '') else 'N/A'
+                            except (TypeError, ValueError):
+                                info['market_cap'] = 'N/A'
                             print(f"[Tushare] ✅ 成功获取部分信息")
                     except Exception as te:
                         print(f"[Tushare] ❌ 获取失败: {te}")

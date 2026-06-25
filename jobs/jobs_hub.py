@@ -2752,10 +2752,12 @@ def _daily_candidate_pool():
         candidates = []
         sector_err = scan_err = knife_skip = 0  # 板块/买点失败数 + 无企稳确认被剔除数(末尾汇总)
         # 兼容 pywencai(DataFrame) 和 dataapi(list[dict])
+        # 2026-06-25: 200→60。候选池盘中(09:45)逐只拉 qfq K线(东财主源)是雪崩高危点,
+        # 200 只×限流 ≈ 数百秒;粗筛 60 只足够(后续还有形态/企稳过滤),且 qfq 已有 sina 真非东财兜底。
         if isinstance(base, (list, tuple)):
-            rows_iter = base[:200]
+            rows_iter = base[:60]
         else:
-            rows_iter = (row for _, row in base.head(200).iterrows())
+            rows_iter = (row for _, row in base.head(60).iterrows())
         for row in rows_iter:
             if isinstance(row, dict):
                 code = str(row.get('code', row.get('股票代码', '')) or '').strip()

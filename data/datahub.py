@@ -546,13 +546,15 @@ _KLINE_DIR = _os.path.join(_bootstrap.DB_DIR, "kline_cache")
 
 
 def _kline_ttl() -> int:
-    """缓存有效期(秒):盘中 9:00-15:30 用 1h(今日 bar 会变),其余时段 12h。"""
+    """缓存有效期(秒):盘中 9:00-15:30 用 2h,其余时段 12h。
+    2026-06-25 盘中 1h→2h:历史 bar 不变、只今日最新一根会动,而盘中最新价一律走 quotes(腾讯)补,
+    2h 容差对均线/形态判断无实质影响,却能把盘中对 K线源(尤其 qfq 主源东财 push2his)的重复回源减半。"""
     try:
         from datetime import datetime as _dt
         m = _dt.now().hour * 60 + _dt.now().minute
-        return 3600 if (9 * 60 <= m <= 15 * 60 + 30) else 43200
+        return 7200 if (9 * 60 <= m <= 15 * 60 + 30) else 43200
     except Exception:
-        return 3600
+        return 7200
 
 
 def _sanitize_kline(df: pd.DataFrame) -> pd.DataFrame:
@@ -1404,9 +1406,10 @@ def _news_cls(page_size):
 
 def market_news(page_size: int = 50) -> List[dict]:
     """全市场财经快讯。list[dict] 键:title/content/time/url。
-    源链:东财全球快讯(akshare) / 财联社电报(dsm)—— 自动升降级。"""
+    源链:财联社电报(dsm,主)→ 东财全球快讯(akshare,兜底)。2026-06-25:财联社是真跨源,提为主源,
+    东财降兜底以减少东财调用(财经快讯对决策权重低,财联社口径完全够用)。"""
     return _route("market_news",
-                  [("em", lambda: _news_em(page_size)), ("cls", lambda: _news_cls(page_size))], empty=[]) or []
+                  [("cls", lambda: _news_cls(page_size)), ("em", lambda: _news_em(page_size))], empty=[]) or []
 
 
 def announcements(code: str) -> List[dict]:
