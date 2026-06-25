@@ -753,6 +753,49 @@ def _kline_akshare_qfq(code: str, period: str = "1y", interval: str = "1d") -> p
     return _slice_by_days(out, _period_days(period))
 
 
+def _sina_symbol(code: str) -> str:
+    """6位代码 → 新浪带交易所前缀(sh600519/sz000001/bj830799)。qfq 主用个股(6/0/3)。"""
+    c = _norm_code(code)
+    if c[:3] in ('920',) or c[0] in ('4', '8'):
+        return 'bj' + c
+    if c[0] in ('0', '2', '3'):
+        return 'sz' + c
+    return 'sh' + c   # 6/9/5 开头(沪)及兜底
+
+
+def _kline_sina_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """新浪前复权(qfq)日线 —— **唯一真非东财** qfq 源(akshare stock_zh_a_daily, finance.sina.com.cn)。
+
+    原 qfq 链 east_qfq(东财 push2his fqt=1)+ akshare_qfq(stock_zh_a_hist 也走东财)**全是东财**,
+    机房 IP 被封时整个 qfq 取不到 → 技术分析只能退 raw(除权跳空毁形态/缠论/因子)。新浪 stock_zh_a_daily
+    用复权因子本地算 qfq, 与东财同口径(实测:最新价对齐 raw、历史价下移), 是 qfq 的真跨公司兜底。
+    返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV, Volume 单位'股')或空 DF。仅日线。
+    ⚠️ 该接口 volume 本就是'股'(非 akshare '手'), **不乘 100**;返回全历史, 由 _slice_by_days 截到 period。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    need = ('date', 'open', 'close', 'high', 'low', 'volume')
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_zh_a_daily, symbol=_sina_symbol(code), adjust='qfq', timeout=20)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
+        return pd.DataFrame()
+    try:
+        out = pd.DataFrame({
+            'Date': pd.to_datetime(df['date'], errors='coerce').dt.normalize(),
+            'Open': pd.to_numeric(df['open'], errors='coerce'),
+            'Close': pd.to_numeric(df['close'], errors='coerce'),
+            'High': pd.to_numeric(df['high'], errors='coerce'),
+            'Low': pd.to_numeric(df['low'], errors='coerce'),
+            'Volume': pd.to_numeric(df['volume'], errors='coerce'),  # 已是'股', 不乘 100
+        }).dropna(subset=['Date']).set_index('Date').sort_index()
+    except Exception:
+        return pd.DataFrame()
+    return _slice_by_days(out, _period_days(period))
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
           adjust: str = "raw") -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
@@ -786,19 +829,24 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                      ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
                      ("mootdx", lambda: _kline_mootdx(code, period, interval))],
                     empty=pd.DataFrame(), timeout=45)
-    else:  # qfq:独立源(都走东财),绕开只能 raw 的新浪/mootdx
-        # ⚡ 健康度短路(2026-06-25 修):qfq 两源都走东财系,东财封/外网全挂时每只吃满源超时
-        # (原 45s×2=90s)会拖垮 unified_selection 等批量任务。两源都在**活跃冷却期**(连续失败,
-        # 冷却额外 -1.0 → score<-0.5)→ 直接走 raw,0 成本快速降级。
+    else:  # qfq:east/akshare 走东财,sina_qfq 真非东财兜底
+        # ⚡ 健康度短路(2026-06-25 修):qfq 源在**活跃冷却期**(连续失败,冷却额外 -1.0 → score<-0.5)
+        # 时每只吃满源超时(原 45s×2=90s)会拖垮 unified_selection 等批量任务 → 直接走 raw,0 成本降级。
+        # ⚠️ 必须**三源全冷却**才退 raw:east_qfq/akshare_qfq 是东财,sina_qfq 是真非东财(新浪)——
+        #    东财被封时 east/akshare 冷却但 sina 仍健康(0.5> -0.5)→ 不短路 → _route 走 sina 拿真 qfq。
+        #    漏掉 sina 会让"东财一封就退 raw"白白浪费真非东财源(2026-06-25 补 sina 源时同步修)。
         # ⚠️ 阈值用 -0.5 不用 0:冷却期(120s内)score≈-1.2 才短路;冷却过期后 score≈-0.2(不短路)
-        # → 每 120s 自动重试一次 qfq,网络/东财恢复即自愈(用 0 会因 rate=0 永久短路、死锁不恢复)。
+        # → 每 120s 自动重试,网络/东财恢复即自愈(用 0 会因 rate=0 永久短路、死锁不恢复)。
         _now = _time.time()
-        if _health('kline_qfq:east_qfq', _now) < -0.5 and _health('kline_qfq:akshare_qfq', _now) < -0.5:
+        if (_health('kline_qfq:east_qfq', _now) < -0.5 and _health('kline_qfq:akshare_qfq', _now) < -0.5
+                and _health('kline_qfq:sina_qfq', _now) < -0.5):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
-        # 短超时 10s(qfq 取不到快速 fallback,不再每只吃满 45s):east 内部 6s、akshare 由此钳到 10s
+        # 短超时 10s(qfq 取不到快速 fallback,不再每只吃满 45s)。东财封时 east/akshare 冷却沉底,
+        # sina_qfq(真非东财)自动靠健康度上位 → 技术分析仍有真 qfq,不必退 raw。
         df = _route("kline_qfq",
                     [("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq')),
-                     ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval))],
+                     ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval)),
+                     ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval))],
                     empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # qfq 源全失败(典型:东财被封)→ 退回 raw(技术分析有数据胜过无),但**绝不写进 qfq 缓存**(防污染)
@@ -878,7 +926,8 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
     if adjust in ('qfq', 'both'):
         try:
             qdf = _route("kline_qfq_prefetch",
-                         [("east_qfq", lambda: _kline_eastmoney(code, base, interval, 'qfq'))],
+                         [("east_qfq", lambda: _kline_eastmoney(code, base, interval, 'qfq')),
+                          ("sina_qfq", lambda: _kline_sina_qfq(code, base, interval))],
                          empty=pd.DataFrame(), timeout=10)
             qdf = _sanitize_kline(qdf)
             if isinstance(qdf, pd.DataFrame) and not qdf.empty:
