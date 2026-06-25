@@ -796,6 +796,64 @@ def _kline_sina_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.D
     return _slice_by_days(out, _period_days(period))
 
 
+_TF_CLIENT = None
+
+
+def _tickflow_client():
+    """TickFlow 免费客户端(模块级懒加载单例)。抑制其初始化 banner 噪音。"""
+    global _TF_CLIENT
+    if _TF_CLIENT is None:
+        import io as _io
+        import contextlib as _cl
+        from tickflow import TickFlow
+        with _cl.redirect_stdout(_io.StringIO()):
+            _TF_CLIENT = TickFlow.free()
+    return _TF_CLIENT
+
+
+def _tickflow_symbol(code: str) -> str:
+    """6位代码 → TickFlow 格式(600519.SH / 000001.SZ / 830799.BJ)。"""
+    c = _norm_code(code)
+    if c[:3] in ('920',) or c[0] in ('4', '8'):
+        return c + '.BJ'
+    if c[0] in ('0', '2', '3'):
+        return c + '.SZ'
+    return c + '.SH'
+
+
+def _kline_tickflow_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """TickFlow 免费日K前复权 —— qfq **末位**真非东财兜底(`free-api.tickflow.org`,独立第三方)。
+
+    实测前复权(最新价对齐 raw、历史价下移),与东财/新浪 qfq 同口径。⚠️ 限流严(免费版 10次/分、
+    1标的/次、盘中不实时)→ `throttle('tickflow')` 6s,且**只作 east_qfq/akshare_qfq/sina_qfq 全挂时的
+    现调兜底,不进盘后预热**(预热用 sina 足够)。返回 fetcher 同款格式(DatetimeIndex='Date' + 大写
+    OCHLV,Volume 单位'股')或空 DF。仅日线。⚠️ TickFlow volume 单位'手' → ×100 对齐'股'。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    need = ('trade_date', 'open', 'high', 'low', 'close', 'volume')
+    try:
+        from rate_limiter import throttle
+        throttle('tickflow')
+        cnt = max(int(_period_days(period) * 0.7) + 15, 30)
+        df = _tickflow_client().klines.get(_tickflow_symbol(code), period='1d', count=cnt, as_dataframe=True)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
+        return pd.DataFrame()
+    try:
+        out = pd.DataFrame({
+            'Date': pd.to_datetime(df['trade_date'], errors='coerce').dt.normalize(),
+            'Open': pd.to_numeric(df['open'], errors='coerce'),
+            'Close': pd.to_numeric(df['close'], errors='coerce'),
+            'High': pd.to_numeric(df['high'], errors='coerce'),
+            'Low': pd.to_numeric(df['low'], errors='coerce'),
+            'Volume': pd.to_numeric(df['volume'], errors='coerce') * 100,  # 手→股
+        }).dropna(subset=['Date']).set_index('Date').sort_index()
+    except Exception:
+        return pd.DataFrame()
+    return _slice_by_days(out, _period_days(period))
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
           adjust: str = "raw") -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
@@ -839,14 +897,17 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         # → 每 120s 自动重试,网络/东财恢复即自愈(用 0 会因 rate=0 永久短路、死锁不恢复)。
         _now = _time.time()
         if (_health('kline_qfq:east_qfq', _now) < -0.5 and _health('kline_qfq:akshare_qfq', _now) < -0.5
-                and _health('kline_qfq:sina_qfq', _now) < -0.5):
+                and _health('kline_qfq:sina_qfq', _now) < -0.5
+                and _health('kline_qfq:tickflow_qfq', _now) < -0.5):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
         # 短超时 10s(qfq 取不到快速 fallback,不再每只吃满 45s)。东财封时 east/akshare 冷却沉底,
-        # sina_qfq(真非东财)自动靠健康度上位 → 技术分析仍有真 qfq,不必退 raw。
+        # sina_qfq→tickflow_qfq(均真非东财)自动靠健康度上位 → 技术分析仍有真 qfq,不必退 raw。
+        # tickflow 限流 6s 慢、放末位:仅前三源全挂时才轮到(极端降级,有数据胜过退 raw)。
         df = _route("kline_qfq",
                     [("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq')),
                      ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval)),
-                     ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval))],
+                     ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval)),
+                     ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))],
                     empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # qfq 源全失败(典型:东财被封)→ 退回 raw(技术分析有数据胜过无),但**绝不写进 qfq 缓存**(防污染)

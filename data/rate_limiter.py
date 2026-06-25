@@ -22,11 +22,16 @@ _DEFAULT_GAP = 1.0
 # 按源覆盖最小间隔(秒)。键 = throttle(source) 传入的 source 名(支持 host 前缀近似匹配)。
 # 只填"按惯例需要比 1s 更宽"的源; 低于 1s 的值会被下限钳制无效。
 # 2026-06-23: akshare 反爬最严 3s; 同花顺(pywencai)次之 2s; 实时行情/其余走 1s 惯例。
+# 2026-06-25: 东财机房 IP 反爬严(整域被封 RemoteDisconnected)→ eastmoney 1s→3s 降调用量;
+#   子串匹配:throttled_session 按 host 的 push2/datacenter/reportapi.eastmoney.com 都命中 'eastmoney'→3s。
+#   tickflow 免费版 10次/分 → 6s。
 _GAP_BY_SOURCE: dict[str, float] = {
     'akshare': 3.0,
     'pywencai': 2.0,
     'ths': 2.0,          # 同花顺直连
     '10jqka': 2.0,       # 同花顺域名
+    'eastmoney': 3.0,    # 东财(含 push2/datacenter/reportapi 各子域, 子串匹配)
+    'tickflow': 6.0,     # TickFlow 免费版 10次/分
 }
 
 
