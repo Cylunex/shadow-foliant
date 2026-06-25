@@ -702,6 +702,86 @@ def _sector_fund_flow_bkzj(sector_type: str = "industry", top_n: int = 50) -> li
         return []
 
 
+def _f_num(v) -> float:
+    """容错转 float(板块兜底源用):'--'/空/None → 0.0。"""
+    try:
+        return float(str(v).replace('%', '').replace(',', ''))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _sector_ranking_ths(sector_type: str = "industry", top_n: int = 20) -> dict:
+    """行业/概念板块涨跌排名 —— 同花顺(akshare ths, data.10jqka.com.cn, **真非东财**)。
+
+    作为东财 push2 `_industry_comparison`/`_concept_comparison` 的**真跨公司**兜底:
+    东财机房 IP 被封时, 同花顺仍可取板块涨跌榜。产出与东财源逐字段同构
+    {top,bottom,total}, 每条 {rank,name,change_pct,code,up_count,down_count,leader,leader_change}。
+    ⚠️ 用纯 JSON 的 stock_fund_flow_industry/concept(自带涨跌幅+领涨股)按涨跌幅排序, **不用**
+    stock_board_industry_summary_ths —— 后者底层 read_html 抓页面表格, 偶发 'No tables found' 不稳,
+    兜底源求稳优先。代价:该接口无上涨/下跌家数 → up_count/down_count 补 0;无板块代码 → code 空。
+    """
+    import akshare as ak
+    from data.akshare_safe import call as ak_call
+    fn = ak.stock_fund_flow_concept if sector_type == "concept" else ak.stock_fund_flow_industry
+    try:
+        df = ak_call(fn, symbol="即时", timeout=20)
+    except Exception as e:
+        print(f"[a-stock] 板块排名(同花顺兜底)请求失败({sector_type}): {e}")
+        return {"top": [], "bottom": [], "total": 0}
+    if df is None or getattr(df, 'empty', True) or "行业" not in df.columns or "行业-涨跌幅" not in df.columns:
+        return {"top": [], "bottom": [], "total": 0}
+    df = df.sort_values("行业-涨跌幅", ascending=False)
+    rows = []
+    for i, (_, r) in enumerate(df.iterrows()):
+        rows.append({
+            "rank": i + 1,
+            "name": r.get("行业", ""),
+            "change_pct": _f_num(r.get("行业-涨跌幅")),
+            "code": "",
+            "up_count": 0,
+            "down_count": 0,
+            "leader": r.get("领涨股", "") or "",
+            "leader_change": _f_num(r.get("领涨股-涨跌幅")),
+        })
+    return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
+
+
+def _sector_fund_flow_ths(sector_type: str = "industry", top_n: int = 50) -> list[dict]:
+    """行业/概念板块资金流 —— 同花顺(akshare ths, data.10jqka.com.cn, **真非东财**)。
+
+    作为东财 push2/bkzj 的**真跨公司**兜底(那两个都是东财, IP 被封时同死)。
+    产出与 `_sector_fund_flow_push2` 逐字段同构 list[dict](按主力净额降序)。
+    ⚠️ 单位:同花顺"净额"为**亿元**, 本项目板块资金流口径为**元**(见 _sector_fund_flow_push2)→ ×1e8 对齐;
+    同花顺只给主力净额, 不分超大/大/中/小档 → 分档补 0;无板块代码 → code 空。
+    """
+    import akshare as ak
+    from data.akshare_safe import call as ak_call
+    fn = ak.stock_fund_flow_concept if sector_type == "concept" else ak.stock_fund_flow_industry
+    try:
+        df = ak_call(fn, symbol="即时", timeout=20)
+    except Exception as e:
+        print(f"[a-stock] 板块资金流(同花顺兜底)请求失败({sector_type}): {e}")
+        return []
+    need = ("行业", "行业-涨跌幅", "净额")
+    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
+        return []
+    df = df.sort_values("净额", ascending=False)
+    rows = []
+    for _, r in df.head(top_n).iterrows():
+        rows.append({
+            "name": r.get("行业", ""),
+            "code": "",
+            "change_pct": _f_num(r.get("行业-涨跌幅")),
+            "main_net_inflow": _f_num(r.get("净额")) * 1e8,   # 亿元 → 元(对齐 push2 口径)
+            "main_net_inflow_pct": 0,
+            "super_large_net_inflow": 0, "large_net_inflow": 0,
+            "medium_net_inflow": 0, "small_net_inflow": 0,
+            "leader": r.get("领涨股", "") or "",
+            "leader_change": _f_num(r.get("领涨股-涨跌幅")),
+        })
+    return rows
+
+
 def _dragon_tiger_board(code: str, trade_date: str, look_back: int = 30) -> dict:
     """龙虎榜数据聚合"""
     code = _normalize_code(code)
@@ -1244,6 +1324,14 @@ class AStockDataAdapter:
     def get_sector_fund_flow_bkzj(self, sector_type: str = "industry", top_n: int = 50) -> list[dict]:
         """板块资金流 —— 非 push2 兜底源（东财 datacenter getbkzj，受限网络下 push2 被墙时用）"""
         return _sector_fund_flow_bkzj(sector_type, top_n)
+
+    def get_sector_ranking_ths(self, sector_type: str = "industry", top_n: int = 20) -> dict:
+        """板块涨跌排名 —— 同花顺真跨源兜底（data.10jqka.com.cn，东财被封时用）"""
+        return _sector_ranking_ths(sector_type, top_n)
+
+    def get_sector_fund_flow_ths(self, sector_type: str = "industry", top_n: int = 50) -> list[dict]:
+        """板块资金流 —— 同花顺真跨源兜底（data.10jqka.com.cn，东财被封时用）"""
+        return _sector_fund_flow_ths(sector_type, top_n)
 
     def get_dragon_tiger(self, symbol: str, trade_date: str = None, look_back: int = 30) -> dict:
         """龙虎榜数据"""

@@ -1127,10 +1127,17 @@ def hot_stocks(date: str = None) -> pd.DataFrame:
 
 
 def sector_ranking(sector_type: str = "industry", top_n: int = 20) -> dict:
-    """板块涨跌排名 {top,bottom,total}。sector_type: industry/concept。源:东财 push2(非鉴权)。"""
+    """板块涨跌排名 {top,bottom,total}。sector_type: industry/concept。
+    源:东财 push2(主)→ 同花顺 data.10jqka(**真跨公司**兜底,2026-06-25:东财机房 IP 被封时仍可取)。
+    ⚠️ 排名是 dict,东财失败返回的空结构 {top:[],total:0} 仍 truthy、会被 _route 当"成功"而不 fallback,
+    故 thunk 用 _rank_or_none 把空结构(total=0)显式转 None → _route 正确降级到同花顺。"""
     a = _adapter()
     fn = a.get_concept_ranking if sector_type == "concept" else a.get_industry_ranking
-    return _route(f"sector_ranking_{sector_type}", [("em_push2", lambda: fn(top_n))],
+    def _rank_or_none(d):
+        return d if isinstance(d, dict) and d.get("total") else None
+    return _route(f"sector_ranking_{sector_type}",
+                  [("em_push2", lambda: _rank_or_none(fn(top_n))),
+                   ("ths", lambda: _rank_or_none(a.get_sector_ranking_ths(sector_type, top_n)))],
                   empty={"top": [], "bottom": [], "total": 0}) or {"top": [], "bottom": [], "total": 0}
 
 
@@ -1176,11 +1183,13 @@ def sector_spot(top_n: int = 8, bottom_n: int = 5) -> dict:
 
 
 def sector_fund_flow(sector_type: str = "industry", top_n: int = 50) -> List[dict]:
-    """板块资金流(行业/概念)。list[dict]。
-    主源东财 push2;push2 被墙时自动降级到 datacenter getbkzj(非 push2,借鉴 go-stock)。"""
+    """板块资金流(行业/概念)。list[dict](金额单位=元)。
+    主源东财 push2 → datacenter getbkzj(仍东财,push2 偶发抽风时换子接口)→ 同花顺 data.10jqka
+    (**真跨公司**兜底,2026-06-25:前两者都是东财,IP 被封时同死,同花顺接上保住板块资金流不全空)。"""
     return _route(f"sector_fund_flow_{sector_type}",
                   [("push2", lambda: _adapter().get_sector_fund_flow(sector_type, top_n)),
-                   ("bkzj", lambda: _adapter().get_sector_fund_flow_bkzj(sector_type, top_n))],
+                   ("bkzj", lambda: _adapter().get_sector_fund_flow_bkzj(sector_type, top_n)),
+                   ("ths", lambda: _adapter().get_sector_fund_flow_ths(sector_type, top_n))],
                   empty=[]) or []
 
 
