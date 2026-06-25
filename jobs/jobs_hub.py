@@ -553,21 +553,24 @@ def task_stock_monitor_check():
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
 
-    # ── 持仓加仓审核（原 wf_position_guard_check,开关控制,默认开;自带交易时段判断）──
-    try:
-        _t = time.time()
-        _position_guard_check()
-        print(f'[stock_monitor_check] 加仓审核完成 ({time.time()-_t:.1f}s)', flush=True)
-    except Exception as e:
-        print(f'[stock_monitor_check] 加仓审核子任务失败: {e}')
+    # ── 尾接两个子任务,各套整体超时护栏(2026-06-25):外网全挂时它们逐只吃满源超时会拖到
+    #    1800s+、孤儿线程累积、还推残缺信号。套硬超时,超了这轮放弃(下个30分钟再来),不阻塞主任务。
+    from concurrent.futures import ThreadPoolExecutor as _TPE2, TimeoutError as _TO2
 
-    # ── 持仓盘中急跌监控(2026-06-12,原 W8"方案B"):跌≥5% 立即推,每股每日只报一次 ──
-    try:
-        _t = time.time()
-        _intraday_plunge_check()
-        print(f'[stock_monitor_check] 急跌监控完成 ({time.time()-_t:.1f}s)', flush=True)
-    except Exception as e:
-        print(f'[stock_monitor_check] 急跌监控子任务失败: {e}')
+    def _guarded(name, fn, timeout):
+        try:
+            _t = time.time()
+            with _TPE2(max_workers=1) as _ex:
+                _ex.submit(fn).result(timeout=timeout)
+            print(f'[stock_monitor_check] {name}完成 ({time.time()-_t:.1f}s)', flush=True)
+        except _TO2:
+            print(f'[stock_monitor_check] {name}超时{timeout}s放弃(外网慢?下轮再来)', flush=True)
+        except Exception as e:
+            print(f'[stock_monitor_check] {name}子任务失败: {e}')
+
+    # 持仓加仓审核(原 wf_position_guard_check,开关/交易时段判断在内);急跌监控(跌≥5%即推,每日一次)
+    _guarded('加仓审核', _position_guard_check, 200)
+    _guarded('急跌监控', _intraday_plunge_check, 120)
 
 
 def _intraday_plunge_check(drop_pct: float = -5.0):
@@ -2969,7 +2972,9 @@ def _position_guard_check():
     started = datetime.now().isoformat()
     try:
         from position_guardian import evaluate_all_triggered, format_alert
-        items = evaluate_all_triggered()
+        # 限市值 top15 + 跳过慢的基本面评分(2026-06-25):原无 limit+含基本面,外网全挂时全持仓逐只
+        # 吃满 quote60s+kline135s+基本面 → 加仓审核 1813s 拖垮 stock_monitor_check + 推残缺信号。
+        items = evaluate_all_triggered(limit=15, with_fundamental=False)
         if items:
             text = format_alert(items)
             try:

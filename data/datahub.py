@@ -140,6 +140,11 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
        不会无限等(根治 datahub.quotes 等卡死拖垮 jobs)。单源异常/超时被吞续试下一个。"""
     to = timeout or _SOURCE_TIMEOUT
     now = _time.time()
+    # ⚡ 全源熔断(2026-06-25):该域所有源都在活跃冷却期(连续失败沉底,score<-0.5)→ 外网/该域整体
+    # 不可达,直接返回 empty,不再逐源吃满超时。外网全挂时让 监控/选股/快照 等批量任务秒级降级而非
+    # 每只吃 quotes60s+kline135s 拖到任务超时(1813s 加仓审核即此)。冷却 120s 后自动放行重试 → 自愈。
+    if sources and all(_health(f"{capability}:{n}", now) < -0.5 for n, _ in sources):
+        return empty
     ordered = sorted(sources, key=lambda ns: -_health(f"{capability}:{ns[0]}", now))
     for name, fn in ordered:
         key = f"{capability}:{name}"
