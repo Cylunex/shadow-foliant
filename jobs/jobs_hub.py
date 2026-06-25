@@ -1396,7 +1396,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
     'factor_collection':         1200,
-    'kline_prefetch':            1500,   # 焐 raw+qfq 两套缓存(2026-06-24),给足时间
+    'kline_prefetch':            1800,   # 焐 raw+qfq 两套 K线 + full_valuation(2026-06-25),给足时间
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
@@ -3215,8 +3215,18 @@ def task_kline_prefetch():
                 pass
         msg = f'universe={len(pool)} warmed={ok} total_bars={bars}'
         print(f'[kline_prefetch] {msg}')
+        # 顺便焐 full_valuation(同花顺一致预期,慢源,TTL 1天)→ 盘中选股/取因子读暖缓存、0 调同花顺,
+        # 不再 09:45 逐只现调把线程池打满(雪崩另一半)。盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
+        vwarm = 0
+        for c in pool:
+            try:
+                if datahub.full_valuation(c):
+                    vwarm += 1
+            except Exception:
+                pass
+        print(f'[kline_prefetch] full_valuation 焐热 {vwarm}/{len(pool)}')
         _log_run(job, 'success' if ok else 'error',
-                 error=msg if ok else f'no_kline_warmed; {msg}',
+                 error=f'{msg} fv={vwarm}' if ok else f'no_kline_warmed; {msg}',
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,

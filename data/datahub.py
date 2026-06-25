@@ -224,8 +224,11 @@ _CACHE_TTL: Dict[str, Any] = {
     # —— 低频(按天/更久):基本面/估值/股东/解禁/概念 ——
     "stock_info": 43200,
     "financials": 86400,
-    "valuation": (3600, 43200),
-    "full_valuation": (3600, 43200),
+    # 估值/一致预期:EPS 是券商一致预期,几天才变,price 略旧对 PEG/前向PE 因子无所谓。
+    # (2026-06-25)盘中也拉到 1 天:原盘中 1h → 09:45 选股 60 只候选缓存过期、逐只现调同花顺慢源,
+    # 是池耗尽雪崩的一半。盘后 kline_prefetch 顺便焐热,盘中读缓存 0 调同花顺。
+    "valuation": 86400,
+    "full_valuation": 86400,
     "eps_forecast": 86400,
     "stock_reports": 86400,
     "industry_reports": 86400,
