@@ -144,8 +144,9 @@ def collect_factors(symbol: str, use_cache: bool = True) -> Dict[str, Optional[f
 
     返回的 dict 即使部分字段缺也返回，缺字段值为 None。
     ⭐ 整体缓存 1 天(2026-06-25):基本面/一致预期/财务指标几天才变,但每只内部调 full_valuation
-    (同花顺,慢)+ pywencai(问财,限流2s+30s超时,**不受 datahub 全源熔断保护**)→ 盘中 60 只逐只现调
-    是取因子"累计156s"+池耗尽雪崩的真主因。盘后 kline_prefetch 焐热,盘中读缓存 0 调慢源。
+    (同花顺,慢,走 datahub._route 全源熔断)+ pywencai(问财,限流2s+30s超时,**自带熔断 见 pywencai_safe**)
+    → 盘中 60 只逐只现调是取因子"累计156s"+池耗尽雪崩的真主因。盘后 kline_prefetch 焐热,盘中读缓存 0 调慢源。
+    慢源整体不可达时两者都在连续失败后秒级短路降级(不再逐只吃满 timeout 拖垮焐热/采集任务)。
     """
     if use_cache:
         try:
