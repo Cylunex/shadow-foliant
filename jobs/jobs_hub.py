@@ -462,10 +462,12 @@ def task_portfolio_indicator_snapshot():
 
 
 def task_ai_rec_check():
-    """盘中每 30 分钟跑：对所有已启用监控的 AI 推荐对比实时价，触发回填+推送
+    """📊 推荐池胜率回填(盘后每天一次, 16:35)：对 AI 推荐池逐条用**当日收盘价**对比目标/止损,
+    回填 last_price/realized_pnl, 喂 ai_eval_weekly 周评估闭环(衡量选股质量, 非盯盘/非短线工具)。
 
-    仅在交易日交易时段执行（09:30-15:00），其他时段静默跳过。
-    受开关 ai_rec_check 控制（默认开）。
+    2026-06-25 改:原盘中每30分钟实时追价 → 盘后每天一次收盘价后验(用户不搞短线 → 不需盘中实时;
+    收盘价足够判 tp/sl 命中 + 刷 last_price, 周报口径不变; 行情请求量从 ~480次/日 压到 ~10次/日)。
+    受开关 ai_rec_check 控制(默认开)。
     """
     job = 'ai_rec_check'
     try:
@@ -475,11 +477,6 @@ def task_ai_rec_check():
     except Exception:
         pass
     if _skip_if_not_trading(job):
-        return
-    now = datetime.now()
-    # datetime.now() 已是 CST（TZ=Asia/Shanghai）
-    minutes = now.hour * 60 + now.minute
-    if minutes < (9 * 60 + 30) or minutes > (15 * 60):
         return
     started = datetime.now().isoformat()
     try:
@@ -3704,6 +3701,30 @@ def task_morning_portfolio():
             lines.append(f'⚠️ {nosnap_n}/{len(scans)} 只无盘后指标快照(等 15:45 快照任务跑过后完整)')
 
         _push_daily('☀️ 早盘持仓分析', '\n'.join(lines))
+
+        # 🎯 挑「今日重点盯盘候选」(持仓多→聚焦):风险分>0 / 有买点 / 盘中异动±3%。
+        # 存快照供 11:20 午间盯盘只看这批(不再全持仓逐只),与"持仓瘦身"理念一致。
+        try:
+            cands = []
+            for s in scans:
+                hot = s['sell_score'] > 0 or s['buy_signal'] or abs(s.get('change') or 0) >= 3
+                if not hot:
+                    continue
+                if s['sell_score'] > 0:
+                    tag = '⚠️ ' + '、'.join(s['sell_reasons'][:2])
+                elif s['buy_signal']:
+                    tag = '🟢 ' + (s.get('buy_reason') or '买点')
+                else:
+                    tag = f"⚡ 异动{s.get('change'):+.1f}%"
+                pri = s['sell_score'] * 2 + (1 if s['buy_signal'] else 0) + (1 if abs(s.get('change') or 0) >= 3 else 0)
+                cands.append({'code': s['code'], 'name': s['name'], 'pri': pri, 'tag': tag,
+                              'sell_score': s['sell_score'], 'mprice': s.get('price') or 0})
+            cands.sort(key=lambda x: x['pri'], reverse=True)
+            save_indicator_snapshot('focus_candidates',
+                                    {'date': datetime.now().strftime('%Y-%m-%d'), 'picks': cands[:15]})
+        except Exception as _e:
+            print(f'[morning_portfolio] 候选挑选失败: {_e}', flush=True)
+
         _log_run(job, 'success',
                  error=f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} movers={len(movers)}',
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -3740,6 +3761,57 @@ def task_afternoon_portfolio():
         _position_profit_check()
     except Exception as e:
         print(f'[afternoon_portfolio] 减仓信号子任务失败: {e}')
+
+
+def task_noon_portfolio():
+    """🕦 午间持仓盯盘(11:20)—— 只看早盘(09:50)挑出的「今日重点候选」, 不再全持仓逐只。
+
+    持仓多(80只)全程逐只盯既费算力又抓不住重点 → 早盘 morning_portfolio 按 风险分/买点/异动
+    挑出 top15 存 focus_candidates 快照, 午间只跟这批。一组批量行情(零逐只K线)看候选当前价/异动,
+    推简报; 尾接持仓急跌兜底(原挂 stock_monitor_check 每30分, 该任务退役后移到此单点)。"""
+    job = 'noon_portfolio'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        snap = get_indicator_snapshot('focus_candidates') or {}
+        picks = (snap.get('picks') or []) if snap.get('date') == today else []
+        if not picks:
+            _log_run(job, 'success', error='no focus candidates (早盘未挑/无持仓)',
+                     started_at=started, finished_at=datetime.now().isoformat())
+        else:
+            codes = [p['code'] for p in picks]
+            quotes = {}
+            try:
+                for i in range(0, len(codes), 20):
+                    quotes.update(datahub.quotes(codes[i:i + 20]) or {})
+            except Exception:
+                pass
+            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
+            for p in picks:
+                q = quotes.get(p['code']) or {}
+                try:
+                    price = float(q.get('price') or 0)
+                    chg = float(q.get('change_pct') or 0)
+                except (TypeError, ValueError):
+                    price, chg = 0, 0
+                mark = '🔴' if chg <= -3 else ('🟢' if chg >= 3 else '·')
+                price_s = f'¥{price}' if price else ''
+                lines.append(f"  {mark} {p['name']} {p['code']} {price_s} {chg:+.1f}%  {p.get('tag', '')}")
+            _push_daily('🕦 午间重点盯盘', '\n'.join(lines))
+        _log_run(job, 'success', error=f'candidates={len(picks)}',
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+    # ── 持仓急跌兜底(原挂 stock_monitor_check 每30分, 退役后移到此单点)──
+    try:
+        _intraday_plunge_check()
+    except Exception as e:
+        print(f'[noon_portfolio] 急跌监控子任务失败: {e}', flush=True)
 
 
 def task_portfolio_health_ai():
@@ -4247,34 +4319,33 @@ def register_default_jobs():
 
     """注册整合后的任务时间表（2026-06-12 二次整合，CST 时区）
 
-    时间表（CST）：
-      09:00 morning_strategy            — 📊 晨间市场报告（3条:AI研判[一句话+昨日收益+持仓建议]/新闻/数据快照;
-                                            持仓扫描零逐只接口,只喂AI;买卖明细推送在 09:50）
+    时间表（CST，2026-06-25 大改:监控重构 + 盘后全挪 16:30 后）：
       08:55 fund_dca_reminder           — 定投提醒
+      09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:05 fund_valuation_signal       — 估值信号
-      09:45 unified_selection           — 整合选股（5策略+InStock13进化参数+组合新策略+多因子并池;
-                                            来源标签+持仓标记;尾接 个人候选池[开关]）
-      09:50 morning_portfolio           — ☀️ 早盘持仓分析（原晨报买卖提示移此:风险分+浮盈+买点+盘中异动,实时价）
+      09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
+      09:50 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
       10:30 mx_selection_review         — 选股过妙想诊断
-      12:00 noon_report                 — 📊 午盘简报
-      14:30 afternoon_portfolio         — 尾盘持仓分析（风险分+浮盈卖出+尾盘强势;尾接 止盈阶梯减仓[开关]）
-      15:45 portfolio_indicator_snapshot— 持仓+监测列表指标快照（含原预热/缠论/VaR预警/形态告警[开关]）
-      15:50 daily_market_snapshot       — 大盘+北向+龙虎榜快照（北向缓存读时自刷新）
-      15:55 factor_collection           — 因子采集
-      16:00 dragon_tiger_archive        — 龙虎榜归档
-      16:30 daily_backtest              — 回测+基因组进化（尾接 策略命中→AI→推荐池[开关]）
-      17:00 mx_daily_analysis           — 妙想收盘复盘
-      22:00 fund_nav_refresh            — 🏦 基金净值+基金日收益计算并存表
-      22:05 fund_target_check           — 基金止盈
-      22:30 daily_pnl_snapshot          — 💰 合并股票日涨跌+基金日收益落表
-      02:00 pg_backup                   — PG 备份
-      02:30 rag_ingest                  — 语义检索
-      每30分 ai_rec_check               — AI推荐监控
-      每30分 stock_monitor_check        — 股价监控（尾接 持仓加仓审核[开关]）
-      周日 15:00 weekly_analysis        — 综合持仓周报（含评级变化/减仓加仓Top5/4象限体检/新闻）
-      周日 20:00 wf_weekly_backtest     — 策略回测
-      周一 03:00 weekly_db_cleanup      — 数据库清理
-      周一 09:30 ai_eval_weekly         — AI推荐周评估
+      11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
+      12:00 noon_report                 — 📊 午盘简报(大盘)
+      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 三合一;尾接止盈阶梯减仓)
+      —— 盘后(全 16:30 后;硬依赖链 kline_prefetch 必须最先焐缓存)——
+      16:30 kline_prefetch              — 📥 K线+因子缓存预热(链头)
+      16:35 ai_rec_check                — 📊 推荐池胜率回填(收盘价后验,原盘中每30分)
+      16:40 factor_collection           — 🧬 因子采集(读暖缓存)
+      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(MyTT/缠论/VaR;次日早盘读它)
+      16:48 daily_market_snapshot       — 📷 大盘快照
+      16:55 decision_signal_outcomes    — 🎯 决策信号后验(需当日收盘K线)
+      18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
+      18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
+      19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
+      17:00 mx_daily_analysis           — 🌙 妙想收盘复盘
+      22:00/22:05/22:30 fund_nav_refresh / fund_target_check / daily_pnl_snapshot
+      02:00/02:30 pg_backup / rag_ingest
+      周日 10:00/15:00/16:00/20:00 mx_weekend_outlook / weekly_analysis / portfolio_stress_ai / wf_weekly_backtest
+      周一 03:00/09:30 weekly_db_cleanup / ai_eval_weekly
+      ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
+         selection_debate/lockup_radar/research_digest(已并入 unified_selection / announcement_scan)。
 
     2026-06-12 整合说明:
       已删除(被覆盖): morning_briefing_push(并入 morning_strategy)、morning_warmup(并入快照)、
@@ -4295,35 +4366,34 @@ def register_default_jobs():
 
     # ---- 09:45 整合选股 ----
     hub.register('unified_selection',           '09:45', task_unified_selection)
-    # ---- 09:50 早盘持仓分析 ----
-    hub.register('morning_portfolio',           '09:50', task_morning_portfolio)
-    # ---- 10:00 选股红蓝对抗证伪 ----
-    hub.register('selection_debate',            '10:00', task_selection_debate)
-    # ---- 10:30 选股过妙想 ----
+    # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
+    #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
+    hub.register('morning_portfolio',           '09:50', task_morning_portfolio)   # 早盘:全持仓 + 挑 top15 候选
     hub.register('mx_selection_review',         '10:30', task_mx_selection_review)
+    hub.register('noon_portfolio',              '11:20', task_noon_portfolio)      # 午间:只盯早盘候选 + 急跌兜底
 
     # ---- 🟡 盘中 ----
     hub.register('noon_report',                 '12:00', task_noon_report)
-    hub.register('ai_rec_check', 'every:30:minutes', task_ai_rec_check)
-    hub.register('stock_monitor_check', 'every:30:minutes', task_stock_monitor_check)
-    # ---- 14:30 尾盘持仓分析 ----
-    # 尾盘持仓总结(14:40):整合原 尾盘持仓/AI体检/清仓助手 三合一(eod_review)。
-    # portfolio_health_ai / exit_advice 不再单独定时推送(内容已并入);其模块仍供 MCP/前端按需调用。
-    hub.register('afternoon_portfolio',          '14:40', task_afternoon_portfolio)
+    # ⚠️ 2026-06-25 监控重构:stock_monitor_check(进场区间盯盘,价值低)已退役、不再注册;
+    #    其急跌兜底并入 11:20 noon_portfolio;ai_rec_check(推荐池胜率回填,非盯盘)由 every:30 → 盘后 16:35 收盘后验。
+    # ---- 14:30 尾盘持仓总结(eod_review 三合一,从 14:40 提前) ----
+    hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 
-    # ---- 🔴 盘后 ----
-    hub.register('kline_prefetch',              '15:35', task_kline_prefetch)
-    hub.register('portfolio_indicator_snapshot','15:45', task_portfolio_indicator_snapshot)
-    hub.register('daily_market_snapshot',       '15:50', task_daily_market_snapshot)
-    hub.register('factor_collection',           '15:55', task_factor_collection)
-    hub.register('lockup_radar',                '15:48', task_lockup_radar)
-    hub.register('dragon_tiger_archive',        '16:00', task_dragon_tiger_archive)
-    hub.register('announcement_scan',           '16:02', task_announcement_scan)
-    hub.register('research_digest',             '16:05', task_research_digest)
-    hub.register('decision_signal_outcomes',    '16:10', task_decision_signal_outcomes)
+    # ---- 🔴 盘后(2026-06-25 全部挪到 16:30 之后:错峰 + 收盘数据已稳,降东财峰值并发)----
+    # ⚠️ 硬依赖顺序(勿随手按字母/时间调序):kline_prefetch 必须**最先**焐 K线+因子缓存,
+    #    factor_collection / portfolio_indicator_snapshot / daily_backtest 都读这份暖缓存(顺序颠倒→冷拉雪崩);
+    #    decision_signal_outcomes 需当日收盘 K线已入缓存;龙虎榜傍晚才出全量,故 dragon_tiger 押后到 18:30。
+    hub.register('kline_prefetch',              '16:30', task_kline_prefetch)            # 链头:焐缓存(最慢,留足窗)
+    hub.register('ai_rec_check',                '16:35', task_ai_rec_check)              # 推荐池收盘价后验(轻,只行情)
+    hub.register('factor_collection',           '16:40', task_factor_collection)        # 读暖缓存
+    hub.register('portfolio_indicator_snapshot','16:45', task_portfolio_indicator_snapshot)
+    hub.register('daily_market_snapshot',       '16:48', task_daily_market_snapshot)
+    hub.register('decision_signal_outcomes',    '16:55', task_decision_signal_outcomes)
+    hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
+    hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 
-    # ---- 📐 盘后回测 ----
-    hub.register('daily_backtest',             '16:30', task_daily_backtest)
+    # ---- 📐 盘后回测(放最后:纯 CPU 重活,读全量暖缓存,不与焐缓存抢)----
+    hub.register('daily_backtest',             '19:00', task_daily_backtest)
 
     # ---- 🌙 夜间 ----
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)

@@ -49,7 +49,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '☀️ 早盘持仓分析',
         'schedule': '09:50 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '持仓逐只风险分+浮盈+买点+盘中异动(实时价,零逐只接口)',
+        'description': '持仓逐只风险分+浮盈+买点+盘中异动(实时价,零逐只接口);并挑今日 top15 重点候选存 focus_candidates',
+    },
+    'noon_portfolio': {
+        'cn': '🕦 午间重点盯盘',
+        'schedule': '11:20 每日',
+        'category': '核心', 'default': True, 'core': True,
+        'description': '只看早盘挑出的 top15 重点候选(批量行情,零逐只K线)+ 持仓急跌兜底(原 stock_monitor 的急跌移此)',
     },
     'mx_selection_review': {
         'cn': '🔍 选股过妙想第二意见',
@@ -65,37 +71,37 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'afternoon_portfolio': {
         'cn': '🧹 尾盘持仓总结',
-        'schedule': '14:40 每日',
+        'schedule': '14:30 每日',
         'category': '核心', 'default': True, 'core': True,
         'description': '尾盘持仓三合一(原 持仓分析+AI体检+清仓助手):一次AI出 瘦身策略+逐只融合动作+尾盘机会;尾接止盈阶梯减仓[alert]',
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',
-        'schedule': '15:35 每日',
+        'schedule': '16:30 每日(盘后链头)',
         'category': '数据', 'default': True,
         'description': '盘后全量预拉 持仓+监测+沪深300成分 日线写共享磁盘缓存(db/kline_cache),让回测/因子/晨报/持仓守卫命中暖缓存(0ms);全量拉天然无复权漂移,无需增量/周末特判',
     },
     'portfolio_indicator_snapshot': {
         'cn': '📸 持仓指标快照',
-        'schedule': '15:45 每日',
+        'schedule': '16:45 每日',
         'category': '核心', 'default': True, 'core': True,
         'description': '持仓+监测列表算 MyTT/缠论/VaR 快照(早盘晨报扫描全靠它);尾接风险预警/形态告警[开关]。关掉会让次日分析读不到快照',
     },
     'daily_market_snapshot': {
         'cn': '📷 大盘快照',
-        'schedule': '15:50 每日',
+        'schedule': '16:48 每日',
         'category': '核心', 'default': True, 'core': True,
         'description': '大盘+北向+龙虎榜快照入库',
     },
     'factor_collection': {
         'cn': '🧬 因子采集',
-        'schedule': '15:55 每日',
+        'schedule': '16:40 每日',
         'category': '核心', 'default': True, 'core': True,
         'description': '收盘后采集 OHLCV+技术指标+估值打分因子快照',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',
-        'schedule': '16:00 每日',
+        'schedule': '18:30 每日(晚间出全量)',
         'category': '核心', 'default': True, 'core': True,
         'description': '每交易日盘后拉龙虎榜存库(不做 AI)',
     },
@@ -131,11 +137,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # ===== 常驻核心(已在表内)=====
     'ai_rec_check': {
-        'cn': 'AI 推荐盘中价格监控',
-        'schedule': 'every:30:min 交易时段',
+        'cn': '📊 推荐池胜率回填',
+        'schedule': '16:35 每日(盘后)',
         'category': '核心',
-        'default': True,  # 盈利反馈环数据引擎:追实时价 → 填 last_price/realized_pnl,开销低(仅拉报价)
-        'description': '对启用监控的 AI 推荐拉实时价对比触发条件 + 回填真实盈亏',
+        'default': True,  # 盈利反馈环数据引擎:盘后收盘价后验 → 填 last_price/realized_pnl,喂周评估;非盯盘非短线
+        'description': '盘后用收盘价对 AI 推荐池对比目标/止损 + 回填真实盈亏(2026-06-25 由盘中每30分改盘后)',
     },
     'ai_eval_weekly': {
         'cn': 'AI 推荐周度评估推送',
@@ -146,17 +152,17 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'decision_signal_outcomes': {
         'cn': '🎯 决策信号后验校验',
-        'schedule': '16:10 每日',
+        'schedule': '16:55 每日',
         'category': '数据',
         'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
         'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
     },
     'selection_debate': {
         'cn': '⚔️ 选股红蓝对抗证伪',
-        'schedule': '10:00 每日',
+        'schedule': '已并入 unified_selection(9:45),仅手动/MCP',
         'category': '核心',
-        'default': True,  # 给综合选股 TOP10 加证伪闸门;空头专攻,结论进 decision_signal 可对比验证增量
-        'description': '对当日综合选股 TOP10 跑多头/空头/裁判对抗,给对抗后结论,结论进决策信号后验',
+        'default': False,  # 2026-06-25 已并入 unified_selection,不再单独注册;模块保留供手动触发
+        'description': '[已并入 9:45 综合选股,不再定时] 多头/空头/裁判对抗,结论进决策信号后验',
     },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',
@@ -167,37 +173,37 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'announcement_scan': {
         'cn': '📢 公告事件分级',
-        'schedule': '16:02 每日',
+        'schedule': '18:35 每日(三合一)',
         'category': '核心',
         'default': True,  # announcements 端点零调用;AI 分类+重大性分级,利空强→reduce信号+告警(黑天鹅预警)
         'description': '对持仓+选股拉近5天公告,AI 分类+利好利空强度分级,利空强即时告警并写决策信号',
     },
     'lockup_radar': {
         'cn': '⏳ 持仓解禁雷达',
-        'schedule': '15:48 每日',
+        'schedule': '已并入 announcement_scan(18:35),仅手动/MCP',
         'category': '核心',
-        'default': True,  # 补持仓事件型风控盲区;datahub.lockup_expiry 查未来解禁,AI 给解禁前减仓研判
-        'description': '查持仓未来60天限售解禁(占比≥3%),AI 给解禁前减仓研判,减仓→告警+决策信号',
+        'default': False,  # 2026-06-25 已并入 announcement_scan 三合一,不再单独注册;模块保留供手动
+        'description': '[已并入 announcement_scan,不再定时] 查持仓未来60天解禁,AI 给减仓研判',
     },
     'research_digest': {
         'cn': '📑 研报增量解读',
-        'schedule': '16:05 每日',
+        'schedule': '已并入 announcement_scan(18:35),仅手动/MCP',
         'category': '核心',
-        'default': True,  # 研报端点已有却零调用;AI 提炼评级方向+核心逻辑,强看多进 decision_signal 后验
-        'description': '对持仓+当日选股拉近10天券商研报,AI 提炼评级方向/核心逻辑,强看多写决策信号后验',
+        'default': False,  # 2026-06-25 已并入 announcement_scan 三合一,不再单独注册;模块保留供手动
+        'description': '[已并入 announcement_scan,不再定时] 拉近10天券商研报,AI 提炼评级方向/核心逻辑',
     },
     # exit_advice / portfolio_health_ai 已并入 afternoon_portfolio(尾盘持仓总结 eod_review),
     # 不再单独定时;模块仍供 MCP(exit_advice/portfolio_health_check)与前端"🧹清仓助手"页按需调用。
     'stock_monitor_check': {
         'cn': '📊 持仓进场区间监控',
-        'schedule': 'every:30:min 交易时段(09:30-15:00)',
+        'schedule': '已退役(2026-06-25),仅手动/MCP',
         'category': '核心',
-        'default': True,
-        'description': '每30分钟检查监控股票是否进入进场区间，触发通知',
+        'default': False,  # 2026-06-25 退役:盯进场区间价值低,不再注册;急跌兜底已并入 11:20 noon_portfolio
+        'description': '[已退役,不再定时] 检查监控股是否进入进场区间;急跌监控已移到 noon_portfolio',
     },
     'daily_backtest': {
         'cn': '📐 盘后策略回测',
-        'schedule': '16:30 每日',
+        'schedule': '19:00 每日',
         'category': '核心',
         'default': True,
         'description': '盘后对持仓TOP10跑5套核心策略回测，推送胜率/收益',
@@ -250,10 +256,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # wf_weekly_portfolio_report 已并入 weekly_analysis(周日 15:00,4象限体检随周报常开)
     'wf_position_guard_check': {
         'cn': '🎯 个人策略：盘中加仓信号',
-        'schedule': 'every:30:min 交易时段(stock_monitor_check 尾部)',
+        'schedule': '已退役(2026-06-25 随 stock_monitor),仅手动/MCP',
         'category': '个人策略',
-        'default': True,
-        'description': '触发跌幅时审核：✅建议加 / ⚠️警告止损（双推送，决策权在你）',
+        'default': False,  # 2026-06-25 随 stock_monitor_check 退役(加仓决策权在用户);模块保留供手动
+        'description': '[已退役,不再定时] 触发跌幅时审核 ✅建议加/⚠️警告止损',
     },
     'wf_position_profit_check': {
         'cn': '🎯 个人策略：减仓信号（方案 A）',
