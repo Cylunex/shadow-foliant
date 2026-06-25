@@ -18,7 +18,7 @@ import _bootstrap  # noqa: F401  路径引导
 清仓/减仓结论写 decision_signal(source_type='exit_advice', action=sell/reduce)→ 16:10 方向后验
 (卖出期望跌→命中),让"清仓建议"也进可量化胜率环。
 
-接口:run_exit_advice(target_positions=10, record_signals=True) -> dict
+接口:run_exit_advice(target_positions=20, record_signals=True) -> dict
 """
 
 from datetime import datetime
@@ -93,7 +93,7 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
 _ACT_TAG = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'hold': '⚪持有'}
 
 
-def run_exit_advice(target_positions: int = 10, record_signals: bool = True) -> Dict[str, Any]:
+def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:
     """对全部持仓打清仓紧迫分并排序 + 过度分散瘦身建议 + AI 整体策略。返回 {ok, items, text, ...}。"""
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
     try:

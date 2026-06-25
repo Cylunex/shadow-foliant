@@ -841,7 +841,7 @@ def research_digest(codes: List[str], days: int = 10) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def exit_advice(target_positions: int = 10) -> Dict[str, Any]:
+def exit_advice(target_positions: int = 20) -> Dict[str, Any]:
     """清仓决策助手:对全部持仓打"清仓紧迫分"(割肉止损/止盈锁定/破位减仓/死钱调出)排序,
     持仓过度分散时给"目标持仓数"瘦身建议(先清哪几只),并给 AI 整体瘦身策略。
     回答"买太多了不知道什么时候清"。清仓/减仓建议写决策信号(source_type=exit_advice)进后验。"""

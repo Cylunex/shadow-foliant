@@ -11,7 +11,7 @@ import _bootstrap  # noqa: F401  路径引导
   - 一条报告:总策略 → 按紧迫度的处理清单(去重) → 尾盘强势机会;一组决策信号(source_type='eod_review')。
 比原来 3 任务 / 2 次 LLM / 3 条推送 更省、更不矛盾、更好看。
 
-接口:run_eod_review(target_positions=10, record_signals=True) -> dict
+接口:run_eod_review(target_positions=20, record_signals=True) -> dict
 """
 
 import re
@@ -23,7 +23,7 @@ _ACT_TAG = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'add': '🔴加仓', '
 _ACT_ORDER = {'sell': 0, 'reduce': 1, 'add': 2, 'hold': 3, 'watch': 4}
 
 
-def run_eod_review(target_positions: int = 10, record_signals: bool = True) -> Dict[str, Any]:
+def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
     try:
         from portfolio_db import portfolio_db

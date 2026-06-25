@@ -3724,7 +3724,7 @@ def task_afternoon_portfolio():
     started = datetime.now().isoformat()
     try:
         import os as _os6
-        target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '10'))
+        target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
         from eod_review import run_eod_review
         res = run_eod_review(target_positions=target, record_signals=True)
         if res.get('ok') and res.get('text'):
@@ -3938,7 +3938,7 @@ def task_exit_advice():
     started = datetime.now().isoformat()
     try:
         import os as _os5
-        target = int(_os5.getenv('EXIT_TARGET_POSITIONS', '10'))
+        target = int(_os5.getenv('EXIT_TARGET_POSITIONS', '20'))
         from exit_advisor import run_exit_advice
         res = run_exit_advice(target_positions=target, record_signals=True)
         if res.get('ok') and res.get('text'):
