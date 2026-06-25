@@ -278,7 +278,7 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 | 12:00 | `noon_report` | 📊 午盘简报 | ❌ |
 | 每30分 | `ai_rec_check` / `stock_monitor_check` | 推荐追价(不推) / 监测触发(alert) | ❌ |
 | 14:40 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(瘦身策略+逐只动作+尾盘机会,eod_review) | ✅ |
-| 15:35–16:10 | `kline_prefetch`(焐raw+qfq两套)/`portfolio_indicator_snapshot`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/**`announcement_scan`(三合一:解禁+公告+研报→一条⚠️盘后风险预警)**/`decision_signal_outcomes` | K线预热/指标快照/大盘快照/因子采集/龙虎榜归档/盘后风险预警/信号后验。`lockup_radar`/`research_digest` 已并入 announcement_scan | 部分✅ |
+| 15:35–16:10 | `kline_prefetch`(焐raw+qfq两套K线 + collect_factors因子/估值,盘中读暖缓存防慢源雪崩)/`portfolio_indicator_snapshot`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/**`announcement_scan`(三合一:解禁+公告+研报→一条⚠️盘后风险预警)**/`decision_signal_outcomes` | K线预热/指标快照/大盘快照/因子采集/龙虎榜归档/盘后风险预警/信号后验。`lockup_radar`/`research_digest` 已并入 announcement_scan | 部分✅ |
 | 16:30 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
 | 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
