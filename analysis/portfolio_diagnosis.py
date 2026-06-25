@@ -90,6 +90,15 @@ def diagnose_portfolio(holdings: List[Dict[str, Any]], cov: Optional[Dict] = Non
         suggestions.append(f"HHI={conc['hhi']}(高度集中),有效持仓仅 {conc.get('effective_n')} 只,建议增加分散")
     if sec.get('warning'):
         suggestions.append(sec['warning'] + ',建议跨行业再平衡')
+    # 过度分散提示(原诊断只对"集中"告警,对持仓过多/有效持仓低的"过度分散"是盲区):
+    # 持仓 >25 只 或 有效持仓数明显低于实际只数(大量零碎尾仓)→ 提示瘦身。
+    _n = conc.get('n_holdings', 0)
+    _eff = conc.get('effective_n')
+    if _n > 25:
+        _msg = f"持仓 {_n} 只过度分散(精力/跟踪/成本都摊薄),建议用清仓助手瘦身到 ~20 只核心"
+        if _eff and _eff < _n * 0.5:
+            _msg += f";且有效持仓仅 {_eff} 只(大量零碎尾仓拖后腿,可优先清掉)"
+        suggestions.append(_msg)
     if not suggestions:
         suggestions.append('集中度与行业分布在合理区间')
     out = {'available': True, 'concentration': conc, 'sector': sec,
