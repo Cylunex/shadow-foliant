@@ -3474,14 +3474,18 @@ def task_unified_selection():
         # 红蓝对抗整合(2026-06-24):上午不再单独推一条,TOP10 的多空对抗结论直接并进本表
         # (妙想第二意见 10:30 仍独立)。best-effort:LLM 挂了红蓝列留空,不影响选股表;
         # 决策信号在此写(record_signals=True),原 selection_debate 独立任务因此跳过不重复。
+        # ⚡ 整体超时护栏(2026-06-25 修):红蓝是 10 只 LLM,外网/LLM 挂时会拖很久 → 套 6min 硬超时,
+        # 超了放弃红蓝(表格红蓝列留空),**保住选股核心先推出去**,不让 unified 被红蓝拖到 1800s 超时崩。
         debate_map = {}
         try:
             from selection_debate import run_selection_debate
-            _dres = run_selection_debate(top_list[:10], max_stocks=10, record_signals=True)
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            with _TPE(max_workers=1) as _dex:
+                _dres = _dex.submit(run_selection_debate, top_list[:10], 10, True).result(timeout=360)
             for _it in (_dres.get('items') or []):
                 debate_map[str(_it.get('code'))] = _it
         except Exception as _de:
-            print(f'[unified_selection] 红蓝对抗整合失败(不影响选股): {type(_de).__name__}: {str(_de)[:60]}')
+            print(f'[unified_selection] 红蓝对抗放弃(不影响选股): {type(_de).__name__}: {str(_de)[:60]}')
 
         # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'

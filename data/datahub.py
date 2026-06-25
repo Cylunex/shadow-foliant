@@ -779,10 +779,19 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                      ("mootdx", lambda: _kline_mootdx(code, period, interval))],
                     empty=pd.DataFrame(), timeout=45)
     else:  # qfq:独立源(都走东财),绕开只能 raw 的新浪/mootdx
+        # ⚡ 健康度短路(2026-06-25 修):qfq 两源都走东财系,东财封/外网全挂时每只吃满源超时
+        # (原 45s×2=90s)会拖垮 unified_selection 等批量任务。两源都在**活跃冷却期**(连续失败,
+        # 冷却额外 -1.0 → score<-0.5)→ 直接走 raw,0 成本快速降级。
+        # ⚠️ 阈值用 -0.5 不用 0:冷却期(120s内)score≈-1.2 才短路;冷却过期后 score≈-0.2(不短路)
+        # → 每 120s 自动重试一次 qfq,网络/东财恢复即自愈(用 0 会因 rate=0 永久短路、死锁不恢复)。
+        _now = _time.time()
+        if _health('kline_qfq:east_qfq', _now) < -0.5 and _health('kline_qfq:akshare_qfq', _now) < -0.5:
+            return kline(code, period, interval, use_cache=use_cache, adjust='raw')
+        # 短超时 10s(qfq 取不到快速 fallback,不再每只吃满 45s):east 内部 6s、akshare 由此钳到 10s
         df = _route("kline_qfq",
                     [("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq')),
                      ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval))],
-                    empty=pd.DataFrame(), timeout=45)
+                    empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # qfq 源全失败(典型:东财被封)→ 退回 raw(技术分析有数据胜过无),但**绝不写进 qfq 缓存**(防污染)
     if adjust == 'qfq' and (not isinstance(df, pd.DataFrame) or df.empty):
