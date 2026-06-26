@@ -410,6 +410,22 @@ def mx_industry_report(query: str) -> Dict[str, Any]:
     return industry_report(query)
 
 
+@mcp.tool()
+def mx_screen(query: str, select_type: str = "A股", top_n: int = 30) -> Dict[str, Any]:
+    """妙想·智能选股(自然语言海选,**非问财的独立选股源**)。返回结构化候选清单。
+    query 例:「主力资金净流入排名前20的A股」「市盈率最低的50只创业板」「半导体板块市值前20」。
+    select_type ∈ A股/港股/美股/基金/ETF/可转债/板块。"""
+    from miaoxiang import screen
+    df = screen(query, select_type)
+    if df is None or df.empty:
+        return {'query': query, 'select_type': select_type, 'count': 0, 'rows': []}
+    if top_n and top_n > 0:
+        df = df.head(top_n)
+    return {'query': query, 'select_type': select_type, 'count': len(df),
+            'columns': list(df.columns),
+            'rows': df.to_dict(orient='records')}
+
+
 # =========================== 基金(长期/定投) ===========================
 @mcp.tool()
 def fund_info(code: str) -> Dict[str, Any]:

@@ -92,6 +92,79 @@ def query(skill: str, text: str, timeout: int = TIMEOUT) -> dict:
     return out
 
 
+# —— 妙想智能选股(mx-stocks-screener / selectSecurity)——
+# 与上面 SKILLS 不同:body 是 {query, selectType, toolContext}、结果在 data.allResults.result.dataList。
+# 这是**非问财的独立选股源**(数据来自东财妙想大模型),能按自然语言条件海选出结构化候选清单。
+_SCREENER_PATH = 'b/mcp/tool/selectSecurity'
+SELECT_TYPES = ('A股', '港股', '美股', '基金', 'ETF', '可转债', '板块')
+
+
+def screen(query_text: str, select_type: str = 'A股', timeout: int = 40):
+    """妙想自然语言选股 → pandas.DataFrame(列含 '代码'/'名称' + 中文指标列)。失败/无结果返回空 DF。
+
+    query_text 例:'主力资金净流入排名前20的A股'、'市盈率最低的50只创业板'、'半导体板块市值前20';
+    select_type ∈ A股/港股/美股/基金/ETF/可转债/板块。纯旁路源:任何异常吞掉返回空 DF,不抛。"""
+    import uuid as _uuid
+    try:
+        import pandas as _pd
+    except Exception:
+        return None
+    text = (query_text or '').strip()
+    if not text:
+        return _pd.DataFrame()
+    try:  # 与其他妙想调用同源限流(1s 最小间隔)
+        from rate_limiter import throttle as _throttle
+        _throttle('eastmoney_saas')
+    except Exception:
+        pass
+    meta = {'query': text, 'selectType': select_type or 'A股',
+            'toolContext': {'callId': f'call_{_uuid.uuid4().hex[:8]}',
+                            'userInfo': {'userId': f'user_{_uuid.uuid4().hex[:8]}'}}}
+    body = json.dumps(meta, ensure_ascii=False).encode('utf-8')
+    req = _req.Request(BASE + _SCREENER_PATH, data=body, method='POST',
+                       headers={'Content-Type': 'application/json', 'em_api_key': _api_key()})
+    try:
+        with _req.urlopen(req, timeout=timeout) as resp:
+            raw = json.loads(resp.read().decode('utf-8', 'replace'))
+    except Exception:
+        return _pd.DataFrame()
+    data = raw.get('data') if isinstance(raw, dict) else None
+    if not isinstance(data, dict):
+        return _pd.DataFrame()
+    res = ((data.get('allResults') or {}).get('result') or {})
+    data_list = res.get('dataList') if isinstance(res, dict) else None
+    if not isinstance(data_list, list) or not data_list:
+        return _pd.DataFrame()
+    # 列名 key → 中文 title 映射(SECURITY_CODE→代码、SECURITY_SHORT_NAME→名称…)
+    cmap = {}
+    for c in (res.get('columns') or []):
+        if isinstance(c, dict):
+            k = c.get('field') or c.get('name') or c.get('key')
+            t = c.get('displayName') or c.get('title') or c.get('label') or k
+            if k:
+                cmap[str(k)] = str(t)
+    rows = [{cmap.get(str(k), str(k)): v for k, v in r.items()}
+            for r in data_list if isinstance(r, dict)]
+    return _pd.DataFrame(rows)
+
+
+def screen_codes(query_text: str, select_type: str = 'A股', top_n: int = 0, timeout: int = 40):
+    """screen() 便捷封装:直接返回 6 位股票代码列表(去重保序,可截断 top_n)。失败返回 []。"""
+    df = screen(query_text, select_type, timeout)
+    if df is None or df.empty or '代码' not in df.columns:
+        return []
+    seen, out = set(), []
+    for c in df['代码'].tolist():
+        s = str(c).strip()
+        if not s:
+            continue
+        s = s.split('.')[0].zfill(6)[-6:]   # 去交易所后缀/补零取后6位
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:top_n] if (top_n and top_n > 0) else out
+
+
 # —— 便捷命名包装(MCP 工具直接调这些)——
 def stock_diagnosis(question: str) -> dict: return query('stock_diagnosis', question)
 def finance_ask(question: str) -> dict:     return query('ask', question)
