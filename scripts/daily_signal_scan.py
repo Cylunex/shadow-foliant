@@ -827,25 +827,21 @@ def noon_report():
     lines.append(f"{'─'*40}")
 
     try:
-        # ─── 大盘指数 ───
-        indices = {
-            "sh000001": "上证指数",
-            "sz399001": "深证成指",
-            "sz399006": "创业板指",
-            "sh000688": "科创50",
-            "sh000300": "沪深300",
-        }
-        idx_data = datahub.quotes(list(indices.keys()))
+        # ─── 大盘指数 ───(走 datahub.indices 专用指数源:新浪/腾讯;不能用 datahub.quotes —
+        #  它按个股口径取数且把 key 归一成6位,指数代码 sh000001 既歧义又对不上 → 必取空)
+        want = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300"]
+        idx_map = {d.get("name"): d for d in (datahub.indices() or [])}
         lines.append("🏛️ 大盘指数")
-        for code, name in indices.items():
-            q = idx_data.get(code, {})
-            if q and q.get("change_pct") is not None and q.get("change_pct", 0) != 0:
-                price = q.get("price", "-")
-                zf = q.get("change_pct", 0)
+        for name in want:
+            q = idx_map.get(name)
+            if not q:
+                continue
+            price = q.get("value", "-")
+            zf = q.get("change_pct", 0)
+            if zf is not None and zf != 0:
                 arrow = "🔴" if float(zf) >= 0 else "🟢"
                 lines.append(f"  {name} {price}  {arrow} {float(zf):+.2f}%")
-            elif q:
-                price = q.get("price", "-")
+            else:
                 lines.append(f"  {name} {price}  ⏸️")
     except Exception as e:
         lines.append(f"  ⚠️ 指数获取失败: {e}")
