@@ -148,12 +148,19 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '周末用东财妙想做前瞻:本周复盘+下周展望+热点题材+重点行业,充分利用周末空档(非交易日照跑)',
     },
     # ===== 常驻核心(已在表内)=====
+    'eod_outcomes': {
+        'cn': '🎯 盘后后验合并',
+        'schedule': '16:55 每日(盘后)',
+        'category': '核心',
+        'default': True,  # A 合并:推荐池收盘价回填胜率 + 决策信号 K线后验,二者皆"盘后读K线做后验",合一个任务
+        'description': '盘后①推荐池收盘价回填真实盈亏(喂周评估)②决策信号过 horizon 判 hit/miss。合 ai_rec_check+decision_signal_outcomes',
+    },
     'ai_rec_check': {
         'cn': '📊 推荐池胜率回填',
-        'schedule': '16:35 每日(盘后)',
+        'schedule': '已并入 eod_outcomes(16:55),仅手动/MCP',
         'category': '核心',
-        'default': True,  # 盈利反馈环数据引擎:盘后收盘价后验 → 填 last_price/realized_pnl,喂周评估;非盯盘非短线
-        'description': '盘后用收盘价对 AI 推荐池对比目标/止损 + 回填真实盈亏(2026-06-25 由盘中每30分改盘后)',
+        'default': False,  # 2026-06-26 已并入 eod_outcomes,不再单独注册;函数保留供手动/MCP
+        'description': '[已并入 eod_outcomes] 盘后用收盘价对 AI 推荐池对比目标/止损 + 回填真实盈亏',
     },
     'ai_eval_weekly': {
         'cn': 'AI 推荐周度评估推送',
@@ -164,10 +171,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'decision_signal_outcomes': {
         'cn': '🎯 决策信号后验校验',
-        'schedule': '16:55 每日',
+        'schedule': '已并入 eod_outcomes(16:55),仅手动/MCP',
         'category': '数据',
-        'default': True,  # 统一信号层后验:K线判 hit/miss,累积按维度胜率;无 AI 调用,纯库+K线缓存
-        'description': '对已过持有周期的决策信号用 K线判命中,累积按动作/来源/周期的真实胜率',
+        'default': False,  # 2026-06-26 已并入 eod_outcomes,不再单独注册;函数保留供手动/MCP
+        'description': '[已并入 eod_outcomes] 对已过持有周期的决策信号用 K线判命中,累积按维度真实胜率',
     },
     'selection_debate': {
         'cn': '⚔️ 选股红蓝对抗证伪',
@@ -282,12 +289,19 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 
     # ↓↓↓ 基金模块（长期/定投）
-    'fund_nav_refresh': {
-        'cn': '🏦 基金：盘后净值入库',
+    'fund_evening': {
+        'cn': '🏦 基金：晚间合并(净值入库+止盈检查)',
         'schedule': '22:00 每日',
         'category': '基金',
-        'default': True,
-        'description': '对持有基金 + 定投计划标的拉最新净值落 fund_nav 缓存',
+        'default': True,  # B 合并:顺序跑 净值入库 → 定投止盈检查(止盈依赖新净值),合一个调度入口
+        'description': '盘后先①拉最新净值入库+算基金单日收益,再②按新净值查定投止盈达标。合 fund_nav_refresh+fund_target_check',
+    },
+    'fund_nav_refresh': {
+        'cn': '🏦 基金：盘后净值入库',
+        'schedule': '已并入 fund_evening(22:00),作其子步骤',
+        'category': '基金',
+        'default': True,  # 仍 True:由 fund_evening 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
+        'description': '对持有基金 + 定投计划标的拉最新净值落 fund_nav 缓存(fund_evening 第①步)',
     },
     'fund_dca_reminder': {
         'cn': '🏦 基金：定投到期提醒',
@@ -298,10 +312,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'fund_target_check': {
         'cn': '🏦 基金：定投止盈检查',
-        'schedule': '22:05 每日',
+        'schedule': '已并入 fund_evening(22:00),作其子步骤',
         'category': '基金',
-        'default': True,
-        'description': '对设了止盈目标的持有基金,按最新净值算浮盈,达标则提醒赎回',
+        'default': True,  # 仍 True:由 fund_evening 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
+        'description': '对设了止盈目标的持有基金,按最新净值算浮盈,达标则提醒赎回(fund_evening 第②步)',
     },
     'fund_valuation_signal': {
         'cn': '🏦 基金：宽基估值分位播报',

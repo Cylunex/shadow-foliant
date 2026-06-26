@@ -313,6 +313,7 @@ def task_portfolio_indicator_snapshot():
     job = 'portfolio_indicator_snapshot'
     if _skip_if_not_trading(job):
         return
+    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完缓存再逐只算快照(读暖缓存,不冷拉)
     started = datetime.now().isoformat()
     try:
         from portfolio_db import portfolio_db
@@ -638,6 +639,49 @@ def _intraday_plunge_check(drop_pct: float = -5.0):
         save_indicator_snapshot('_plunge_alerted', {'date': today, 'codes': sorted(alerted)})
     except Exception:
         pass
+
+
+def _wait_kline_prefetch(job: str, max_wait: int = 300, poll: int = 10) -> bool:
+    """F(盘后链依赖显式化):盘后"读暖缓存"的任务(因子采集/持仓快照/后验)开头调用,**等当日
+    kline_prefetch 焐完缓存再继续** —— 把"靠 16:30→16:40→16:45 时钟间隔保证 prefetch 先跑"的
+    隐式依赖,变成显式 barrier。根治 prefetch 跑超时(东财封)时下游在缓存没焐好就冷拉。
+
+    每个任务在独立 worker 线程跑(线程池 6),此处 sleep 不阻塞调度线程,只占一个 worker。
+    返回 True=缓存视为已暖(prefetch 当日已结束) / False=等超时或无法判定 → **fail-open 照常继续**
+    (绝不因依赖检查误杀盘后任务;DB 读不了/prefetch 没开 一律放行)。"""
+    try:
+        from automation_config import is_enabled
+        if not is_enabled('kline_prefetch'):
+            return False   # prefetch 没开 → 无可等,直接放行
+    except Exception:
+        pass
+    waited = 0
+    while True:
+        try:
+            conn = db_connect(_SNAPSHOT_DB_PATH)
+            cur = conn.cursor()
+            # ⚠️ PG 里 started_at 是 timestamptz,不能 LIKE(会 operator 报错);按"当日"过滤分库:
+            #    PG 用 ::date = CURRENT_DATE、SQLite 用 DATE()(started_at 为 ISO 文本)。
+            if USE_POSTGRES:
+                cur.execute("""SELECT finished_at FROM job_runs
+                               WHERE job_name='kline_prefetch' AND started_at::date = CURRENT_DATE
+                               ORDER BY id DESC LIMIT 1""")
+            else:
+                cur.execute("""SELECT finished_at FROM job_runs
+                               WHERE job_name='kline_prefetch' AND DATE(started_at) = DATE('now')
+                               ORDER BY id DESC LIMIT 1""")
+            row = cur.fetchone()
+            conn.close()
+        except Exception:
+            return False   # 读不了 job_runs → fail-open
+        if row and row[0]:          # 当日已有 finished 记录 → 缓存已暖
+            return True
+        if waited >= max_wait:      # 等够仍未完(还在跑/未起) → fail-open 继续
+            print(f'[{job}] 等 kline_prefetch 焐缓存超 {max_wait}s 仍未结束,照常继续'
+                  f'(prefetch 慢/未跑?datahub 已有全源熔断兜底)', flush=True)
+            return False
+        time.sleep(poll)
+        waited += poll
 
 
 def task_daily_backtest():
@@ -1023,6 +1067,43 @@ def task_decision_signal_outcomes():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_eod_outcomes():
+    """🎯 盘后后验合并(16:55)—— 合 ai_rec_check + decision_signal_outcomes 为一个任务:
+    收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly)
+    ②决策信号过 horizon 判 hit/miss(run_outcomes)。二者都是"盘后读K线/行情做后验",合一个少一环
+    盘后链。两段各自 try 包裹:一段失败不拖另一段。开关 eod_outcomes(默认开)。非交易日跳过。"""
+    job = 'eod_outcomes'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):   # 非交易日不跑(K线无新 bar)
+        return
+    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完缓存再后验(读暖缓存,不冷拉)
+    started = datetime.now().isoformat()
+    parts = []
+    # ① 推荐池收盘价回填(原 ai_rec_check)
+    try:
+        from ai_recommendation_monitor import check_all_active
+        s = check_all_active()
+        parts.append(f"rec: checked={s['checked']} tp={s['hit_target']} sl={s['hit_stop']}")
+    except Exception as e:
+        parts.append(f"rec_err={type(e).__name__}:{str(e)[:50]}")
+    # ② 决策信号后验(原 decision_signal_outcomes)
+    try:
+        from decision_signal import run_outcomes
+        r = run_outcomes(days=35)   # 35天足覆盖最长 horizon(long=20交易日)+缓冲
+        parts.append(f"signals: eval={r.get('evaluated')} hit={r.get('hit')} miss={r.get('miss')}")
+    except Exception as e:
+        parts.append(f"signal_err={type(e).__name__}:{str(e)[:50]}")
+    _log_run(job, 'success', error=' | '.join(parts),
+             started_at=started, finished_at=datetime.now().isoformat())
+
+
 def _fund_gate(job: str) -> bool:
     """基金任务统一开关 + 交易日守卫。返回 True 表示应跳过。"""
     try:
@@ -1214,6 +1295,28 @@ def task_fund_target_check():
     except Exception as e:
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
+
+
+def task_fund_evening():
+    """🏦 基金晚间合并(22:00)—— 合 fund_nav_refresh + fund_target_check 为一个调度入口:
+    顺序跑 ①盘后拉净值入库+算基金单日收益 → ②按最新净值查定投止盈(止盈依赖新净值,故必须先刷后查)。
+    两子任务各自的开关(fund_nav_refresh/fund_target_check)+日志仍独立有效、可单独关;本任务只是统一
+    顺序调度。开关 fund_evening(默认开;关掉则两步都不跑)。两段各自 try:一段异常不拖另一段。"""
+    job = 'fund_evening'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            return
+    except Exception:
+        pass
+    try:
+        task_fund_nav_refresh()      # ① 先刷净值(内含 _fund_gate + _log_run + 异常兜底)
+    except Exception as e:
+        print(f'[fund_evening] 净值入库异常(继续查止盈): {type(e).__name__}: {str(e)[:80]}')
+    try:
+        task_fund_target_check()     # ② 再查止盈(读 ① 刷出的新净值)
+    except Exception as e:
+        print(f'[fund_evening] 止盈检查异常: {type(e).__name__}: {str(e)[:80]}')
 
 
 def task_fund_valuation_signal():
@@ -1429,6 +1532,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'fund_dca_reminder':         300,
     'fund_target_check':         600,
     'fund_nav_refresh':          900,
+    'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
+    'eod_outcomes':              900,    # A 合并:等 prefetch(≤300) + 推荐池回填 + 信号后验
     'pg_backup':                 600,
 }
 _TASK_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -2342,6 +2447,21 @@ def task_morning_strategy():
                     if not code:
                         continue
                     try:
+                        # C(门控一致性,2026-06-26):A 路对齐 B/final_decision 的盈亏比硬约束 —— 此前晨间
+                        # 候选直接入池+监控,无止损/无 R:R 校验(全项目唯一漏网)。现:买入必须有止损
+                        # (缺则按进场×0.92兜底),(目标-进场)/(进场-止损)<2:1 → 性价比不足,跳过不入池。
+                        _el, _eh = _safe_float(s.get('entry_low')), _safe_float(s.get('entry_high'))
+                        _entry = (_el + _eh) / 2 if (_el and _eh) else (_el or _eh)
+                        _tp = _safe_float(s.get('target_price'))
+                        _is_buy = ('buy' in str(s.get('rating', 'buy')).lower()
+                                   or '买' in str(s.get('rating', '')))
+                        if _is_buy and _entry:
+                            _sl = _safe_float(s.get('stop_loss'))
+                            if not _sl or _sl <= 0 or _sl >= _entry:
+                                _sl = round(_entry * 0.92, 2)
+                                s['stop_loss'] = _sl   # 兜底止损回写,save 时带上
+                            if _tp and _sl and _tp > _entry > _sl > 0 and (_tp - _entry) / (_entry - _sl) < 2.0:
+                                continue   # 盈亏比 < 2:1,不入池(与 B 路/final_decision 一致)
                         rid = save_recommendation(
                             symbol=str(code),
                             name=s.get('name', ''),
@@ -3012,6 +3132,7 @@ def task_factor_collection():
     job = 'factor_collection'
     if _skip_if_not_trading(job):   # 非交易日无新行情:跳过,免采集重复/陈旧因子快照
         return
+    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完 K线+因子缓存再采集(读暖缓存,不冷拉)
     started = datetime.now().isoformat()
     try:
         import factor_collector
@@ -3813,6 +3934,12 @@ def task_afternoon_portfolio():
     except Exception as e:
         print(f'[afternoon_portfolio] 减仓信号子任务失败: {e}')
 
+    # ── E: 盘中急跌兜底(14:30 尾盘段,每股每日去重)。覆盖点 10:30/11:20/14:30 三次,不重复告警 ──
+    try:
+        _intraday_plunge_check()
+    except Exception as e:
+        print(f'[afternoon_portfolio] 急跌监控子任务失败: {e}')
+
 
 def task_noon_portfolio():
     """🕦 午间持仓盯盘(11:20)—— 只看早盘(09:50)挑出的「今日重点候选」, 不再全持仓逐只。
@@ -4107,24 +4234,47 @@ def task_mx_selection_review():
         except Exception:
             name_map = {}
 
-        lines = [f'## 🔍 妙想第二意见 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
-                 '_东财妙想 AI 对今日入选股的独立看法,仅作交叉验证_', '']
+        agree, watch, avoid, detail = [], [], [], []
         for code in top_list[:10]:
             nm = name_map.get(code) or code
             try:
                 result = stock_diagnosis(code)
-                verdict = '✅ 买入' if 'buy' in str(result).lower() else '❌ 规避' if 'sell' in str(result).lower() else '⚠️ 观望'
-                lines.append(f'{nm} {code}: {verdict}')
+                low = str(result).lower()
+                if 'buy' in low:
+                    verdict, bucket = '✅ 买入', agree
+                elif 'sell' in low:
+                    verdict, bucket = '❌ 规避', avoid
+                else:
+                    verdict, bucket = '⚠️ 观望', watch
+                bucket.append(f'{nm} {code}')
+                detail.append(f'{nm} {code}: {verdict}')
             except Exception:
-                lines.append(f'{nm} {code}: ⚠️ 诊断失败')
+                detail.append(f'{nm} {code}: ⚠️ 诊断失败')
 
-        _push_daily('🔍 妙想第二意见', '\n'.join(lines))
-        _log_run(job, 'success', started_at=started,
-                 finished_at=datetime.now().isoformat())
+        # D: 只在"妙想与综合选股分歧"时才推 —— 妙想对 unified 选中的票判❌规避才算实质分歧;
+        # 全是买入/观望则不打扰(意见仍记 job_runs 可查)。env MX_REVIEW_ALWAYS_PUSH=true 恢复每日推。
+        import os as _osmx
+        always = _osmx.getenv('MX_REVIEW_ALWAYS_PUSH', 'false').lower() in ('1', 'true', 'yes', 'on')
+        if avoid or always:
+            head = (f'## 🔍 妙想第二意见 — {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
+                    '_东财妙想 AI 对今日入选股的独立看法,仅作交叉验证_\n')
+            if avoid:
+                head += f'\n⚠️ 与综合选股分歧({len(avoid)} 只妙想判规避):' + '、'.join(avoid) + '\n'
+            _push_daily('🔍 妙想第二意见', head + '\n' + '\n'.join(detail))
+        _log_run(job, 'success',
+                 error=f'买入{len(agree)}/观望{len(watch)}/规避{len(avoid)}'
+                       + ('(分歧已推)' if avoid else '(一致,未推)'),
+                 started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
+
+    # ── E: 盘中急跌兜底(10:30 段,每股每日去重)。覆盖点 10:30/11:20/14:30 三次,不重复告警 ──
+    try:
+        _intraday_plunge_check()
+    except Exception as e:
+        print(f'[mx_selection_review] 急跌监控子任务失败: {e}')
 
 
 def task_mx_daily_analysis():
@@ -4458,23 +4608,23 @@ def register_default_jobs():
       09:05 fund_valuation_signal       — 估值信号
       09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
       09:50 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
-      10:30 mx_selection_review         — 选股过妙想诊断
+      10:30 mx_selection_review         — 选股过妙想诊断(D:只在与综合选股分歧时推) + 急跌兜底
       11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
       12:00 noon_report                 — 📊 午盘简报(大盘)
-      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 三合一;尾接止盈阶梯减仓)
-      —— 盘后(全 16:30 后;硬依赖链 kline_prefetch 必须最先焐缓存)——
+      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 三合一;尾接止盈阶梯减仓 + 急跌兜底)
+      —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
+      —— 盘后(全 16:30 后;F:读暖缓存任务显式等 kline_prefetch 焐完,不靠时钟间隔)——
       16:30 kline_prefetch              — 📥 K线+因子缓存预热(链头)
-      16:35 ai_rec_check                — 📊 推荐池胜率回填(收盘价后验,原盘中每30分)
-      16:40 factor_collection           — 🧬 因子采集(读暖缓存)
-      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(MyTT/缠论/VaR;次日早盘读它)
+      16:40 factor_collection           — 🧬 因子采集(读暖缓存,F:等 prefetch)
+      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(MyTT/缠论/VaR;F:等 prefetch;次日早盘读它)
       16:48 daily_market_snapshot       — 📷 大盘快照
-      16:55 decision_signal_outcomes    — 🎯 决策信号后验(需当日收盘K线)
+      16:55 eod_outcomes                — 🎯 盘后后验合并(A:推荐池回填 + 决策信号后验,F:等 prefetch)
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
       17:00 mx_daily_analysis           — 🌙 妙想收盘复盘
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
-      22:00/22:05/22:30 fund_nav_refresh / fund_target_check / daily_pnl_snapshot
+      22:00 fund_evening                — 🏦 基金晚间合并(B:净值入库→定投止盈检查) · 22:30 daily_pnl_snapshot
       02:00/02:30 pg_backup / rag_ingest
       周日 10:00/15:00/16:00/20:00 mx_weekend_outlook / weekly_analysis / portfolio_stress_ai / wf_weekly_backtest
       周一 03:00/09:30 weekly_db_cleanup / ai_eval_weekly
@@ -4519,11 +4669,11 @@ def register_default_jobs():
     #    factor_collection / portfolio_indicator_snapshot / daily_backtest 都读这份暖缓存(顺序颠倒→冷拉雪崩);
     #    decision_signal_outcomes 需当日收盘 K线已入缓存;龙虎榜傍晚才出全量,故 dragon_tiger 押后到 18:30。
     hub.register('kline_prefetch',              '16:30', task_kline_prefetch)            # 链头:焐缓存(最慢,留足窗)
-    hub.register('ai_rec_check',                '16:35', task_ai_rec_check)              # 推荐池收盘价后验(轻,只行情)
-    hub.register('factor_collection',           '16:40', task_factor_collection)        # 读暖缓存
+    hub.register('factor_collection',           '16:40', task_factor_collection)        # 读暖缓存(F:等 prefetch 焐完)
     hub.register('portfolio_indicator_snapshot','16:45', task_portfolio_indicator_snapshot)
     hub.register('daily_market_snapshot',       '16:48', task_daily_market_snapshot)
-    hub.register('decision_signal_outcomes',    '16:55', task_decision_signal_outcomes)
+    # A 合并(2026-06-26):eod_outcomes = 原 ai_rec_check(16:35 推荐池回填)+ decision_signal_outcomes(信号后验)
+    hub.register('eod_outcomes',                '16:55', task_eod_outcomes)             # 盘后后验合并(读暖缓存)
     hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
     hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 
@@ -4534,8 +4684,8 @@ def register_default_jobs():
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)
     hub.register('sector_rotation',             '17:30', task_sector_rotation)        # 📈 题材轮动雷达(盘后,智策引擎)
     hub.register('daily_pnl_snapshot',          '22:30', task_daily_pnl_snapshot)
-    hub.register('fund_nav_refresh',            '22:00', task_fund_nav_refresh)
-    hub.register('fund_target_check',           '22:05', task_fund_target_check)
+    # B 合并(2026-06-26):fund_evening = 原 fund_nav_refresh(22:00 净值入库)→ fund_target_check(止盈检查)
+    hub.register('fund_evening',                '22:00', task_fund_evening)             # 基金晚间合并(先刷净值再查止盈)
     hub.register('pg_backup',                   '02:00', task_pg_backup)
     hub.register('rag_ingest',                  '02:30', task_rag_ingest)
 
