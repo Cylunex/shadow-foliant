@@ -142,12 +142,13 @@ def get_index_universe(index_code: str = '000300') -> List[str]:
     """
     try:
         import akshare as ak
+        from akshare_safe import call as ak_call   # 硬超时,防 csindex/新浪慢响应卡死
         try:
-            df = ak.index_stock_cons_csindex(symbol=index_code)
+            df = ak_call(ak.index_stock_cons_csindex, symbol=index_code, timeout=20)
             col = '成分券代码' if '成分券代码' in df.columns else df.columns[4]
             return [str(x).zfill(6) for x in df[col].tolist()]
         except Exception:
-            df = ak.index_stock_cons(symbol=index_code)
+            df = ak_call(ak.index_stock_cons, symbol=index_code, timeout=20)
             col = '品种代码' if '品种代码' in df.columns else df.columns[0]
             return [str(x).zfill(6) for x in df[col].tolist()]
     except Exception:
@@ -162,10 +163,27 @@ def get_sector_leaders(leaders_per_board: int = 2, max_boards: Optional[int] = N
     leaders_per_board: 每个板块取前几只；max_boards: 限制板块数（调试/限速用）。
     include_concept: 是否额外纳入概念板块龙头（默认否，概念噪声大）。
     失败/无 akshare 返回空列表（调用方降级）。
-    """
+
+    ⚠️ 2026-06-27 防东财封禁重构:本函数原裸 `import akshare` 逐 ~86 个行业板块调
+    `ak.stock_board_industry_cons_em`(均走东财 push2),无缓存/无限流/无超时,单次冷算 ~87 次
+    东财调用,被 webui「强制刷新」/MCP 选股盘中连点放大成 IP 级封禁源。现:① 结果整体缓存 20h
+    (板块龙头名单日内基本不变,盘后焐一次各处复用);② 每板块调用走 akshare_safe(硬超时)+
+    rate_limiter('akshare') 背压(把 86 次背靠背突发拉成 3s 间隔,杜绝突发触封);③ 盘中现拉路径
+    由上游 screen_index_cached(cache_only=盘中) 短路拦截,本函数盘中不冷算。"""
     leaders: List[str] = []
     try:
+        from cache import cache_get, cache_set
+    except Exception:
+        cache_get = cache_set = None
+    ckey = f"sector_leaders:{leaders_per_board}:{max_boards}:{int(bool(include_concept))}"
+    if cache_get:
+        hit = cache_get(ckey)
+        if isinstance(hit, list) and hit:
+            return hit
+    try:
         import akshare as ak
+        from akshare_safe import call as ak_call
+        from rate_limiter import throttle as _throttle
     except Exception:
         return []
 
@@ -180,14 +198,15 @@ def get_sector_leaders(leaders_per_board: int = 2, max_boards: Optional[int] = N
         return [str(x).zfill(6) for x in df[code_col].head(leaders_per_board).tolist()]
 
     try:
-        boards = ak.stock_board_industry_name_em()
+        boards = ak_call(ak.stock_board_industry_name_em, timeout=20)
         name_col = '板块名称' if '板块名称' in boards.columns else boards.columns[0]
         names = boards[name_col].tolist()
         if max_boards:
             names = names[:max_boards]
         for nm in names:
+            _throttle('akshare')   # 背压:东财板块成分接口逐个 3s 间隔,防突发封禁
             try:
-                leaders += _topn_of_board(ak.stock_board_industry_cons_em(symbol=nm))
+                leaders += _topn_of_board(ak_call(ak.stock_board_industry_cons_em, symbol=nm, timeout=20))
             except Exception:
                 continue
     except Exception:
@@ -195,18 +214,22 @@ def get_sector_leaders(leaders_per_board: int = 2, max_boards: Optional[int] = N
 
     if include_concept:
         try:
-            cb = ak.stock_board_concept_name_em()
+            cb = ak_call(ak.stock_board_concept_name_em, timeout=20)
             ncol = '板块名称' if '板块名称' in cb.columns else cb.columns[0]
             cnames = cb[ncol].tolist()[:(max_boards or 30)]
             for nm in cnames:
+                _throttle('akshare')
                 try:
-                    leaders += _topn_of_board(ak.stock_board_concept_cons_em(symbol=nm))
+                    leaders += _topn_of_board(ak_call(ak.stock_board_concept_cons_em, symbol=nm, timeout=20))
                 except Exception:
                     continue
         except Exception:
             pass
 
-    return list(dict.fromkeys(leaders))  # 去重保序
+    out = list(dict.fromkeys(leaders))  # 去重保序
+    if cache_set and out:
+        cache_set(ckey, out, 20 * 3600)   # 20h:盘后焐后存活整个交易日,次日盘后焐自然刷新
+    return out
 
 
 def get_default_universe(index_code: str = '000300', add_sector_leaders: bool = True,

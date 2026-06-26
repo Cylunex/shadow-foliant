@@ -74,6 +74,11 @@ def query(skill: str, text: str, timeout: int = TIMEOUT) -> dict:
     if not text:
         return {'error': 'text 为空', 'skill': skill}
     path, field = SKILLS[skill]
+    try:  # 与 screen() 同源限流(1s 最小间隔):防 mx_selection_review(10:30 盘中)逐只
+        from rate_limiter import throttle as _throttle   # 诊断 top10 背靠背连打东财妙想 SaaS 触发封禁
+        _throttle('eastmoney_saas')
+    except Exception:
+        pass
     body = json.dumps({field: text}, ensure_ascii=False).encode('utf-8')
     req = _req.Request(BASE + path, data=body, method='POST',
                        headers={'Content-Type': 'application/json', 'em_api_key': _api_key()})
