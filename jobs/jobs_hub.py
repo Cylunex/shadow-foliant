@@ -3587,6 +3587,16 @@ def task_unified_selection():
             if _rej:
                 body += '\n🟢 避开:' + '、'.join((r.get('name') or r['code']) for r in _rej)
 
+        # ── 红蓝对抗门控(2026-06-26):被「否决」的票剔出推荐池/盘后扫描快照,不再当推荐追踪胜率 ──
+        # 此前否决票照样入池污染胜率闭环(ai_eval_weekly)。表格仍显示🟢避开(可见性不丢),只停止入池。
+        # 只拦「否决」,不误伤「谨慎/买入」。开关 SELECTION_DEBATE_GATE(默认开;设 false/0/no/off 关闭)。
+        if debate_map and os.getenv('SELECTION_DEBATE_GATE', 'true').lower() not in ('false', '0', 'no', 'off'):
+            _vetoed = [c for c in top_list if debate_map.get(c, {}).get('verdict') == '否决']
+            if _vetoed:
+                top_list = [c for c in top_list if c not in set(_vetoed)]
+                body += f'\n🛡️ 门控:已剔除 {len(_vetoed)} 只(不入推荐池/不再追踪胜率)'
+                print(f'[unified_selection] 红蓝门控剔除 {len(_vetoed)} 只: {"、".join(_vetoed)}')
+
         # 附：策略基因组热度摘要
         if strategy_weights:
             ranked_weights = sorted(strategy_weights.items(), key=lambda x: -x[1])[:5]
