@@ -126,7 +126,7 @@ def build_briefing(sell_n: int = 5, buy_n: int = 6) -> dict:
             import datahub
             q = datahub.quotes([b["code"] for b in buy]) or {}
             for b in buy:
-                info = q.get(b["code"]) or {}
+                info = q.get(b["code"]) or q.get(str(b["code"])[-6:]) or {}  # datahub.quotes 归一key:带前缀也兜底
                 b["name"], b["price"] = info.get("name"), info.get("price")
         except Exception:
             pass

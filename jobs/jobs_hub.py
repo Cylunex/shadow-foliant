@@ -544,7 +544,7 @@ def task_stock_monitor_check():
         checked = notified = 0
         for stock in stocks:
             code = stock['symbol']
-            q = quotes.get(code, {})
+            q = (quotes.get(code) or quotes.get(str(code)[-6:]) or {})
             price = q.get('price')
             if price is None:
                 continue
@@ -1816,7 +1816,7 @@ def _format_strategy_results(results: dict) -> str:
             pb = next((row[c] for c in ['pb', 'PB'] if c in row.index), '')
 
             # 实时行情补充
-            q = quotes.get(code, {})
+            q = (quotes.get(code) or quotes.get(str(code)[-6:]) or {})
             change = q.get('change_pct', '')
             turnover = q.get('turnover_pct', '')
             mcap = q.get('mcap_yi', '')
@@ -3532,7 +3532,7 @@ def task_unified_selection():
             score = round(cinfo['score'], 1)
             src_s = '/'.join(cinfo['src'])[:24] or '-'
             # 行情优先用批量缓存，不再逐只调 get_stock_info（省 15 次网络请求）
-            q = quotes_cache.get(code, {})
+            q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
             name = q.get('name') or name_map.get(code) or code
             price = q.get('price', '?')
             pct = q.get('change_pct', '')
@@ -3587,7 +3587,7 @@ def task_unified_selection():
                 for code in top_list[:10]:
                     if code in held_codes:
                         continue  # 已持仓的不算"新推荐"
-                    q = quotes_cache.get(code, {})
+                    q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
                     cinfo = candidates.get(code) or {}
                     try:
                         rid = save_recommendation(
