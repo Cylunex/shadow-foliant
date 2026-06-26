@@ -724,38 +724,6 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     return _slice_by_days(out, _period_days(period))
 
 
-def _kline_akshare_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """akshare 前复权(qfq)日线,datahub.kline qfq 源之一。返回 fetcher 同款格式
-    (DatetimeIndex='Date' + 大写 OCHLV, Volume 单位'股')或空 DF。仅日线。
-    ⚠️ akshare stock_zh_a_hist 走东财,东财封时取不到(返回空,_route 跳过/上层 fallback raw)。"""
-    if interval not in ('1d', 'daily', '101'):
-        return pd.DataFrame()
-    cmap = {'日期': 'Date', '开盘': 'Open', '收盘': 'Close', '最高': 'High', '最低': 'Low', '成交量': 'Volume'}
-    try:
-        import akshare as ak
-        from data.akshare_safe import call as ak_call
-        from datetime import datetime as _dt, timedelta as _td
-        start = (_dt.now() - _td(days=_period_days(period) + 15)).strftime('%Y%m%d')
-        df = ak_call(ak.stock_zh_a_hist, symbol=_norm_code(code), period='daily',
-                     start_date=start, end_date='20500101', adjust='qfq', timeout=20)
-    except Exception:
-        return pd.DataFrame()
-    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in cmap):
-        return pd.DataFrame()
-    try:
-        out = pd.DataFrame({
-            'Date': pd.to_datetime(df['日期'], errors='coerce').dt.normalize(),
-            'Open': pd.to_numeric(df['开盘'], errors='coerce'),
-            'Close': pd.to_numeric(df['收盘'], errors='coerce'),
-            'High': pd.to_numeric(df['最高'], errors='coerce'),
-            'Low': pd.to_numeric(df['最低'], errors='coerce'),
-            'Volume': pd.to_numeric(df['成交量'], errors='coerce') * 100,  # akshare 成交量"手"→"股"对齐
-        }).dropna(subset=['Date']).set_index('Date').sort_index()
-    except Exception:
-        return pd.DataFrame()
-    return _slice_by_days(out, _period_days(period))
-
-
 def _sina_symbol(code: str) -> str:
     """6位代码 → 新浪带交易所前缀(sh600519/sz000001/bj830799)。qfq 主用个股(6/0/3)。"""
     c = _norm_code(code)
@@ -922,32 +890,31 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                      ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
                      ("mootdx", lambda: _kline_mootdx(code, period, interval))],
                     empty=pd.DataFrame(), timeout=45)
-    else:  # qfq:east/akshare 走东财,sina_qfq/baostock_qfq 真非东财兜底
+    else:  # qfq:east 走东财,sina_qfq/baostock_qfq 真非东财兜底
         # ⚡ 健康度短路(2026-06-25 修):qfq 源在**活跃冷却期**(连续失败,冷却额外 -1.0 → score<-0.5)
         # 时每只吃满源超时(原 45s×2=90s)会拖垮 unified_selection 等批量任务 → 直接走 raw,0 成本降级。
-        # ⚠️ 必须**三源全冷却**才退 raw:east_qfq/akshare_qfq 是东财,sina_qfq 是真非东财(新浪)——
-        #    东财被封时 east/akshare 冷却但 sina 仍健康(0.5> -0.5)→ 不短路 → _route 走 sina 拿真 qfq。
-        #    漏掉 sina 会让"东财一封就退 raw"白白浪费真非东财源(2026-06-25 补 sina 源时同步修)。
+        # ⚠️ 必须**全部 qfq 源都冷却**才退 raw:east_qfq 是东财,sina_qfq/baostock_qfq 是真非东财——
+        #    东财被封时 east 冷却但 sina/baostock 仍健康(0.5> -0.5)→ 不短路 → _route 走它们拿真 qfq。
+        #    漏掉真非东财源会让"东财一封就退 raw"白白浪费可达源(2026-06-25 补 sina 源时同步修)。
         # ⚠️ 阈值用 -0.5 不用 0:冷却期(120s内)score≈-1.2 才短路;冷却过期后 score≈-0.2(不短路)
         # → 每 120s 自动重试,网络/东财恢复即自愈(用 0 会因 rate=0 永久短路、死锁不恢复)。
-        # ⚠️ baostock_qfq 也是真非东财 qfq 源(全历史),纳入"全冷却才退 raw"判断:东财封且 sina/tickflow
-        #    也冷时,只要 baostock_qfq 还健康就别退 raw,交 _route 用 baostock 拿真 qfq。
+        # ⚠️ 2026-06-27 阶段1重构:删 akshare_qfq(ak.stock_zh_a_hist 实走东财 push2his,是 east_qfq 的
+        #    二道贩子冗余,东财封时与 east 同死、不封时被 east 覆盖,纯多打一次东财)。短路判断同步去掉它。
         _now = _time.time()
-        if (_health('kline_qfq:east_qfq', _now) < -0.5 and _health('kline_qfq:akshare_qfq', _now) < -0.5
+        if (_health('kline_qfq:east_qfq', _now) < -0.5
                 and _health('kline_qfq:sina_qfq', _now) < -0.5
                 and _health('kline_qfq:tickflow_qfq', _now) < -0.5
                 and _health('kline_qfq:baostock_qfq', _now) < -0.5):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
         # 短超时 10s。**优先真非东财源**(用户诉求:东财常被封):sina_qfq(新浪,快)→ baostock_qfq(稳,全历史)
-        # → east_qfq/akshare_qfq(东财,降级)→ tickflow_qfq(限流慢,末位)。东财封时前两个非东财源顶上,
+        # → east_qfq(东财,降级)→ tickflow_qfq(限流慢,末位)。东财封时前两个非东财源顶上,
         # 技术分析仍有真 qfq、不必退 raw。长周期(≥2y)baostock_qfq 居首拿全历史。
         _sina_q = ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval))
         _bao_q = ("baostock_qfq", lambda: _kline_baostock(code, period, interval, 'qfq'))
         _east_q = ("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq'))
-        _aksh_q = ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval))
         _tick_q = ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))
         # 长历史(≥2y)已在上面直调 baostock,这里只管常规多源(短周期/长历史 baostock 失败的兜底)
-        df = _route("kline_qfq", [_sina_q, _bao_q, _east_q, _aksh_q, _tick_q],
+        df = _route("kline_qfq", [_sina_q, _bao_q, _east_q, _tick_q],
                     empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # 取数成功 → 写缓存(刷新 mtime)返回
@@ -1192,7 +1159,7 @@ def _north_flow_akshare(days: int = 30) -> List[dict]:
 
 def north_flow(days: int = 30) -> List[dict]:
     """北向资金近 N 日。list[dict] 键:trade_date/hgt_yi/sgt_yi/net_total(亿元)+ net_hgt/net_sgt(元)/net_tgt。
-    源:北向本地缓存(同花顺,主;dsm 内含 adata)→ akshare 沪深港通汇总(兜底,实质失效)。
+    源:北向本地缓存(同花顺,主;2026-06-27 阶段1:dsm 内 adata 兜底已删)→ akshare 沪深港通汇总(兜底,实质失效)。
     ⚠️ 2026-06-24 实测:akshare 走的东财 datacenter 接口活着但 FUND_INFLOW=null(北向 2024-08 官方停实时
     披露已坐实),拿不到有效净流入 → 真数据只能靠主源同花顺本地缓存(jobs 每日 15:40 入库)。akshare 留作
     占位,值无效时被 _north_flow_akshare 的防御拦截、_route 退回主源,无害。"""
@@ -1248,17 +1215,55 @@ def capital_flow_minute(code: str) -> List[dict]:
 
 
 def capital_flow_adata(code: str) -> List[dict]:
-    """个股历史日度资金流(adata 源,各档净流入原始记录)。与 capital_flow(东财 push2his)互补:
-    形状/列名是 adata 原始 records,非 canonical 的 date/main_net/…。AI 分析上下文/MCP 用作补充源。
-    单独成域:adata 与东财字段不同构,合并进 capital_flow 会污染口径,故独立 _route(自带熔断/超时)。"""
-    from data_source_manager import data_source_manager as dsm
-    return _route("capital_flow_adata", [("adata", lambda: dsm.get_capital_flow_a_data(code))], empty=[]) or []
+    """个股历史日度资金流(**兼容别名**)。2026-06-27 阶段1:adata(二道贩子)已删 →
+    本域改返回 canonical `capital_flow(code)`(东财 push2his,真实各档净流入 date/main_net/small_net/
+    mid_net/large_net/super_net,元)。保留函数名供旧调用方(agents/ai_workflow/MCP/API)零改签名;
+    数据从 adata 占位升级为东财真值。各档不同构污染口径的顾虑随 adata 删除一并消解。"""
+    return capital_flow(code)
+
+
+def _dragon_tiger_eastmoney(trade_date: str = None, page_size: int = 400) -> List[dict]:
+    """全市场龙虎榜明细 —— 东财数据中心直连(RPT_DAILYBILLBOARD_DETAILSNEW),替代原 adata 源(已删)。
+    trade_date='YYYY-MM-DD' 指定日;None → 取最近一个有龙虎榜数据的交易日(按 TRADE_DATE 降序取首日,
+    自然处理"盘中今日龙虎榜未出 → 退到上一交易日")。归一含 stock_code/stock_name(供 wf_daily_strategy_scan
+    池子加载 r.get('stock_code'))+ 净买/买卖额/原因。任何异常返 [](交 _route 跳过/上层无害)。"""
+    from a_stock_data_adapter import _eastmoney_datacenter
+    flt = f"(TRADE_DATE>='{trade_date}')(TRADE_DATE<='{trade_date}')" if trade_date else ""
+    rows = _eastmoney_datacenter('RPT_DAILYBILLBOARD_DETAILSNEW', filter_str=flt,
+                                 page_size=page_size, sort_columns='TRADE_DATE', sort_types='-1')
+    if not rows:
+        return []
+    if not trade_date:   # 只保留最近一个交易日的行(东财按 TRADE_DATE 降序返回 → 首行即最近日)
+        latest = str(rows[0].get('TRADE_DATE', ''))[:10]
+        rows = [r for r in rows if str(r.get('TRADE_DATE', ''))[:10] == latest]
+
+    def _num(v):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+    out = []
+    for r in rows:
+        out.append({
+            'trade_date': str(r.get('TRADE_DATE', ''))[:10],
+            'stock_code': str(r.get('SECURITY_CODE', '') or ''),
+            'stock_name': r.get('SECURITY_NAME_ABBR', '') or '',
+            'reason': r.get('EXPLANATION', '') or '',
+            'net_buy': round(_num(r.get('BILLBOARD_NET_AMT')) / 10000, 1),     # 万元
+            'buy_amt': round(_num(r.get('BILLBOARD_BUY_AMT')) / 10000, 1),     # 万元
+            'sell_amt': round(_num(r.get('BILLBOARD_SELL_AMT')) / 10000, 1),   # 万元
+            'change_pct': round(_num(r.get('CHANGE_RATE')), 2),
+            'turnover': round(_num(r.get('TURNOVERRATE')), 2),
+        })
+    out.sort(key=lambda x: x['net_buy'], reverse=True)   # 净买额降序
+    return out
 
 
 def dragon_tiger(trade_date: str = None) -> List[dict]:
-    """全市场龙虎榜明细(指定/最近交易日)。list[dict]。"""
-    from data_source_manager import data_source_manager as dsm
-    return _route("dragon_tiger", [("dsm", lambda: dsm.get_dragon_tiger_detail_a_data(trade_date))], empty=[]) or []
+    """全市场龙虎榜明细(指定/最近交易日)。list[dict],键:trade_date/stock_code/stock_name/reason/
+    net_buy/buy_amt/sell_amt(万元)/change_pct/turnover。
+    源:东财数据中心直连(2026-06-27 阶段1:原 adata 源 list_a_list_daily 已删,口径迁东财 RPT)。"""
+    return _route("dragon_tiger", [("em_datacenter", lambda: _dragon_tiger_eastmoney(trade_date))], empty=[]) or []
 
 
 def dragon_tiger_stock(code: str, trade_date: str = None, look_back: int = 30) -> dict:

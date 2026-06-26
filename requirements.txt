@@ -23,7 +23,7 @@ reportlab>=4.0.0
 peewee>=3.17.0
 schedule>=1.2.0
 pywencai>=0.7.0
-adata>=2.9.0
+# adata 已于 2026-06-27 阶段1重构移除(二道贩子整合库;北向走同花顺缓存、龙虎榜/资金流走东财直连)。
 psycopg2-binary>=2.9.5
 jieba>=0.42.1
 beautifulsoup4>=4.12.0

@@ -32,7 +32,7 @@ TOOL_GROUP_META: Dict[str, Dict[str, Any]] = {
         'use_cases': ['技术分析师', '形态识别', '短线买卖点'],
     },
     'fund_flow': {
-        'description': '资金流向（主力/超大单/中小单 + adata 北向资金）',
+        'description': '资金流向（主力/超大单/中小单 + 北向资金）',
         'use_cases': ['资金面分析师', '主力选股', '北向跟踪'],
     },
     'fundamentals': {
@@ -162,7 +162,7 @@ def collect_chan_theory_context(symbol: str, period: str = '1y') -> Dict[str, An
 
 
 def collect_fund_flow_context(symbol: str, days: int = 60) -> Dict[str, Any]:
-    """采集资金流：个股资金流 + 北向资金大盘 + adata 历史日度"""
+    """采集资金流：个股资金流 + 北向资金大盘 + 历史日度资金流(东财)"""
     ctx: Dict[str, Any] = {'symbol': symbol, 'errors': []}
 
     # 个股资金流（沿用现有 a-stock HTTP > akshare > tushare 优先级）
@@ -173,7 +173,8 @@ def collect_fund_flow_context(symbol: str, days: int = 60) -> Dict[str, Any]:
     except Exception as e:
         ctx['errors'].append(f'individual_flow: {e}')
 
-    # adata 历史日度资金流（备用,走 datahub 统一数据层熔断/超时）
+    # 历史日度资金流（东财 push2his，走 datahub 统一数据层熔断/超时;原 adata 源已于 2026-06-27 删,
+    # capital_flow_adata 现为东财 canonical 别名。ctx 键名保留兼容下游 AI 上下文）
     try:
         import datahub
         rows = datahub.capital_flow_adata(symbol)

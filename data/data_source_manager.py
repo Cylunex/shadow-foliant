@@ -57,17 +57,7 @@ class DataSourceManager:
                 self.tushare_available = False
         else:
             print("ℹ️ 未配置Tushare Token，将仅使用Akshare数据源")
-
-        # 初始化 adata（北向资金、龙虎榜详情、概念资金流等 akshare 缺失/不稳定的数据源）
-        self.adata_available = False
-        try:
-            import adata  # noqa: F401
-            self.adata_available = True
-            print("✅ [adata] 数据源初始化成功（北向资金/龙虎榜/概念资金流）")
-        except ImportError:
-            print("ℹ️ [adata] 未安装，相关接口将不可用（pip install adata 可启用）")
-        except Exception as e:
-            print(f"⚠️ [adata] 初始化失败: {e}")
+        # ⚠️ adata（二道贩子整合库）已于 2026-06-27 阶段1重构删除：北向走同花顺本地缓存、龙虎榜/资金流走东财直连。
 
     def _get_proxy_url(self):
         """获取代理URL，优先从环境变量读取，默认使用NAS代理"""
@@ -1120,7 +1110,10 @@ class DataSourceManager:
             return []
 
     # ============================================================
-    # adata 数据源 — 填补 akshare 缺失的数据（北向/龙虎榜详情/概念资金流）
+    # 北向资金（同花顺本地缓存主源；2026-06-27 阶段1:adata 兜底已删）
+    # 龙虎榜详情/个股资金流/融资融券的 adata 方法已删除：
+    #   · dragon_tiger → datahub.dragon_tiger（东财数据中心直连）
+    #   · capital_flow → datahub.capital_flow（东财 push2his 直连）
     # ============================================================
 
     def get_north_flow_a_data(self, days: int = 30):
@@ -1129,10 +1122,9 @@ class DataSourceManager:
         数据源优先级：
           1. northbound_cache 本地缓存（同花顺 hsgtApi 真实数据，由 jobs_hub 每日 15:40 追加）
           2. 同花顺实时拉取一次并入库（缓存为空时的 fallback）
-          3. adata（断供期间返回 0，仅占位）
 
         返回: list[dict] 含 trade_date, hgt_yi, sgt_yi, net_total（亿元）+
-              兼容字段 net_hgt, net_sgt（元）, net_tgt（恒 0）
+              兼容字段 net_hgt, net_sgt（元）, net_tgt（恒 0）；无缓存且实时拉取失败 → []。
         """
         try:
             from northbound_cache import get_recent, refresh_today
@@ -1142,76 +1134,8 @@ class DataSourceManager:
             if refresh_today():
                 return get_recent(days)
         except Exception as e:
-            print(f"[northbound_cache] 读取失败，回退 adata: {e}")
-
-        if not self.adata_available:
-            return []
-        try:
-            import adata
-            df = adata.sentiment.north.north_flow()
-            if df is None or df.empty:
-                return []
-            df = df.head(days)
-            return df.to_dict(orient='records')
-        except Exception as e:
-            print(f"[adata] get_north_flow 失败: {e}")
-            return []
-
-    def get_dragon_tiger_detail_a_data(self, trade_date: str = None):
-        """龙虎榜每日详情（adata 比 akshare 更稳定）
-
-        参数: trade_date 'YYYY-MM-DD'，None 则取最近交易日
-        返回: list[dict] 每条含股票代码、名称、上榜原因、买卖席位汇总
-        """
-        if not self.adata_available:
-            return []
-        try:
-            import adata
-            df = adata.sentiment.hot.list_a_list_daily(trade_date=trade_date) if trade_date \
-                else adata.sentiment.hot.list_a_list_daily()
-            if df is None or df.empty:
-                return []
-            return df.to_dict(orient='records')
-        except Exception as e:
-            print(f"[adata] get_dragon_tiger_detail 失败: {e}")
-            return []
-
-    def get_capital_flow_a_data(self, symbol: str):
-        """个股历史日度资金流（adata 备用，避免 akshare 限频）
-
-        参数: symbol 6 位股票代码（不带前缀）
-        返回: list[dict] 主力/超大/大/中/小 各档净流入
-        """
-        if not self.adata_available:
-            return []
-        try:
-            import adata
-            df = adata.stock.market.get_capital_flow(stock_code=symbol)
-            if df is None or df.empty:
-                return []
-            return df.to_dict(orient='records')
-        except Exception as e:
-            print(f"[adata] get_capital_flow 失败: {e}")
-            return []
-
-    def get_securities_margin_a_data(self, symbol: str = None):
-        """融资融券数据（akshare 不提供个股粒度，adata 可以）
-
-        参数: symbol 6 位股票代码，None 取大盘数据
-        返回: list[dict]
-        """
-        if not self.adata_available:
-            return []
-        try:
-            import adata
-            df = adata.sentiment.securities_margin(stock_code=symbol) if symbol \
-                else adata.sentiment.securities_margin()
-            if df is None or df.empty:
-                return []
-            return df.to_dict(orient='records')
-        except Exception as e:
-            print(f"[adata] get_securities_margin 失败: {e}")
-            return []
+            print(f"[northbound_cache] 读取失败: {e}")
+        return []
 
 
 # 全局数据源管理器实例

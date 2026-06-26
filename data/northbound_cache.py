@@ -185,25 +185,9 @@ def get_recent(days: int = 30) -> List[Dict]:
 
 
 def backfill_from_adata() -> int:
-    """一次性从 adata 拉历史灌入（断供期间值为 0，仅占位）"""
-    try:
-        import adata
-        df = adata.sentiment.north.north_flow()
-        if df is None or df.empty:
-            return 0
-        n = 0
-        for _, row in df.iterrows():
-            td = str(row.get('trade_date', ''))
-            if not td:
-                continue
-            hgt = float(row.get('net_hgt', 0) or 0) / 1e8
-            sgt = float(row.get('net_sgt', 0) or 0) / 1e8
-            upsert(td, hgt, sgt, 'adata')
-            n += 1
-        return n
-    except Exception as e:
-        print(f'[northbound_cache] backfill 失败: {e}')
-        return 0
+    """（已弃用）一次性回灌历史。2026-06-27 阶段1:adata（二道贩子）已从项目移除,
+    此函数无调用方、保留空壳避免外部 import 报错。北向真实历史由 jobs 每日 15:40 同花顺 hsgtApi 累积。"""
+    return 0
 
 
 if __name__ == '__main__':
