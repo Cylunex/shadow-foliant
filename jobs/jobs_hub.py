@@ -482,115 +482,6 @@ def task_portfolio_indicator_snapshot():
                  finished_at=datetime.now().isoformat())
 
 
-def task_ai_rec_check():
-    """📊 推荐池胜率回填(盘后每天一次, 16:35)：对 AI 推荐池逐条用**当日收盘价**对比目标/止损,
-    回填 last_price/realized_pnl, 喂 ai_eval_weekly 周评估闭环(衡量选股质量, 非盯盘/非短线工具)。
-
-    2026-06-25 改:原盘中每30分钟实时追价 → 盘后每天一次收盘价后验(用户不搞短线 → 不需盘中实时;
-    收盘价足够判 tp/sl 命中 + 刷 last_price, 周报口径不变; 行情请求量从 ~480次/日 压到 ~10次/日)。
-    受开关 ai_rec_check 控制(默认开)。
-    """
-    job = 'ai_rec_check'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):
-        return
-    started = datetime.now().isoformat()
-    try:
-        from ai_recommendation_monitor import check_all_active
-        stats = check_all_active()
-        msg = (f"checked={stats['checked']} "
-               f"hit_target={stats['hit_target']} "
-               f"hit_stop={stats['hit_stop']}")
-        _log_run(job, 'success', error=msg,
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
-
-
-def task_stock_monitor_check():
-    """每5分钟检查监测股票价格是否进入进场区间，触发通知。
-    
-    交易时段内(09:30-15:00)运行。受开关 stock_monitor_check 控制（默认开）。
-    """
-    job = 'stock_monitor_check'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):
-        return
-    now = datetime.now()
-    minutes = now.hour * 60 + now.minute
-    if minutes < (9 * 60 + 30) or minutes > (15 * 60):
-        return
-    started = datetime.now().isoformat()
-    try:
-        from monitor_db import monitor_db
-        stocks = monitor_db.get_monitored_stocks()
-        if not stocks:
-            _log_run(job, 'success', error='no stocks monitored',
-                     started_at=started, finished_at=datetime.now().isoformat())
-            return
-        # 批量获取所有监控股票的行情
-        codes = [s['symbol'] for s in stocks if s.get('symbol')]
-        quotes = datahub.quotes(codes) if codes else {}
-        checked = notified = 0
-        for stock in stocks:
-            code = stock['symbol']
-            q = (quotes.get(code) or quotes.get(str(code)[-6:]) or {})
-            price = q.get('price')
-            if price is None:
-                continue
-            checked += 1
-            # 更新 last_checked
-            monitor_db.update_last_checked(stock['id'])
-            # 检查是否进入进场区间
-            er = stock.get('entry_range') or {}
-            lo = float(er.get('min', 0) or 0)
-            hi = float(er.get('max', 0) or 0)
-            if lo > 0 and hi > 0 and lo <= price <= hi:
-                msg = f"股票 {code} ({stock.get('name','')}) 价格 {price} 进入进场区间 [{lo}-{hi}]"
-                monitor_db.add_notification(
-                    stock['id'], 'entry', msg)
-                from notification_router import send
-                send('alert', title=f"监控触发: {code} 进入进场区间",
-                     content=f"📊 {code} {stock.get('name','')} {price:.2f}进入进场区间[{lo}-{hi}]")
-                notified += 1
-        _log_run(job, 'success',
-                 error=f'checked={checked} notified={notified}/{len(stocks)}',
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
-
-    # ── 尾接两个子任务,各套整体超时护栏(2026-06-25):外网全挂时它们逐只吃满源超时会拖到
-    #    1800s+、孤儿线程累积、还推残缺信号。套硬超时,超了这轮放弃(下个30分钟再来),不阻塞主任务。
-    from concurrent.futures import ThreadPoolExecutor as _TPE2, TimeoutError as _TO2
-
-    def _guarded(name, fn, timeout):
-        try:
-            _t = time.time()
-            with _TPE2(max_workers=1) as _ex:
-                _ex.submit(fn).result(timeout=timeout)
-            print(f'[stock_monitor_check] {name}完成 ({time.time()-_t:.1f}s)', flush=True)
-        except _TO2:
-            print(f'[stock_monitor_check] {name}超时{timeout}s放弃(外网慢?下轮再来)', flush=True)
-        except Exception as e:
-            print(f'[stock_monitor_check] {name}子任务失败: {e}')
-
-    # 持仓加仓审核(原 wf_position_guard_check,开关/交易时段判断在内);急跌监控(跌≥5%即推,每日一次)
-    _guarded('加仓审核', _position_guard_check, 200)
-    _guarded('急跌监控', _intraday_plunge_check, 120)
-
-
 def _intraday_plunge_check(drop_pct: float = -5.0):
     """持仓盘中急跌监控(挂在 stock_monitor_check 每30分钟):
     批量行情扫持仓,跌幅 ≤ drop_pct 即推告警;用快照表做"每股每日只报一次"去重。
@@ -1033,34 +924,6 @@ def task_ai_eval_weekly():
 
         _log_run(job, 'success',
                  error=f'samples={overall.sample_size} score={overall.score}',
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
-
-
-def task_decision_signal_outcomes():
-    """每日盘后:对已过持有周期的决策信号做后验校验(K线判 hit/miss),让胜率统计持续累积。
-    开关 decision_signal_outcomes(默认开,无 LLM 调用、纯库+K线缓存,开销低)。"""
-    job = 'decision_signal_outcomes'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            _log_run(job, 'skipped', error='disabled by automation_config',
-                     started_at=datetime.now().isoformat(),
-                     finished_at=datetime.now().isoformat())
-            return
-    except Exception:
-        pass
-    if _skip_if_not_trading(job):   # 非交易日不跑(K线无新 bar)
-        return
-    started = datetime.now().isoformat()
-    try:
-        from decision_signal import run_outcomes
-        r = run_outcomes(days=35)   # 35天足覆盖最长 horizon(long=20交易日)+缓冲;窄窗免每日重扫全量空转
-        _log_run(job, 'success',
-                 error=f"evaluated={r.get('evaluated')} hit={r.get('hit')} "
-                       f"miss={r.get('miss')} unable={r.get('unable')}",
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
@@ -4029,16 +3892,6 @@ def task_portfolio_health_ai():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
-def task_selection_debate():
-    """⚔️ 选股红蓝对抗 —— 2026-06-24 已并入晨间综合选股(unified_selection 9:45):红蓝结论直接
-    进选股表(一条推送一眼看完),决策信号也在 unified 内写(record_signals=True)。本任务保留仅作
-    兼容/手动触发,默认跳过不重复(避免上午连发多条 + 决策信号重复写)。"""
-    job = 'selection_debate'
-    _log_run(job, 'skipped', error='merged_into_unified_selection(9:45)',
-             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
-    return
-
-
 def task_portfolio_stress_ai():
     """🛡️ 组合压力情景叙事官(周日 16:00):跑全 8 宏观情景压力 + 集中度 → AI 风险预案
     (最脆弱情景/风险担当持仓/具体减仓对冲建议)。开关 portfolio_stress_ai(默认开)。周末照跑(静态分析)。"""
@@ -4162,15 +4015,6 @@ def task_announcement_scan():
                  finished_at=datetime.now().isoformat())
 
 
-def task_lockup_radar():
-    """⏳ 持仓解禁雷达 —— 2026-06-24 已并入盘后风险预警三合一(announcement_scan 16:02),不再单独跑/推
-    (避免盘后连发多条;解禁决策信号在合并任务内写)。保留本函数仅作兼容/手动触发。"""
-    job = 'lockup_radar'
-    _log_run(job, 'skipped', error='merged_into_announcement_scan(16:02)',
-             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
-    return
-
-
 def task_exit_advice():
     """🧹 清仓决策助手(14:40 尾盘):对全部持仓打"清仓紧迫分"排序 + 过度分散瘦身建议 + AI 整体策略。
     清仓/减仓结论写 decision_signal(source_type='exit_advice')→ 16:10 方向后验。开关 exit_advice(默认开)。"""
@@ -4202,15 +4046,6 @@ def task_exit_advice():
     except Exception as e:
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
-
-
-def task_research_digest():
-    """📑 研报增量解读 —— 2026-06-24 已并入盘后风险预警三合一(announcement_scan 16:02),不再单独跑/推
-    (研报决策信号在合并任务内写)。保留本函数仅作兼容/手动触发。"""
-    job = 'research_digest'
-    _log_run(job, 'skipped', error='merged_into_announcement_scan(16:02)',
-             started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
-    return
 
 
 def task_mx_selection_review():

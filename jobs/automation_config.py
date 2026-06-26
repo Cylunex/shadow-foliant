@@ -155,33 +155,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # A 合并:推荐池收盘价回填胜率 + 决策信号 K线后验,二者皆"盘后读K线做后验",合一个任务
         'description': '盘后①推荐池收盘价回填真实盈亏(喂周评估)②决策信号过 horizon 判 hit/miss。合 ai_rec_check+decision_signal_outcomes',
     },
-    'ai_rec_check': {
-        'cn': '📊 推荐池胜率回填',
-        'schedule': '已并入 eod_outcomes(16:55),仅手动/MCP',
-        'category': '核心',
-        'default': False,  # 2026-06-26 已并入 eod_outcomes,不再单独注册;函数保留供手动/MCP
-        'description': '[已并入 eod_outcomes] 盘后用收盘价对 AI 推荐池对比目标/止损 + 回填真实盈亏',
-    },
     'ai_eval_weekly': {
         'cn': 'AI 推荐周度评估推送',
         'schedule': '周一 09:30',
         'category': '核心',
         'default': True,  # 盈利反馈环:按 source 出真实盈亏评估,回喂选股决策;无 AI 调用,开销低
         'description': '按 source 评估过去 30 天推荐真实盈亏(胜率/平均收益/盈亏比)',
-    },
-    'decision_signal_outcomes': {
-        'cn': '🎯 决策信号后验校验',
-        'schedule': '已并入 eod_outcomes(16:55),仅手动/MCP',
-        'category': '数据',
-        'default': False,  # 2026-06-26 已并入 eod_outcomes,不再单独注册;函数保留供手动/MCP
-        'description': '[已并入 eod_outcomes] 对已过持有周期的决策信号用 K线判命中,累积按维度真实胜率',
-    },
-    'selection_debate': {
-        'cn': '⚔️ 选股红蓝对抗证伪',
-        'schedule': '已并入 unified_selection(9:45),仅手动/MCP',
-        'category': '核心',
-        'default': False,  # 2026-06-25 已并入 unified_selection,不再单独注册;模块保留供手动触发
-        'description': '[已并入 9:45 综合选股,不再定时] 多头/空头/裁判对抗,结论进决策信号后验',
     },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',
@@ -197,29 +176,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # announcements 端点零调用;AI 分类+重大性分级,利空强→reduce信号+告警(黑天鹅预警)
         'description': '对持仓+选股拉近5天公告,AI 分类+利好利空强度分级,利空强即时告警并写决策信号',
     },
-    'lockup_radar': {
-        'cn': '⏳ 持仓解禁雷达',
-        'schedule': '已并入 announcement_scan(18:35),仅手动/MCP',
-        'category': '核心',
-        'default': False,  # 2026-06-25 已并入 announcement_scan 三合一,不再单独注册;模块保留供手动
-        'description': '[已并入 announcement_scan,不再定时] 查持仓未来60天解禁,AI 给减仓研判',
-    },
-    'research_digest': {
-        'cn': '📑 研报增量解读',
-        'schedule': '已并入 announcement_scan(18:35),仅手动/MCP',
-        'category': '核心',
-        'default': False,  # 2026-06-25 已并入 announcement_scan 三合一,不再单独注册;模块保留供手动
-        'description': '[已并入 announcement_scan,不再定时] 拉近10天券商研报,AI 提炼评级方向/核心逻辑',
-    },
     # exit_advice / portfolio_health_ai 已并入 afternoon_portfolio(尾盘持仓总结 eod_review),
     # 不再单独定时;模块仍供 MCP(exit_advice/portfolio_health_check)与前端"🧹清仓助手"页按需调用。
-    'stock_monitor_check': {
-        'cn': '📊 持仓进场区间监控',
-        'schedule': '已退役(2026-06-25),仅手动/MCP',
-        'category': '核心',
-        'default': False,  # 2026-06-25 退役:盯进场区间价值低,不再注册;急跌兜底已并入 11:20 noon_portfolio
-        'description': '[已退役,不再定时] 检查监控股是否进入进场区间;急跌监控已移到 noon_portfolio',
-    },
     'daily_backtest': {
         'cn': '📐 盘后策略回测',
         'schedule': '19:00 每日',

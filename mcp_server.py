@@ -664,27 +664,28 @@ _TASKS = {
     'morning_portfolio':        ('☀️ 早盘持仓分析(买卖提示+浮盈+异动)', '09:50'),
     'mx_selection_review':      ('🔍 妙想第二意见', '10:30'),
     'noon_report':              ('☀️ 午间报告', '12:00'),
-    'ai_rec_check':             ('🤖 AI推荐检查', 'every:30m'),
-    'stock_monitor_check':      ('👀 股价监控检查', 'every:5m'),
     'afternoon_portfolio':      ('📊 尾盘持仓分析', '14:30'),
-    'portfolio_indicator_snapshot': ('📸 组合指标快照', '15:45'),
-    'daily_market_snapshot':    ('📷 每日市场快照', '15:50'),
-    'factor_collection':        ('🧬 因子收集', '15:55'),
-    'dragon_tiger_archive':     ('🐉 龙虎榜归档', '16:00'),
-    'daily_backtest':           ('📐 盘后策略回测', '16:30'),
+    'kline_prefetch':           ('📥 K线+因子缓存预热(盘后链头)', '16:30'),
+    'factor_collection':        ('🧬 因子收集', '16:40'),
+    'portfolio_indicator_snapshot': ('📸 组合指标快照', '16:45'),
+    'daily_market_snapshot':    ('📷 每日市场快照', '16:48'),
+    'eod_outcomes':             ('🎯 盘后后验(推荐池回填+决策信号后验)', '16:55'),
     'mx_daily_analysis':        ('🌙 妙想收盘复盘', '17:00'),
+    'sector_rotation':          ('📈 题材轮动雷达', '17:30'),
+    'dragon_tiger_archive':     ('🐉 龙虎榜归档', '18:30'),
+    'announcement_scan':        ('📢 公告/研报/解禁三合一预警', '18:35'),
+    'daily_backtest':           ('📐 盘后策略回测', '19:00'),
     'daily_pnl_snapshot':       ('💰 当日盈亏快照', '22:30'),
-    'fund_nav_refresh':         ('🔄 基金净值刷新', '22:00'),
-    'fund_target_check':        ('🎯 基金目标检查', '22:05'),
+    'fund_evening':             ('🏦 基金晚间(净值入库+止盈检查)', '22:00'),
     'pg_backup':                ('💾 数据库备份', '02:00'),
     'rag_ingest':               ('📚 知识库更新', '02:30'),
     'weekly_analysis':          ('📊 周日持仓综合周报', '周日 15:00'),
     'wf_weekly_backtest':       ('⏪ 每周回测', '周日 20:00'),
     'weekly_db_cleanup':        ('🧹 每周数据清理', '周一 03:00'),
     'ai_eval_weekly':           ('📈 AI推荐周评估', '周一 09:30'),
-    # 2026-06-12 任务整合:晨报并入 morning_strategy;预热/风险/形态并入 portfolio_indicator_snapshot;
-    # 策略扫描→daily_backtest尾部、候选池→unified_selection尾部、止盈阶梯→afternoon_portfolio尾部、
-    # 加仓审核→stock_monitor_check尾部(均受原开关控制);其余冗余任务已删除。
+    # 2026-06-26 任务整合:ai_rec_check+decision_signal_outcomes→eod_outcomes;fund_nav_refresh+
+    # fund_target_check→fund_evening;stock_monitor_check/selection_debate/lockup_radar/research_digest
+    # 已退役删除(红蓝→unified_selection、解禁/研报→announcement_scan、急跌→noon/mx/afternoon 尾部)。
 }
 
 
