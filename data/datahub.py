@@ -891,21 +891,37 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         except Exception:
             pass
 
-    # baostock(证券宝)免费全历史(1990至今):**长周期(≥2y)优先**(解新浪~365根的回测深度限制),
-    # 短周期作末位独立兜底(腾讯/新浪/东财全挂时的免费源)。串行+惰性登录,未装返空自动跳过。
+    # baostock(证券宝)免费全历史(1990至今)+ 稳定(不像东财常被反爬封):
+    #   · 长周期(≥2y)居首拿全历史(解新浪~365根回测深度限制);
+    #   · 短周期排**新浪之后、东财之前** —— 新浪(实测可达+支持并发+有当日bar)当主源,baostock 作首选兜底
+    #     **优先于常被封的东财**(用户诉求:东财老被限,稳定免费源能用就先用)。
+    #   ⚠️ baostock 不放第一:它(a)不可并发(全局锁串行,批量会卡)(b)当日K线 17:30 才入库(16:30 预热缺今日)。
     _long_hist = period in ('2y', '3y', '5y')
+    # 长历史(≥2y)**直调 baostock**(绕过健康路由):只有 baostock 能给全量(新浪/东财日K均~365根上限),
+    # 而 _route 按健康度排序会让健康的新浪抢先返回 365 根 → 静态把 baostock 放第一也没用。故长历史直接
+    # 优先调 baostock,非空即用、写缓存返回;未装/失败/空 再落下面常规多源链(只能~365,有数据胜无)。
+    if _long_hist:
+        _bl = _sanitize_kline(_kline_baostock(code, period, interval, adjust))
+        if isinstance(_bl, pd.DataFrame) and not _bl.empty:
+            if use_cache:
+                try:
+                    _os.makedirs(_KLINE_DIR, exist_ok=True)
+                    _bl.to_pickle(cache_f)
+                except Exception:
+                    pass
+            return _bl
 
     if adjust == 'raw':
         def _f():
             df = _fetcher().get_stock_data(code, period, interval)   # StockDataFetcher 默认 raw
             return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
-        # fetcher(新浪 raw)在前(服务器实测可达), east(东财 fqt=0)兜底, mootdx 独立协议, baostock 全历史/兜底
-        _srcs = [("fetcher", _f),
-                 ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
-                 ("mootdx", lambda: _kline_mootdx(code, period, interval))]
-        _bao = ("baostock", lambda: _kline_baostock(code, period, interval, 'raw'))
-        _srcs = ([_bao] + _srcs) if _long_hist else (_srcs + [_bao])   # 长周期 baostock 优先
-        df = _route("kline", _srcs, empty=pd.DataFrame(), timeout=45)
+        # 新浪主源(可达+并发+有当日bar)→ baostock(免费稳定,**优先于常被封的东财**)→ 东财 → mootdx
+        df = _route("kline",
+                    [("fetcher", _f),
+                     ("baostock", lambda: _kline_baostock(code, period, interval, 'raw')),
+                     ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
+                     ("mootdx", lambda: _kline_mootdx(code, period, interval))],
+                    empty=pd.DataFrame(), timeout=45)
     else:  # qfq:east/akshare 走东财,sina_qfq/baostock_qfq 真非东财兜底
         # ⚡ 健康度短路(2026-06-25 修):qfq 源在**活跃冷却期**(连续失败,冷却额外 -1.0 → score<-0.5)
         # 时每只吃满源超时(原 45s×2=90s)会拖垮 unified_selection 等批量任务 → 直接走 raw,0 成本降级。
@@ -922,16 +938,17 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                 and _health('kline_qfq:tickflow_qfq', _now) < -0.5
                 and _health('kline_qfq:baostock_qfq', _now) < -0.5):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
-        # 短超时 10s(qfq 取不到快速 fallback,不再每只吃满 45s)。东财封时 east/akshare 冷却沉底,
-        # sina_qfq→tickflow_qfq→baostock_qfq(均真非东财)自动靠健康度上位 → 技术分析仍有真 qfq,不必退 raw。
-        # tickflow 限流慢;baostock 串行+登录慢,故放末位:仅前面源全挂时才轮到。长周期(≥2y)baostock 提前。
-        _srcs_q = [("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq')),
-                   ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval)),
-                   ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval)),
-                   ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))]
+        # 短超时 10s。**优先真非东财源**(用户诉求:东财常被封):sina_qfq(新浪,快)→ baostock_qfq(稳,全历史)
+        # → east_qfq/akshare_qfq(东财,降级)→ tickflow_qfq(限流慢,末位)。东财封时前两个非东财源顶上,
+        # 技术分析仍有真 qfq、不必退 raw。长周期(≥2y)baostock_qfq 居首拿全历史。
+        _sina_q = ("sina_qfq", lambda: _kline_sina_qfq(code, period, interval))
         _bao_q = ("baostock_qfq", lambda: _kline_baostock(code, period, interval, 'qfq'))
-        _srcs_q = ([_bao_q] + _srcs_q) if _long_hist else (_srcs_q + [_bao_q])
-        df = _route("kline_qfq", _srcs_q, empty=pd.DataFrame(), timeout=10)
+        _east_q = ("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq'))
+        _aksh_q = ("akshare_qfq", lambda: _kline_akshare_qfq(code, period, interval))
+        _tick_q = ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))
+        # 长历史(≥2y)已在上面直调 baostock,这里只管常规多源(短周期/长历史 baostock 失败的兜底)
+        df = _route("kline_qfq", [_sina_q, _bao_q, _east_q, _aksh_q, _tick_q],
+                    empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # 取数成功 → 写缓存(刷新 mtime)返回
     if isinstance(df, pd.DataFrame) and not df.empty:
