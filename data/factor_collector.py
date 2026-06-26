@@ -252,7 +252,7 @@ def compute_technical(closes: np.ndarray) -> Dict:
 # ═══════════════════════════════════════════════════
 
 def collect(do_score: bool = False):
-    from a_stock_data_adapter import adapter
+    import datahub  # 统一数据层:行情/估值走 datahub(熔断+超时+多源兜底+缓存),不再裸调 adapter
     from portfolio_db_pg import portfolio_db
 
     conn = psycopg2.connect(**DB)
@@ -264,7 +264,7 @@ def collect(do_score: bool = False):
     print(f'📊 采集 {len(codes)} 只股票因子数据 ({today})')
 
     # 批量行情
-    quotes = adapter.get_quotes(codes)
+    quotes = datahub.quotes(codes)
     print(f'  行情获取: {len(quotes)}只')
 
     # 逐只处理
@@ -293,7 +293,7 @@ def collect(do_score: bool = False):
         # —— 估值因子 ——
         val = {}
         try:
-            val = adapter.get_full_valuation(code) or {}
+            val = datahub.full_valuation(code) or {}   # 走 _route:同花顺连续失败秒级熔断,不再 83 只逐只干等超时
         except Exception:
             pass
 

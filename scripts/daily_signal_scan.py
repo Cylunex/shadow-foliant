@@ -34,8 +34,8 @@ import numpy as np
 import pandas as pd
 from io import StringIO
 
-from a_stock_data_adapter import adapter, _eastmoney_datacenter, _industry_comparison
-from data_source_manager import data_source_manager
+import datahub  # 统一数据层:行情/龙虎/板块/估值/资金流/强势股一律走 datahub(熔断+超时+多源兜底)
+from a_stock_data_adapter import _eastmoney_datacenter  # 龙虎榜 RPT 明细,datahub 暂无对应,保留私有源
 
 # ═══════════════════════════════════════════════════════════
 #  通知层 — QQ Webhook 优先，邮件兜底
@@ -260,7 +260,7 @@ def dragon_tiger_report():
                 net = (row.get("BILLBOARD_NET_AMT") or 0) / 10000
                 if abs(net) > 3000:
                     try:
-                        dtb = adapter.get_dragon_tiger(code, trade_date, 30)
+                        dtb = datahub.dragon_tiger_stock(code, trade_date, 30)
                         inst = dtb.get("institution", {})
                         if inst.get("net_amt", 0) != 0:
                             inst_net = inst["net_amt"]
@@ -317,7 +317,7 @@ def smart_stock_picks(session_name="早盘", top_n=10):
             if c not in wide_watchlist:
                 wide_watchlist.append(c)
 
-        quotes = adapter.get_quotes(wide_watchlist)
+        quotes = datahub.quotes(wide_watchlist)
         if quotes:
             # 估值筛选: PE 0-40, 换手率>0.3%
             pe_filtered = []
@@ -349,7 +349,7 @@ def smart_stock_picks(session_name="早盘", top_n=10):
     try:
         lines.append("  ")
         lines.append("📈 领涨行业 TOP 5")
-        ranking = adapter.get_industry_ranking(5)
+        ranking = datahub.sector_ranking("industry", 5)
         for r in ranking.get("top", [])[:5]:
             lines.append(
                 f"  {r['rank']}. {r['name']}: {r['change_pct']}% "
@@ -365,7 +365,7 @@ def smart_stock_picks(session_name="早盘", top_n=10):
         margin_data = []
         for code in list(candidates)[:8]:
             try:
-                margin = adapter.get_margin_trading(code, 5)
+                margin = datahub.margin(code, 5)
                 if margin and len(margin) >= 2:
                     latest = margin[0]['rzye']
                     prev = margin[1]['rzye']
@@ -479,7 +479,7 @@ def _calc_stock_scores(quotes, portfolio_data):
     """综合打分 — 估值+成长+情绪+规模，截面排名
 
     Args:
-        quotes: adapter.get_quotes() 结果，code→行情dict
+        quotes: datahub.quotes() 结果，code→行情dict
         portfolio_data: code→{name,qty,cost,return_pct,pos_value}
 
     Returns:
@@ -521,7 +521,7 @@ def _calc_stock_scores(quotes, portfolio_data):
         peg = None
         cagr = 0
         try:
-            val = adapter.get_full_valuation(code)
+            val = datahub.full_valuation(code)
             if val:
                 peg = val.get('peg')
                 cagr = val.get('cagr_pct') or 0
@@ -643,7 +643,7 @@ def portfolio_analysis(session_name="持仓"):
     # ─── 行情快照 ───
     try:
         portfolio_codes = get_portfolio_codes()
-        quotes = adapter.get_quotes(portfolio_codes)
+        quotes = datahub.quotes(portfolio_codes)
         if quotes:
             # ── 综合打分（估值+成长+情绪+规模） ──
             scores = _calc_stock_scores(quotes, portfolio_data)
@@ -780,7 +780,7 @@ def portfolio_analysis(session_name="持仓"):
         flow_anomalies = []
         for code in portfolio_codes[:10]:
             try:
-                flow = adapter.get_fund_flow_history(code)
+                flow = datahub.capital_flow(code)
                 if flow and len(flow) >= 5:
                     recent5 = sum(d['main_net'] for d in flow[-5:])
                     if abs(recent5) > 50000000:  # 5000万
@@ -841,7 +841,7 @@ def noon_report():
             "sh000688": "科创50",
             "sh000300": "沪深300",
         }
-        idx_data = adapter.get_quotes(list(indices.keys()))
+        idx_data = datahub.quotes(list(indices.keys()))
         lines.append("🏛️ 大盘指数")
         for code, name in indices.items():
             q = idx_data.get(code, {})
@@ -858,7 +858,7 @@ def noon_report():
 
     try:
         # ─── 板块排名 ───
-        ranking = adapter.get_industry_ranking(10)
+        ranking = datahub.sector_ranking("industry", 10)
         if ranking and isinstance(ranking, dict):
             lines.append("  ")
             lines.append("📂 上午板块排名")
@@ -881,14 +881,14 @@ def noon_report():
 
     try:
         # ─── 热门股 ───
-        hot = adapter.get_hot_stocks()
+        hot = datahub.hot_stocks()
         if hot is not None and len(hot) > 0:
             lines.append("  ")
             lines.append("🔥 热门强势股TOP10")
             top_hot = hot.head(10)
             # get_hot_stocks() 只返回 代码/名称/题材，需要单独拉实时行情补涨幅和成交额
             hot_codes = [row.get("代码", row.get("code", "")) for _, row in top_hot.iterrows()]
-            hot_quotes = adapter.get_quotes(hot_codes) if hot_codes else {}
+            hot_quotes = datahub.quotes(hot_codes) if hot_codes else {}
             for _, row in top_hot.iterrows():
                 symbol = row.get("代码", row.get("code", ""))
                 name = row.get("名称", row.get("name", ""))
@@ -913,7 +913,7 @@ def noon_report():
             pq = {}
             for i in range(0, len(codes), 20):
                 try:
-                    pq.update(adapter.get_quotes(codes[i:i + 20]) or {})
+                    pq.update(datahub.quotes(codes[i:i + 20]) or {})
                 except Exception:
                     continue
             chgs = []

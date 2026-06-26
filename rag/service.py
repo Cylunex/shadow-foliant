@@ -118,14 +118,13 @@ def ingest_recommendations() -> int:
 def ingest_reports(symbols: List[str], per: int = 5) -> int:
     """实时抓个股研报 → 摄取(按需)。"""
     try:
-        from a_stock_data_adapter import AStockDataAdapter
-        ad = AStockDataAdapter()
+        import datahub  # 研报走统一数据层(stock_reports 包的就是 adapter.get_reports,多套熔断/超时)
     except Exception:
         return 0
     docs = []
     for sym in symbols:
         try:
-            for r in (ad.get_reports(sym, max_pages=1) or [])[:per]:
+            for r in (datahub.stock_reports(sym, max_pages=1) or [])[:per]:
                 title = r.get('title') or r.get('报告名称') or ''
                 docs.append({'source_type': 'report', 'ref_id': f"rpt_{sym}_{hash(title) & 0xffffff}",
                              'title': title[:120], 'content': (title + ' ' + str(r.get('summary', '')))[:2000],
