@@ -118,7 +118,9 @@ def build_briefing(sell_n: int = 5, buy_n: int = 6) -> dict:
            "buy": [], "sell": [], "hold_buy": [], "scanned": 0}
     try:
         from multi_factor_screener import screen_index_cached
-        r = _bounded(lambda: screen_index_cached(index_code="000300", n=buy_n, add_sector_leaders=True, workers=8),
+        # cache_only:晨报(09:00)也只读盘后焐好的多因子缓存,冷了就空着这段,不在早盘现拉 300 只
+        r = _bounded(lambda: screen_index_cached(index_code="000300", n=buy_n, add_sector_leaders=True,
+                                                 workers=1, cache_only=True),
                      25, {}) or {}
         buy = [{"code": x.get("symbol"), "composite": round(float(x.get("composite") or 0), 3)}
                for x in (r.get("top") or [])[:buy_n]]

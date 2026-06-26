@@ -360,7 +360,8 @@ def _rescore_pool(rows: List[Dict], weights: Dict[str, float], n: int) -> List[D
 def screen_index_cached(index_code: str = '000300', n: int = 15,
                         add_sector_leaders: bool = True, limit: int = _CANON_LIMIT,
                         workers: int = 8, force: bool = False,
-                        ttl: int = _CACHE_TTL, style: str = 'balanced') -> Dict[str, Any]:
+                        ttl: int = _CACHE_TTL, style: str = 'balanced',
+                        cache_only: bool = False) -> Dict[str, Any]:
     """带 Redis 缓存的 screen_index。同指数共享一份"已打分池",按 n 切片返回。
 
     - force=True：跳过读缓存（强制现算），仍写回（供 jobs 周扫预热）。
@@ -379,6 +380,10 @@ def screen_index_cached(index_code: str = '000300', n: int = 15,
             base = hit
             base['cached'] = True
     if base is None:
+        if cache_only:
+            # cache_only:盘后预热缓存冷(失败/Redis挂)→ 早盘不现算 300 只,直接跳过(空 top)
+            return {'top': [], 'index_code': index_code, 'cached': False,
+                    'cache_only_miss': True, 'style': style}
         base = screen_index(index_code=index_code, n=max(n, _CANON_LIMIT),
                             limit=limit, add_sector_leaders=add_sector_leaders, workers=workers)
         if base.get('top'):

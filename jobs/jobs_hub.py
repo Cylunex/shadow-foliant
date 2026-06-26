@@ -3237,6 +3237,16 @@ def task_kline_prefetch():
         except Exception as e:
             print(f'[kline_prefetch] 因子焐热不可用: {e}')
         print(f'[kline_prefetch] 因子(含估值/问财)焐热 {vwarm}/{len(pool)}')
+
+        # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好沪深300横截面排名,写长 TTL(到次日早盘)。
+        # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉 300 只**。
+        try:
+            from multi_factor_screener import screen_index_cached as _mfs
+            _mfr = _mfs(index_code='000300', n=25, add_sector_leaders=True, workers=1,
+                        force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
+            print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
+        except Exception as e:
+            print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
         _log_run(job, 'success' if ok else 'error',
                  error=f'{msg} fv={vwarm}' if ok else f'no_kline_warmed; {msg}',
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -3535,8 +3545,10 @@ def task_unified_selection():
         # 加上 InStock 基因组初期还没积累 → TOP 15 全是多因子, 失去多策略综合的意义)。
         try:
             from multi_factor_screener import screen_index_cached
+            # cache_only:只读盘后(kline_prefetch 尾)焐好的多因子缓存;冷了(盘后失败)就跳过多因子,
+            # **绝不在 09:45 选股高峰现拉 300 只沪深300**(那是当年东财被封 + 雪崩的量源)。
             mf_result = screen_index_cached(index_code='000300', n=25, add_sector_leaders=True,
-                                            workers=1, force=False, ttl=3600)
+                                            workers=1, force=False, ttl=3600, cache_only=True)
             for item in mf_result.get('top', []):
                 sym = item.get('symbol', '')
                 if sym:
