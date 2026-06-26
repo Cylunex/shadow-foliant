@@ -1385,7 +1385,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
-    'main_force_prefetch':       180,    # 盘前预取主力选股:问财90s + akshare兜底,给3分钟
+    'strategy_prefetch':         600,    # 盘前预取 5 大问财策略(串行,各≤90s);慢慢来,给足 10 分钟
     'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
@@ -1672,11 +1672,14 @@ def _run_strategy_scans() -> dict:
     """执行5大策略扫描，返回汇总结果。单个策略失败不影响其他，并推送告警。
     每个策略调用都套 120s 硬超时(外层兜底, 防底层卡死绕过内部超时)。"""
     results = {}
+    # 09:45 选股优先读盘前 strategy_prefetch 写的当日缓存(避开问财高峰/熔断);未命中才现调(120s 兜底)。
+    import strategy_cache as _sc
     try:
         from low_price_bull_selector import LowPriceBullSelector
         ok, df, msg = _call_with_hard_timeout(
             '低价擒牛',
-            lambda: LowPriceBullSelector().get_low_price_stocks(top_n=5),
+            lambda: _sc.cached('低价擒牛',
+                               lambda: LowPriceBullSelector().get_low_price_stocks(top_n=5)),
             timeout=120)
         results['低价擒牛'] = (ok, df, msg)
         if not ok:
@@ -1688,7 +1691,8 @@ def _run_strategy_scans() -> dict:
         from small_cap_selector import SmallCapSelector
         ok, df, msg = _call_with_hard_timeout(
             '小市值',
-            lambda: SmallCapSelector().get_small_cap_stocks(top_n=5),
+            lambda: _sc.cached('小市值',
+                               lambda: SmallCapSelector().get_small_cap_stocks(top_n=5)),
             timeout=120)
         results['小市值'] = (ok, df, msg)
         if not ok:
@@ -1700,7 +1704,8 @@ def _run_strategy_scans() -> dict:
         from profit_growth_selector import ProfitGrowthSelector
         ok, df, msg = _call_with_hard_timeout(
             '净利增长',
-            lambda: ProfitGrowthSelector().get_profit_growth_stocks(top_n=5),
+            lambda: _sc.cached('净利增长',
+                               lambda: ProfitGrowthSelector().get_profit_growth_stocks(top_n=5)),
             timeout=120)
         results['净利增长'] = (ok, df, msg)
         if not ok:
@@ -1712,7 +1717,8 @@ def _run_strategy_scans() -> dict:
         from value_stock_selector import ValueStockSelector
         ok, df, msg = _call_with_hard_timeout(
             '低估值',
-            lambda: ValueStockSelector().get_value_stocks(top_n=5),
+            lambda: _sc.cached('低估值',
+                               lambda: ValueStockSelector().get_value_stocks(top_n=5)),
             timeout=120)
         results['低估值'] = (ok, df, msg)
         if not ok:
@@ -1724,7 +1730,7 @@ def _run_strategy_scans() -> dict:
         from main_force_selector import MainForceStockSelector
         def _do_main_force():
             mf = MainForceStockSelector()
-            # 读盘前 09:15 main_force_prefetch 写的当日缓存;冷了才现调问财(选股高峰不卡问财)
+            # 读盘前 09:10 strategy_prefetch 写的当日缓存;冷了才现调问财(选股高峰不卡问财)
             r_ok, r_df, r_msg = mf.get_main_force_stocks_cached(days_ago=5, use_cache=True)
             if r_ok and r_df is not None and len(r_df) > 0:
                 r_df = mf.get_top_stocks(r_df, top_n=5)
@@ -3375,26 +3381,49 @@ def _scan_holdings_with_snapshot():
 # 🆕 整合后的新任务（原始任务函数保留不动，仅此为新的调度入口）
 # =====================================================================
 
-def task_main_force_prefetch():
-    """🏦 盘前预取主力选股(问财全市场"主力资金净流入排名")→ 写当日缓存。
-    09:45 unified_selection 的"主力资金"策略读这份缓存,不在选股高峰现调问财
-    (问财熔断/卡死时主力选股会退化成"按市值选股")。非交易日跳过。失败不告警:09:45 自动 fallback 现调。"""
-    job = 'main_force_prefetch'
+def task_strategy_prefetch():
+    """🏦 盘前预取**全部 5 大问财策略** → 写当日缓存,09:45 unified_selection 读暖、不在选股高峰现调问财
+    (问财熔断/卡死时整层选股不再哑火)。2026-06-26 由原 main_force_prefetch 扩成 5 策略一起预热。
+    **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不告警(09:45 自动 fallback 现调)。
+      ① 主力资金(走 main_force_selector 自带当日缓存)
+      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(走 strategy_cache 当日缓存)"""
+    job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    done, total = 0, 5
+    # ① 主力资金:自带缓存,强制现取回写
     try:
         from main_force_selector import MainForceStockSelector
-        mf = MainForceStockSelector()
-        ok, df, msg = mf.get_main_force_stocks_cached(days_ago=5, use_cache=False)  # 强制现取并回写
+        ok, df, msg = MainForceStockSelector().get_main_force_stocks_cached(days_ago=5, use_cache=False)
         n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
-        print(f'[main_force_prefetch] {"✅" if n else "⚠️"} 预取主力选股 {n} 只 ({msg})', flush=True)
-        _log_run(job, 'success' if n else 'error',
-                 error=None if n else f'prefetch_empty: {msg}',
-                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+        if n:
+            done += 1
+        print(f'[strategy_prefetch] {"✅" if n else "⚠️"} 主力资金 {n} 只 ({msg})', flush=True)
     except Exception as e:
-        _log_run(job, 'error', error=str(e), started_at=started,
-                 finished_at=datetime.now().isoformat(), notify=False)
+        print(f'[strategy_prefetch] ⚠️ 主力资金异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+    # ② 其余 4 个问财策略:走通用 strategy_cache,各自现取回写当日缓存(串行)
+    import strategy_cache as _sc
+    _jobs = [
+        ('低价擒牛', 'low_price_bull_selector', 'LowPriceBullSelector', 'get_low_price_stocks'),
+        ('小市值',   'small_cap_selector',      'SmallCapSelector',     'get_small_cap_stocks'),
+        ('净利增长', 'profit_growth_selector',  'ProfitGrowthSelector', 'get_profit_growth_stocks'),
+        ('低估值',   'value_stock_selector',    'ValueStockSelector',   'get_value_stocks'),
+    ]
+    for name, mod, cls, fn in _jobs:
+        try:
+            _m = __import__(mod)
+            sel = getattr(_m, cls)()
+            ok, df, msg = _sc.cached(name, lambda s=sel, f=fn: getattr(s, f)(top_n=5), use_cache=False)
+            n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
+            if n:
+                done += 1
+            print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
+        except Exception as e:
+            print(f'[strategy_prefetch] ⚠️ {name} 异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+    _log_run(job, 'success' if done else 'error',
+             error=f'prefetched {done}/{total}' if done else 'all_empty(问财不可达?09:45 现调兜底)',
+             started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
 def task_unified_selection():
@@ -4484,7 +4513,7 @@ def register_default_jobs():
     hub.register('fund_valuation_signal',       '09:05', task_fund_valuation_signal)
 
     # ---- 09:45 整合选股 ----
-    hub.register('main_force_prefetch',         '09:15', task_main_force_prefetch)  # 盘前预取主力选股问财结果入缓存
+    hub.register('strategy_prefetch',           '09:10', task_strategy_prefetch)  # 盘前预取 5 大问财策略入缓存(拉早到 09:10,留足 35min)
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
