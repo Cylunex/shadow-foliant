@@ -173,10 +173,10 @@ def collect_fund_flow_context(symbol: str, days: int = 60) -> Dict[str, Any]:
     except Exception as e:
         ctx['errors'].append(f'individual_flow: {e}')
 
-    # adata 历史日度资金流（备用）
+    # adata 历史日度资金流（备用,走 datahub 统一数据层熔断/超时）
     try:
-        from data_source_manager import data_source_manager
-        rows = data_source_manager.get_capital_flow_a_data(symbol)
+        import datahub
+        rows = datahub.capital_flow_adata(symbol)
         ctx['adata_capital_flow'] = rows[:days] if rows else []
     except Exception as e:
         ctx['errors'].append(f'adata_capital_flow: {e}')
@@ -251,10 +251,8 @@ def collect_fundamentals_context(symbol: str) -> Dict[str, Any]:
         ctx['errors'].append(f'quarterly: {e}')
 
     try:
-        from data_source_manager import data_source_manager
         import datahub
-        if hasattr(data_source_manager, 'get_valuation_a_stock'):
-            ctx['valuation'] = datahub.valuation(symbol)
+        ctx['valuation'] = datahub.valuation(symbol)
     except Exception as e:
         ctx['errors'].append(f'valuation: {e}')
 
@@ -321,16 +319,14 @@ def collect_sentiment_context(symbol: str = None, lookback_days: int = 30) -> Di
 
     if symbol:
         try:
-            from data_source_manager import data_source_manager
-            ctx['margin'] = data_source_manager.get_securities_margin_a_data(symbol)
+            import datahub
+            ctx['margin'] = datahub.margin(symbol)
         except Exception as e:
             ctx['errors'].append(f'margin: {e}')
 
         try:
-            from data_source_manager import data_source_manager
             import datahub
-            if hasattr(data_source_manager, 'get_stock_news_a_stock'):
-                ctx['news'] = datahub.stock_news(symbol, 20)
+            ctx['news'] = datahub.stock_news(symbol, 20)
         except Exception as e:
             ctx['errors'].append(f'news: {e}')
 
@@ -407,10 +403,8 @@ def collect_risk_context(symbol: str) -> Dict[str, Any]:
         ctx['errors'].append(f'risk_data: {e}')
 
     try:
-        from data_source_manager import data_source_manager
         import datahub
-        if hasattr(data_source_manager, 'get_lockup_expiry_a_stock'):
-            ctx['lockup'] = datahub.lockup_expiry(symbol)
+        ctx['lockup'] = datahub.lockup_expiry(symbol)
     except Exception as e:
         ctx['errors'].append(f'lockup: {e}')
 

@@ -64,8 +64,8 @@ def _p_signals(ctx):
 
 
 def _p_flow(ctx):
-    from data_source_manager import data_source_manager as M
-    return M.get_capital_flow_a_data(ctx["code"])
+    import datahub
+    return datahub.capital_flow_adata(ctx["code"])
 
 
 def _p_kline(ctx):

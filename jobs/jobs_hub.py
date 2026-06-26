@@ -1912,13 +1912,7 @@ def task_morning_strategy():
         dragon_tiger_summary = '（无数据）'
         dragon_tiger_detailed = ''
         try:
-            from a_stock_data_adapter import _eastmoney_datacenter
-            dt_data = _eastmoney_datacenter(
-                'RPT_DAILYBILLBOARD_DETAILSNEW',
-                filter_str=f"(TRADE_DATE>='{lookback_date}')(TRADE_DATE<='{lookback_date}')",
-                page_size=200,
-                sort_columns='BILLBOARD_NET_AMT', sort_types='-1',
-            )
+            dt_data = datahub.dragon_tiger_detail(lookback_date)
             if dt_data:
                 # AI prompt 用简版摘要
                 lines = []

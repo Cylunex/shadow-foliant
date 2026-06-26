@@ -52,8 +52,8 @@ def latest_indicators(code: str, period: str = '1y') -> Dict[str, Any]:
 @mcp.tool()
 def capital_flow(code: str) -> Any:
     """个股资金流向(主力/超大单等)。"""
-    from data_source_manager import data_source_manager as M
-    return M.get_capital_flow_a_data(code)
+    import datahub
+    return datahub.capital_flow_adata(code)
 
 
 @mcp.tool()

@@ -34,8 +34,7 @@ import numpy as np
 import pandas as pd
 from io import StringIO
 
-import datahub  # 统一数据层:行情/龙虎/板块/估值/资金流/强势股一律走 datahub(熔断+超时+多源兜底)
-from a_stock_data_adapter import _eastmoney_datacenter  # 龙虎榜 RPT 明细,datahub 暂无对应,保留私有源
+import datahub  # 统一数据层:行情/龙虎/板块/估值/资金流/强势股/龙虎榜明细一律走 datahub
 
 # ═══════════════════════════════════════════════════════════
 #  通知层 — QQ Webhook 优先，邮件兜底
@@ -210,12 +209,7 @@ def dragon_tiger_report():
 
     # 1. 全市场龙虎榜
     try:
-        data = _eastmoney_datacenter(
-            "RPT_DAILYBILLBOARD_DETAILSNEW",
-            filter_str=f"(TRADE_DATE>='{trade_date}')(TRADE_DATE<='{trade_date}')",
-            page_size=200,
-            sort_columns="BILLBOARD_NET_AMT", sort_types="-1",
-        )
+        data = datahub.dragon_tiger_detail(trade_date)
         if data:
             lines.append(f"📊 全市场龙虎榜 ({len(data)}条)")
             lines.append("───────────────")

@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import config
-from data_source_manager import data_source_manager
 from notification_service import NotificationService
 import sqlite3
 

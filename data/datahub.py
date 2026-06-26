@@ -1192,6 +1192,14 @@ def capital_flow_minute(code: str) -> List[dict]:
     return _route("capital_flow_minute", [("a_stock", lambda: _adapter().get_fund_flow_minute(code))], empty=[]) or []
 
 
+def capital_flow_adata(code: str) -> List[dict]:
+    """个股历史日度资金流(adata 源,各档净流入原始记录)。与 capital_flow(东财 push2his)互补:
+    形状/列名是 adata 原始 records,非 canonical 的 date/main_net/…。AI 分析上下文/MCP 用作补充源。
+    单独成域:adata 与东财字段不同构,合并进 capital_flow 会污染口径,故独立 _route(自带熔断/超时)。"""
+    from data_source_manager import data_source_manager as dsm
+    return _route("capital_flow_adata", [("adata", lambda: dsm.get_capital_flow_a_data(code))], empty=[]) or []
+
+
 def dragon_tiger(trade_date: str = None) -> List[dict]:
     """全市场龙虎榜明细(指定/最近交易日)。list[dict]。"""
     from data_source_manager import data_source_manager as dsm
@@ -1202,6 +1210,22 @@ def dragon_tiger_stock(code: str, trade_date: str = None, look_back: int = 30) -
     """个股龙虎榜上榜记录。dict。"""
     return _route("dragon_tiger_stock",
                   [("a_stock", lambda: _adapter().get_dragon_tiger(code, trade_date, look_back))], empty={}) or {}
+
+
+def dragon_tiger_detail(trade_date: str = None, page_size: int = 200) -> List[dict]:
+    """全市场龙虎榜明细(东财数据中心 RPT_DAILYBILLBOARD_DETAILSNEW),按净买入降序。list[dict],
+    键为东财 RPT 原字段(SECURITY_CODE/SECURITY_NAME_ABBR/BILLBOARD_NET_AMT/BILLBOARD_BUY_AMT/
+    BILLBOARD_SELL_AMT/EXPLANATION/CHANGE_RATE…)。与 dragon_tiger(走 dsm,字段不同构)互补,
+    此函数保 RPT 原字段口径供盘前龙虎榜报告/盘后综述用。"""
+    if not trade_date:
+        return []
+    flt = f"(TRADE_DATE>='{trade_date}')(TRADE_DATE<='{trade_date}')"
+
+    def _q():
+        from a_stock_data_adapter import _eastmoney_datacenter
+        return _eastmoney_datacenter('RPT_DAILYBILLBOARD_DETAILSNEW', filter_str=flt,
+                                     page_size=page_size, sort_columns='BILLBOARD_NET_AMT', sort_types='-1')
+    return _route("dragon_tiger_detail", [("em_datacenter", _q)], empty=[]) or []
 
 
 def margin(code: str, page_size: int = 30) -> List[dict]:

@@ -235,8 +235,8 @@ def stock_insights(code: str):
             return analyze_forensics(collect_factors(code) or {})
 
         def flow():
-            from data_source_manager import data_source_manager as M
-            return M.get_capital_flow_a_data(code)
+            import datahub
+            return datahub.capital_flow_adata(code)
 
         tasks = {"chan": chan, "chip": chip, "signals": signals, "forensics": forensics, "flow": flow}
         with ThreadPoolExecutor(max_workers=5) as ex:
