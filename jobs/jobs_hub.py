@@ -1385,7 +1385,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
-    'strategy_prefetch':         600,    # 盘前预取 5 大问财策略(串行,各≤90s);慢慢来,给足 10 分钟
+    'strategy_prefetch':         900,    # 盘前预取 5 问财+5 妙想(串行,各≤90s);慢慢来,给足 15 分钟
     'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
@@ -3382,16 +3382,17 @@ def _scan_holdings_with_snapshot():
 # =====================================================================
 
 def task_strategy_prefetch():
-    """🏦 盘前预取**全部 5 大问财策略** → 写当日缓存,09:45 unified_selection 读暖、不在选股高峰现调问财
-    (问财熔断/卡死时整层选股不再哑火)。2026-06-26 由原 main_force_prefetch 扩成 5 策略一起预热。
+    """🏦 盘前预取**5 大问财策略 + 5 条妙想镜像策略**(共 10)→ 写当日缓存,09:45 unified_selection 读暖、
+    不在选股高峰现调外部源(问财熔断/卡死时整层选股不再哑火;妙想是非问财独立源,双源交叉)。
     **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不告警(09:45 自动 fallback 现调)。
       ① 主力资金(走 main_force_selector 自带当日缓存)
-      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(走 strategy_cache 当日缓存)"""
+      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)
+      ③ 妙想·主力/低价/小市值/净利/低估值(妙想 selectSecurity,走 strategy_cache 当日缓存)"""
     job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    done, total = 0, 5
+    done, total = 0, 10   # 5 问财 + 5 妙想镜像
     # ① 主力资金:自带缓存,强制现取回写
     try:
         from main_force_selector import MainForceStockSelector
@@ -3421,6 +3422,20 @@ def task_strategy_prefetch():
             print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
         except Exception as e:
             print(f'[strategy_prefetch] ⚠️ {name} 异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+    # ③ 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
+    try:
+        import mx_strategies
+        for name, query, st in mx_strategies.MX_STRATEGIES:
+            try:
+                ok, df, msg = mx_strategies.run_one(name, query, st, use_cache=False)
+                n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
+                if n:
+                    done += 1
+                print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
+            except Exception as e:
+                print(f'[strategy_prefetch] ⚠️ {name} 异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+    except Exception as e:
+        print(f'[strategy_prefetch] ⚠️ 妙想镜像整体跳过: {type(e).__name__}: {str(e)[:60]}', flush=True)
     _log_run(job, 'success' if done else 'error',
              error=f'prefetched {done}/{total}' if done else 'all_empty(问财不可达?09:45 现调兜底)',
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
@@ -3450,6 +3465,27 @@ def task_unified_selection():
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
                         _add(code, 1.0, sname)
+
+        # 1b. 妙想智能选股镜像(非问财冗余源,2026-06-26):5 条妙想查询并池,与问财双源交叉——
+        # 同票被问财源+妙想源都命中 → +2分、命中2 source,排序靠前(下游合并/配额/红蓝照常筛)。
+        # 走 strategy_cache 当日缓存(盘前 strategy_prefetch 已预取);问财熔断时妙想仍出候选,整层不哑火。
+        # 开关 env UNIFIED_MX_STRATEGIES(默认开;设 false/0/no/off 关闭)。
+        if os.getenv('UNIFIED_MX_STRATEGIES', 'true').lower() not in ('false', '0', 'no', 'off'):
+            try:
+                import mx_strategies
+                _mx_hit = 0
+                for sname, (ok, df, msg) in mx_strategies.run_all(use_cache=True).items():
+                    if ok and df is not None:
+                        for _, row in df.iterrows():
+                            code = next((row[c] for c in ['代码', '股票代码', 'code', 'symbol']
+                                         if c in row.index), None)
+                            if code:
+                                _add(str(code).split('.')[0].zfill(6)[-6:], 1.0, sname)
+                                _mx_hit += 1
+                if _mx_hit:
+                    print(f'[unified_selection] 妙想镜像 5 策略并池 {_mx_hit} 条命中', flush=True)
+            except Exception as _mxe:
+                print(f'[unified_selection] 妙想镜像选股跳过(不影响选股): {type(_mxe).__name__}: {str(_mxe)[:60]}')
 
         # 2. InStock 13 策略扫描（对持仓+候选池批量跑,用基因组进化后的最优参数+组合新策略,按横截面评分加权）
         strategy_weights = {}  # 提前定义:step2 整体失败时,后面"基因组热度摘要"不至于 NameError
