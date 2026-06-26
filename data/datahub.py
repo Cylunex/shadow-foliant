@@ -546,15 +546,16 @@ _KLINE_DIR = _os.path.join(_bootstrap.DB_DIR, "kline_cache")
 
 
 def _kline_ttl() -> int:
-    """缓存有效期(秒):盘中 9:00-15:30 用 2h,其余时段 12h。
-    2026-06-25 盘中 1h→2h:历史 bar 不变、只今日最新一根会动,而盘中最新价一律走 quotes(腾讯)补,
-    2h 容差对均线/形态判断无实质影响,却能把盘中对 K线源(尤其 qfq 主源东财 push2his)的重复回源减半。"""
+    """K线磁盘缓存有效期(秒)。2026-06-26 拉长到 3 天:年K(日线序列)的历史 bar 永不变、
+    只今日最新一根会动,而盘中最新价一律走 quotes(腾讯)补 + 盘后 prefetch 每晚刷新缓存 →
+    3 天容差对均线/形态判断无实质影响,却大幅减少对 K线源(尤其 qfq 主源东财 push2his)的回源。
+    配合 kline() 的"取数失败回退历史缓存 + 缓存不主动过期删除":源全挂时永远有历史 K线可用。
+    env DATAHUB_KLINE_TTL_DAYS 可调(默认 3)。"""
     try:
-        from datetime import datetime as _dt
-        m = _dt.now().hour * 60 + _dt.now().minute
-        return 7200 if (9 * 60 <= m <= 15 * 60 + 30) else 43200
-    except Exception:
-        return 7200
+        days = float(_os.environ.get('DATAHUB_KLINE_TTL_DAYS', '3'))
+    except (TypeError, ValueError):
+        days = 3.0
+    return int(max(days, 0.01) * 86400)
 
 
 def _sanitize_kline(df: pd.DataFrame) -> pd.DataFrame:
@@ -912,16 +913,33 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                      ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))],
                     empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
-    # qfq 源全失败(典型:东财被封)→ 退回 raw(技术分析有数据胜过无),但**绝不写进 qfq 缓存**(防污染)
-    if adjust == 'qfq' and (not isinstance(df, pd.DataFrame) or df.empty):
-        return kline(code, period, interval, use_cache=use_cache, adjust='raw')
-    if use_cache and isinstance(df, pd.DataFrame) and not df.empty:
+    # 取数成功 → 写缓存(刷新 mtime)返回
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        if use_cache:
+            try:
+                _os.makedirs(_KLINE_DIR, exist_ok=True)
+                df.to_pickle(cache_f)
+            except Exception:
+                pass
+        return df
+    # —— 取数失败(空 DF)——
+    # ① 历史缓存兜底(即使已过 TTL):缓存不主动过期删除,源全挂时永远有历史 K线可用(2026-06-26)。
+    #    回测/因子/技术分析宁可用几天前的历史序列,也好过空 DF 直接断流。
+    if use_cache:
         try:
-            _os.makedirs(_KLINE_DIR, exist_ok=True)
-            df.to_pickle(cache_f)
+            if _os.path.isfile(cache_f):
+                stale = pd.read_pickle(cache_f)
+                if isinstance(stale, pd.DataFrame) and not stale.empty:
+                    _age_d = int((_time.time() - _os.path.getmtime(cache_f)) / 86400)
+                    print(f'[datahub.kline] {_norm_code(code)} {period}{suffix} 取数失败,'
+                          f'回退历史缓存(age {_age_d}d)', flush=True)
+                    return stale
         except Exception:
             pass
-    return df
+    # ② qfq 且无历史缓存可兜 → 退回 raw(技术分析有数据胜过无;raw 自身也走①历史兜底)。绝不写 qfq 缓存防污染。
+    if adjust == 'qfq':
+        return kline(code, period, interval, use_cache=use_cache, adjust='raw')
+    return df   # raw 也失败且无历史缓存 → 空 DF
 
 
 # ── K线缓存预热(每日盘后焐热目标股票池,供回测/因子/晨报/持仓守卫命中暖缓存)──
