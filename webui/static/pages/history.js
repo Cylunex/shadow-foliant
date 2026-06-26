@@ -91,25 +91,29 @@ export default {
           <div class="metric"><div class="k">总 Token</div><div class="v">{{fmt(u.data.totals.total_tokens)}}</div></div>
           <div class="metric"><div class="k">输入</div><div class="v">{{fmt(u.data.totals.prompt_tokens)}}</div></div>
           <div class="metric"><div class="k">输出</div><div class="v">{{fmt(u.data.totals.completion_tokens)}}</div></div>
+          <div class="metric" v-if="u.data.totals.cache_hit_ratio!=null" :title="'命中 '+fmt(u.data.totals.cache_hit_tokens)+' / 未命中 '+fmt(u.data.totals.cache_miss_tokens)+' 输入 token。DeepSeek 上下文缓存命中约 1/10 计价。'">
+            <div class="k">缓存命中率</div><div class="v">{{(u.data.totals.cache_hit_ratio*100).toFixed(1)}}%</div></div>
         </div>
         <div v-if="!u.data.totals.calls" class="sub" style="margin-top:12px">暂无用量数据(尚未发生 LLM 调用,或遥测表未建)。</div>
         <div v-if="u.data.by_model.length" class="row" style="gap:24px;flex-wrap:wrap;margin-top:16px;align-items:flex-start">
           <div style="flex:1;min-width:280px">
             <div class="sub" style="margin-bottom:6px">按模型</div>
             <table style="width:100%">
-              <thead><tr><th>provider:model</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th></tr></thead>
+              <thead><tr><th>provider:model</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th><th style="text-align:right" title="输入缓存命中率(DeepSeek 命中约 1/10 计价)">缓存</th></tr></thead>
               <tbody><tr v-for="m in u.data.by_model" :key="m.model">
                 <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{m.model}}</td>
                 <td style="text-align:right">{{m.calls}}</td><td style="text-align:right">{{fmt(m.total_tokens)}}</td>
+                <td style="text-align:right">{{m.cache_hit_ratio!=null?(m.cache_hit_ratio*100).toFixed(0)+'%':'—'}}</td>
               </tr></tbody>
             </table>
           </div>
           <div style="flex:1;min-width:280px">
             <div class="sub" style="margin-bottom:6px">按环节(call_type)</div>
             <table style="width:100%">
-              <thead><tr><th>环节</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th></tr></thead>
+              <thead><tr><th>环节</th><th style="text-align:right">调用</th><th style="text-align:right">Token</th><th style="text-align:right" title="输入缓存命中率(DeepSeek 命中约 1/10 计价)">缓存</th></tr></thead>
               <tbody><tr v-for="c in u.data.by_call_type" :key="c.call_type">
                 <td>{{c.call_type}}</td><td style="text-align:right">{{c.calls}}</td><td style="text-align:right">{{fmt(c.total_tokens)}}</td>
+                <td style="text-align:right">{{c.cache_hit_ratio!=null?(c.cache_hit_ratio*100).toFixed(0)+'%':'—'}}</td>
               </tr></tbody>
             </table>
           </div>
