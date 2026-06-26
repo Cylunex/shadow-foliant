@@ -135,6 +135,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'description': '收盘后东财妙想一站式复盘(收数据→调妙想→格式化)推送',
     },
+    'sector_rotation': {
+        'cn': '📈 题材轮动雷达',
+        'schedule': '17:30 每日(盘后)',
+        'category': '核心', 'default': True,
+        'description': '盘后智策板块引擎:看多/看空板块+轮动潜力+热度榜+关键机会,一条推送看清今日资金在哪些题材间轮动、明日关注谁(原 sector agents 已有未进每日节奏)',
+    },
     'mx_weekend_outlook': {
         'cn': '🔮 周末妙想研判',
         'schedule': '周日 10:00',

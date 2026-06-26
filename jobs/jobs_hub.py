@@ -1416,6 +1416,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'kline_prefetch':            1800,   # 焐 raw+qfq 两套 K线 + full_valuation(2026-06-25),给足时间
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
+    'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
     'main_force_prefetch':       180,    # 盘前预取主力选股:问财90s + akshare兜底,给3分钟
@@ -4361,6 +4362,88 @@ def task_weekly_analysis():
 _REGISTERED = False
 
 
+def _format_sector_rotation(pred: dict) -> str:
+    """把智策引擎 final_predictions 收成一条简洁的题材轮动推送(看多空/轮动潜力/热度/关键机会)。
+
+    pred 形状(sector_strategy_engine.run_comprehensive_analysis 产出):
+      long_short: {bullish:[{sector,confidence}], bearish:[...]}
+      rotation:   {potential:[{sector,advice}]}
+      heat:       {hottest:[{sector,score}]}
+      summary:    {key_opportunity: str}
+    无有效内容返回空串(调用方据此不推送)。"""
+    if not pred:
+        return ''
+    lines = []
+    ls = pred.get('long_short') or {}
+    bull = [it for it in (ls.get('bullish') or []) if (it.get('confidence') or 0) >= 7][:3]
+    bear = [it for it in (ls.get('bearish') or []) if (it.get('confidence') or 0) >= 7][:3]
+    if bull or bear:
+        lines.append('━━ 多空研判 ━━')
+        if bull:
+            lines.append('🔴 看多: ' + '、'.join(f"{it.get('sector')}({it.get('confidence')}分)" for it in bull))
+        if bear:
+            lines.append('🟢 看空: ' + '、'.join(f"{it.get('sector')}({it.get('confidence')}分)" for it in bear))
+    rot = (pred.get('rotation') or {}).get('potential') or []
+    if rot:
+        lines.append('\n━━ 轮动潜力 ━━')
+        for it in rot[:3]:
+            adv = (it.get('advice') or '').strip()
+            lines.append(f"• {it.get('sector')}: {adv[:60]}" if adv else f"• {it.get('sector')}")
+    hot = (pred.get('heat') or {}).get('hottest') or []
+    if hot:
+        lines.append('\n━━ 热度榜 ━━')
+        lines.append('、'.join(f"{i}.{it.get('sector')}({it.get('score', 0)}分)"
+                              for i, it in enumerate(hot[:3], 1)))
+    opp = ((pred.get('summary') or {}).get('key_opportunity') or '').strip()
+    if opp:
+        lines.append('\n💡 ' + (opp[:160] + '…' if len(opp) > 160 else opp))
+    return '\n'.join(lines).strip()
+
+
+def task_sector_rotation():
+    """📈 题材轮动雷达(盘后 17:30)—— 智策板块引擎(原 sector agents 子系统,自带 schedule 线程,
+    现并入 jobs 统一节奏):盘后看多/看空板块 + 轮动潜力 + 热度榜 + 关键机会,一条推送看清今日资金
+    在哪些题材间轮动、明日关注谁。开关 sector_rotation(默认开)。非交易日跳过(板块资金流需交易日)。"""
+    job = 'sector_rotation'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from sector_strategy_data import SectorStrategyDataFetcher
+        from sector_strategy_engine import SectorStrategyEngine
+        data = SectorStrategyDataFetcher().get_all_sector_data()
+        if not data.get('success'):
+            # 外部板块数据暂不可用:平和收尾,不推吓人告警(非代码 bug)
+            _log_run(job, 'success', error='板块数据暂不可用,跳过推送',
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        result = SectorStrategyEngine().run_comprehensive_analysis(data)
+        if not result.get('success'):
+            _log_run(job, 'success', error='AI 分析未产出,跳过推送',
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        body = _format_sector_rotation(result.get('final_predictions', {}))
+        if body:
+            try:
+                from notification_router import send
+                send('report', '📈 题材轮动雷达', body)
+            except Exception as ne:
+                print(f'[sector_rotation] 推送失败: {ne}')
+        _log_run(job, 'success', error=(None if body else '无有效轮动结论'),
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=str(e),
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def register_default_jobs():
     global _REGISTERED
     if _REGISTERED:
@@ -4390,6 +4473,7 @@ def register_default_jobs():
       18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
       17:00 mx_daily_analysis           — 🌙 妙想收盘复盘
+      17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
       22:00/22:05/22:30 fund_nav_refresh / fund_target_check / daily_pnl_snapshot
       02:00/02:30 pg_backup / rag_ingest
       周日 10:00/15:00/16:00/20:00 mx_weekend_outlook / weekly_analysis / portfolio_stress_ai / wf_weekly_backtest
@@ -4448,6 +4532,7 @@ def register_default_jobs():
 
     # ---- 🌙 夜间 ----
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)
+    hub.register('sector_rotation',             '17:30', task_sector_rotation)        # 📈 题材轮动雷达(盘后,智策引擎)
     hub.register('daily_pnl_snapshot',          '22:30', task_daily_pnl_snapshot)
     hub.register('fund_nav_refresh',            '22:00', task_fund_nav_refresh)
     hub.register('fund_target_check',           '22:05', task_fund_target_check)
