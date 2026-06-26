@@ -28,9 +28,18 @@ def run_one(name: str, query: str, select_type: str = 'A股',
     import strategy_cache as _sc
 
     def _fetch():
+        # 读 config.EXCLUDE_KCB(默认排除):排除时在 NL 查询里补"非科创板",妙想少海选 688(unified _add 也会兜底拦)
+        q = query
+        try:
+            import config as _cfg
+            _excl = bool(getattr(_cfg, 'EXCLUDE_KCB', True))
+        except Exception:
+            _excl = True
+        if _excl and '科创' not in q:
+            q = q + '，非科创板'
         try:
             import miaoxiang as _mx
-            df = _mx.screen(query, select_type)
+            df = _mx.screen(q, select_type)
         except Exception as e:
             return False, None, f'{name} 异常: {type(e).__name__}: {str(e)[:50]}'
         if df is None or not hasattr(df, 'empty') or df.empty or '代码' not in df.columns:

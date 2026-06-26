@@ -43,3 +43,8 @@ TDX_CONFIG = {
 # 网络代理配置（全项目统一入口，改一处即生效）
 PROXY = os.getenv("PROXY_URL") or None
 PROXIES = {'http': PROXY, 'https': PROXY} if PROXY else None
+
+# 选股是否排除科创板（688/689）。默认排除（True）—— 科创板涨跌幅±20%、风险高、散户权限门槛高。
+# 全项目选股统一入口:问财 5 策略本就在 query 里写"非科创板",妙想镜像/多因子等其余源由 unified_selection
+# 的候选过滤兜底。设 env EXCLUDE_KCB=false 可放开纳入科创板。
+EXCLUDE_KCB = os.getenv("EXCLUDE_KCB", "true").lower() not in ("false", "0", "no", "off")

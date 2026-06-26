@@ -3450,8 +3450,18 @@ def task_unified_selection():
     try:
         # candidates: code -> {'score': float, 'src': [来源标签]}(2026-06-12 加来源追踪,推送可解释)
         candidates = {}
+        # 排除科创板(config.EXCLUDE_KCB,默认排除):统一在候选入口拦,覆盖所有源(问财/妙想/InStock/多因子)——
+        # 问财 5 策略 query 本就写"非科创板",但妙想 NL/多因子(沪深300含688)可能漏进 688/689,在此兜底。
+        try:
+            import config as _cfg_kcb
+            _exclude_kcb = bool(getattr(_cfg_kcb, 'EXCLUDE_KCB', True))
+        except Exception:
+            _exclude_kcb = True
 
         def _add(code, pts, src):
+            code = str(code)
+            if _exclude_kcb and (code.startswith('688') or code.startswith('689')):
+                return  # 科创板,排除(不入候选池)
             c = candidates.setdefault(code, {'score': 0.0, 'src': []})
             c['score'] += pts
             if src and src not in c['src']:
