@@ -39,6 +39,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'description': '8 维数据(龙虎榜/美股/新闻/北向/题材/FRED/A股大盘/持仓扫描)综合 AI → 开盘策略+持仓建议+昨日收益,4条推送',
     },
+    'main_force_prefetch': {
+        'cn': '🏦 主力选股盘前预取',
+        'schedule': '09:15 每日(盘前)',
+        'category': '数据', 'default': True,
+        'description': '盘前预取问财"主力资金净流入排名"入当日缓存,09:45 综合选股的主力资金策略读缓存,不在选股高峰现调问财(问财熔断时主力选股会退化成按市值选)',
+    },
     'unified_selection': {
         'cn': '🎯 综合选股 TOP15',
         'schedule': '09:45 每日',

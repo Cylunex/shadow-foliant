@@ -10,6 +10,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import time
+import os
+import pickle
 
 # ⭐ 全项目统一从 data.pywencai_safe 调 pywencai, 自带硬超时(防僵尸进程)
 from data.pywencai_safe import pywencai_get
@@ -20,6 +22,53 @@ try:
 except Exception:
     def _throttle(*a, **k):
         return 0.0
+
+
+# ── 主力选股当日缓存(2026-06-26)──────────────────────────────────────────
+# 问财"主力资金净流入排名"是全市场单次查询、日级 EOD 口径(已完成的天收盘即定数)。
+# 盘前 09:15 预取写当日缓存 → 09:45 综合选股的主力资金策略读缓存,不在选股高峰现调问财
+# (问财熔断/卡死时主力选股会退化成"按市值选股")。缓存键=当日+days_ago+市值档,跨交易日自然失效。
+_MF_CACHE_DIR = None
+
+
+def _mf_cache_dir() -> str:
+    global _MF_CACHE_DIR
+    if _MF_CACHE_DIR is None:
+        try:
+            import _bootstrap
+            d = _bootstrap.db_path('main_force_cache')
+        except Exception:
+            d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'db', 'main_force_cache')
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        _MF_CACHE_DIR = d
+    return _MF_CACHE_DIR
+
+
+def _mf_cache_key(days_ago, min_mcap, max_mcap) -> str:
+    today = datetime.now().strftime('%Y-%m-%d')
+    return f"mf_{today}_d{days_ago}_{int(min_mcap or 0)}_{int(max_mcap or 0)}"
+
+
+def _mf_cache_load(key: str):
+    try:
+        p = os.path.join(_mf_cache_dir(), key + '.pkl')
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                return pickle.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _mf_cache_save(key: str, df) -> None:
+    try:
+        with open(os.path.join(_mf_cache_dir(), key + '.pkl'), 'wb') as f:
+            pickle.dump(df, f)
+    except Exception:
+        pass
 
 
 def _fetch_via_akshare_fund_flow(min_market_cap: float = None,
@@ -223,7 +272,33 @@ class MainForceStockSelector:
             error_msg = f"获取主力选股数据失败: {str(e)}"
             print(f"\n❌ {error_msg}")
             return False, None, error_msg
-    
+
+    def get_main_force_stocks_cached(self, days_ago=None, start_date=None,
+                                     min_market_cap=None, max_market_cap=None,
+                                     use_cache: bool = True):
+        """带当日缓存的主力选股(盘前预取/盘中读缓存)。
+        - 盘前任务用 use_cache=False:强制现取并回写当日缓存。
+        - 09:45 选股用 use_cache=True:命中当日缓存即返回,**不在高峰现调问财**。
+        start_date 显式指定时不走缓存(缓存键按 days_ago 口径,避免错配)。"""
+        if start_date is not None:
+            return self.get_main_force_stocks(start_date=start_date, days_ago=days_ago,
+                                              min_market_cap=min_market_cap, max_market_cap=max_market_cap)
+        _d = 30 if days_ago is None else days_ago
+        _mn = 50 if min_market_cap is None else min_market_cap
+        _mx = 5000 if max_market_cap is None else max_market_cap
+        key = _mf_cache_key(_d, _mn, _mx)
+        if use_cache:
+            cached = _mf_cache_load(key)
+            if cached is not None and hasattr(cached, 'empty') and not cached.empty:
+                self.raw_data = cached
+                print(f"  ✅ 主力选股命中当日缓存({key}): {len(cached)} 只,不现调问财")
+                return True, cached, f"命中当日缓存 {len(cached)} 只"
+        ok, df, msg = self.get_main_force_stocks(days_ago=days_ago,
+                                                 min_market_cap=min_market_cap, max_market_cap=max_market_cap)
+        if ok and df is not None and hasattr(df, 'empty') and not df.empty:
+            _mf_cache_save(key, df)
+        return ok, df, msg
+
     def _convert_to_dataframe(self, result) -> pd.DataFrame:
         """转换问财返回结果为DataFrame"""
         try:

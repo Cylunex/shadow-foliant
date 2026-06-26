@@ -1418,6 +1418,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'mx_selection_review':       1500,
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
+    'main_force_prefetch':       180,    # 盘前预取主力选股:问财90s + akshare兜底,给3分钟
     'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
@@ -1754,7 +1755,8 @@ def _run_strategy_scans() -> dict:
         from main_force_selector import MainForceStockSelector
         def _do_main_force():
             mf = MainForceStockSelector()
-            r_ok, r_df, r_msg = mf.get_main_force_stocks(days_ago=5)
+            # 读盘前 09:15 main_force_prefetch 写的当日缓存;冷了才现调问财(选股高峰不卡问财)
+            r_ok, r_df, r_msg = mf.get_main_force_stocks_cached(days_ago=5, use_cache=True)
             if r_ok and r_df is not None and len(r_df) > 0:
                 r_df = mf.get_top_stocks(r_df, top_n=5)
             return r_ok, r_df, r_msg
@@ -3388,6 +3390,28 @@ def _scan_holdings_with_snapshot():
 # 🆕 整合后的新任务（原始任务函数保留不动，仅此为新的调度入口）
 # =====================================================================
 
+def task_main_force_prefetch():
+    """🏦 盘前预取主力选股(问财全市场"主力资金净流入排名")→ 写当日缓存。
+    09:45 unified_selection 的"主力资金"策略读这份缓存,不在选股高峰现调问财
+    (问财熔断/卡死时主力选股会退化成"按市值选股")。非交易日跳过。失败不告警:09:45 自动 fallback 现调。"""
+    job = 'main_force_prefetch'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from main_force_selector import MainForceStockSelector
+        mf = MainForceStockSelector()
+        ok, df, msg = mf.get_main_force_stocks_cached(days_ago=5, use_cache=False)  # 强制现取并回写
+        n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
+        print(f'[main_force_prefetch] {"✅" if n else "⚠️"} 预取主力选股 {n} 只 ({msg})', flush=True)
+        _log_run(job, 'success' if n else 'error',
+                 error=None if n else f'prefetch_empty: {msg}',
+                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+    except Exception as e:
+        _log_run(job, 'error', error=str(e), started_at=started,
+                 finished_at=datetime.now().isoformat(), notify=False)
+
+
 def task_unified_selection():
     """🆕 整合选股：4大策略 + InStock10 + 多因子 + 个人过滤 →  TOP 15"""
     job = 'unified_selection'
@@ -4381,6 +4405,7 @@ def register_default_jobs():
     hub.register('fund_valuation_signal',       '09:05', task_fund_valuation_signal)
 
     # ---- 09:45 整合选股 ----
+    hub.register('main_force_prefetch',         '09:15', task_main_force_prefetch)  # 盘前预取主力选股问财结果入缓存
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
