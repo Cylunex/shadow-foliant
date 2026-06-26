@@ -22,6 +22,7 @@ Jobs Hub — 统一的后台任务注册与管理
 import os
 import sys
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -108,6 +109,21 @@ def _init_snapshot_db():
 _init_snapshot_db()
 
 
+def _json_sanitize(obj):
+    """递归把 NaN/Inf → None。PG 的 JSONB 列拒收 NaN/Infinity 字面量,而 json.dumps 默认
+    (allow_nan=True)会把 float('nan') 原样写成 NaN → 写库报 `invalid input syntax for type
+    json: Token "NaN" is invalid`(SQLite 不校验 JSON 所以本地发现不了)。datahub 行情/北向
+    记录里常有 NaN(如 turnover_ratio),写快照前必须洗。numpy.float64 是 float 子类,
+    isnan/isinf 通吃;其余 numpy 标量随后由 json.dumps(default=str) 兜底。"""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(v) for v in obj]
+    return obj
+
+
 def save_indicator_snapshot(symbol: str, indicators: Dict):
     """保存某只股票当日指标快照（重复触发会覆盖当天的）"""
     today = datetime.now().strftime('%Y-%m-%d')
@@ -119,7 +135,7 @@ def save_indicator_snapshot(symbol: str, indicators: Dict):
         ON CONFLICT(symbol, snapshot_date) DO UPDATE SET
             indicators = excluded.indicators,
             created_at = CURRENT_TIMESTAMP
-    ''', (symbol, today, json.dumps(indicators, ensure_ascii=False, default=str)))
+    ''', (symbol, today, json.dumps(_json_sanitize(indicators), ensure_ascii=False, default=str)))
     conn.commit()
     conn.close()
 
@@ -187,7 +203,7 @@ def save_market_snapshot(payload: Dict):
         ON CONFLICT(snapshot_date) DO UPDATE SET
             payload = excluded.payload,
             created_at = CURRENT_TIMESTAMP
-    ''', (today, json.dumps(payload, ensure_ascii=False, default=str)))
+    ''', (today, json.dumps(_json_sanitize(payload), ensure_ascii=False, default=str)))
     conn.commit()
     conn.close()
 
@@ -203,7 +219,7 @@ def get_market_snapshot(date: str = None) -> Optional[Dict]:
 
 
 def _log_run(job_name: str, status: str, error: str = None,
-             started_at: str = None, finished_at: str = None):
+             started_at: str = None, finished_at: str = None, notify: bool = True):
     # 整个 jobs_hub 的可观测性靠这一个 DB 写入点,它被成功/失败/跳过三条路径调用。
     # 必须设防:SQLite 写锁(database is locked)或连接失效时,遥测写失败绝不能击穿任务执行/调度
     # (尤其 except 路径与 _skip_if_not_trading 内的调用,二次抛出会丢日志/让静默跳过变异常)。
@@ -222,8 +238,12 @@ def _log_run(job_name: str, status: str, error: str = None,
     except Exception as _le:
         print(f'[_log_run] 写 job_runs 失败(忽略,不阻断任务): {type(_le).__name__}: {str(_le)[:80]}',
               flush=True)
-    # 任务失败自动推送告警(本身已设防,不让推送失败再冒泡)
-    if status == 'error' and error:
+    # 任务失败自动推送告警(本身已设防,不让推送失败再冒泡)。
+    # notify=False:调用方会自己发更贴切的通知(超时→平和的 _notify_data_unavailable;
+    # 真异常→带 traceback 的 _notify_task_error),此处不再重复推一条吓人的「⚠️任务异常」
+    # (否则同一次失败双推送,违背"超时只发平和提示"的约定)。任务内部自处理错误并直接调
+    # _log_run('error') 的路径仍默认推送,保证那条是唯一告警。
+    if status == 'error' and error and notify:
         try:
             _push_error(f'⚠️ 任务异常: {job_name}', f'{error[:500]}')
         except Exception:
@@ -1441,7 +1461,7 @@ def _run_with_log(name, func, *a, **kw):
         elapsed = time.time() - t0
         msg = f'task 超过硬超时 {timeout}s 被切断(孤儿线程留底层)'
         print(f'[jobs_hub] ⏱️ {name} 超时切断 (耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
-        _log_run(name, 'error', error=msg)
+        _log_run(name, 'error', error=msg, notify=False)
         # 超时基本都是"外部数据源卡死/不可用"导致(datahub 源级已 20s 兜底, 任务级超时
         # 通常意味数据源整体抽风)。按用户要求: 发一条平和"数据源不可用"提示, 任务正常结束,
         # 不发吓人的"⚠️任务失败+traceback"告警(避免误以为代码崩了)。限频同 _notify_task_error。
@@ -1452,7 +1472,7 @@ def _run_with_log(name, func, *a, **kw):
         elapsed = time.time() - t0
         print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
               f'{type(e).__name__}: {str(e)[:120]}', flush=True)
-        _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}')
+        _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}', notify=False)
         _notify_task_error(name, e, tb)
     finally:
         with _TASK_LOCK:
