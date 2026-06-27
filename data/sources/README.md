@@ -48,8 +48,8 @@
   - ✅ 指数源归位:`sina.indices()` + 新建 `tencent.py`(qt.gtimg);datahub `_indices_*` 委托。
   - ✅ 东财 K线归位:`eastmoney.kline()`(push2his raw/qfq);datahub `_kline_eastmoney` 委托。
   - ✅ 独立原子源文件 git mv 进本包:`baostock.py` / `mootdx.py` / `pywencai.py`(旧 `data/*_safe.py`、`tdx_mootdx.py` 留 shim,15+ 处导入零改)。
-  - ✅ adapter 东财大半归位 `eastmoney.py`:datacenter 个股(融资融券/大宗/股东户数/分红/解禁)、资金流(分钟·日级·板块)、研报/新闻/基本面、datacenter 查询单一化(adapter 改再导出)。
-  - ⏭️ **剩**:adapter 东财尾(`_dragon_tiger_board`/`_full_valuation`)+ 其余 provider(腾讯 quote/同花顺/百度/财联社/巨潮/quotes 批量);拆 `StockDataFetcher` + 摊平 `manager` 8 源链(动主 raw K线路径);`tushare.py`。详见重构计划 §7 阶段 3。
+  - ✅ **adapter 全 provider 归位**(1456→621 行):东财(eastmoney.py:行情ulist/资金流/datacenter个股/研报新闻基本面/板块排名/龙虎榜聚合)、腾讯·新浪(quotes/indices)、同花顺(ths.py)、百度(baidu.py)、财联社(cls.py)、巨潮(cninfo.py)。adapter 仅余派生计算/编排/接口类。
+  - ⏭️ **剩(最后一块,高风险)**:拆 `StockDataFetcher` + 摊平 `manager` 8 源链(动主 raw K线路径);`tushare.py`;阶段4 `akshare.py`(末位兜底层)+ 清 orphan `_sina_financial_report`。详见重构计划 §7。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。
