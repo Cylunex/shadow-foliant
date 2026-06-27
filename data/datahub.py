@@ -623,60 +623,14 @@ _EM_INDEX_CODES = frozenset({
 
 def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d",
                      adjust: str = "raw") -> pd.DataFrame:
-    """东财 push2his 日线。adjust='raw'→fqt=0(不复权,与 fetcher 主源新浪同口径)/
-    'qfq'→fqt=1(前复权,供技术分析两套缓存的 qfq 源)。
+    """东财 push2his 日线(kline raw/qfq 源)。2026-06-27 阶段3:归位 data/sources/eastmoney.py
+    (push2his fqt=0 raw / fqt=1 qfq;成交量「手」×100 对齐「股」;指数重码放弃;解析<80% 弃用)。
     返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。仅日线。"""
-    if interval not in ('1d', 'daily', '101'):
-        return pd.DataFrame()                  # 非日线交回主 fetcher 处理
-    c = _norm_code(code)
-    if c in _EM_INDEX_CODES:
-        return pd.DataFrame()                  # 指数代码与个股重码, 放弃避免取到错票
-    # ⭐ 限流(2026-06-24 审查修复: 原先漏导致 NameError 被静默吞, east 源 100% 失效)
     try:
-        from rate_limiter import throttle as _throttle
-    except Exception:
-        def _throttle(*a, **k):
-            return 0.0
-    import urllib.request as _ur
-    import json as _json
-    lmt = int(_period_days(period) * 0.72) + 30   # 自然日→交易日约 ×0.72, 多取 30 根冗余
-    secid = _em_secid(c)
-    # fqt=0 不复权(raw,与新浪主源 scale=240&ma=no 同口径,2025-06-13 茅台两源一致);
-    # fqt=1 前复权(qfq,技术分析两套缓存的 qfq 源)。raw 缓存须 fqt=0,否则历史价跳变污染。
-    _fqt = '1' if adjust == 'qfq' else '0'
-    url = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
-           f'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'
-           f'&klt=101&fqt={_fqt}&end=20500101&lmt={lmt}')
-    try:
-        _throttle('eastmoney')
-        req = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        raw = _ur.urlopen(req, timeout=6).read().decode('utf-8')   # 6s 短超时, 死源快失败
-        klines = ((_json.loads(raw).get('data') or {}).get('klines')) or []
+        from data.sources import eastmoney as _em
+        return _em.kline(code, period, interval, adjust)
     except Exception:
         return pd.DataFrame()
-    if not klines:
-        return pd.DataFrame()
-    rows = []
-    for line in klines:
-        p = line.split(',')             # date,open,close,high,low,volume(手),amount
-        if len(p) < 6:
-            continue
-        try:
-            # ⚠️ 东财成交量单位是"手"(100股), 而 fetcher 主源(新浪)是"股"。
-            # 实测同票同日: 新浪 4480330股 = 东财 44803手 ×100。这里 ×100 对齐"股",
-            # 否则量比/成交量均线/放量判断全缩 100 倍。
-            rows.append((p[0], float(p[1]), float(p[2]), float(p[3]), float(p[4]),
-                         float(p[5]) * 100))
-        except (ValueError, IndexError):
-            continue
-    # 解析完整性护栏: 成功解析行数 < 收到行数的 80% → 视为响应残缺/损坏, 放弃交回 fetcher,
-    # 避免 east 残缺数据通过 _route 的 non-empty 判定挤掉 fetcher 更完整的序列。
-    if not rows or len(rows) < len(klines) * 0.8:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows, columns=['Date', 'Open', 'Close', 'High', 'Low', 'Volume'])
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date']).set_index('Date').sort_index()
-    return df
 
 
 def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:

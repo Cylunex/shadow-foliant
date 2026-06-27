@@ -150,6 +150,55 @@ def fund_nav(code: str) -> pd.DataFrame:
     return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
 
 
+# ── K线(push2his 日线)─────────────────────────────────────────────────────
+_KLINE_URL = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
+              'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'
+              '&klt=101&fqt={fqt}&end=20500101&lmt={lmt}')
+_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825}
+
+
+def _lmt(period: str) -> int:
+    """period → 取数根数(自然日→交易日约 ×0.72,多取 30 根冗余)。"""
+    return int(_PERIOD_DAYS.get(period, 365) * 0.72) + 30
+
+
+def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw") -> pd.DataFrame:
+    """东财 push2his 日线。adjust='raw'→fqt=0(不复权,与新浪主源同口径)/ 'qfq'→fqt=1(前复权)。
+    返回项目契约(DatetimeIndex='Date' + 大写 OCHLV,Volume「股」)或空 DF。仅日线。
+    ⚠️ 指数代码与个股重码 → 放弃(交指数专路);成交量「手」×100 对齐「股」;解析<80% 视残缺弃用。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    c = C.norm_code(code)
+    if c in C.EM_INDEX_CODES:
+        return pd.DataFrame()
+    fqt = '1' if str(adjust) == 'qfq' else '0'   # raw 缓存须 fqt=0,否则历史价跳变污染
+    url = _KLINE_URL.format(secid=C.em_secid(c), fqt=fqt, lmt=_lmt(period))
+    try:
+        C.throttle('eastmoney')
+        d = C.http_get_json(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)  # 6s 短超时,死源快失败
+        klines = ((d.get('data') or {}).get('klines')) or []
+    except Exception:
+        return pd.DataFrame()
+    if not klines:
+        return pd.DataFrame()
+    rows = []
+    for line in klines:
+        p = line.split(',')             # date,open,close,high,low,volume(手),amount
+        if len(p) < 6:
+            continue
+        try:
+            # 东财成交量「手」(100 股)→ ×100 对齐新浪主源「股」口径
+            rows.append((p[0], float(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[5]) * 100))
+        except (ValueError, IndexError):
+            continue
+    # 解析完整性护栏:成功行 < 收到行 80% → 视残缺弃用(防残缺数据挤掉更完整的主源)
+    if not rows or len(rows) < len(klines) * 0.8:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=['Date', 'Open', 'Close', 'High', 'Low', 'Volume'])
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    return df.dropna(subset=['Date']).set_index('Date').sort_index()
+
+
 if __name__ == '__main__':
     import sys
     import io
@@ -161,4 +210,7 @@ if __name__ == '__main__':
     print(f'convertible_bonds: {len(cb)} 只;', (cb[0] if cb else None))
     fn = fund_nav('000001')
     print(f'fund_nav 000001: {len(fn)} 行;', (fn.tail(1).to_string() if not fn.empty else 'EMPTY'))
-    print('OK' if (n and cb and not fn.empty) else '⚠️ 部分能力空(可能网络/被封)')
+    kr = kline('600519', '6mo', adjust='raw')
+    kq = kline('600519', '6mo', adjust='qfq')
+    print(f'kline raw {len(kr)} 行 / qfq {len(kq)} 行; raw末收={kr["Close"].iloc[-1] if len(kr) else None}')
+    print('OK' if (n and cb and not fn.empty and len(kr)) else '⚠️ 部分能力空(可能网络/被封)')
