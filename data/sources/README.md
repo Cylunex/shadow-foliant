@@ -40,7 +40,8 @@
 
 - **阶段 0(脚手架)✅**:本包 + `_common.py` 已建;归一工具收口完成,新写直连源即刻可用。
 - **阶段 1(快赢)✅**:删 `adata`(二道贩子);K线 qfq 去 `akshare_qfq` 东财二道冗余;`dragon_tiger` 换东财数据中心直连;`capital_flow_adata` 退化为东财 canonical。
-- **阶段 2-3(待续)**:把现有散在 `datahub.py` / `a_stock_data_adapter.py` 的东财/新浪/腾讯/同花顺/百度/财联社/巨潮直连**逐 provider 搬进 `sources/*.py`**,门面只留 `_route` 声明;摊平 `StockDataFetcher` 内层嵌套降级。详见重构计划 §7 阶段 2-3。
+- **阶段 2(进行中)**:第 1 域 ✅ `sina.py`(2026-06-27):新浪 qfq 日线(免 py_mini_racer,与 akshare 逐字段一致)/ 行业 spot / 财报三表 直连;datahub `_kline_sina_qfq`/`_sector_spot_sina`/`financials` 已切。下一域 `eastmoney.py`。
+- **阶段 2 余项 / 阶段 3(待续)**:把现有散在 `datahub.py` / `a_stock_data_adapter.py` 的东财/腾讯/同花顺/百度/财联社/巨潮直连**逐 provider 搬进 `sources/*.py`**,门面只留 `_route` 声明;摊平 `StockDataFetcher` 内层嵌套降级。详见重构计划 §7 阶段 2-3。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。

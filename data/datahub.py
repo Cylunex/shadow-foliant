@@ -746,36 +746,23 @@ def _kline_baostock(code: str, period: str = "1y", interval: str = "1d",
 
 
 def _kline_sina_qfq(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """新浪前复权(qfq)日线 —— **唯一真非东财** qfq 源(akshare stock_zh_a_daily, finance.sina.com.cn)。
+    """新浪前复权(qfq)日线 —— **唯一真非东财** qfq 源,直连 data/sources/sina.py(免 akshare/py_mini_racer)。
 
     原 qfq 链 east_qfq(东财 push2his fqt=1)+ akshare_qfq(stock_zh_a_hist 也走东财)**全是东财**,
-    机房 IP 被封时整个 qfq 取不到 → 技术分析只能退 raw(除权跳空毁形态/缠论/因子)。新浪 stock_zh_a_daily
-    用复权因子本地算 qfq, 与东财同口径(实测:最新价对齐 raw、历史价下移), 是 qfq 的真跨公司兜底。
+    机房 IP 被封时整个 qfq 取不到 → 技术分析只能退 raw(除权跳空毁形态/缠论/因子)。
+    现取数 = 新浪 getKLineData 清洁 JSON(不复权)÷ qfq.js 复权因子(round 2),与原 akshare
+    stock_zh_a_daily(adjust='qfq') **逐字段一致**(2026-06-27 阶段2 实测 沪/深/创业/科创 4 票 241 行
+    OHLC max|Δ|=0、Volume 全等),是 qfq 的真跨公司兜底,且免去 akshare 的 JS 解密依赖。
     返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV, Volume 单位'股')或空 DF。仅日线。
-    ⚠️ 该接口 volume 本就是'股'(非 akshare '手'), **不乘 100**;返回全历史, 由 _slice_by_days 截到 period。"""
-    if interval not in ('1d', 'daily', '101'):
-        return pd.DataFrame()
-    need = ('date', 'open', 'close', 'high', 'low', 'volume')
+    返回全历史(≈period), 由 _slice_by_days 截到 period。"""
     try:
-        import akshare as ak
-        from data.akshare_safe import call as ak_call
-        df = ak_call(ak.stock_zh_a_daily, symbol=_sina_symbol(code), adjust='qfq', timeout=20)
+        from data.sources import sina as _sina
+        df = _sina.kline(code, period, interval, adjust='qfq')
     except Exception:
         return pd.DataFrame()
-    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
+    if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
-    try:
-        out = pd.DataFrame({
-            'Date': pd.to_datetime(df['date'], errors='coerce').dt.normalize(),
-            'Open': pd.to_numeric(df['open'], errors='coerce'),
-            'Close': pd.to_numeric(df['close'], errors='coerce'),
-            'High': pd.to_numeric(df['high'], errors='coerce'),
-            'Low': pd.to_numeric(df['low'], errors='coerce'),
-            'Volume': pd.to_numeric(df['volume'], errors='coerce'),  # 已是'股', 不乘 100
-        }).dropna(subset=['Date']).set_index('Date').sort_index()
-    except Exception:
-        return pd.DataFrame()
-    return _slice_by_days(out, _period_days(period))
+    return _slice_by_days(df, _period_days(period))
 
 
 _TF_CLIENT = None
@@ -1338,18 +1325,14 @@ def sector_ranking(sector_type: str = "industry", top_n: int = 20) -> dict:
 
 
 def _sector_spot_sina() -> List[dict]:
-    """板块快照新浪行业源,产出 [{板块,涨跌幅,领涨}](涨幅降序)。列对不齐/空/异常→[]。"""
+    """板块快照新浪行业源,产出 [{板块,涨跌幅,领涨}](涨幅降序)。空/异常→[]。
+    2026-06-27 阶段2:换 newSinaHy.php 直连 data/sources/sina.py(免 akshare),
+    与原 akshare stock_sector_spot('新浪行业') **逐字段一致**(实测 49 板块 0 不一致)。"""
     try:
-        import akshare as ak
-        from data.akshare_safe import call as ak_call
-        df = ak_call(ak.stock_sector_spot, indicator="新浪行业", timeout=20)
+        from data.sources import sina as _sina
+        return _sina.sector_spot()
     except Exception:
         return []
-    if df is None or getattr(df, 'empty', True) or '板块' not in df.columns or '涨跌幅' not in df.columns:
-        return []
-    rows = [{"板块": r.get("板块"), "涨跌幅": round(float(r.get("涨跌幅") or 0), 2),
-             "领涨": r.get("股票名称") or ""} for _, r in df.iterrows()]
-    return sorted(rows, key=lambda x: x["涨跌幅"], reverse=True)
 
 
 def _sector_spot_ths() -> List[dict]:
@@ -1400,8 +1383,14 @@ def concept_blocks(code: str) -> dict:
 # ══════════════════════════════════════════════════════════
 
 def financials(code: str, report_type: str = "lrb") -> List[dict]:
-    """财报三表。report_type: fzb 资产负债 / lrb 利润 / llb 现金流。list[dict]。"""
-    return _route("financials", [("a_stock", lambda: _adapter().get_financial_reports(code, report_type))], empty=[]) or []
+    """财报三表。report_type: fzb 资产负债 / lrb 利润 / llb 现金流。list[dict](一期一条,新→旧)。
+    2026-06-27 阶段2:换新浪直连 data/sources/sina.py。⚠️ 原 adapter._sina_financial_report 读错层级
+    (取 result.data['lrb'] 恒空,而真数据在 result.data.report_list)→ 此域**此前静默返空**;
+    直连版读对层级、产出真实科目(item_title→数值)。"""
+    def _sina_fin():
+        from data.sources import sina as _sina
+        return _sina.financials(code, report_type)
+    return _route("financials", [("sina", _sina_fin)], empty=[]) or []
 
 
 def valuation(code: str) -> dict:
