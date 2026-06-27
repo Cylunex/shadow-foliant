@@ -1512,38 +1512,17 @@ def screen(price_max=None, pe_max=None, profit_growth_min=None,
 
 
 # ══════════════════════════════════════════════════════════
-#  可转债域(双低策略)
+#  可转债域(双低策略)—— 2026-06-27 阶段2:东财(_cb_eastmoney)/集思录(_cb_jsl)均直连
+#  data/sources/{eastmoney,jsl}.py;数值归一 _cb_num 已随之下沉到各源模块(本层不再用)。
 # ══════════════════════════════════════════════════════════
-def _cb_num(v):
-    try:
-        f = float(v)
-        return round(f, 3) if f == f else None   # NaN→None
-    except Exception:
-        return None
-
-
 def _cb_jsl() -> List[dict]:
-    import akshare as ak
-    df = ak.bond_cb_jsl()
-    if df is None or getattr(df, "empty", True):
+    """集思录可转债(convertible_bonds 兜底源)。2026-06-27 阶段2:换直连 data/sources/jsl.py
+    (替 ak.bond_cb_jsl,直接映射 jsl 原始字段;匿名约 30 只,与原 akshare 路径 30 只逐字段一致)。"""
+    try:
+        from data.sources import jsl as _jsl
+        return _jsl.convertible_bonds()
+    except Exception:
         return []
-    out = []
-    for _, r in df.iterrows():
-        price = _cb_num(r.get('现价'))
-        prem = _cb_num(r.get('转股溢价率'))
-        dl = _cb_num(r.get('双低'))
-        if dl is None and price is not None and prem is not None:
-            dl = round(price + prem, 2)
-        out.append({
-            'code': str(r.get('代码', '')), 'name': str(r.get('转债名称', '')),
-            'price': price, 'change_pct': _cb_num(r.get('涨跌幅')),
-            'premium_pct': prem, 'conv_value': _cb_num(r.get('转股价值')),
-            'double_low': dl, 'rating': str(r.get('债券评级', '') or ''),
-            'stock_code': str(r.get('正股代码', '')), 'stock_name': str(r.get('正股名称', '')),
-            'ytm_pct': _cb_num(r.get('到期税前收益')), 'remain_years': _cb_num(r.get('剩余年限')),
-            'remain_scale_yi': _cb_num(r.get('剩余规模')), 'turnover_pct': _cb_num(r.get('换手率')),
-        })
-    return out
 
 
 def _cb_eastmoney() -> List[dict]:
