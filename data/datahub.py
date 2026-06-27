@@ -644,7 +644,7 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     if interval not in ('1d', 'daily', '101'):
         return pd.DataFrame()
     try:
-        from tdx_mootdx import get_kline as _tdx_k
+        from data.sources.mootdx import get_kline as _tdx_k
         df = _tdx_k(_norm_code(code), frequency='day', count=800, adjust='')
     except Exception:
         return pd.DataFrame()
@@ -691,9 +691,9 @@ def _sina_symbol(code: str) -> str:
 def _kline_baostock(code: str, period: str = "1y", interval: str = "1d",
                     adjust: str = "raw") -> pd.DataFrame:
     """baostock(证券宝)日线 —— 免费全历史(1990至今)+ 独立兜底源(非腾讯/新浪/东财)。
-    封装在 data/baostock_safe.py(惰性登录 + 全局锁串行 + 未装返空)。raw=不复权 / qfq=前复权。"""
+    源在 data/sources/baostock.py(惰性登录 + 全局锁串行 + 未装返空)。raw=不复权 / qfq=前复权。"""
     try:
-        import baostock_safe as _bao
+        from data.sources import baostock as _bao
         return _bao.kline(code, period, interval, adjust)
     except Exception:
         return pd.DataFrame()
