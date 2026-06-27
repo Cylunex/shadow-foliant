@@ -1460,13 +1460,14 @@ def stock_news(code: str, page_size: int = 20) -> List[dict]:
 
 
 def _news_em(page_size):
-    import akshare as ak
-    df = ak.stock_info_global_em()
-    if df is None or df.empty:
+    """东财全球快讯(market_news 兜底源)→ [{title,content,time,url}]。
+    2026-06-27 阶段2:换直连 data/sources/eastmoney.py(替 ak.stock_info_global_em,
+    实测与原 akshare 路径标题/字段逐条一致)。"""
+    try:
+        from data.sources import eastmoney as _em
+        return _em.global_news(page_size)
+    except Exception:
         return []
-    return [{"title": str(r.get("标题", "")), "content": str(r.get("摘要", "")),
-             "time": str(r.get("发布时间", "")), "url": str(r.get("链接", ""))}
-            for _, r in df.head(page_size).iterrows()]
 
 
 def _news_cls(page_size):
@@ -1546,34 +1547,14 @@ def _cb_jsl() -> List[dict]:
 
 
 def _cb_eastmoney() -> List[dict]:
-    import akshare as ak
-    df = ak.bond_cov_comparison()
-    if df is None or getattr(df, "empty", True):
+    """可转债比价东财源。2026-06-27 阶段2:换直连 data/sources/eastmoney.py(替 ak.bond_cov_comparison,
+    按 f-code 直连映射,不依赖 akshare 脆弱的位置列名;实测与原 akshare 路径 326 只逐字段 0 不一致)。
+    评级/到期收益/剩余年限/规模/换手 东财比价表本就不含 → None(由集思录 _cb_jsl 补)。"""
+    try:
+        from data.sources import eastmoney as _em
+        return _em.convertible_bonds()
+    except Exception:
         return []
-    cols = list(df.columns)
-
-    def pick(r, *names):
-        for n in names:
-            for c in cols:
-                if n in c:
-                    return r.get(c)
-        return None
-
-    out = []
-    for _, r in df.iterrows():
-        price = _cb_num(pick(r, '转债最新价', '转债现价', '最新价'))
-        prem = _cb_num(pick(r, '转股溢价率'))
-        out.append({
-            'code': str(pick(r, '转债代码', '代码') or ''), 'name': str(pick(r, '转债名称', '名称') or ''),
-            'price': price, 'change_pct': _cb_num(pick(r, '转债涨跌幅', '涨跌幅')),
-            'premium_pct': prem, 'conv_value': _cb_num(pick(r, '转股价值')),
-            'double_low': round(price + prem, 2) if (price is not None and prem is not None) else None,
-            'rating': str(pick(r, '债券评级', '评级') or ''), 'stock_code': str(pick(r, '正股代码') or ''),
-            'stock_name': str(pick(r, '正股名称') or ''), 'ytm_pct': _cb_num(pick(r, '到期收益率', '纯债收益率')),
-            'remain_years': _cb_num(pick(r, '剩余年限')), 'remain_scale_yi': _cb_num(pick(r, '剩余规模')),
-            'turnover_pct': _cb_num(pick(r, '换手率')),
-        })
-    return out
 
 
 def convertible_bonds() -> List[dict]:
@@ -1589,49 +1570,15 @@ def convertible_bonds() -> List[dict]:
 # 兜底:akshare fund_open_fund_info_em(部分基金 PyExecJS 抛 ReferenceError 时主源已覆盖)
 # 返回标准列 [date, unit_nav, acc_nav, daily_return] 升序 DataFrame。
 def _fund_nav_eastmoney(code: str) -> pd.DataFrame:
-    """直连东财 f10/lsjz JSON 翻页拉取全部历史净值。被 _route 调用, 失败抛异常即可。"""
-    import urllib.request
-    import json as _json
+    """基金历史净值东财源。2026-06-27 阶段2:归位到 data/sources/eastmoney.py(东财 f10/lsjz JSON,
+    纯 HTTP,带 Referer)。返回标准列 [date, unit_nav, acc_nav, daily_return] 升序。
+    ⚠️ lsjz 现每页约 20 条上限(无视 pageSize),故只取近 ~20 条净值;拉全历史需 ~300 翻页(东财封禁风险),
+    维持原行为(此前直连即如此,非本次回归)。"""
     try:
-        from rate_limiter import throttle as _throttle
+        from data.sources import eastmoney as _em
+        return _em.fund_nav(code)
     except Exception:
-        def _throttle(*a, **k): return 0.0
-    code = str(code).zfill(6)
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': f'http://fundf10.eastmoney.com/jjjz_{code}.html',
-    }
-    rows: List[dict] = []
-    page_size = 200
-    for page in range(1, 200):  # 200*200=40000 条上限, 远超任何基金的历史长度
-        url = (f'https://api.fund.eastmoney.com/f10/lsjz?'
-               f'fundCode={code}&pageIndex={page}&pageSize={page_size}')
-        _throttle('eastmoney')
-        req = urllib.request.Request(url, headers=headers)
-        raw = urllib.request.urlopen(req, timeout=8).read().decode('utf-8', 'replace')
-        data = _json.loads(raw)
-        lst = ((data.get('Data') or {}).get('LSJZList')) or []
-        if not lst:
-            break
-        rows.extend(lst)
-        if len(lst) < page_size:
-            break
-    if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).rename(columns={
-        'FSRQ': 'date', 'DWJZ': 'unit_nav', 'LJJZ': 'acc_nav', 'JZZZL': 'daily_return',
-    })
-    keep = [c for c in ('date', 'unit_nav', 'acc_nav', 'daily_return') if c in df.columns]
-    if 'date' not in keep or 'unit_nav' not in keep:
-        return pd.DataFrame()
-    df = df[keep].copy()
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    for c in ('unit_nav', 'acc_nav', 'daily_return'):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-    if 'acc_nav' not in df.columns:
-        df['acc_nav'] = df['unit_nav']
-    return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
 
 
 def _fund_nav_akshare(code: str) -> pd.DataFrame:
