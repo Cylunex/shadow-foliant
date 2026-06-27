@@ -71,25 +71,9 @@ def _normalize_code(code: str) -> str:
     return code.strip()
 
 
-def _eastmoney_datacenter(report_name: str, columns: str = "ALL",
-                          filter_str: str = "", page_size: int = 50,
-                          sort_columns: str = "", sort_types: str = "-1") -> list[dict]:
-    """东财数据中心统一查询"""
-    params = {
-        "reportName": report_name, "columns": columns,
-        "filter": filter_str, "pageNumber": "1", "pageSize": str(page_size),
-        "sortColumns": sort_columns, "sortTypes": sort_types,
-        "source": "WEB", "client": "WEB",
-    }
-    try:
-        r = _session.get(DATACENTER_URL, params=params,
-                         headers={"User-Agent": UA}, timeout=DEFAULT_TIMEOUT)
-        d = r.json()
-        if d.get("result") and d["result"].get("data"):
-            return d["result"]["data"]
-    except Exception as e:
-        print(f"[a-stock] 东财数据中心查询失败: {e}")
-    return []
+# 2026-06-27 阶段3:东财数据中心查询已归位 data/sources/eastmoney.datacenter;此处再导出,
+# 本模块 _dragon_tiger_board 及外部 `from a_stock_data_adapter import _eastmoney_datacenter` 零改。
+from data.sources.eastmoney import datacenter as _eastmoney_datacenter   # noqa: E402
 
 
 # ============================================================

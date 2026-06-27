@@ -1135,7 +1135,7 @@ def _dragon_tiger_eastmoney(trade_date: str = None, page_size: int = 400) -> Lis
     trade_date='YYYY-MM-DD' 指定日;None → 取最近一个有龙虎榜数据的交易日(按 TRADE_DATE 降序取首日,
     自然处理"盘中今日龙虎榜未出 → 退到上一交易日")。归一含 stock_code/stock_name(供 wf_daily_strategy_scan
     池子加载 r.get('stock_code'))+ 净买/买卖额/原因。任何异常返 [](交 _route 跳过/上层无害)。"""
-    from a_stock_data_adapter import _eastmoney_datacenter
+    from data.sources.eastmoney import datacenter as _eastmoney_datacenter
     flt = f"(TRADE_DATE>='{trade_date}')(TRADE_DATE<='{trade_date}')" if trade_date else ""
     rows = _eastmoney_datacenter('RPT_DAILYBILLBOARD_DETAILSNEW', filter_str=flt,
                                  page_size=page_size, sort_columns='TRADE_DATE', sort_types='-1')
@@ -1190,7 +1190,7 @@ def dragon_tiger_detail(trade_date: str = None, page_size: int = 200) -> List[di
     flt = f"(TRADE_DATE>='{trade_date}')(TRADE_DATE<='{trade_date}')"
 
     def _q():
-        from a_stock_data_adapter import _eastmoney_datacenter
+        from data.sources.eastmoney import datacenter as _eastmoney_datacenter
         return _eastmoney_datacenter('RPT_DAILYBILLBOARD_DETAILSNEW', filter_str=flt,
                                      page_size=page_size, sort_columns='BILLBOARD_NET_AMT', sort_types='-1')
     return _route("dragon_tiger_detail", [("em_datacenter", _q)], empty=[]) or []
