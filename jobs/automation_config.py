@@ -117,9 +117,15 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'description': '合并股票日涨跌+基金日收益落 daily_pnl_snapshots(晨报昨日收益的数据源)',
     },
+    'weekend_portfolio': {
+        'cn': '📊 周末持仓深度合并(周报+压力情景)',
+        'schedule': '周日 15:00',
+        'category': '核心', 'default': True, 'core': True,
+        'description': 'F 合并:顺序跑 ①持仓综合周报(评级/减仓加仓Top5/4象限/已实现盈亏)→ ②8情景压力AI(最脆弱情景/减仓对冲)。合 weekly_analysis+portfolio_stress_ai',
+    },
     'weekly_analysis': {
         'cn': '📊 周日持仓综合周报',
-        'schedule': '周日 15:00',
+        'schedule': '已并入 weekend_portfolio(周日15:00)第①步',
         'category': '核心', 'default': True, 'core': True,
         'description': '评级变化/减仓加仓Top5/4象限体检/已实现盈亏/周末新闻',
     },
@@ -164,9 +170,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',
-        'schedule': '周日 16:00',
+        'schedule': '已并入 weekend_portfolio(周日15:00)第②步',
         'category': '核心',
-        'default': True,  # scenario_stress 已写好8情景却无人调;AI 翻译成最脆弱情景+风险担当+减仓对冲预案
+        'default': True,  # 仍 True:由 weekend_portfolio 调用时要执行(可单独关掉它的子步骤)
         'description': '周末跑全8宏观情景压力+集中度,AI 给最脆弱情景/风险担当持仓/具体减仓对冲建议',
     },
     'announcement_scan': {
@@ -261,11 +267,18 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,  # 仍 True:由 fund_evening 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '对持有基金 + 定投计划标的拉最新净值落 fund_nav 缓存(fund_evening 第①步)',
     },
+    'fund_premarket': {
+        'cn': '🏦 基金：盘前合并(定投提醒+估值分位)',
+        'schedule': '08:55 每日(盘前)',
+        'category': '基金',
+        'default': True,  # E 合并:顺序跑 定投到期提醒 → 宽基估值分位播报,合一个盘前调度入口
+        'description': '盘前先①定投到期提醒/自动记账,再②宽基指数估值分位播报。合 fund_dca_reminder+fund_valuation_signal',
+    },
     'fund_dca_reminder': {
         'cn': '🏦 基金：定投到期提醒',
-        'schedule': '08:55 每日',
+        'schedule': '已并入 fund_premarket(08:55),作其子步骤',
         'category': '基金',
-        'default': True,
+        'default': True,  # 仍 True:由 fund_premarket 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '检查启用的定投计划,到当期定投日则提醒(阶段一只提醒不自动下单/记账)',
     },
     'fund_target_check': {
@@ -277,9 +290,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'fund_valuation_signal': {
         'cn': '🏦 基金：宽基估值分位播报',
-        'schedule': '09:05 每日',
+        'schedule': '已并入 fund_premarket(08:55),作其子步骤',
         'category': '基金',
-        'default': True,
+        'default': True,  # 仍 True:由 fund_premarket 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '扫常用宽基指数滚动PE分位,低估的提示加投(估值定投择时依据)',
     },
     'pg_backup': {

@@ -1222,6 +1222,28 @@ def task_fund_valuation_signal():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_fund_premarket():
+    """🏦 基金盘前合并(08:55)—— 合 fund_dca_reminder + fund_valuation_signal 为一个调度入口:
+    顺序跑 ①定投到期提醒/自动记账 → ②宽基指数估值分位播报。两子任务各自开关(fund_dca_reminder/
+    fund_valuation_signal)+ 交易日守卫 + 日志仍独立有效、可单独关;本任务只统一顺序调度。
+    开关 fund_premarket(默认开;关掉则两步都不跑)。两段各自 try:一段异常不拖另一段。"""
+    job = 'fund_premarket'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            return
+    except Exception:
+        pass
+    try:
+        task_fund_dca_reminder()        # ① 定投到期提醒(内含 _fund_gate + _log_run)
+    except Exception as e:
+        print(f'[fund_premarket] 定投提醒异常(继续估值): {type(e).__name__}: {str(e)[:80]}')
+    try:
+        task_fund_valuation_signal()    # ② 宽基估值分位
+    except Exception as e:
+        print(f'[fund_premarket] 估值分位异常: {type(e).__name__}: {str(e)[:80]}')
+
+
 def task_rag_ingest():
     """🔎 每日把历史分析/新闻/推荐 嵌入入 pgvector(语义检索语料保鲜)。开关 rag_ingest,默认开。"""
     job = 'rag_ingest'
@@ -1393,9 +1415,11 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'selection_debate':          900,
     'fund_valuation_signal':     300,    # 6 个指数, 5 分钟够
     'fund_dca_reminder':         300,
+    'fund_premarket':            900,    # E 合并:定投提醒(300) + 估值分位(300),串行给足
     'fund_target_check':         600,
     'fund_nav_refresh':          900,
     'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
+    'weekend_portfolio':         1800,   # F 合并:周报(run_once 全持仓) + 8情景压力AI,串行给足
     'eod_outcomes':              900,    # A 合并:等 prefetch(≤300) + 推荐池回填 + 信号后验
     'pg_backup':                 600,
 }
@@ -4282,8 +4306,17 @@ def task_mx_weekend_outlook():
 
 def task_weekly_analysis():
     """🆕 周日持仓综合分析（真合并 weekly_portfolio_analysis + wf_weekly_portfolio_report，
-    2026-06-12 整合:此前合并版丢了评级变化/浮盈明细/4象限体检,现补全后旧任务已删）"""
+    2026-06-12 整合:此前合并版丢了评级变化/浮盈明细/4象限体检,现补全后旧任务已删）
+    2026-06-27:并入 weekend_portfolio(周日合并入口),故补内部开关守卫(原靠 _wrap,直调时也生效)。"""
     job = 'weekly_analysis'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
     started = datetime.now().isoformat()
     try:
         from portfolio_scheduler import portfolio_scheduler
@@ -4441,6 +4474,28 @@ def task_weekly_analysis():
                  finished_at=datetime.now().isoformat())
 
 
+def task_weekend_portfolio():
+    """📊 周末持仓深度合并(周日 15:00)—— 合 weekly_analysis + portfolio_stress_ai 为一个调度入口:
+    顺序跑 ①持仓综合周报(评级变化/减仓加仓Top5/4象限体检/已实现盈亏)→ ②全 8 宏观情景压力叙事
+    (最脆弱情景/风险担当持仓/具体减仓对冲)。两子任务各自开关(weekly_analysis/portfolio_stress_ai)+
+    日志仍独立有效、可单独关;本任务只统一顺序调度。开关 weekend_portfolio(默认开)。两段各自 try。"""
+    job = 'weekend_portfolio'
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            return
+    except Exception:
+        pass
+    try:
+        task_weekly_analysis()          # ① 持仓综合周报(内含 is_enabled + _log_run)
+    except Exception as e:
+        print(f'[weekend_portfolio] 周报异常(继续压力情景): {type(e).__name__}: {str(e)[:80]}')
+    try:
+        task_portfolio_stress_ai()      # ② 8 情景压力叙事
+    except Exception as e:
+        print(f'[weekend_portfolio] 压力情景异常: {type(e).__name__}: {str(e)[:80]}')
+
+
 # 默认注册一组适合大多数用户的任务时间表
 _REGISTERED = False
 
@@ -4536,9 +4591,8 @@ def register_default_jobs():
     """注册整合后的任务时间表（2026-06-12 二次整合，CST 时区）
 
     时间表（CST，2026-06-25 大改:监控重构 + 盘后全挪 16:30 后）：
-      08:55 fund_dca_reminder           — 定投提醒
+      08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
-      09:05 fund_valuation_signal       — 估值信号
       09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
       10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
       10:30 mx_selection_review         — 选股过妙想诊断(D:只在与综合选股分歧时推) + 急跌兜底
@@ -4559,7 +4613,7 @@ def register_default_jobs():
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
       22:00 fund_evening                — 🏦 基金晚间合并(B:净值入库→定投止盈检查) · 22:30 daily_pnl_snapshot
       02:00/02:30 pg_backup / rag_ingest
-      周日 10:00/15:00/16:00/20:00 mx_weekend_outlook / weekly_analysis / portfolio_stress_ai / wf_weekly_backtest
+      周日 10:00/15:00/20:00 mx_weekend_outlook / weekend_portfolio(F:周报+8情景压力合并) / wf_weekly_backtest
       周一 03:00/09:30 weekly_db_cleanup / ai_eval_weekly
       ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
          selection_debate/lockup_radar/research_digest(已并入 unified_selection / announcement_scan)。
@@ -4578,8 +4632,8 @@ def register_default_jobs():
     """
     # ---- 🟢 盘前 ----
     hub.register('morning_strategy',            '09:00', task_morning_strategy)
-    hub.register('fund_dca_reminder',           '08:55', task_fund_dca_reminder)
-    hub.register('fund_valuation_signal',       '09:05', task_fund_valuation_signal)
+    # 基金盘前合并(2026-06-27):fund_dca_reminder(08:55)+fund_valuation_signal(09:05)→ 一条 fund_premarket
+    hub.register('fund_premarket',              '08:55', task_fund_premarket)
 
     # ---- 09:45 整合选股 ----
     hub.register('strategy_prefetch',           '09:10', task_strategy_prefetch)  # 盘前预取 5 大问财策略入缓存(拉早到 09:10,留足 35min)
@@ -4632,23 +4686,15 @@ def register_default_jobs():
     except Exception as e:
         print(f'[jobs_hub] mx_weekend_outlook 注册失败: {e}')
 
+    # 周末持仓深度合并(2026-06-27):weekly_analysis(15:00)+portfolio_stress_ai(16:00)→ 一条 weekend_portfolio
     try:
-        wrapped = hub._wrap('weekly_analysis', task_weekly_analysis)
+        wrapped = hub._wrap('weekend_portfolio', task_weekend_portfolio)
         job = schedule.every().sunday.at('15:00').do(wrapped)
         hub._registered.append({
-            'name': 'weekly_analysis', 'when': 'sun 15:00 CST', 'job': job,
+            'name': 'weekend_portfolio', 'when': 'sun 15:00 CST', 'job': job,
         })
     except Exception as e:
-        print(f'[jobs_hub] weekly_analysis 注册失败: {e}')
-
-    try:
-        wrapped = hub._wrap('portfolio_stress_ai', task_portfolio_stress_ai)
-        job = schedule.every().sunday.at('16:00').do(wrapped)
-        hub._registered.append({
-            'name': 'portfolio_stress_ai', 'when': 'sun 16:00 CST', 'job': job,
-        })
-    except Exception as e:
-        print(f'[jobs_hub] portfolio_stress_ai 注册失败: {e}')
+        print(f'[jobs_hub] weekend_portfolio 注册失败: {e}')
 
     try:
         wrapped = hub._wrap('weekly_db_cleanup', task_weekly_db_cleanup)
