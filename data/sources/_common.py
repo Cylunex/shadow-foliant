@@ -171,6 +171,28 @@ def ak_safe(fn: Callable[..., Any], *args, timeout: int = 30, **kwargs) -> Any:
     return _call(fn, *args, timeout=timeout, **kwargs)
 
 
+# ── 共享 requests 会话(国内直连源:东财/同花顺/百度/财联社/巨潮)────────────────
+DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+_REQ_SESSION = None
+
+
+def requests_session():
+    """trust_env=False(国内源不走代理)+ rate_limiter 限流的共享 requests 会话(单例)。
+    requests 源(东财 datacenter/push2、同花顺、百度、财联社、巨潮)统一从此取,代理/限流口径一致。"""
+    global _REQ_SESSION
+    if _REQ_SESSION is None:
+        import requests
+        s = requests.Session()
+        s.trust_env = False
+        try:
+            from rate_limiter import throttled_session
+            throttled_session(s)
+        except Exception:
+            pass
+        _REQ_SESSION = s
+    return _REQ_SESSION
+
+
 if __name__ == '__main__':
     print('=== data.sources._common 自检 ===')
     assert norm_code('sh600519') == '600519'

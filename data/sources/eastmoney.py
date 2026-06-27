@@ -450,6 +450,36 @@ def stock_info(code: str) -> dict:
         return {}
 
 
+# ── 行业 / 概念板块涨跌排名(push2 clist)──────────────────────────────────────
+def _comparison(fs: str, pz: str, top_n: int) -> dict:
+    params = {"pn": "1", "pz": pz, "po": "1", "np": "1", "fltt": "2", "invt": "2", "fs": fs,
+              "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207"}
+    try:
+        items = (_SESSION.get("https://push2.eastmoney.com/api/qt/clist/get", params=params,
+                              headers={"User-Agent": _DC_UA}, timeout=15).json()
+                 .get("data", {}).get("diff", []))
+        if not items:
+            return {"top": [], "bottom": [], "total": 0}
+        rows = [{"rank": i + 1, "name": it.get("f14", ""), "change_pct": it.get("f3", 0),
+                 "code": it.get("f12", ""), "up_count": it.get("f104", 0), "down_count": it.get("f105", 0),
+                 "leader": it.get("f140", ""), "leader_change": it.get("f136", 0)}
+                for i, it in enumerate(items)]
+        return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
+    except Exception as e:
+        print(f"[sources.eastmoney] 板块对比请求失败({fs}): {e}")
+        return {"top": [], "bottom": [], "total": 0}
+
+
+def industry_comparison(top_n: int = 20) -> dict:
+    """全行业涨跌幅排名(push2 m:90+t:2)→ {top,bottom,total}。"""
+    return _comparison("m:90+t:2", "100", top_n)
+
+
+def concept_comparison(top_n: int = 50) -> dict:
+    """全概念板块涨跌幅排名(push2 m:90+t:3)→ {top,bottom,total}。"""
+    return _comparison("m:90+t:3", "300", top_n)
+
+
 # ── K线(push2his 日线)─────────────────────────────────────────────────────
 _KLINE_URL = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
               'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'

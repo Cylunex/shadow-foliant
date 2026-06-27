@@ -284,71 +284,18 @@ from data.sources.eastmoney import (   # noqa: E402
 )
 
 
-def _ths_eps_forecast(code: str) -> pd.DataFrame:
-    """同花顺机构一致预期EPS"""
-    code = _normalize_code(code)
-    url = f"https://basic.10jqka.com.cn/new/{code}/worth.html"
-    headers = {
-        "User-Agent": UA,
-        "Referer": "https://basic.10jqka.com.cn/",
-    }
-    try:
-        r = _session.get(url, headers=headers, timeout=15)
-        r.encoding = "gbk"
-        # ⚠️ pandas 2.1+ 不再接受裸 HTML 字符串(短串会被当文件路径打开,抛 FileNotFoundError
-        #    "[Errno 2] No such file or directory: <!DOCTYPE HTML>"), 必须 StringIO 包装。
-        dfs = pd.read_html(StringIO(r.text))
-        for df in dfs:
-            cols = [str(c) for c in df.columns]
-            if any("每股收益" in c or "均值" in c for c in cols):
-                return df
-        return dfs[0] if dfs else pd.DataFrame()
-    except ValueError as e:
-        # "No tables found" 是该股票无机构一致预期数据(同花顺返回空表), 正常语义不算异常,
-        # 静默返回空 DataFrame 避免日志刷屏(34 条/天)。其它 ValueError 仍走下面通用分支。
-        if 'No tables found' in str(e):
-            return pd.DataFrame()
-        print(f"[a-stock] 一致预期({code}) 解析失败: {type(e).__name__}: {str(e)[:120]}")
-        return pd.DataFrame()
-    except Exception as e:
-        print(f"[a-stock] 一致预期({code}) 请求失败: {type(e).__name__}: {str(e)[:120]}")
-        return pd.DataFrame()
+# 2026-06-27 阶段3:同花顺 一致预期/热点归因 已归位 data/sources/ths.py(再导出,调用零改)。
+from data.sources.ths import (   # noqa: E402
+    eps_forecast as _ths_eps_forecast,
+    hot_reason as _ths_hot_reason,
+)
 
 
 # ============================================================
 # Layer 3: 信号层
 # ============================================================
 
-def _ths_hot_reason(date: str = None) -> pd.DataFrame:
-    """同花顺当日强势股归因 + 题材标签"""
-    if date is None:
-        from datetime import date as _date
-        date = _date.today().strftime("%Y-%m-%d")
-
-    url = (f"http://zx.10jqka.com.cn/event/api/getharden/"
-           f"date/{date}/orderby/date/orderway/desc/charset/GBK/")
-    headers = {"User-Agent": UA}
-    try:
-        r = _session.get(url, headers=headers, timeout=10)
-        data = r.json()
-        if data.get("errocode", 0) != 0:
-            raise RuntimeError(f"同花顺热点错误: {data.get('errormsg', '')}")
-        rows = data.get("data") or []
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
-        rename_map = {
-            "name": "名称", "code": "代码", "reason": "题材归因",
-            "close": "收盘价", "zhangdie": "涨跌额", "zhangfu": "涨幅%",
-            "huanshou": "换手率%", "chengjiaoe": "成交额",
-            "chengjiaoliang": "成交量", "ddejingliang": "大单净量",
-            "market": "市场",
-        }
-        df = df.rename(columns=rename_map)
-        return df
-    except Exception as e:
-        print(f"[a-stock] 同花顺热点请求失败: {e}")
-        return pd.DataFrame()
+# _ths_hot_reason 已归位 sources/ths(见上方阶段3 再导出块)。
 
 
 # 2026-06-27 阶段3:东财 push2 资金流(个股分钟/日级 + 板块行业/概念)已归位 data/sources/eastmoney.py。
@@ -401,78 +348,14 @@ def _baidu_concept_blocks(code: str) -> dict:
         return {"industry": [], "concept": [], "region": [], "concept_tags": []}
 
 
-def _industry_comparison(top_n: int = 20) -> dict:
-    """全行业涨跌幅排名（东财行业板块）"""
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1", "pz": "100", "po": "1", "np": "1",
-        "fltt": "2", "invt": "2",
-        "fs": "m:90+t:2",
-        "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
-    }
-    headers = {"User-Agent": UA}
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
-        items = d.get("data", {}).get("diff", [])
-        if not items:
-            return {"top": [], "bottom": [], "total": 0}
-
-        rows = []
-        for i, item in enumerate(items):
-            rows.append({
-                "rank": i + 1,
-                "name": item.get("f14", ""),
-                "change_pct": item.get("f3", 0),
-                "code": item.get("f12", ""),
-                "up_count": item.get("f104", 0),
-                "down_count": item.get("f105", 0),
-                "leader": item.get("f140", ""),
-                "leader_change": item.get("f136", 0),
-            })
-        return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
-    except Exception as e:
-        print(f"[a-stock] 行业对比请求失败: {e}")
-        return {"top": [], "bottom": [], "total": 0}
+# 2026-06-27 阶段3:行业/概念板块涨跌排名(east push2 clist)已归位 data/sources/eastmoney.py(再导出)。
+from data.sources.eastmoney import (   # noqa: E402
+    industry_comparison as _industry_comparison,
+    concept_comparison as _concept_comparison,
+)
 
 
-def _concept_comparison(top_n: int = 50) -> dict:
-    """全概念板块涨跌幅排名（东财 push2，fs=m:90+t:3）
-
-    返回与 _industry_comparison 同结构：{top: [...], bottom: [...], total: N}
-    每条 item 字段：rank, name, code, change_pct, up_count, down_count, leader, leader_change
-    """
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1", "pz": "300", "po": "1", "np": "1",
-        "fltt": "2", "invt": "2",
-        "fs": "m:90+t:3",
-        "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
-    }
-    headers = {"User-Agent": UA}
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
-        items = d.get("data", {}).get("diff", [])
-        if not items:
-            return {"top": [], "bottom": [], "total": 0}
-
-        rows = []
-        for i, item in enumerate(items):
-            rows.append({
-                "rank": i + 1,
-                "name": item.get("f14", ""),
-                "change_pct": item.get("f3", 0),
-                "code": item.get("f12", ""),
-                "up_count": item.get("f104", 0),
-                "down_count": item.get("f105", 0),
-                "leader": item.get("f140", ""),
-                "leader_change": item.get("f136", 0),
-            })
-        return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
-    except Exception as e:
-        print(f"[a-stock] 概念对比请求失败: {e}")
-        return {"top": [], "bottom": [], "total": 0}
+# _concept_comparison 已归位 sources/eastmoney(见上方阶段3 再导出块)。
 
 
 # _sector_fund_flow_push2 / _sector_fund_flow_bkzj 已归位 sources/eastmoney(见上方阶段3 再导出块)。
