@@ -130,6 +130,43 @@ def sector_spot() -> List[dict]:
         return []
 
 
+# ── 大盘指数 ────────────────────────────────────────────────────────────────
+# 新浪 hq.sinajs 代码(HK 用 rt_hkHSI,字段位与 A 股不同)。
+_INDICES = [
+    ("上证指数", "s_sh000001"), ("深证成指", "s_sz399001"), ("创业板指", "s_sz399006"),
+    ("科创50", "s_sh000688"), ("沪深300", "s_sh000300"), ("恒生指数", "rt_hkHSI"),
+]
+
+
+def indices() -> List[dict]:
+    """主要大盘指数实时 → [{name, value, change_amt, change_pct}]。空/异常 → []。
+    新浪 hq.sinajs 行 `var hq_str_<sym>="逗号字段"`:A 股 value=v[1]/amt=v[2]/pct=v[3];HK(rt_hk)用 v[6..8]。
+    ⚠️ hq.sinajs 需带 Referer(防盗链),gb2312 编码。"""
+    try:
+        url = "https://hq.sinajs.cn/list=" + ",".join(s for _, s in _INDICES)
+        txt = C.http_get_text(url, headers={"Referer": "https://finance.sina.com.cn"},
+                              timeout=8, encoding="gb2312")
+        raw = {line.split("=", 1)[0].replace("var", "").strip()[7:]: line.split('"', 2)[1].split(",")
+               for line in txt.splitlines() if "hq_str_" in line and '="' in line}
+        out = []
+        for name, ssym in _INDICES:
+            v = raw.get(ssym)
+            if not v:
+                continue
+            try:
+                if ssym.startswith("rt_hk"):
+                    out.append({"name": name, "value": float(v[6]),
+                                "change_amt": float(v[7]), "change_pct": float(v[8])})
+                else:
+                    out.append({"name": name, "value": float(v[1]),
+                                "change_amt": float(v[2]), "change_pct": float(v[3])})
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
 # ── 财报三表 ────────────────────────────────────────────────────────────────
 _FIN_URL = ("https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022"
             "?paperCode={sym}&source={src}&type=0&page=1&num={num}")

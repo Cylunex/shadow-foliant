@@ -1053,55 +1053,22 @@ def stock_info(code: str) -> dict:
     return info if isinstance(info, dict) else {}
 
 
-_INDEX_SPECS = [("上证指数", "s_sh000001", "s_sh000001"), ("深证成指", "s_sz399001", "s_sz399001"),
-                ("创业板指", "s_sz399006", "s_sz399006"), ("科创50", "s_sh000688", "s_sh000688"),
-                ("沪深300", "s_sh000300", "s_sh000300"), ("恒生指数", "rt_hkHSI", "r_hkHSI")]
-
-
 def _indices_sina() -> List[dict]:
-    import urllib.request
-    url = "https://hq.sinajs.cn/list=" + ",".join(s for _, s, _ in _INDEX_SPECS)
-    txt = urllib.request.urlopen(urllib.request.Request(
-        url, headers={"Referer": "https://finance.sina.com.cn"}), timeout=8).read().decode("gb2312", "replace")
-    raw = {line.split("=", 1)[0].replace("var", "").strip()[7:]: line.split('"', 2)[1].split(",")
-           for line in txt.splitlines() if "hq_str_" in line and '="' in line}
-    out = []
-    for name, ssym, _ in _INDEX_SPECS:
-        v = raw.get(ssym)
-        if not v:
-            continue
-        try:
-            if ssym.startswith("rt_hk"):
-                out.append({"name": name, "value": float(v[6]), "change_amt": float(v[7]), "change_pct": float(v[8])})
-            else:
-                out.append({"name": name, "value": float(v[1]), "change_amt": float(v[2]), "change_pct": float(v[3])})
-        except Exception:
-            continue
-    return out
+    """大盘指数新浪源(indices 主源)。2026-06-27 阶段3:归位 data/sources/sina.py(hq.sinajs 直连)。"""
+    try:
+        from data.sources import sina as _s
+        return _s.indices()
+    except Exception:
+        return []
 
 
 def _indices_tencent() -> List[dict]:
-    import urllib.request
-    url = "https://qt.gtimg.cn/q=" + ",".join(t for _, _, t in _INDEX_SPECS)
-    txt = urllib.request.urlopen(urllib.request.Request(
-        url, headers={"Referer": "https://finance.qq.com"}), timeout=8).read().decode("gbk", "replace")
-    raw = {line.split("=", 1)[0].replace("v_", "").strip(): line.split('"', 2)[1].split("~")
-           for line in txt.splitlines() if line.startswith("v_") and '="' in line}
-    out = []
-    for name, _, tsym in _INDEX_SPECS:
-        v = raw.get(tsym)
-        if not v or len(v) < 6:
-            continue
-        try:
-            cur = float(v[3])
-            if tsym.startswith("r_"):
-                prev = float(v[4]); amt = cur - prev; pct = (amt / prev * 100) if prev else 0
-            else:
-                amt = float(v[4]); pct = float(v[5])
-            out.append({"name": name, "value": cur, "change_amt": amt, "change_pct": pct})
-        except Exception:
-            continue
-    return out
+    """大盘指数腾讯源(indices 兜底)。2026-06-27 阶段3:归位 data/sources/tencent.py(qt.gtimg 直连)。"""
+    try:
+        from data.sources import tencent as _t
+        return _t.indices()
+    except Exception:
+        return []
 
 
 def indices() -> List[dict]:
