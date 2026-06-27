@@ -44,7 +44,11 @@
   - ✅ `sina.py`:新浪 qfq 日线(免 py_mini_racer,与 akshare 逐字段一致)/ 行业 spot / 财报三表 直连;datahub `_kline_sina_qfq`/`_sector_spot_sina`/`financials` 已切。
   - ✅ `eastmoney.py`:全球快讯(getFastNewsList)/ 可转债比价(push2 clist,f-code 直连,326 只 0 不一致)/ 基金净值(f10 lsjz)直连;datahub `_news_em`/`_cb_eastmoney`/`_fund_nav_eastmoney` 已切。
   - ✅ `jsl.py`:集思录可转债(POST cb_list_new,匿名约 30 只,与 akshare 30 只逐字段一致);datahub `_cb_jsl` 已切。
-- **阶段 3(待续)**:把现有散在 `datahub.py` / `a_stock_data_adapter.py` 的东财(行情/K线/datacenter)/腾讯/同花顺/百度/财联社/巨潮直连**逐 provider 搬进 `sources/*.py`**,门面只留 `_route` 声明;摊平 `StockDataFetcher` 内层嵌套降级。详见重构计划 §7 阶段 3。
+- **阶段 3(进行中 2026-06-27)**:
+  - ✅ 指数源归位:`sina.indices()` + 新建 `tencent.py`(qt.gtimg);datahub `_indices_*` 委托。
+  - ✅ 东财 K线归位:`eastmoney.kline()`(push2his raw/qfq);datahub `_kline_eastmoney` 委托。
+  - ✅ 独立原子源文件 git mv 进本包:`baostock.py` / `mootdx.py` / `pywencai.py`(旧 `data/*_safe.py`、`tdx_mootdx.py` 留 shim,15+ 处导入零改)。
+  - ⏭️ **剩(高风险/高工作量)**:adapter(~30 方法)逐 provider 归位;拆 `StockDataFetcher` + 摊平 `manager` 8 源链(动主 raw K线路径);`tushare.py`。详见重构计划 §7 阶段 3。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。
