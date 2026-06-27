@@ -3766,8 +3766,45 @@ def task_unified_selection():
         print(f'[unified_selection] 候选池子任务失败: {e}')
 
 
+def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '') -> str:
+    """早盘持仓 AI 研判:**一次** LLM,只喂"风险/买点/异动"子集(控 token、不逐只、不雪崩)→
+    整体基调 + 重点处理 1-2 只 + 一句早盘纪律。失败/无关注子集 → 返回 ''(不阻塞规则报告)。"""
+    if not (sell_list or buy_list or movers):
+        return ''
+
+    def _row(s):
+        pnl = f"浮盈{s['pnl']}%" if s.get('pnl') is not None else ''
+        chg = f"{s.get('change'):+.1f}%" if s.get('change') is not None else ''
+        rs = '/'.join((s.get('sell_reasons') or [])[:2]) or '—'
+        return f"{s['code']} {s['name']} {chg} {pnl} 风险分{s.get('sell_score', 0)}({rs}){' 有买点' if s.get('buy_signal') else ''}"
+    parts = []
+    if sell_list:
+        parts.append('【风险/该减】\n' + '\n'.join(_row(s) for s in sell_list))
+    if buy_list:
+        parts.append('【出现买点】\n' + '\n'.join(_row(s) for s in buy_list[:6]))
+    if movers:
+        parts.append('【盘中异动±3%】\n' + '\n'.join(_row(s) for s in movers))
+    prompt = (f"你是早盘持仓顾问。账户共持有 {n} 只。现在是开盘后约 35 分钟(10:05),"
+              f"下面是需要关注的子集(规则已算好风险分/买点/异动):\n"
+              + chr(10).join(parts)
+              + (f"\n大盘:{mkt_line}" if mkt_line else '')
+              + "\n\n请给≤120字早盘研判,三句话:①整体基调(进攻/防守/观望,一句为什么);"
+                "②今早最该先处理的 1-2 只(点名代码+动作);③一句早盘纪律(别追高/破位别扛/留子弹 等)。"
+                "口语化、结论先行,不要逐只复述、不要免责声明。")
+    try:
+        from deepseek_client import DeepSeekClient
+        ans = DeepSeekClient().call_api(
+            [{'role': 'system', 'content': '你是冷静务实的早盘持仓顾问,只给可执行结论,不空话。'},
+             {'role': 'user', 'content': prompt}], max_tokens=400, call_type='morning_portfolio') or ''
+        return ans.strip()[:400]
+    except Exception as e:
+        print(f'[morning_portfolio] AI 研判失败: {type(e).__name__}: {str(e)[:50]}')
+        return ''
+
+
 def task_morning_portfolio():
     """🆕 早盘持仓分析（接住原晨报"持仓买卖提示":多因子风险分+浮盈,10:05 开盘后实时价比 9:00 盘前快照更准）
+    2026-06-27:加早盘 AI 研判(一次 LLM,只喂风险/买点/异动子集,控 token、不逐只;开关 morning_portfolio_ai)。
 
     数据全部现成:盘后指标快照 + 持仓成本 + 一次批量实时行情(_scan_holdings_with_snapshot)。
     """
@@ -3792,16 +3829,31 @@ def task_morning_portfolio():
         lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
 
         # 大盘速览(轻量,新浪源)
+        mkt_line = ''
         try:
             import briefing as _brief
             _mkt = _brief._market()
             if _mkt.get('indices'):
-                lines.append('【大盘】' + '  '.join(f"{x['name']}{x['v']}" for x in _mkt['indices']))
+                mkt_line = '  '.join(f"{x['name']}{x['v']}" for x in _mkt['indices'])
+                lines.append('【大盘】' + mkt_line)
             if _mkt.get('sector_top'):
                 lines.append('强势板块: ' + '、'.join(f"{s['板块']}{s['涨跌幅']}%" for s in _mkt['sector_top']))
             lines.append('')
         except Exception:
             pass
+
+        # 🧠 早盘 AI 研判(一次 LLM,只喂关注子集;开关 morning_portfolio_ai,默认开,可单独关)
+        try:
+            from automation_config import is_enabled as _ai_on
+            _do_ai = _ai_on('morning_portfolio_ai')
+        except Exception:
+            _do_ai = True
+        if _do_ai:
+            _ai = _morning_ai_review(len(scans), sell_list, buy_list, movers, mkt_line)
+            if _ai:
+                lines.append('### 🧠 早盘研判(AI)')
+                lines.append(_ai)
+                lines.append('')
 
         lines.append('### 🔴 该减/清的(结论先行,按紧迫度)')
         # 术语翻人话:用户看"跌破60日线"比"破MA60(12.3)"懂

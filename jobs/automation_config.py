@@ -55,7 +55,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '☀️ 早盘持仓分析',
         'schedule': '10:05 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '持仓逐只风险分+浮盈+买点+盘中异动(实时价,零逐只接口);并挑今日 top15 重点候选存 focus_candidates',
+        'description': '持仓逐只风险分+浮盈+买点+盘中异动(实时价,零逐只接口);并挑今日 top15 重点候选存 focus_candidates;含早盘 AI 研判(子开关 morning_portfolio_ai)',
+    },
+    'morning_portfolio_ai': {
+        'cn': '☀️ 早盘 AI 研判(morning_portfolio 内)',
+        'schedule': '10:05 每日(morning_portfolio 内,一次 LLM)',
+        'category': '核心', 'default': True,
+        'description': '早盘对持仓"风险/买点/异动"子集做一次 LLM 研判(整体基调+重点处理1-2只+早盘纪律);只喂子集控 token、不逐只。关掉则早盘分析回到纯规则',
     },
     'noon_portfolio': {
         'cn': '🕦 午间重点盯盘',
