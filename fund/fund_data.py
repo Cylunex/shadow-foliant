@@ -307,20 +307,71 @@ def _to_float(v):
         return None
 
 
-def get_stock_holdings(code: str, year: str = None) -> Optional[pd.DataFrame]:
-    """持股穿透(前十大重仓股)。year 形如 '2024',缺省最近。失败 None。"""
+# ----- 基金重仓股(季报数据,文件缓存防逐只重复打东财) -------------------
+# fund_portfolio_hold_em 走东财天天基金、是**季报**披露(一季度才变一次)。基金组合诊断的重仓穿透
+# 会对持有的 N 只基金逐只调本接口,无缓存时盘中一点就逐只串行打几十次东财 → 易被封 IP。
+# 故:① 结果按 基金代码+年份 落 1 天文件缓存(DataFrame,L2 pickle 思路,无 Redis 也在);
+#     ② cache_only=True(组合穿透盘中传)→ 只读缓存、冷则返回过期缓存或 None(绝不盘中现拉);
+#     ③ 现取失败回退过期缓存(季报数据旧一天无妨,有胜无)。
+import os as _os
+import time as _time
+try:
+    import _bootstrap as _bs
+    _HOLD_CACHE_DIR = _os.path.join(_bs.DB_DIR, 'fund_holdings_cache')
+except Exception:
+    _HOLD_CACHE_DIR = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'db', 'fund_holdings_cache')
+_HOLD_TTL = 24 * 3600   # 1 天:季报数据日内不变,盘后焐一次日内复用;次日自然刷新
+
+
+def _read_hold_pkl(cf: str) -> Optional[pd.DataFrame]:
+    try:
+        if _os.path.isfile(cf):
+            df = pd.read_pickle(cf)
+            if isinstance(df, pd.DataFrame):
+                return df
+    except Exception:
+        pass
+    return None
+
+
+def get_stock_holdings(code: str, year: str = None,
+                       cache_only: bool = False) -> Optional[pd.DataFrame]:
+    """持股穿透(前十大重仓股,季报)。year 形如 '2024',缺省最近。失败 None。
+    cache_only=True:只读缓存、缓存冷不现拉东财(返回过期缓存或 None)——组合重仓穿透盘中用,防逐只封 IP。"""
+    code6 = str(code).zfill(6)
+    cf = _os.path.join(_HOLD_CACHE_DIR, f"{code6}_{year or 'latest'}.pkl")
+    # ① 新鲜缓存命中(TTL 内)
+    try:
+        if _os.path.isfile(cf) and (_time.time() - _os.path.getmtime(cf)) < _HOLD_TTL:
+            fresh = _read_hold_pkl(cf)
+            if fresh is not None:
+                return fresh
+    except Exception:
+        pass
+    # ② 盘中只读模式:缓存冷不现拉(有过期缓存就用旧的,季报旧一天无妨;全无 → None 让上层跳过)
+    if cache_only:
+        return _read_hold_pkl(cf)
+    # ③ 盘后/显式现取 → 写缓存
     ak = _ak()
     if ak is None:
-        return None
+        return _read_hold_pkl(cf)
     try:
         throttle('akshare')
-        kwargs = {'symbol': str(code).zfill(6)}
+        kwargs = {'symbol': code6}
         if year:
             kwargs['date'] = year
-        return ak.fund_portfolio_hold_em(**kwargs)
+        df = ak.fund_portfolio_hold_em(**kwargs)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            try:
+                _os.makedirs(_HOLD_CACHE_DIR, exist_ok=True)
+                df.to_pickle(cf)
+            except Exception:
+                pass
+        return df
     except Exception as e:
         print(f'[fund_data] get_stock_holdings({code}) 失败: {e}')
-        return None
+        return _read_hold_pkl(cf)   # 现取失败回退过期缓存,有胜无
 
 
 def top_holdings(code: str, n: int = 10) -> dict:

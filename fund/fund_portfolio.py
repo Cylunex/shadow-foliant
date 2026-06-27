@@ -102,12 +102,24 @@ def diagnose(holdings: List[Dict], with_overlap: bool = False) -> dict:
     return out
 
 
+_OVERLAP_MAX_FUNDS = 15   # 重仓穿透只取权重最大的前 N 只基金,避免对几十只基金逐只打东财季报接口
+
+
 def _holdings_overlap(rows: List[Dict]) -> List[Dict]:
-    """重仓股穿透重叠:统计被多只基金共同重仓的股票(按持仓占比×基金权重 加权)。慢,需联网。"""
+    """重仓股穿透重叠:统计被多只基金共同重仓的股票(按持仓占比×基金权重 加权)。慢,需联网。
+    ⚠️ 2026-06-27 防东财封禁:① 只穿透权重最大的前 _OVERLAP_MAX_FUNDS 只基金(组合再大也封顶);
+    ② 盘中(交易时段)对 get_stock_holdings 传 cache_only=True —— 只读缓存、冷则跳过,绝不盘中逐只现拉。
+    重仓是季报数据(get_stock_holdings 自带 1 天文件缓存),盘后焐一次盘中复用。"""
+    try:
+        from datahub import _is_trading_hours
+        _cache_only = _is_trading_hours()
+    except Exception:
+        _cache_only = False
+    rows = sorted(rows, key=lambda r: r.get('weight', 0), reverse=True)[:_OVERLAP_MAX_FUNDS]
     stock_w = defaultdict(float)
     stock_funds = defaultdict(set)
     for r in rows:
-        hold = fund_data.get_stock_holdings(r['code'])
+        hold = fund_data.get_stock_holdings(r['code'], cache_only=_cache_only)
         if hold is None or len(hold) == 0:
             continue
         name_col = next((c for c in hold.columns if '股票名称' in c or '名称' in c), None)
