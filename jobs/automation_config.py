@@ -217,7 +217,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'wf_daily_pattern_alert': {
         'cn': '🔗 工作流 D：形态+基本面 E 级预警',
-        'schedule': '15:45 每日(portfolio_indicator_snapshot 内,复用同一份K线)',
+        'schedule': '16:45 每日(portfolio_indicator_snapshot 内,复用同一份K线)',
         'category': '工作流',
         'default': True,
         'description': '对持仓股扫 TA-Lib 反转形态 + 基本面 E 级警报，立即推送',
