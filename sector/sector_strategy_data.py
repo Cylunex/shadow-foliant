@@ -336,76 +336,64 @@ class SectorStrategyDataFetcher:
             return {}
     
     def _get_market_overview(self):
-        """获取市场总体情况"""
+        """获取市场总体情况。
+        ⚠️ 2026-06-27 防东财封禁:① 大盘指数改走 datahub.indices()(新浪/腾讯多源+缓存,**非东财**),
+        替代原 3× ak.stock_zh_index_spot_em(东财);② 全市场涨跌家数(ak.stock_zh_a_spot_em 全A横截面,
+        东财 push2)走 akshare_safe 硬超时+限流,且**盘中跳过**(交易时段不拉全A横截面;广度统计非关键,
+        本采集器本就盘后 17:30 sector_rotation 跑,盘中只有 scheduler 配置错才触达)。"""
+        overview = {}
+        # —— 涨跌家数/涨停跌停:全A横截面(东财 push2),仅盘后拉、盘中跳过 ——
         try:
-            # 获取A股市场统计
-            overview = {}
-            
-            # 涨跌家数
+            from datahub import _is_trading_hours
+            _trading = _is_trading_hours()
+        except Exception:
+            _trading = False
+        if not _trading:
             try:
-                df_stat = self._safe_request(ak.stock_zh_a_spot_em)
+                from akshare_safe import call as _ak_call
+                from rate_limiter import throttle as _throttle
+                _throttle('akshare')
+                df_stat = _ak_call(ak.stock_zh_a_spot_em, timeout=25)
                 if df_stat is not None and not df_stat.empty:
                     total_count = len(df_stat)
                     up_count = len(df_stat[df_stat['涨跌幅'] > 0])
                     down_count = len(df_stat[df_stat['涨跌幅'] < 0])
-                    flat_count = total_count - up_count - down_count
-                    
                     overview["total_stocks"] = total_count
                     overview["up_count"] = up_count
                     overview["down_count"] = down_count
-                    overview["flat_count"] = flat_count
+                    overview["flat_count"] = total_count - up_count - down_count
                     overview["up_ratio"] = round(up_count / total_count * 100, 2) if total_count > 0 else 0
-                    
-                    # 涨停跌停
-                    limit_up = len(df_stat[df_stat['涨跌幅'] >= 9.5])
-                    limit_down = len(df_stat[df_stat['涨跌幅'] <= -9.5])
-                    overview["limit_up"] = limit_up
-                    overview["limit_down"] = limit_down
-            except:
+                    overview["limit_up"] = len(df_stat[df_stat['涨跌幅'] >= 9.5])
+                    overview["limit_down"] = len(df_stat[df_stat['涨跌幅'] <= -9.5])
+            except Exception:
                 pass
-            
-            # 大盘指数
-            try:
-                # 上证指数
-                df_sh = ak.stock_zh_index_spot_em(symbol="上证指数")
-                if df_sh is not None and not df_sh.empty:
-                    overview["sh_index"] = {
-                        "code": "000001",
-                        "name": "上证指数",
-                        "close": df_sh.iloc[0].get('最新价', 0),
-                        "change_pct": df_sh.iloc[0].get('涨跌幅', 0),
-                        "change": df_sh.iloc[0].get('涨跌额', 0)
+
+        # —— 大盘指数:走 datahub.indices()(新浪/腾讯,非东财,带缓存,按中文名匹配) ——
+        try:
+            import datahub
+            idx = {str(d.get('name', '')): d for d in (datahub.indices() or [])}
+
+            def _pick(names):
+                for nm in names:
+                    for k, d in idx.items():
+                        if nm in k:
+                            return d
+                return None
+            for key, names, code in (("sh_index", ["上证指数", "上证综指"], "000001"),
+                                     ("sz_index", ["深证成指"], "399001"),
+                                     ("cyb_index", ["创业板指"], "399006")):
+                d = _pick(names)
+                if d:
+                    overview[key] = {
+                        "code": code, "name": names[0],
+                        "close": d.get('value', 0),
+                        "change_pct": d.get('change_pct', 0),
+                        "change": d.get('change_amt', 0),
                     }
-                
-                # 深证成指
-                df_sz = self._safe_request(ak.stock_zh_index_spot_em, symbol="深证成指")
-                if df_sz is not None and not df_sz.empty:
-                    overview["sz_index"] = {
-                        "code": "399001",
-                        "name": "深证成指",
-                        "close": df_sz.iloc[0].get('最新价', 0),
-                        "change_pct": df_sz.iloc[0].get('涨跌幅', 0),
-                        "change": df_sz.iloc[0].get('涨跌额', 0)
-                    }
-                
-                # 创业板指
-                df_cyb = self._safe_request(ak.stock_zh_index_spot_em, symbol="创业板指")
-                if df_cyb is not None and not df_cyb.empty:
-                    overview["cyb_index"] = {
-                        "code": "399006",
-                        "name": "创业板指",
-                        "close": df_cyb.iloc[0].get('最新价', 0),
-                        "change_pct": df_cyb.iloc[0].get('涨跌幅', 0),
-                        "change": df_cyb.iloc[0].get('涨跌额', 0)
-                    }
-            except:
-                pass
-            
-            return overview
-            
         except Exception as e:
-            print(f"    获取市场概况失败: {e}")
-            return {}
+            print(f"    获取大盘指数失败: {e}")
+
+        return overview
     
     def _get_north_money_flow(self):
         """北向资金近 N 日。⭐ 2026-06-24 统一走 datahub.north_flow(单位规范:净额一律"亿元"),
@@ -434,26 +422,21 @@ class SectorStrategyDataFetcher:
             return {}
     
     def _get_financial_news(self):
-        """获取财经新闻"""
+        """获取财经新闻。⚠️ 2026-06-27 防东财封禁:改走 datahub.market_news()(财联社主源+三级缓存,
+        东财仅降级兜底),替代原直调 ak.stock_news_em(东财全球快讯,绕 datahub 无缓存/熔断)。"""
         try:
-            # 获取东方财富财经新闻（使用重试机制）
-            df = self._safe_request(ak.stock_news_em, symbol="全球")
-            
-            if df is None or df.empty:
-                return []
-            
+            import datahub
+            rows = datahub.market_news(page_size=150) or []
             news_list = []
-            for idx, row in df.head(150).iterrows():  # 取前150条
+            for r in rows:
                 news_list.append({
-                    "title": row.get('新闻标题', ''),
-                    "content": row.get('新闻内容', ''),
-                    "publish_time": str(row.get('发布时间', '')),
-                    "source": row.get('文章来源', ''),
-                    "url": row.get('新闻链接', '')
+                    "title": r.get('title', ''),
+                    "content": r.get('content', ''),
+                    "publish_time": str(r.get('time', '')),
+                    "source": r.get('source', '财联社'),
+                    "url": r.get('url', '')
                 })
-            
             return news_list
-            
         except Exception as e:
             print(f"    获取财经新闻失败: {e}")
             return []
