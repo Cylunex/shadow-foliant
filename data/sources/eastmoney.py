@@ -14,9 +14,11 @@ a_stock_data_adapter 直连,阶段 3 再归位本模块):
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
+import requests
 
 from . import _common as C
 
@@ -148,6 +150,112 @@ def fund_nav(code: str) -> pd.DataFrame:
     if 'acc_nav' not in df.columns:
         df['acc_nav'] = df['unit_nav']
     return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+
+
+# ── 东财数据中心(datacenter:个股公司数据)───────────────────────────────────
+# 共享:trust_env=False 限流 requests 会话(国内源不走代理,与原 adapter 同口径)+ datacenter 统一查询。
+_DC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+_DC_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_SESSION = requests.Session()
+_SESSION.trust_env = False
+try:
+    from rate_limiter import throttled_session as _throttled_session
+    _throttled_session(_SESSION)   # 按 host 自动限流(.get 已被包装)
+except Exception:
+    pass
+
+
+def datacenter(report_name: str, columns: str = "ALL", filter_str: str = "",
+               page_size: int = 50, sort_columns: str = "", sort_types: str = "-1") -> List[dict]:
+    """东财数据中心统一查询 → list[dict](原始字段名)。失败 → []。"""
+    params = {
+        "reportName": report_name, "columns": columns, "filter": filter_str,
+        "pageNumber": "1", "pageSize": str(page_size),
+        "sortColumns": sort_columns, "sortTypes": sort_types,
+        "source": "WEB", "client": "WEB",
+    }
+    try:
+        r = _SESSION.get(_DC_URL, params=params, headers={"User-Agent": _DC_UA}, timeout=15)
+        d = r.json()
+        if d.get("result") and d["result"].get("data"):
+            return d["result"]["data"]
+    except Exception as e:
+        print(f"[sources.eastmoney] 数据中心查询失败: {e}")
+    return []
+
+
+def margin(code: str, page_size: int = 30) -> List[dict]:
+    """融资融券明细(日级)→ [{date,rzye,rzmre,rzche,rqye,rzrqye}]。"""
+    rows = []
+    for row in datacenter("RPTA_WEB_RZRQ_GGMX", filter_str=f'(SCODE="{C.norm_code(code)}")',
+                          page_size=page_size, sort_columns="DATE", sort_types="-1"):
+        rows.append({
+            "date": str(row.get("DATE", ""))[:10], "rzye": row.get("RZYE", 0),
+            "rzmre": row.get("RZMRE", 0), "rzche": row.get("RZCHE", 0),
+            "rqye": row.get("RQYE", 0), "rzrqye": row.get("RZRQYE", 0),
+        })
+    return rows
+
+
+def block_trade(code: str, page_size: int = 20) -> List[dict]:
+    """大宗交易记录 → [{date,price,close,premium_pct,vol,amount,buyer,seller}]。"""
+    rows = []
+    for row in datacenter("RPT_DATA_BLOCKTRADE", filter_str=f'(SECURITY_CODE="{C.norm_code(code)}")',
+                          page_size=page_size, sort_columns="TRADE_DATE", sort_types="-1"):
+        close = row.get("CLOSE_PRICE") or 0
+        deal_price = row.get("DEAL_PRICE") or 0
+        premium = ((deal_price / close - 1) * 100) if close else 0
+        rows.append({
+            "date": str(row.get("TRADE_DATE", ""))[:10], "price": deal_price, "close": close,
+            "premium_pct": round(premium, 2), "vol": row.get("DEAL_VOLUME", 0),
+            "amount": row.get("DEAL_AMT", 0), "buyer": row.get("BUYER_NAME", ""),
+            "seller": row.get("SELLER_NAME", ""),
+        })
+    return rows
+
+
+def holder_num_change(code: str, page_size: int = 10) -> List[dict]:
+    """股东户数变化(季度级)→ [{date,holder_num,change_num,change_ratio,avg_shares}]。"""
+    rows = []
+    for row in datacenter("RPT_HOLDERNUMLATEST", filter_str=f'(SECURITY_CODE="{C.norm_code(code)}")',
+                          page_size=page_size, sort_columns="END_DATE", sort_types="-1"):
+        rows.append({
+            "date": str(row.get("END_DATE", ""))[:10], "holder_num": row.get("HOLDER_NUM", 0),
+            "change_num": row.get("HOLDER_NUM_CHANGE", 0), "change_ratio": row.get("HOLDER_NUM_RATIO", 0),
+            "avg_shares": row.get("AVG_FREE_SHARES", 0),
+        })
+    return rows
+
+
+def dividend(code: str, page_size: int = 20) -> List[dict]:
+    """分红送转历史 → [{date,bonus_rmb,transfer_ratio,bonus_ratio,plan}]。"""
+    rows = []
+    for row in datacenter("RPT_SHAREBONUS_DET", filter_str=f'(SECURITY_CODE="{C.norm_code(code)}")',
+                          page_size=page_size, sort_columns="EX_DIVIDEND_DATE", sort_types="-1"):
+        rows.append({
+            "date": str(row.get("EX_DIVIDEND_DATE", ""))[:10], "bonus_rmb": row.get("PRETAX_BONUS_RMB", 0),
+            "transfer_ratio": row.get("TRANSFER_RATIO", 0), "bonus_ratio": row.get("BONUS_RATIO", 0),
+            "plan": row.get("ASSIGN_PROGRESS", ""),
+        })
+    return rows
+
+
+def lockup_expiry(code: str, trade_date: str, forward_days: int = 90) -> dict:
+    """限售解禁日历 → {history:[...], upcoming:[...]}(各项 {date,type,shares,ratio})。"""
+    c = C.norm_code(code)
+
+    def _rows(data):
+        return [{"date": str(r.get("FREE_DATE", ""))[:10], "type": r.get("LIMITED_STOCK_TYPE", ""),
+                 "shares": r.get("FREE_SHARES_NUM", 0), "ratio": r.get("FREE_RATIO", 0)} for r in data]
+
+    history = _rows(datacenter("RPT_LIFT_STAGE", filter_str=f'(SECURITY_CODE="{c}")',
+                               page_size=15, sort_columns="FREE_DATE", sort_types="-1"))
+    end_str = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=forward_days)).strftime("%Y-%m-%d")
+    upcoming = _rows(datacenter(
+        "RPT_LIFT_STAGE",
+        filter_str=f'(SECURITY_CODE="{c}")(FREE_DATE>="{trade_date}")(FREE_DATE<="{end_str}")',
+        page_size=20, sort_columns="FREE_DATE", sort_types="1"))
+    return {"history": history, "upcoming": upcoming}
 
 
 # ── K线(push2his 日线)─────────────────────────────────────────────────────

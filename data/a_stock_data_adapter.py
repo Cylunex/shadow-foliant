@@ -850,91 +850,15 @@ def _dragon_tiger_board(code: str, trade_date: str, look_back: int = 30) -> dict
 # Layer 4: 资金面 / 筹码层
 # ============================================================
 
-def _margin_trading(code: str, page_size: int = 30) -> list[dict]:
-    """融资融券明细（日级）"""
-    code = _normalize_code(code)
-    data = _eastmoney_datacenter(
-        "RPTA_WEB_RZRQ_GGMX",
-        filter_str=f'(SCODE="{code}")',
-        page_size=page_size, sort_columns="DATE", sort_types="-1",
-    )
-    rows = []
-    for row in data:
-        rows.append({
-            "date": str(row.get("DATE", ""))[:10],
-            "rzye": row.get("RZYE", 0),
-            "rzmre": row.get("RZMRE", 0),
-            "rzche": row.get("RZCHE", 0),
-            "rqye": row.get("RQYE", 0),
-            "rzrqye": row.get("RZRQYE", 0),
-        })
-    return rows
-
-
-def _block_trade(code: str, page_size: int = 20) -> list[dict]:
-    """大宗交易记录"""
-    code = _normalize_code(code)
-    data = _eastmoney_datacenter(
-        "RPT_DATA_BLOCKTRADE",
-        filter_str=f'(SECURITY_CODE="{code}")',
-        page_size=page_size, sort_columns="TRADE_DATE", sort_types="-1",
-    )
-    rows = []
-    for row in data:
-        close = row.get("CLOSE_PRICE") or 0
-        deal_price = row.get("DEAL_PRICE") or 0
-        premium = ((deal_price / close - 1) * 100) if close else 0
-        rows.append({
-            "date": str(row.get("TRADE_DATE", ""))[:10],
-            "price": deal_price,
-            "close": close,
-            "premium_pct": round(premium, 2),
-            "vol": row.get("DEAL_VOLUME", 0),
-            "amount": row.get("DEAL_AMT", 0),
-            "buyer": row.get("BUYER_NAME", ""),
-            "seller": row.get("SELLER_NAME", ""),
-        })
-    return rows
-
-
-def _holder_num_change(code: str, page_size: int = 10) -> list[dict]:
-    """股东户数变化（季度级）"""
-    code = _normalize_code(code)
-    data = _eastmoney_datacenter(
-        "RPT_HOLDERNUMLATEST",
-        filter_str=f'(SECURITY_CODE="{code}")',
-        page_size=page_size, sort_columns="END_DATE", sort_types="-1",
-    )
-    rows = []
-    for row in data:
-        rows.append({
-            "date": str(row.get("END_DATE", ""))[:10],
-            "holder_num": row.get("HOLDER_NUM", 0),
-            "change_num": row.get("HOLDER_NUM_CHANGE", 0),
-            "change_ratio": row.get("HOLDER_NUM_RATIO", 0),
-            "avg_shares": row.get("AVG_FREE_SHARES", 0),
-        })
-    return rows
-
-
-def _dividend_history(code: str, page_size: int = 20) -> list[dict]:
-    """分红送转历史"""
-    code = _normalize_code(code)
-    data = _eastmoney_datacenter(
-        "RPT_SHAREBONUS_DET",
-        filter_str=f'(SECURITY_CODE="{code}")',
-        page_size=page_size, sort_columns="EX_DIVIDEND_DATE", sort_types="-1",
-    )
-    rows = []
-    for row in data:
-        rows.append({
-            "date": str(row.get("EX_DIVIDEND_DATE", ""))[:10],
-            "bonus_rmb": row.get("PRETAX_BONUS_RMB", 0),
-            "transfer_ratio": row.get("TRANSFER_RATIO", 0),
-            "bonus_ratio": row.get("BONUS_RATIO", 0),
-            "plan": row.get("ASSIGN_PROGRESS", ""),
-        })
-    return rows
+# 2026-06-27 阶段3:个股公司数据(融资融券/大宗/股东户数/分红/解禁)已归位 data/sources/eastmoney.py。
+# 这里保留原私有函数名作再导出,类方法与外部 `from a_stock_data_adapter import _xxx` 零改。
+from data.sources.eastmoney import (   # noqa: E402
+    margin as _margin_trading,
+    block_trade as _block_trade,
+    holder_num_change as _holder_num_change,
+    dividend as _dividend_history,
+    lockup_expiry as _lockup_expiry,
+)
 
 
 # ============================================================
@@ -1064,40 +988,7 @@ def _sina_financial_report(code: str, report_type: str = "lrb") -> list[dict]:
         return []
 
 
-def _lockup_expiry(code: str, trade_date: str, forward_days: int = 90) -> dict:
-    """限售解禁日历"""
-    code = _normalize_code(code)
-    history_data = _eastmoney_datacenter(
-        "RPT_LIFT_STAGE",
-        filter_str=f'(SECURITY_CODE="{code}")',
-        page_size=15, sort_columns="FREE_DATE", sort_types="-1",
-    )
-    history = []
-    for row in history_data:
-        history.append({
-            "date": str(row.get("FREE_DATE", ""))[:10],
-            "type": row.get("LIMITED_STOCK_TYPE", ""),
-            "shares": row.get("FREE_SHARES_NUM", 0),
-            "ratio": row.get("FREE_RATIO", 0),
-        })
-
-    end_date = datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=forward_days)
-    end_str = end_date.strftime("%Y-%m-%d")
-    upcoming_data = _eastmoney_datacenter(
-        "RPT_LIFT_STAGE",
-        filter_str=f'(SECURITY_CODE="{code}")(FREE_DATE>="{trade_date}")(FREE_DATE<="{end_str}")',
-        page_size=20, sort_columns="FREE_DATE", sort_types="1",
-    )
-    upcoming = []
-    for row in upcoming_data:
-        upcoming.append({
-            "date": str(row.get("FREE_DATE", ""))[:10],
-            "type": row.get("LIMITED_STOCK_TYPE", ""),
-            "shares": row.get("FREE_SHARES_NUM", 0),
-            "ratio": row.get("FREE_RATIO", 0),
-        })
-
-    return {"history": history, "upcoming": upcoming}
+# _lockup_expiry 已归位 data/sources/eastmoney.lockup_expiry(见上方阶段3 再导出块)。
 
 
 # ============================================================
