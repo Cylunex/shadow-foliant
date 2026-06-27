@@ -15,7 +15,7 @@ DEEPSEEK_API_KEY=your_api_key_here
 
 ### 启动系统
 ```bash
-streamlit run app.py
+python webui/run_dev.py        # → http://localhost:8601
 ```
 
 访问：http://localhost:8501

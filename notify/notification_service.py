@@ -4,7 +4,10 @@ from email.mime.multipart import MIMEMultipart
 import json
 import os
 from typing import Dict, List
-import streamlit as st
+try:
+    import streamlit as st   # 旧 Streamlit UI 残留;2026-06 迁 FastAPI 后仅 _show_streamlit_notification 用(UI 已废),设为可选
+except Exception:
+    st = None
 
 from monitor_db import monitor_db
 
@@ -196,7 +199,9 @@ class NotificationService:
             return True
     
     def _show_streamlit_notification(self, notification: Dict):
-        """在Streamlit界面显示通知"""
+        """在Streamlit界面显示通知(已废:Streamlit UI 2026-06 迁 FastAPI;无 streamlit 直接跳过)"""
+        if st is None:
+            return
         # 使用session_state存储通知
         if 'notifications' not in st.session_state:
             st.session_state.notifications = []

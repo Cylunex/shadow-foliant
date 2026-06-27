@@ -25,7 +25,7 @@ pip install openai  # DeepSeek API使用
 
 ### 2. 访问功能
 
-1. 启动应用：`streamlit run app.py`
+1. 启动应用：`python webui/run_dev.py`
 2. 点击侧边栏**"📊 持仓分析"**按钮
 3. 进入持仓管理界面
 

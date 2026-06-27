@@ -3,7 +3,6 @@ import threading
 import schedule
 from datetime import datetime, timedelta
 from typing import Dict, List
-import streamlit as st
 import os
 import logging
 
@@ -154,22 +153,8 @@ class StockMonitorService:
         }
 
     def _ui_message(self, level: str, msg: str):
-        """安全地输出消息 — Streamlit session 上下文不可用时回退到 print
-
-        autostart / 后台线程 / Docker 干净启动场景下，没有活跃的 streamlit session，
-        直接调用 st.success/info 会抛 NoSessionContextError 导致服务启动失败。
-        """
-        try:
-            if level == 'success':
-                st.success(msg)
-            elif level == 'info':
-                st.info(msg)
-            elif level == 'warning':
-                st.warning(msg)
-            elif level == 'error':
-                st.error(msg)
-        except Exception:
-            print(f'[monitor_service] {msg}')
+        """输出消息 —— 原走 Streamlit st.*,2026-06 迁 FastAPI 后 Streamlit UI 已废,统一 print。"""
+        print(f'[monitor_service] {msg}')
 
     def start_monitoring(self, force: bool = False):
         """启动监测服务

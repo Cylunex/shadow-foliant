@@ -372,9 +372,7 @@ pip install -r requirements.txt
 # 2. 配置 .env（参考 .env.example）
 
 # 3. 启动 (默认端口 8601)
-python run.py
-# 或
-streamlit run app.py
+python webui/run_dev.py
 ```
 
 ### Docker 启动
