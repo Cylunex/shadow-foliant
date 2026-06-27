@@ -53,7 +53,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'morning_portfolio': {
         'cn': '☀️ 早盘持仓分析',
-        'schedule': '09:50 每日',
+        'schedule': '10:05 每日',
         'category': '核心', 'default': True, 'core': True,
         'description': '持仓逐只风险分+浮盈+买点+盘中异动(实时价,零逐只接口);并挑今日 top15 重点候选存 focus_candidates',
     },
@@ -79,7 +79,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🧹 尾盘持仓总结',
         'schedule': '14:30 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '尾盘持仓三合一(原 持仓分析+AI体检+清仓助手):一次AI出 瘦身策略+逐只融合动作+尾盘机会;尾接止盈阶梯减仓[alert]',
+        'description': '尾盘持仓四合一(原 持仓分析+AI体检+清仓助手 + 止盈阶梯/破位减仓信号):一次AI出 瘦身策略+逐只融合动作+尾盘机会+减仓信号,合并一条推送',
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',
@@ -240,10 +240,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'wf_position_profit_check': {
         'cn': '🎯 个人策略：减仓信号（方案 A）',
-        'schedule': '14:30 每日(afternoon_portfolio 尾部)',
+        'schedule': '14:30 每日(并入 afternoon_portfolio 尾盘总结一条推送)',
         'category': '个人策略',
         'default': True,
-        'description': '30/60/100% 阶梯减仓 + 跌破 MA20 减半 / 跌破 MA60 清仓',
+        'description': '30/60/100% 阶梯减仓 + 跌破 MA20 减半 / 跌破 MA60 清仓(2026-06-27 并入尾盘总结;开关关则该段不出现;webui 手动仍可单推 alert)',
     },
 
     # ↓↓↓ 基金模块（长期/定投）

@@ -2025,7 +2025,7 @@ def task_morning_strategy():
             cn_index_summary = f'(拉取失败: {e})'
 
         # ─── 5d. 持仓逐只扫描（共用 _scan_holdings_with_snapshot,零逐只接口）───
-        # 仅供 AI 第8维研判;详细买卖列表已移至 09:50 早盘持仓分析推送
+        # 仅供 AI 第8维研判;详细买卖列表已移至 10:05 早盘持仓分析推送
         hold_summary = '（无持仓扫描数据）'
         try:
             _scans = _scan_holdings_with_snapshot()
@@ -2256,7 +2256,7 @@ def task_morning_strategy():
         mod_c.append('━━━ 🏛️ 宏观面板 (FRED) ━━━')
         mod_c.append(fred_summary)
 
-        # (原模块D"持仓买卖提示"已移至 09:50 morning_portfolio,用开盘后实时价更准;
+        # (原模块D"持仓买卖提示"已移至 10:05 morning_portfolio,用开盘后实时价更准;
         #  晨报回到 3 条,AI 的持仓建议仍在模块A的 position_advice)
 
         # 组合各模块
@@ -2908,43 +2908,49 @@ def _daily_candidate_pool():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
-def _position_profit_check():
-    """🔗 工作流 H：持仓减仓信号（方案 A：30/60/100 阶梯 + MA 保护）
-    （2026-06-12 整合:并入 afternoon_portfolio 尾盘执行,不再独立调度;开关 wf_position_profit_check 仍有效）
-    - 涨 ≥ 30/60/100% 各推一次"减 30%"建议
-    - 跌破 MA20 → "减 50%" 警告
-    - 跌破 MA60 → "清仓" 警告
-    用户实际减仓后下次扫描会基于新持仓重算。
-    """
+def _position_profit_text():
+    """持仓止盈阶梯/破位减仓信号 → (text, critical, warning, n)。**只算不推送**,供
+    尾盘总结合并 + 独立 alert(_position_profit_check)共用。开关 wf_position_profit_check 关 / 无信号 → ('',0,0,0)。
+    方案 A:涨 ≥30/60/100% 各"减30%";跌破 MA20→"减50%";跌破 MA60→"清仓"。"""
     job = 'wf_position_profit_check'
     try:
         from automation_config import is_enabled
         if not is_enabled(job):
-            _log_run(job, 'skipped', error='disabled', started_at=datetime.now().isoformat(),
-                     finished_at=datetime.now().isoformat())
-            return
+            return '', 0, 0, 0
     except Exception:
         pass
-    if _skip_if_not_trading(job):
-        return
-
-    started = datetime.now().isoformat()
     try:
         from position_profit_taker import evaluate_all, format_alert
         items = evaluate_all()
-        if items:
-            text = format_alert(items)
+    except Exception as e:
+        print(f'[position_profit] 计算失败: {e}')
+        return '', 0, 0, 0
+    if not items:
+        return '', 0, 0, 0
+    text = format_alert(items)
+    critical = sum(1 for x in items if any(a['severity'] == 'critical' for a in x['actions']))
+    warning = sum(1 for x in items if any(a['severity'] == 'warning' for a in x['actions']))
+    return text, critical, warning, len(items)
+
+
+def _position_profit_check():
+    """🔗 工作流 H：持仓减仓信号 —— **独立 alert 推送入口**(供 webui 手动触发 / 旧路径)。
+    （2026-06-12 并入 afternoon_portfolio 执行;2026-06-27 计算抽到 `_position_profit_text`,
+      并入尾盘总结**一条**推送降噪;本函数保留供手动单推 alert;开关 wf_position_profit_check 仍有效）"""
+    job = 'wf_position_profit_check'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        text, critical, warning, n = _position_profit_text()
+        if text:
             try:
                 from notification_router import send
                 send('alert', '💰 持仓减仓信号', text)
             except Exception:
                 print(text)
-        critical = sum(1 for x in items
-                       if any(a['severity'] == 'critical' for a in x['actions']))
-        warning = sum(1 for x in items
-                      if any(a['severity'] == 'warning' for a in x['actions']))
         _log_run(job, 'success',
-                 error=f'triggered={len(items)} critical={critical} warning={warning}',
+                 error=f'triggered={n} critical={critical} warning={warning}',
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
@@ -3307,7 +3313,7 @@ def _holdings_codes():
 def _scan_holdings_with_snapshot():
     """持仓逐只扫描(零逐只K线接口):盘后指标快照 + 持仓成本 + 批量实时行情。
 
-    晨报AI(09:00)/早盘持仓(09:50)/尾盘持仓(14:30)共用。
+    晨报AI(09:00)/早盘持仓(10:05)/尾盘持仓(14:30)共用。
     返回 [{'code','name','price','change','pnl','sell_score','sell_reasons',
            'buy_signal','buy_reason'}],失败返回 []。
     卖出风险分: 破MA60(+2)/破MA20(+1)/VaR95>5%(+1)/年回撤>40%(+1)/浮亏>10%(+1)/
@@ -3737,7 +3743,7 @@ def task_unified_selection():
 
 
 def task_morning_portfolio():
-    """🆕 早盘持仓分析（接住原晨报"持仓买卖提示":多因子风险分+浮盈,9:50 开盘后实时价比 9:00 盘前快照更准）
+    """🆕 早盘持仓分析（接住原晨报"持仓买卖提示":多因子风险分+浮盈,10:05 开盘后实时价比 9:00 盘前快照更准）
 
     数据全部现成:盘后指标快照 + 持仓成本 + 一次批量实时行情(_scan_holdings_with_snapshot)。
     """
@@ -3857,10 +3863,11 @@ def task_morning_portfolio():
 
 
 def task_afternoon_portfolio():
-    """🧹 尾盘持仓总结(14:40)—— 整合原「尾盘持仓分析 + 持仓AI体检 + 清仓助手」三条重叠推送为一条。
-    一次取数 + 一次 LLM → 整体瘦身策略 + 逐只**融合**动作(每只一个结论,不再三处口径打架)+ 尾盘机会;
+    """🧹 尾盘持仓总结(14:30)—— 尾盘**四合一**:eod_review(原 尾盘持仓分析 + 持仓AI体检 + 清仓助手)
+    + 止盈阶梯/破位减仓信号,合并为**一条**推送(2026-06-27:减仓信号原独立 alert,现并入降噪)。
+    一次取数 + 一次 LLM → 整体瘦身策略 + 逐只**融合**动作(每只一个结论)+ 尾盘机会 + 止盈/减仓信号;
     清仓/减仓写 decision_signal(source_type='eod_review')。详见 `portfolio/eod_review.py`。
-    末尾仍跑 止盈阶梯/破位减仓信号 子任务(alert 渠道,按需,保留不并)。"""
+    (减仓信号开关 wf_position_profit_check 仍有效:关则该段不出现;webui 手动仍可单推 alert。)"""
     job = 'afternoon_portfolio'
     if _skip_if_not_trading(job):
         return
@@ -3870,19 +3877,23 @@ def task_afternoon_portfolio():
         target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
         from eod_review import run_eod_review
         res = run_eod_review(target_positions=target, record_signals=True)
+        parts = []
         if res.get('ok') and res.get('text'):
-            _push_daily('🧹 尾盘持仓总结', res['text'])
+            parts.append(res['text'])
+        # ── 止盈阶梯/破位减仓信号:并入尾盘总结一条推送(2026-06-27,原独立 💰 alert)──
+        try:
+            _rt, _crit, _warn, _n = _position_profit_text()
+            if _rt:
+                parts.append('━━━━━━━━━━\n💰 **止盈/减仓信号**\n' + _rt)
+        except Exception as e:
+            print(f'[afternoon_portfolio] 减仓信号子段失败: {e}')
+        if parts:
+            _push_daily('🧹 尾盘持仓总结', '\n\n'.join(parts))
         _log_run(job, 'success', error=res.get('summary'),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
-
-    # ── 止盈阶梯/破位减仓信号(alert,按需,保留;不并入尾盘总结)──
-    try:
-        _position_profit_check()
-    except Exception as e:
-        print(f'[afternoon_portfolio] 减仓信号子任务失败: {e}')
 
     # ── E: 盘中急跌兜底(14:30 尾盘段,每股每日去重)。覆盖点 10:30/11:20/14:30 三次,不重复告警 ──
     try:
@@ -3892,7 +3903,7 @@ def task_afternoon_portfolio():
 
 
 def task_noon_portfolio():
-    """🕦 午间持仓盯盘(11:20)—— 只看早盘(09:50)挑出的「今日重点候选」, 不再全持仓逐只。
+    """🕦 午间持仓盯盘(11:20)—— 只看早盘(10:05)挑出的「今日重点候选」, 不再全持仓逐只。
 
     持仓多(80只)全程逐只盯既费算力又抓不住重点 → 早盘 morning_portfolio 按 风险分/买点/异动
     挑出 top15 存 focus_candidates 快照, 午间只跟这批。一组批量行情(零逐只K线)看候选当前价/异动,
@@ -4529,11 +4540,11 @@ def register_default_jobs():
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:05 fund_valuation_signal       — 估值信号
       09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
-      09:50 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
+      10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
       10:30 mx_selection_review         — 选股过妙想诊断(D:只在与综合选股分歧时推) + 急跌兜底
       11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
       12:00 noon_report                 — 📊 午盘简报(大盘)
-      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 三合一;尾接止盈阶梯减仓 + 急跌兜底)
+      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
       —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
       —— 盘后(全 16:30 后;F:读暖缓存任务显式等 kline_prefetch 焐完,不靠时钟间隔)——
       16:30 kline_prefetch              — 📥 K线+因子缓存预热(链头)
@@ -4575,7 +4586,7 @@ def register_default_jobs():
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
-    hub.register('morning_portfolio',           '09:50', task_morning_portfolio)   # 早盘:全持仓 + 挑 top15 候选
+    hub.register('morning_portfolio',           '10:05', task_morning_portfolio)   # 早盘:全持仓 + 挑 top15 候选(2026-06-27:09:50→10:05,开盘半小时后价更稳)
     hub.register('mx_selection_review',         '10:30', task_mx_selection_review)
     hub.register('noon_portfolio',              '11:20', task_noon_portfolio)      # 午间:只盯早盘候选 + 急跌兜底
 
@@ -4583,7 +4594,7 @@ def register_default_jobs():
     hub.register('noon_report',                 '12:00', task_noon_report)
     # ⚠️ 2026-06-25 监控重构:stock_monitor_check(进场区间盯盘,价值低)已退役、不再注册;
     #    其急跌兜底并入 11:20 noon_portfolio;ai_rec_check(推荐池胜率回填,非盯盘)由 every:30 → 盘后 16:35 收盘后验。
-    # ---- 14:30 尾盘持仓总结(eod_review 三合一,从 14:40 提前) ----
+    # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 
     # ---- 🔴 盘后(2026-06-25 全部挪到 16:30 之后:错峰 + 收盘数据已稳,降东财峰值并发)----
