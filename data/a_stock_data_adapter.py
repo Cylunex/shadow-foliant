@@ -242,68 +242,8 @@ def _sector_fund_flow_ths(sector_type: str = "industry", top_n: int = 50) -> lis
     return rows
 
 
-def _dragon_tiger_board(code: str, trade_date: str, look_back: int = 30) -> dict:
-    """龙虎榜数据聚合"""
-    code = _normalize_code(code)
-    start = datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=look_back)
-    start_str = start.strftime("%Y-%m-%d")
-
-    records = []
-    data = _eastmoney_datacenter(
-        "RPT_DAILYBILLBOARD_DETAILSNEW",
-        filter_str=f"(TRADE_DATE>='{start_str}')(TRADE_DATE<='{trade_date}')(SECURITY_CODE=\"{code}\")",
-        page_size=50, sort_columns="TRADE_DATE", sort_types="-1",
-    )
-    for row in data:
-        records.append({
-            "date": str(row.get("TRADE_DATE", ""))[:10],
-            "reason": row.get("EXPLANATION", ""),
-            "net_buy": round((row.get("BILLBOARD_NET_AMT") or 0) / 10000, 1),
-            "turnover": round(float(row.get("TURNOVERRATE") or 0), 2),
-        })
-
-    seats = {"buy": [], "sell": []}
-    if records:
-        latest_date = records[0]["date"]
-        buy_data = _eastmoney_datacenter(
-            "RPT_BILLBOARD_DAILYDETAILSBUY",
-            filter_str=f"(TRADE_DATE='{latest_date}')(SECURITY_CODE=\"{code}\")",
-            page_size=10, sort_columns="BUY", sort_types="-1",
-        )
-        for row in buy_data[:5]:
-            seats["buy"].append({
-                "name": row.get("OPERATEDEPT_NAME", ""),
-                "buy_amt": round((row.get("BUY") or 0) / 10000, 1),
-                "sell_amt": round((row.get("SELL") or 0) / 10000, 1),
-                "net": round((row.get("NET") or 0) / 10000, 1),
-            })
-        sell_data = _eastmoney_datacenter(
-            "RPT_BILLBOARD_DAILYDETAILSSELL",
-            filter_str=f"(TRADE_DATE='{latest_date}')(SECURITY_CODE=\"{code}\")",
-            page_size=10, sort_columns="SELL", sort_types="-1",
-        )
-        for row in sell_data[:5]:
-            seats["sell"].append({
-                "name": row.get("OPERATEDEPT_NAME", ""),
-                "buy_amt": round((row.get("BUY") or 0) / 10000, 1),
-                "sell_amt": round((row.get("SELL") or 0) / 10000, 1),
-                "net": round((row.get("NET") or 0) / 10000, 1),
-            })
-
-    institution = {"buy_amt": 0, "sell_amt": 0, "net_amt": 0}
-    for detail_data, side in [(buy_data, "buy"), (sell_data, "sell")]:
-        for row in detail_data:
-            if str(row.get("OPERATEDEPT_CODE", "")) == "0":
-                amt = (row.get("BUY") or 0) if side == "buy" else (row.get("SELL") or 0)
-                if side == "buy":
-                    institution["buy_amt"] += amt
-                else:
-                    institution["sell_amt"] += amt
-    institution["buy_amt"] = round(institution["buy_amt"] / 10000, 1)
-    institution["sell_amt"] = round(institution["sell_amt"] / 10000, 1)
-    institution["net_amt"] = round(institution["buy_amt"] - institution["sell_amt"], 1)
-
-    return {"records": records, "seats": seats, "institution": institution}
+# 2026-06-28 阶段3:个股龙虎榜聚合已归位 data/sources/eastmoney.py(并修空 records 的 NameError 隐患)。
+from data.sources.eastmoney import dragon_tiger_board as _dragon_tiger_board   # noqa: E402
 
 
 # ============================================================
