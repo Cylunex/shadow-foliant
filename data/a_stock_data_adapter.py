@@ -242,33 +242,11 @@ def _batch_quote(codes: list[str]) -> dict[str, dict]:
     return out
 
 
-def _baidu_kline_with_ma(code: str, start_time: str = "") -> dict:
-    """百度股市通K线 — 自带MA5/MA10/MA20均价"""
-    code = _normalize_code(code)
-    url = "https://finance.pae.baidu.com/selfselect/getstockquotation"
-    params = {
-        "all": "1", "isIndex": "false", "isBk": "false", "isBlock": "false",
-        "isFutures": "false", "isStock": "true", "newFormat": "1",
-        "group": "quotation_kline_ab", "finClientType": "pc",
-        "code": code, "start_time": start_time, "ktype": "1",
-    }
-    headers = {
-        "User-Agent": UA,
-        "Accept": "application/vnd.finance-web.v1+json",
-        "Origin": "https://gushitong.baidu.com",
-        "Referer": "https://gushitong.baidu.com/",
-    }
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=10)
-        d = r.json()
-        result = d.get("Result", {})
-        md = result.get("newMarketData", {})
-        keys = md.get("keys", [])
-        rows = md.get("marketData", "").split(";")
-        return {"keys": keys, "rows": rows}
-    except Exception as e:
-        print(f"[a-stock] 百度K线请求失败: {e}")
-        return {"keys": [], "rows": []}
+# 2026-06-27 阶段3:百度股市通(K线/概念块)已归位 data/sources/baidu.py(再导出,调用零改)。
+from data.sources.baidu import (   # noqa: E402
+    kline_with_ma as _baidu_kline_with_ma,
+    concept_blocks as _baidu_concept_blocks,
+)
 
 
 # ============================================================
@@ -308,44 +286,7 @@ from data.sources.eastmoney import (   # noqa: E402
 )
 
 
-def _baidu_concept_blocks(code: str) -> dict:
-    """百度股市通概念板块归属"""
-    code = _normalize_code(code)
-    url = (f"https://finance.pae.baidu.com/api/getrelatedblock"
-           f"?code={code}&market=ab"
-           f"&typeCode=all&finClientType=pc")
-    headers = {
-        "User-Agent": UA,
-        "Accept": "application/vnd.finance-web.v1+json",
-        "Origin": "https://gushitong.baidu.com",
-        "Referer": "https://gushitong.baidu.com/",
-    }
-    try:
-        r = _session.get(url, headers=headers, timeout=10)
-        d = r.json()
-        if str(d.get("ResultCode", -1)) != "0":
-            return {"industry": [], "concept": [], "region": [], "concept_tags": []}
-
-        result = {"industry": [], "concept": [], "region": [], "concept_tags": []}
-        for block in d.get("Result", []):
-            block_type = block.get("type", "")
-            for item in block.get("list", []):
-                entry = {
-                    "name": item.get("name", ""),
-                    "change_pct": item.get("increase", ""),
-                    "desc": item.get("desc", ""),
-                }
-                if "行业" in block_type:
-                    result["industry"].append(entry)
-                elif "概念" in block_type:
-                    result["concept"].append(entry)
-                    result["concept_tags"].append(entry["name"])
-                elif "地域" in block_type:
-                    result["region"].append(entry)
-        return result
-    except Exception as e:
-        print(f"[a-stock] 概念板块请求失败: {e}")
-        return {"industry": [], "concept": [], "region": [], "concept_tags": []}
+# _baidu_concept_blocks 已归位 sources/baidu(见上方阶段3 再导出块)。
 
 
 # 2026-06-27 阶段3:行业/概念板块涨跌排名(east push2 clist)已归位 data/sources/eastmoney.py(再导出)。
@@ -527,25 +468,8 @@ from data.sources.eastmoney import (   # noqa: E402
 # _eastmoney_stock_news 已归位 sources/eastmoney(见上方阶段3 再导出块)。
 
 
-def _cls_telegraph(page_size: int = 50) -> list[dict]:
-    """财联社电报（全市场实时快讯）"""
-    url = "https://www.cls.cn/nodeapi/telegraphList"
-    params = {"rn": str(page_size), "page": "1"}
-    headers = {"User-Agent": UA, "Referer": "https://www.cls.cn/"}
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=10)
-        d = r.json()
-        rows = []
-        for item in d.get("data", {}).get("roll_data", []):
-            rows.append({
-                "title": item.get("title", "") or item.get("brief", ""),
-                "content": item.get("content", "") or item.get("brief", ""),
-                "time": item.get("ctime", ""),
-            })
-        return rows
-    except Exception as e:
-        print(f"[a-stock] 财联社快讯请求失败: {e}")
-        return []
+# 2026-06-27 阶段3:财联社电报已归位 data/sources/cls.py(再导出,调用零改)。
+from data.sources.cls import telegraph as _cls_telegraph   # noqa: E402
 
 
 # ============================================================
@@ -585,48 +509,8 @@ def _sina_financial_report(code: str, report_type: str = "lrb") -> list[dict]:
 # 公告层
 # ============================================================
 
-def _cninfo_announcements(code: str, page_size: int = 30) -> list[dict]:
-    """巨潮公告全文检索"""
-    code = _normalize_code(code)
-    url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
-    if code.startswith("6"):
-        org_id = f"gssh0{code}"
-    elif code.startswith("8") or code.startswith("4"):
-        org_id = f"gsbj0{code}"
-    else:
-        org_id = f"gssz0{code}"
-
-    payload = {
-        "stock": f"{code},{org_id}",
-        "tabName": "fulltext",
-        "pageSize": str(page_size),
-        "pageNum": "1",
-        "column": "", "category": "", "plate": "",
-        "seDate": "", "searchkey": "", "secid": "",
-        "sortName": "", "sortType": "",
-        "isHLtitle": "true",
-    }
-    headers = {
-        "User-Agent": UA,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Referer": "https://www.cninfo.com.cn/new/disclosure",
-        "Origin": "https://www.cninfo.com.cn",
-    }
-    try:
-        r = _session.post(url, data=payload, headers=headers, timeout=15)
-        d = r.json()
-        rows = []
-        for item in d.get("announcements", []) or []:
-            rows.append({
-                "title": item.get("announcementTitle", ""),
-                "type": item.get("announcementTypeName", ""),
-                "date": item.get("announcementTime", ""),
-                "url": f"https://www.cninfo.com.cn/new/disclosure/detail?annoId={item.get('announcementId', '')}",
-            })
-        return rows
-    except Exception as e:
-        print(f"[a-stock] 巨潮公告请求失败: {e}")
-        return []
+# 2026-06-27 阶段3:巨潮公告已归位 data/sources/cninfo.py(再导出,调用零改)。
+from data.sources.cninfo import announcements as _cninfo_announcements   # noqa: E402
 
 
 # ============================================================
