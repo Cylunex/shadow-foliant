@@ -14,6 +14,8 @@ a_stock_data_adapter 直连,阶段 3 再归位本模块):
 """
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -351,6 +353,101 @@ def sector_fund_flow_bkzj(sector_type: str = "industry", top_n: int = 50) -> Lis
     except Exception as e:
         print(f"[sources.eastmoney] 板块资金流(bkzj兜底)请求失败({sector_type}): {e}")
         return []
+
+
+# ── 东财 研报 / 新闻 / 基本面 ─────────────────────────────────────────────────
+# (研报原 adapter 用默认 session;此处统一走 _SESSION=trust_env=False,与其余东财一致——
+#  国内源不走代理,输出口径不变,实测逐字段一致。)
+def reports(code: str, max_pages: int = 3) -> List[dict]:
+    """个股研报列表(reportapi qType=0)→ list[dict](原始字段)。"""
+    c = C.norm_code(code)
+    out = []
+    for page in range(1, max_pages + 1):
+        params = {"industryCode": "*", "pageSize": "50", "industry": "*", "rating": "*",
+                  "ratingChange": "*", "beginTime": "2000-01-01", "endTime": "2030-01-01",
+                  "pageNo": str(page), "fields": "", "qType": "0", "orgCode": "", "code": c, "rcode": ""}
+        try:
+            d = _SESSION.get("https://reportapi.eastmoney.com/report/list", params=params,
+                             headers={"User-Agent": _DC_UA, "Referer": "https://data.eastmoney.com/"},
+                             timeout=30).json()
+            rows = d.get("data") or []
+            if not rows:
+                break
+            out.extend(rows)
+            if page >= (d.get("TotalPage", 1) or 1):
+                break
+        except Exception as e:
+            print(f"[sources.eastmoney] 研报请求失败: {e}")
+            break
+    return out
+
+
+def industry_reports(industry_code: str = "*", max_pages: int = 5, begin: str = "2024-01-01") -> List[dict]:
+    """行业研报列表(reportapi qType=1)→ list[dict](原始字段)。"""
+    out = []
+    for page in range(1, max_pages + 1):
+        params = {"industryCode": industry_code or "*", "pageSize": "100", "industry": "*",
+                  "rating": "*", "ratingChange": "*", "beginTime": begin, "endTime": "2030-01-01",
+                  "pageNo": str(page), "fields": "", "qType": "1"}
+        try:
+            d = _SESSION.get("https://reportapi.eastmoney.com/report/list", params=params,
+                             headers={"User-Agent": _DC_UA, "Referer": "https://data.eastmoney.com/"},
+                             timeout=30).json()
+            rows = d.get("data") or []
+            if not rows:
+                break
+            out.extend(rows)
+            if page >= (d.get("TotalPage", 1) or 1):
+                break
+        except Exception as e:
+            print(f"[sources.eastmoney] 行业研报请求失败: {e}")
+            break
+    return out
+
+
+def stock_news(code: str, page_size: int = 20) -> List[dict]:
+    """东财个股新闻(search-api jsonp)→ [{title,content,time,source,url}](去 HTML 标签)。"""
+    inner = json.dumps({
+        "uid": "", "keyword": C.norm_code(code), "type": ["cmsArticleWebOld"],
+        "client": "web", "clientType": "web", "clientVersion": "curr",
+        "param": {"cmsArticleWebOld": {"searchScope": "default", "sort": "default",
+                  "pageIndex": 1, "pageSize": page_size, "preTag": "", "postTag": ""}},
+    }, separators=(',', ':'))
+    headers = {"User-Agent": _DC_UA, "Referer": "https://so.eastmoney.com/"}
+    try:
+        text = _SESSION.get("https://search-api-web.eastmoney.com/search/jsonp",
+                            params={"cb": "jQuery_news", "param": inner}, headers=headers, timeout=15).text
+        d = json.loads(text[text.index("(") + 1: text.rindex(")")])
+        container = (d.get("result", {}) or {}).get("cmsArticleWebOld", [])
+        articles = container.get("list", []) if isinstance(container, dict) else (
+            container if isinstance(container, list) else [])
+        return [{
+            "title": re.sub(r'<[^>]+>', '', a.get("title", "")),
+            "content": re.sub(r'<[^>]+>', '', a.get("content", ""))[:200],
+            "time": a.get("date", ""), "source": a.get("mediaName", ""), "url": a.get("url", ""),
+        } for a in articles if isinstance(a, dict)]
+    except Exception as e:
+        print(f"[sources.eastmoney] 个股新闻请求失败: {e}")
+        return []
+
+
+def stock_info(code: str) -> dict:
+    """东财个股基本面(push2 stock/get)→ {code,name,industry,total_shares,float_shares,mcap,float_mcap,list_date,price}。"""
+    c = C.norm_code(code)
+    params = {"fltt": "2", "invt": "2", "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
+              "secid": f"{1 if c.startswith('6') else 0}.{c}"}
+    try:
+        d = _SESSION.get("https://push2.eastmoney.com/api/qt/stock/get", params=params,
+                         headers={"User-Agent": _DC_UA}, timeout=10).json().get("data", {})
+        return {
+            "code": d.get("f57", ""), "name": d.get("f58", ""), "industry": d.get("f127", ""),
+            "total_shares": d.get("f84", 0), "float_shares": d.get("f85", 0),
+            "mcap": d.get("f116", 0), "float_mcap": d.get("f117", 0),
+            "list_date": str(d.get("f189", "")), "price": d.get("f43", 0),
+        }
+    except Exception as e:
+        print(f"[sources.eastmoney] 东财个股信息请求失败: {e}")
+        return {}
 
 
 # ── K线(push2his 日线)─────────────────────────────────────────────────────
