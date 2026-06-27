@@ -431,80 +431,14 @@ def _ths_hot_reason(date: str = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _eastmoney_fund_flow_minute(code: str) -> list[dict]:
-    """个股资金流向（分钟级，当日盘中）"""
-    code = _normalize_code(code)
-    secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
-    url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
-    params = {
-        "secid": secid, "klt": 1,
-        "fields1": "f1,f2,f3,f7",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57",
-    }
-    headers = {
-        "User-Agent": UA,
-        "Referer": "https://quote.eastmoney.com/",
-        "Origin": "https://quote.eastmoney.com",
-    }
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=10)
-        d = r.json()
-    except Exception as e:
-        print(f"[a-stock] 资金流(分钟)请求失败: {e}")
-        return []
-
-    rows = []
-    for line in d.get("data", {}).get("klines", []):
-        parts = line.split(",")
-        if len(parts) >= 6:
-            rows.append({
-                "time": parts[0],
-                "main_net": float(parts[1]),
-                "small_net": float(parts[2]),
-                "mid_net": float(parts[3]),
-                "large_net": float(parts[4]),
-                "super_net": float(parts[5]),
-            })
-    return rows
-
-
-def _stock_fund_flow_120d(code: str) -> list[dict]:
-    """个股资金流（日级，最近120个交易日）单位: 元"""
-    code = _normalize_code(code)
-    secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
-    url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-    params = {
-        "secid": secid,
-        "fields1": "f1,f2,f3,f7",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-        "lmt": "120",
-    }
-    headers = {
-        "User-Agent": UA,
-        "Referer": "https://quote.eastmoney.com/",
-        "Origin": "https://quote.eastmoney.com",
-    }
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
-    except Exception as e:
-        print(f"[a-stock] 资金流(120日)请求失败: {e}")
-        return []
-
-    klines = d.get("data", {}).get("klines", [])
-    rows = []
-    for line in klines:
-        parts = line.split(",")
-        if len(parts) >= 7:
-            rows.append({
-                "date": parts[0],
-                "main_net": float(parts[1]) if parts[1] != "-" else 0,
-                "small_net": float(parts[2]) if parts[2] != "-" else 0,
-                "mid_net": float(parts[3]) if parts[3] != "-" else 0,
-                "large_net": float(parts[4]) if parts[4] != "-" else 0,
-                "super_net": float(parts[5]) if parts[5] != "-" else 0,
-            })
-    return rows
+# 2026-06-27 阶段3:东财 push2 资金流(个股分钟/日级 + 板块行业/概念)已归位 data/sources/eastmoney.py。
+# 保留原私有函数名作再导出,类方法/datahub 调用零改。
+from data.sources.eastmoney import (   # noqa: E402
+    fund_flow_minute as _eastmoney_fund_flow_minute,
+    fund_flow_history as _stock_fund_flow_120d,
+    sector_fund_flow as _sector_fund_flow_push2,
+    sector_fund_flow_bkzj as _sector_fund_flow_bkzj,
+)
 
 
 def _baidu_concept_blocks(code: str) -> dict:
@@ -621,85 +555,7 @@ def _concept_comparison(top_n: int = 50) -> dict:
         return {"top": [], "bottom": [], "total": 0}
 
 
-def _sector_fund_flow_push2(sector_type: str = "industry", top_n: int = 50) -> list[dict]:
-    """行业/概念板块资金流（东财 push2 clist 资金流字段）
-
-    sector_type: 'industry' -> m:90+t:2；'concept' -> m:90+t:3
-    返回 list[dict]，按今日主力净流入降序。每条字段：
-      name, code, change_pct, main_net_inflow, main_net_inflow_pct,
-      super_large_net_inflow, large_net_inflow, medium_net_inflow,
-      small_net_inflow, leader, leader_change
-    单位：金额为元（不除 1e4），与 akshare 一致
-    """
-    fs = "m:90+t:2" if sector_type == "industry" else "m:90+t:3"
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1", "pz": "300", "po": "1", "np": "1",
-        "fltt": "2", "invt": "2",
-        "fid": "f62", "fs": fs,
-        "fields": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205",
-    }
-    headers = {"User-Agent": UA}
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
-        items = d.get("data", {}).get("diff", [])
-        if not items:
-            return []
-
-        rows = []
-        for item in items[:top_n]:
-            rows.append({
-                "name": item.get("f14", ""),
-                "code": item.get("f12", ""),
-                "change_pct": item.get("f3", 0),
-                "main_net_inflow": item.get("f62", 0),
-                "main_net_inflow_pct": item.get("f184", 0),
-                "super_large_net_inflow": item.get("f66", 0),
-                "large_net_inflow": item.get("f72", 0),
-                "medium_net_inflow": item.get("f78", 0),
-                "small_net_inflow": item.get("f84", 0),
-                "leader": item.get("f204", ""),
-                "leader_change": item.get("f205", 0),
-            })
-        return rows
-    except Exception as e:
-        print(f"[a-stock] 板块资金流请求失败({sector_type}): {e}")
-        return []
-
-
-def _sector_fund_flow_bkzj(sector_type: str = "industry", top_n: int = 50) -> list[dict]:
-    """行业/概念板块资金流 —— 东财 datacenter `getbkzj`(**非 push2**,借鉴 go-stock)。
-
-    作为 `_sector_fund_flow_push2` 的跨源兜底:push2.eastmoney 在受限网络被墙时,
-    data.eastmoney(datacenter,本项目龙虎榜/解禁等已在用,不被墙)仍可取板块主力净流入。
-    该端点字段较少(只给 code/name/主力净流入 f62),richer 分档字段补 0,口径与 push2 版一致(元)。
-    """
-    code = "m:90+t:2" if sector_type == "industry" else "m:90+t:3"
-    url = "https://data.eastmoney.com/dataapi/bkzj/getbkzj"
-    headers = {"User-Agent": UA, "Referer": "https://data.eastmoney.com/"}
-    try:
-        r = _session.get(url, params={"key": "f62", "code": code}, headers=headers, timeout=15)
-        items = (r.json().get("data") or {}).get("diff") or []
-        if not items:
-            return []
-        items = sorted(items, key=lambda x: (x.get("f62") or 0), reverse=True)
-        rows = []
-        for item in items[:top_n]:
-            rows.append({
-                "name": item.get("f14", ""),
-                "code": item.get("f12", ""),
-                "change_pct": item.get("f3") or 0,
-                "main_net_inflow": item.get("f62") or 0,
-                "main_net_inflow_pct": item.get("f184") or 0,
-                "super_large_net_inflow": 0, "large_net_inflow": 0,
-                "medium_net_inflow": 0, "small_net_inflow": 0,
-                "leader": "", "leader_change": 0,
-            })
-        return rows
-    except Exception as e:
-        print(f"[a-stock] 板块资金流(bkzj兜底)请求失败({sector_type}): {e}")
-        return []
+# _sector_fund_flow_push2 / _sector_fund_flow_bkzj 已归位 sources/eastmoney(见上方阶段3 再导出块)。
 
 
 def _f_num(v) -> float:

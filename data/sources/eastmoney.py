@@ -258,6 +258,101 @@ def lockup_expiry(code: str, trade_date: str, forward_days: int = 90) -> dict:
     return {"history": history, "upcoming": upcoming}
 
 
+# ── 东财 push2 资金流(个股 + 板块)──────────────────────────────────────────
+def _ff_secid(code: str) -> str:
+    """个股资金流 secid(沿用原 adapter 简化口径:6 开头沪=1.,其余=0.)。"""
+    c = C.norm_code(code)
+    return f"1.{c}" if c.startswith("6") else f"0.{c}"
+
+
+def fund_flow_minute(code: str) -> List[dict]:
+    """个股资金流(分钟级,当日盘中)→ [{time,main_net,small_net,mid_net,large_net,super_net}]。"""
+    params = {"secid": _ff_secid(code), "klt": 1, "fields1": "f1,f2,f3,f7",
+              "fields2": "f51,f52,f53,f54,f55,f56,f57"}
+    headers = {"User-Agent": _DC_UA, "Referer": "https://quote.eastmoney.com/",
+               "Origin": "https://quote.eastmoney.com"}
+    try:
+        d = _SESSION.get("https://push2.eastmoney.com/api/qt/stock/fflow/kline/get",
+                         params=params, headers=headers, timeout=10).json()
+    except Exception as e:
+        print(f"[sources.eastmoney] 资金流(分钟)请求失败: {e}")
+        return []
+    rows = []
+    for line in d.get("data", {}).get("klines", []):
+        p = line.split(",")
+        if len(p) >= 6:
+            rows.append({"time": p[0], "main_net": float(p[1]), "small_net": float(p[2]),
+                         "mid_net": float(p[3]), "large_net": float(p[4]), "super_net": float(p[5])})
+    return rows
+
+
+def fund_flow_history(code: str) -> List[dict]:
+    """个股资金流(日级,最近 120 交易日,单位元)→ [{date,main_net,small_net,mid_net,large_net,super_net}]。"""
+    params = {"secid": _ff_secid(code), "fields1": "f1,f2,f3,f7",
+              "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65", "lmt": "120"}
+    headers = {"User-Agent": _DC_UA, "Referer": "https://quote.eastmoney.com/",
+               "Origin": "https://quote.eastmoney.com"}
+    try:
+        d = _SESSION.get("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
+                         params=params, headers=headers, timeout=15).json()
+    except Exception as e:
+        print(f"[sources.eastmoney] 资金流(120日)请求失败: {e}")
+        return []
+    rows = []
+    for line in d.get("data", {}).get("klines", []):
+        p = line.split(",")
+        if len(p) >= 7:
+            rows.append({"date": p[0],
+                         "main_net": float(p[1]) if p[1] != "-" else 0,
+                         "small_net": float(p[2]) if p[2] != "-" else 0,
+                         "mid_net": float(p[3]) if p[3] != "-" else 0,
+                         "large_net": float(p[4]) if p[4] != "-" else 0,
+                         "super_net": float(p[5]) if p[5] != "-" else 0})
+    return rows
+
+
+def sector_fund_flow(sector_type: str = "industry", top_n: int = 50) -> List[dict]:
+    """行业/概念板块资金流(push2 clist,主力净流入降序,单位元)。"""
+    fs = "m:90+t:2" if sector_type == "industry" else "m:90+t:3"
+    params = {"pn": "1", "pz": "300", "po": "1", "np": "1", "fltt": "2", "invt": "2",
+              "fid": "f62", "fs": fs,
+              "fields": "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205"}
+    try:
+        items = (_SESSION.get("https://push2.eastmoney.com/api/qt/clist/get", params=params,
+                              headers={"User-Agent": _DC_UA}, timeout=15).json()
+                 .get("data", {}).get("diff", []))
+        if not items:
+            return []
+        return [{"name": it.get("f14", ""), "code": it.get("f12", ""), "change_pct": it.get("f3", 0),
+                 "main_net_inflow": it.get("f62", 0), "main_net_inflow_pct": it.get("f184", 0),
+                 "super_large_net_inflow": it.get("f66", 0), "large_net_inflow": it.get("f72", 0),
+                 "medium_net_inflow": it.get("f78", 0), "small_net_inflow": it.get("f84", 0),
+                 "leader": it.get("f204", ""), "leader_change": it.get("f205", 0)} for it in items[:top_n]]
+    except Exception as e:
+        print(f"[sources.eastmoney] 板块资金流请求失败({sector_type}): {e}")
+        return []
+
+
+def sector_fund_flow_bkzj(sector_type: str = "industry", top_n: int = 50) -> List[dict]:
+    """行业/概念板块资金流 —— datacenter getbkzj(push2 被墙时的跨源兜底;分档字段补 0)。"""
+    code = "m:90+t:2" if sector_type == "industry" else "m:90+t:3"
+    try:
+        items = (_SESSION.get("https://data.eastmoney.com/dataapi/bkzj/getbkzj",
+                              params={"key": "f62", "code": code},
+                              headers={"User-Agent": _DC_UA, "Referer": "https://data.eastmoney.com/"},
+                              timeout=15).json().get("data") or {}).get("diff") or []
+        if not items:
+            return []
+        items = sorted(items, key=lambda x: (x.get("f62") or 0), reverse=True)
+        return [{"name": it.get("f14", ""), "code": it.get("f12", ""), "change_pct": it.get("f3") or 0,
+                 "main_net_inflow": it.get("f62") or 0, "main_net_inflow_pct": it.get("f184") or 0,
+                 "super_large_net_inflow": 0, "large_net_inflow": 0, "medium_net_inflow": 0,
+                 "small_net_inflow": 0, "leader": "", "leader_change": 0} for it in items[:top_n]]
+    except Exception as e:
+        print(f"[sources.eastmoney] 板块资金流(bkzj兜底)请求失败({sector_type}): {e}")
+        return []
+
+
 # ── K线(push2his 日线)─────────────────────────────────────────────────────
 _KLINE_URL = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?'
               'secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57'
