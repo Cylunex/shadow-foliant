@@ -154,6 +154,49 @@ def fund_nav(code: str) -> pd.DataFrame:
     return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
 
 
+# ── 批量实时行情(push2 ulist.np)───────────────────────────────────────────
+def ulist_quote(codes: List[str]) -> dict:
+    """东财 push2 ulist.np 批量行情(腾讯批量报价的跨源兜底)→ {code6: {...}}(与腾讯源同构精简)。
+    与 adapter._eastmoney_ulist_quote 逐字段一致。空/异常 → {}。"""
+    secids = []
+    for c in codes:
+        cc = C.norm_code(c)
+        mk = '1' if C.a_prefix(cc) == 'sh' else '0'
+        secids.append(f'{mk}.{cc}')
+    fields = 'f2,f3,f4,f5,f6,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10'
+    url = ('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2'
+           f'&ut=bd1d9ddb04089700cf9c27f6f7426281&fields={fields}&secids=' + ','.join(secids))
+    try:
+        C.throttle('eastmoney')
+        d = C.http_get_json(url, headers={'User-Agent': _DC_UA}, timeout=6)
+        diff = (d.get('data') or {}).get('diff') or []
+    except Exception as e:
+        print(f'[sources.eastmoney] ulist 批量行情失败: {type(e).__name__}')
+        return {}
+
+    def _f(v):
+        try:
+            return float(v) if v not in (None, '', '-') else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
+    result = {}
+    for r in diff:
+        code = str(r.get('f12', ''))
+        if not code:
+            continue
+        result[code] = {
+            'name': r.get('f14'), 'price': _f(r.get('f2')), 'last_close': _f(r.get('f18')),
+            'open': _f(r.get('f17')), 'change_amt': _f(r.get('f4')), 'change_pct': _f(r.get('f3')),
+            'high': _f(r.get('f15')), 'low': _f(r.get('f16')),
+            'amount_wan': _f(r.get('f6')) / 1e4, 'turnover_pct': _f(r.get('f8')),
+            'pe_ttm': _f(r.get('f9')), 'mcap_yi': _f(r.get('f20')) / 1e8,
+            'float_mcap_yi': _f(r.get('f21')) / 1e8, 'pb': _f(r.get('f23')),
+            'vol_ratio': _f(r.get('f10')),
+        }
+    return result
+
+
 # ── 东财数据中心(datacenter:个股公司数据)───────────────────────────────────
 # 共享:trust_env=False 限流 requests 会话(国内源不走代理,与原 adapter 同口径)+ datacenter 统一查询。
 _DC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"

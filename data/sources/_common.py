@@ -45,6 +45,18 @@ def sina_code(code: str) -> str:
     return 'sh' + c   # 6/9/5 开头(沪)及兜底
 
 
+def a_prefix(code: str) -> str:
+    """6 位代码 → 市场前缀,与 adapter._get_prefix **同口径**(6/9→sh、8→bj、其余→sz)。
+    ⚠️ 刻意保留原口径(含 920→sh 的历史行为)以保证 quotes 等批量行情逐字段对齐;
+    更细的归一见 sina_code/tencent_code/em_secid。"""
+    c = norm_code(code)
+    if c.startswith(("6", "9")):
+        return "sh"
+    if c.startswith("8"):
+        return "bj"
+    return "sz"
+
+
 def tencent_code(code: str) -> str:
     """6 位代码 → 腾讯带前缀(sh/sz/bj)。已带前缀原样返回。"""
     c = str(code).strip().lower()

@@ -8,9 +8,59 @@
 """
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import Dict, List
 
 from . import _common as C
+
+
+def quotes(codes: List[str]) -> Dict[str, dict]:
+    """腾讯实时行情(qt.gtimg,GBK)→ {code6: {name,price,...,pe_ttm,pb,mcap_yi,...}}。空/异常 → {}。
+    字段位与 adapter._tencent_quote 逐字段一致(vals[1..52])。已带前缀的代码原样查询。"""
+    prefixed = []
+    for c in codes:
+        if re.match(r'^(sh|sz|bj)\d+$', str(c).lower()):
+            prefixed.append(str(c).lower())
+        else:
+            cc = C.norm_code(c)
+            prefixed.append(f"{C.a_prefix(cc)}{cc}")
+    try:
+        C.throttle('tencent')
+        data = C.http_get_text("https://qt.gtimg.cn/q=" + ",".join(prefixed),
+                               headers={"User-Agent": C.DESKTOP_UA}, timeout=6, encoding="gbk")
+    except Exception as e:
+        print(f"[sources.tencent] 腾讯行情请求失败: {type(e).__name__}")
+        return {}
+    result = {}
+    for line in data.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        vals = line.split('"')[1].split("~")
+        if len(vals) < 53:
+            continue
+        result[key[2:]] = {
+            "name": vals[1],
+            "price": float(vals[3]) if vals[3] else 0,
+            "last_close": float(vals[4]) if vals[4] else 0,
+            "open": float(vals[5]) if vals[5] else 0,
+            "change_amt": float(vals[31]) if vals[31] else 0,
+            "change_pct": float(vals[32]) if vals[32] else 0,
+            "high": float(vals[33]) if vals[33] else 0,
+            "low": float(vals[34]) if vals[34] else 0,
+            "amount_wan": float(vals[37]) if vals[37] else 0,
+            "turnover_pct": float(vals[38]) if vals[38] else 0,
+            "pe_ttm": float(vals[39]) if vals[39] else 0,
+            "amplitude_pct": float(vals[43]) if vals[43] else 0,
+            "mcap_yi": float(vals[44]) if vals[44] else 0,
+            "float_mcap_yi": float(vals[45]) if vals[45] else 0,
+            "pb": float(vals[46]) if vals[46] else 0,
+            "limit_up": float(vals[47]) if vals[47] else 0,
+            "limit_down": float(vals[48]) if vals[48] else 0,
+            "vol_ratio": float(vals[49]) if vals[49] else 0,
+            "pe_static": float(vals[52]) if vals[52] else 0,
+        }
+    return result
 
 # 大盘指数:腾讯 qt.gtimg 代码(HK 用 r_hkHSI,与 A 股 s_ 前缀解析口径不同)。
 _INDICES = [

@@ -80,157 +80,17 @@ from data.sources.eastmoney import datacenter as _eastmoney_datacenter   # noqa:
 # Layer 1: 行情层
 # ============================================================
 
-def _tencent_quote(codes: list[str]) -> dict[str, dict]:
-    """腾讯财经实时行情 — PE/PB/市值/换手率/涨跌停"""
-    prefixed = []
-    for c in codes:
-        # 如果调用方已经写了前缀（sh/sz/bj），保留不动
-        if re.match(r'^(sh|sz|bj)\d+$', c.lower()):
-            prefixed.append(c.lower())
-        else:
-            code = _normalize_code(c)
-            prefix = _get_prefix(code)
-            prefixed.append(f"{prefix}{code}")
-
-    url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", UA)
-    try:
-        _throttle('tencent')  # 腾讯行情 urlopen 自限流
-        # 6s 短超时(2026-06-24): 行情源健康时 <1s 返回, 6s 足够; 死源 6s 快速失败,
-        # 让 get_quotes 的东财兜底尽快接手, 不拖满 datahub 的 20s 源超时。
-        resp = urllib.request.urlopen(req, timeout=6)
-        data = resp.read().decode("gbk")
-    except Exception as e:
-        print(f"[a-stock] 腾讯行情请求失败: {type(e).__name__}")
-        return {}
-
-    result = {}
-    for line in data.strip().split(";"):
-        if not line.strip() or "=" not in line or '"' not in line:
-            continue
-        key = line.split("=")[0].split("_")[-1]
-        vals = line.split('"')[1].split("~")
-        if len(vals) < 53:
-            continue
-        code = key[2:]
-        result[code] = {
-            "name": vals[1],
-            "price": float(vals[3]) if vals[3] else 0,
-            "last_close": float(vals[4]) if vals[4] else 0,
-            "open": float(vals[5]) if vals[5] else 0,
-            "change_amt": float(vals[31]) if vals[31] else 0,
-            "change_pct": float(vals[32]) if vals[32] else 0,
-            "high": float(vals[33]) if vals[33] else 0,
-            "low": float(vals[34]) if vals[34] else 0,
-            "amount_wan": float(vals[37]) if vals[37] else 0,
-            "turnover_pct": float(vals[38]) if vals[38] else 0,
-            "pe_ttm": float(vals[39]) if vals[39] else 0,
-            "amplitude_pct": float(vals[43]) if vals[43] else 0,
-            "mcap_yi": float(vals[44]) if vals[44] else 0,
-            "float_mcap_yi": float(vals[45]) if vals[45] else 0,
-            "pb": float(vals[46]) if vals[46] else 0,
-            "limit_up": float(vals[47]) if vals[47] else 0,
-            "limit_down": float(vals[48]) if vals[48] else 0,
-            "vol_ratio": float(vals[49]) if vals[49] else 0,
-            "pe_static": float(vals[52]) if vals[52] else 0,
-        }
-    return result
+# 2026-06-28 阶段3:批量行情三源(腾讯 / 东财 ulist / 新浪)已归位 data/sources/{tencent,eastmoney,sina}.py。
+# _batch_quote(腾讯主 + 东财补缺)留本模块编排,用下列再导出名;类方法 / datahub 调用零改。
+from data.sources.tencent import quotes as _tencent_quote                  # noqa: E402
+from data.sources.eastmoney import ulist_quote as _eastmoney_ulist_quote   # noqa: E402
+from data.sources.sina import quotes as _sina_quote                        # noqa: E402
 
 
-def _eastmoney_ulist_quote(codes: list[str]) -> dict[str, dict]:
-    """东财 push2 ulist.np 批量实时行情 —— 作为腾讯批量报价的**跨源兜底**(借鉴 portfolio-tracker)。
-    一次请求 N 只(secids=市场.代码,1=沪/0=深京)。返回与 _tencent_quote 同构的精简 dict。"""
-    secids = []
-    for c in codes:
-        code = _normalize_code(c)
-        mk = '1' if _get_prefix(code) == 'sh' else '0'
-        secids.append(f'{mk}.{code}')
-    fields = 'f2,f3,f4,f5,f6,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10'
-    url = ('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2'
-           f'&ut=bd1d9ddb04089700cf9c27f6f7426281&fields={fields}&secids=' + ','.join(secids))
-    try:
-        _throttle('eastmoney')
-        req = urllib.request.Request(url, headers={'User-Agent': UA})
-        raw = urllib.request.urlopen(req, timeout=6).read().decode('utf-8')  # 6s 快速失败(同腾讯)
-        diff = (json.loads(raw).get('data') or {}).get('diff') or []
-    except Exception as e:
-        print(f'[a-stock] 东财 ulist 批量行情失败: {type(e).__name__}')
-        return {}
-
-    def _f(v):
-        try:
-            return float(v) if v not in (None, '', '-') else 0.0
-        except (ValueError, TypeError):
-            return 0.0
-
-    result = {}
-    for r in diff:
-        code = str(r.get('f12', ''))
-        if not code:
-            continue
-        result[code] = {
-            'name': r.get('f14'), 'price': _f(r.get('f2')), 'last_close': _f(r.get('f18')),
-            'open': _f(r.get('f17')), 'change_amt': _f(r.get('f4')), 'change_pct': _f(r.get('f3')),
-            'high': _f(r.get('f15')), 'low': _f(r.get('f16')),
-            'amount_wan': _f(r.get('f6')) / 1e4, 'turnover_pct': _f(r.get('f8')),
-            'pe_ttm': _f(r.get('f9')), 'mcap_yi': _f(r.get('f20')) / 1e8,
-            'float_mcap_yi': _f(r.get('f21')) / 1e8, 'pb': _f(r.get('f23')),
-            'vol_ratio': _f(r.get('f10')),
-        }
-    return result
+# _eastmoney_ulist_quote 已归位 sources/eastmoney.ulist_quote(见上方阶段3 再导出块)。
 
 
-def _sina_quote(codes: list[str]) -> dict[str, dict]:
-    """新浪 hq.sinajs.cn 批量实时行情(GBK)——真·独立源(非东财非腾讯)。
-    供 datahub 作 quotes 第三兜底:腾讯+东财都挂时的最后底。⚠️ 新浪只有行情
-    (name/价/涨跌/开高低/额),无 PE/PB/市值/换手/涨跌停 → 这些字段填 0(与东财 ulist
-    缺失口径一致),但 key 集与 _tencent_quote 完全相同,下游不会 KeyError。"""
-    prefixed = []
-    for c in codes:
-        if re.match(r'^(sh|sz|bj)\d+$', c.lower()):
-            prefixed.append(c.lower())
-        else:
-            code = _normalize_code(c)
-            prefixed.append(f"{_get_prefix(code)}{code}")
-    url = "https://hq.sinajs.cn/list=" + ",".join(prefixed)
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", UA)
-    req.add_header("Referer", "https://finance.sina.com.cn")  # 新浪行情必须带 Referer,否则 403
-    try:
-        _throttle('sina')
-        raw = urllib.request.urlopen(req, timeout=6).read().decode("gbk", "replace")  # 6s 快速失败
-    except Exception as e:
-        print(f"[a-stock] 新浪行情请求失败: {type(e).__name__}")
-        return {}
-    result = {}
-    for line in raw.strip().split("\n"):
-        m = re.search(r'hq_str_([a-z]{2}\d{6})="([^"]*)"', line)
-        if not m:
-            continue
-        code = m.group(1)[2:]
-        f = m.group(2).split(",")          # 名称,今开,昨收,现价,最高,最低,买一,卖一,量(股),额(元),...
-        if len(f) < 10 or not f[0]:
-            continue
-        try:
-            open_ = float(f[1]); last = float(f[2]); price = float(f[3])
-            high = float(f[4]); low = float(f[5]); amount = float(f[9])
-        except (ValueError, IndexError):
-            continue
-        if price <= 0:                     # 停牌/集合竞价前现价 0 → 用昨收兜
-            price = last
-        chg = price - last
-        pct = (chg / last * 100) if last else 0.0
-        result[code] = {
-            "name": f[0], "price": price, "last_close": last, "open": open_,
-            "change_amt": round(chg, 2), "change_pct": round(pct, 2),
-            "high": high, "low": low, "amount_wan": amount / 1e4,
-            "turnover_pct": 0.0, "pe_ttm": 0.0,
-            "amplitude_pct": round((high - low) / last * 100, 2) if last else 0.0,
-            "mcap_yi": 0.0, "float_mcap_yi": 0.0, "pb": 0.0,
-            "limit_up": 0.0, "limit_down": 0.0, "vol_ratio": 0.0, "pe_static": 0.0,
-        }
-    return result
+# _sina_quote 已归位 sources/sina.quotes(见上方阶段3 再导出块)。
 
 
 def _batch_quote(codes: list[str]) -> dict[str, dict]:

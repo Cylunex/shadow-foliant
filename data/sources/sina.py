@@ -19,11 +19,59 @@
 from __future__ import annotations
 
 import json
-from typing import List
+import re
+from typing import Dict, List
 
 import pandas as pd
 
 from . import _common as C
+
+
+def quotes(codes: List[str]) -> Dict[str, dict]:
+    """新浪实时行情(hq.sinajs,GBK,需 Referer)→ {code6: {name,price,...}}。空/异常 → {}。
+    新浪只有行情(无 PE/PB/市值/换手/涨跌停 → 0),key 集与腾讯源一致;与 adapter._sina_quote 逐字段一致。"""
+    prefixed = []
+    for c in codes:
+        if re.match(r'^(sh|sz|bj)\d+$', str(c).lower()):
+            prefixed.append(str(c).lower())
+        else:
+            cc = C.norm_code(c)
+            prefixed.append(f"{C.a_prefix(cc)}{cc}")
+    try:
+        C.throttle('sina')
+        raw = C.http_get_text("https://hq.sinajs.cn/list=" + ",".join(prefixed),
+                              headers={"User-Agent": C.DESKTOP_UA, "Referer": "https://finance.sina.com.cn"},
+                              timeout=6, encoding="gbk")
+    except Exception as e:
+        print(f"[sources.sina] 新浪行情请求失败: {type(e).__name__}")
+        return {}
+    result = {}
+    for line in raw.strip().split("\n"):
+        m = re.search(r'hq_str_([a-z]{2}\d{6})="([^"]*)"', line)
+        if not m:
+            continue
+        f = m.group(2).split(",")          # 名称,今开,昨收,现价,最高,最低,买一,卖一,量(股),额(元),...
+        if len(f) < 10 or not f[0]:
+            continue
+        try:
+            open_ = float(f[1]); last = float(f[2]); price = float(f[3])
+            high = float(f[4]); low = float(f[5]); amount = float(f[9])
+        except (ValueError, IndexError):
+            continue
+        if price <= 0:                     # 停牌/集合竞价前现价 0 → 用昨收兜
+            price = last
+        chg = price - last
+        pct = (chg / last * 100) if last else 0.0
+        result[m.group(1)[2:]] = {
+            "name": f[0], "price": price, "last_close": last, "open": open_,
+            "change_amt": round(chg, 2), "change_pct": round(pct, 2),
+            "high": high, "low": low, "amount_wan": amount / 1e4,
+            "turnover_pct": 0.0, "pe_ttm": 0.0,
+            "amplitude_pct": round((high - low) / last * 100, 2) if last else 0.0,
+            "mcap_yi": 0.0, "float_mcap_yi": 0.0, "pb": 0.0,
+            "limit_up": 0.0, "limit_down": 0.0, "vol_ratio": 0.0, "pe_static": 0.0,
+        }
+    return result
 
 
 # ── K线 ────────────────────────────────────────────────────────────────────
