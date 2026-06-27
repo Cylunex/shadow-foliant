@@ -4109,7 +4109,7 @@ def _holdings_plus_selection() -> list:
 
 
 def task_announcement_scan():
-    """⚠️ 盘后风险预警(16:02 三合一,2026-06-24):解禁雷达 + 公告分级 + 研报解读 合并成一条推送
+    """⚠️ 盘后风险预警(18:35 三合一,2026-06-24):解禁雷达 + 公告分级 + 研报解读 合并成一条推送
     (原 15:48 解禁 / 16:05 研报 已并入,不再单独推 → 盘后从 3 条变 1 条;三者各自仍写 decision_signal,
     16:10 后验不变)。有解禁/公告利空 → 走 alert(结论先行、优先看);否则中性内容走 report。
     开关 announcement_scan(默认开)。"""
@@ -4190,7 +4190,7 @@ def task_announcement_scan():
 
 
 def task_exit_advice():
-    """🧹 清仓决策助手(14:40 尾盘):对全部持仓打"清仓紧迫分"排序 + 过度分散瘦身建议 + AI 整体策略。
+    """🧹 清仓决策助手(已并入 14:30 afternoon_portfolio,不再单独定时;模块保留供 MCP 与前端"🧹清仓助手"页按需):对全部持仓打"清仓紧迫分"排序 + 过度分散瘦身建议 + AI 整体策略。
     清仓/减仓结论写 decision_signal(source_type='exit_advice')→ 16:10 方向后验。开关 exit_advice(默认开)。"""
     job = 'exit_advice'
     try:

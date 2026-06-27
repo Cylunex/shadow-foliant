@@ -198,7 +198,7 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - `lockup_radar(codes,forward_days)` — 持仓解禁雷达:未来解禁 → 解禁前减仓研判
 - `announcement_scan(codes,days)` — 公告事件分级:利好/利空 + 重大性,利空预警
 - `portfolio_stress_narrative()` — 组合压力情景叙事:8 情景风险预案
-> 注:`exit_advice`/`portfolio_health_check` 的定时版已并入"尾盘持仓总结"(14:40 `afternoon_portfolio`),这俩仍供按需调用。
+> 注:`exit_advice`/`portfolio_health_check` 的定时版已并入"尾盘持仓总结"(14:30 `afternoon_portfolio`),这俩仍供按需调用。
 
 **选股 / 研报 / 观测**:
 - `research_digest(codes,days)` — 研报增量解读:评级方向 + 隐含目标空间

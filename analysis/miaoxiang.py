@@ -153,23 +153,6 @@ def screen(query_text: str, select_type: str = 'A股', timeout: int = 40):
     return _pd.DataFrame(rows)
 
 
-def screen_codes(query_text: str, select_type: str = 'A股', top_n: int = 0, timeout: int = 40):
-    """screen() 便捷封装:直接返回 6 位股票代码列表(去重保序,可截断 top_n)。失败返回 []。"""
-    df = screen(query_text, select_type, timeout)
-    if df is None or df.empty or '代码' not in df.columns:
-        return []
-    seen, out = set(), []
-    for c in df['代码'].tolist():
-        s = str(c).strip()
-        if not s:
-            continue
-        s = s.split('.')[0].zfill(6)[-6:]   # 去交易所后缀/补零取后6位
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out[:top_n] if (top_n and top_n > 0) else out
-
-
 # —— 便捷命名包装(MCP 工具直接调这些)——
 def stock_diagnosis(question: str) -> dict: return query('stock_diagnosis', question)
 def finance_ask(question: str) -> dict:     return query('ask', question)

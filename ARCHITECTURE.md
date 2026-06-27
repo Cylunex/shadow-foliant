@@ -1,9 +1,9 @@
 # 📈 shadow-foliant — 项目架构与功能全景
 
-> **定位**：基于 **Streamlit + DeepSeek + akshare + adata + a-stock HTTP** 的 A 股多智能体分析系统。
+> **定位**：基于 **FastAPI + Vue3 SPA + DeepSeek + 多源数据直连(东财/腾讯/新浪/同花顺/akshare 等)** 的 A 股多智能体分析系统。
 > 单 Web 应用集成 选股 / 技术分析 / 龙虎榜 / 板块策略 / 宏观分析 / 持仓盯盘 / AI 决策 / 实时监测 / 自动推送 / 后台调度。
 >
-> **数据流**：`数据源（HTTP/akshare/adata/tushare/yfinance）→ DataSourceManager 多源融合 → StockDataFetcher + MyTT 指标 → AI Agents (DeepSeek) → 决策落库 (PG/SQLite) → 邮件/Webhook 推送`
+> **数据流**：`数据源（HTTP/akshare/tushare/yfinance/baostock）→ datahub 统一层(_route 健康度路由 + 三级缓存) → StockDataFetcher + MyTT 指标 → AI Agents (DeepSeek) → 决策落库 (PG/SQLite) → 邮件/Webhook 推送`
 
 ---
 
@@ -35,7 +35,7 @@
 │ • 技术分析师    │ │ • a-stock HTTP   │  │ • monitor_service  │
 │ • 基本面        │ │   (东财/腾讯)    │  │ • low_price_bull   │
 │ • 资金面        │ │ • akshare        │  │ • jobs_hub (10任务)│
-│ • 风险管理      │ │ • adata          │  │ • news_flow_sched  │
+│ • 风险管理      │ │ • 东财数据中心   │  │ • news_flow_sched  │
 │ • 市场情绪      │ │ • tushare        │  │ • portfolio_sched  │
 │ • 新闻分析      │ │ • yfinance       │  │ • sector_sched     │
 │ • 首席策略      │ │ • pywencai       │  │                    │
@@ -79,7 +79,7 @@
 | 🎯 智策板块 | `sector_strategy_*.py` | 宏观/板块诊断/资金/情绪 4 位 |
 | 🐉 智瞰龙虎 | `longhubang_*.py` | 游资/潜力/题材/风险/首席 5 位 |
 | 📰 新闻流量 | `news_flow_*.py` | 新闻情感 + 预警 + 深度 |
-| 🌏 宏观分析 / 🧭 宏观周期 | `macro_analysis_*.py` / `macro_cycle_*.py` | 康波周期 + 美林时钟 + 政策 |
+| 🧭 宏观周期/分析 | `macro_cycle_*.py` | 康波周期 + 美林时钟 + 政策 |
 
 ### 3. 投资管理 (3 套)
 | 模块 | 入口文件 | 功能 |
@@ -107,7 +107,7 @@
 | 模块 | 功能 |
 |---|---|
 | `stock_data.py` | 行情数据获取 + 技术指标计算（TA + MyTT 12 个通达信指标） |
-| `data_source_manager.py` | 多源数据切换（a-stock HTTP > akshare > tushare > adata） |
+| `data_source_manager.py` | 多源数据切换（a-stock HTTP > akshare > tushare；北向/龙虎/资金流走东财直连，adata 已于 2026-06-27 移除） |
 | `a_stock_data_adapter.py` | 直连东财 push2 + 腾讯 + 新浪 + 同花顺 + 巨潮 |
 | `deepseek_client.py` | DeepSeek API 封装（含 prompt 工程） |
 | `ai_agents.py` | 多 Agent 协同分析框架 |
@@ -272,12 +272,12 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 |---|---|---|---|
 | 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
 | 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
-| 09:50 | `morning_portfolio` | 📊 早盘持仓分析 | ❌ |
+| 10:05 | `morning_portfolio` | 📊 早盘持仓分析 + 早盘 AI 研判(子开关 morning_portfolio_ai) | ✅ |
 | (并入9:45) | `selection_debate` | ⚔️ 红蓝对抗已并入综合选股(表内「红蓝」列);妙想第二意见(10:30)仍独立 | ✅ |
 | 10:30 | `mx_selection_review` | 🧠 选股过妙想第二意见 | ✅ |
 | 12:00 | `noon_report` | 📊 午盘简报 | ❌ |
 | 每30分 | `ai_rec_check` / `stock_monitor_check` | 推荐追价(不推) / 监测触发(alert) | ❌ |
-| 14:40 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(瘦身策略+逐只动作+尾盘机会,eod_review) | ✅ |
+| 14:30 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(四合一:瘦身策略+逐只动作+尾盘机会+止盈阶梯减仓,eod_review) | ✅ |
 | 15:35–16:10 | `kline_prefetch`(焐raw+qfq两套K线 + collect_factors因子/估值,盘中读暖缓存防慢源雪崩)/`portfolio_indicator_snapshot`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/**`announcement_scan`(三合一:解禁+公告+研报→一条⚠️盘后风险预警)**/`decision_signal_outcomes` | K线预热/指标快照/大盘快照/因子采集/龙虎榜归档/盘后风险预警/信号后验。`lockup_radar`/`research_digest` 已并入 announcement_scan | 部分✅ |
 | 16:30 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
@@ -460,12 +460,11 @@ def _cmd_xxx(args, ctx):
 - `deepseek_client.technical_analysis()` prompt 自动注入 AI
 - 库源：[MyTT.py](MyTT.py)（8.6K，纯 numpy/pandas 实现，零额外依赖）
 
-### 4. adata 数据源接入
-- 北向资金（沪深港通日度）
-- 龙虎榜每日详情
-- 概念资金流（备用）
-- 融资融券
-- 通过 `pip install adata` 引入
+### 4. 资金/龙虎数据源直连（2026-06-27 阶段1：已移除 adata 二道贩子整合库）
+- 北向资金（沪深港通日度）：同花顺 hsgtApi 本地缓存为主源（jobs 每日 15:40 入库），akshare 兜底
+- 龙虎榜每日详情：东财数据中心直连（RPT_DAILYBILLBOARD_DETAILSNEW）
+- 个股历史日度资金流 / 融资融券：东财 push2his / datacenter 直连
+- 兼容别名 `datahub.capital_flow_adata` 名称保留、底层已换东财真值，**无需再 `pip install adata`**
 
 ### 5. agent_tool_groups (6 类业务域)
 - base / kline_technical / fund_flow / fundamentals / sentiment / risk
@@ -546,7 +545,6 @@ shadow-foliant/
 ├── # AI 层
 ├── ai_agents.py                    # Agents 集合
 ├── deepseek_client.py              # DeepSeek API
-├── model_config.py                 # 模型配置
 ├── agent_tool_groups.py            # 业务域工具组
 ├── 
 ├── # 持久层
@@ -557,7 +555,6 @@ shadow-foliant/
 ├── news_flow_db.py
 ├── smart_monitor_db.py
 ├── monitor_db.py
-├── main_force_batch_db.py
 ├── 
 ├── # 业务模块（每套有 _data / _agents / _engine / _ui / _pdf / _scheduler）
 ├── longhubang_*                    # 智瞰龙虎（5+ 文件）
@@ -568,8 +565,7 @@ shadow-foliant/
 ├── small_cap_*                     # 小市值
 ├── profit_growth_*                 # 净利增长
 ├── value_stock_*                   # 低估值
-├── macro_cycle_*                   # 宏观周期
-├── macro_analysis_*                # 宏观分析
+├── macro_cycle_*                   # 宏观周期/分析
 ├── portfolio_*                     # 持仓分析
 ├── smart_monitor_*                 # AI 盯盘
 ├── monitor_*                       # 实时监测
@@ -580,7 +576,6 @@ shadow-foliant/
 ├── jobs_hub.py                     # 后台任务调度
 ├── bot_dispatcher.py               # Bot 命令分发
 ├── pattern_recognition.py          # K线形态识别
-├── stock_selection.py / stock_strategies.py # 综合策略
 ├── 
 ├── # PDF / 导出
 ├── pdf_generator.py / pdf_generator_fixed.py / pdf_generator_pandoc.py
@@ -643,7 +638,7 @@ shadow-foliant/
    - `database_pg.py` 的接口必须与 `database.py` 完全对齐（方法名 + 参数 + 返回值）
    - 测试切换时观察启动日志的 `[Database] 已切换到 PostgreSQL 后端` 消息
 
-6. **新功能切忌动 `requirements.txt` 引入重型依赖**：MyTT 8K + adata 几 MB 已是上限，再大的依赖（如 TensorFlow）建议拆独立微服务。
+6. **新功能切忌动 `requirements.txt` 引入重型依赖**：MyTT 8K 已是上限（adata 已于 2026-06-27 移除），再大的依赖（如 TensorFlow）建议拆独立微服务。
 
 ---
 

@@ -203,22 +203,6 @@ def crossover_params(p1: Dict[str, Any], p2: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════
-#  标准化参数 → 实际策略参数（供 backtest_engine 调用）
-# ══════════════════════════════════════════════════════════
-
-def apply_params_to_strategy(strategy_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """把基因参数转成 backtest_engine 能用的策略参数
-
-    backtest_engine 的 _trigger_dates 调用 func(('', ''), df, date=date)。
-    原策略内部硬编码了参数。这里的思路是：不修改原策略文件，
-    而是把参数传给 backtest_engine 的新参数化入口。
-    实际使用时走 backtest_one(..., params=params)。
-    """
-    # 直接透传参数，backtest_engine 会用它覆盖默认值
-    return dict(params)
-
-
-# ══════════════════════════════════════════════════════════
 #  评分函数
 # ══════════════════════════════════════════════════════════
 
@@ -758,16 +742,6 @@ def promote_variant(variant_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE strategy_variants SET status = 'promoted' WHERE id = %s", (variant_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def retire_variant(variant_id: int):
-    """淘汰变体"""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE strategy_variants SET status = 'retired' WHERE id = %s", (variant_id,))
     conn.commit()
     cur.close()
     conn.close()

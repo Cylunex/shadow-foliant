@@ -140,7 +140,7 @@ def fetch_stocks_push2(
                     'price': price,
                     'pe': pe,
                     'growth': growth,       # f7 净利润增长率
-                    'change_pct': change_pct,  # f3 涨跌幅
+                    'change_pct': item.get('f3'),  # f3 涨跌幅(原误引未定义变量 change_pct → NameError)
                     'mcap': mcap,
                     'pb': item.get('f23'),
                 })
