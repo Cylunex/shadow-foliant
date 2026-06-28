@@ -635,21 +635,19 @@ def task_daily_backtest():
             except Exception:
                 continue
 
-        # ── 1. 构建股票池：持仓 + 强势股 TOP20（去重） ──
+        # ── 1. 构建股票池：持仓 ∪ 固定多元基准样本(进化适应度去偏) ──
+        # 原来补"昨日强势股 TOP20":这些是被近期涨幅选出来的,在其上回测"买强势"类策略 = 选择偏差,
+        # 样本本身已经涨过 → 系统性高估所有动量类策略的胜率/收益,使变体适应度不可比。
+        # 改用固定、跨行业、非按近期表现筛选的基准样本(EVOLUTION_FITNESS_UNIVERSE),适应度无偏。
         pool = {}
         stocks = portfolio_db.get_all_stocks() if hasattr(portfolio_db, 'get_all_stocks') else []
         for s in stocks:
             code = s.get('code', '')
             if code and code not in pool:
                 pool[code] = s.get('name', '')
-
-        # 尝试获取昨日强势股作为补充
         try:
-            from selection.strong_stock import get_top_strong_stocks
-            strong = get_top_strong_stocks(top_n=20)
-            for code, name in (strong or []):
-                if code and code not in pool:
-                    pool[code] = name
+            from analysis.strategy_genome import evolution_fitness_pool
+            pool = evolution_fitness_pool(pool)
         except Exception:
             pass
 

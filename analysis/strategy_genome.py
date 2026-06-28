@@ -210,11 +210,17 @@ def crossover_params(p1: Dict[str, Any], p2: Dict[str, Any]) -> Dict[str, Any]:
 # avg_max_dd 多落在 5~20%,取 20% 作满罚阈值,使变体间回撤差异有足够区分度。可调。
 _RISK_DD_FULL_PENALTY = 20.0
 
+# 小样本置信阈值:触发数 ≥ 该值 = 满置信(不缩分);低于则按 trigger/该值 比例把整分收缩向 0。
+# 根治"2 笔交易 100% 胜率 → 评分 85 霸榜情报排行 → 0.85 实盘选股权重"的小样本幻觉:
+# holdout 部署门(holdout_trigger≥3)只拦"是否部署",拦不住情报排行 / strategy_weights / AI 提示
+# 用的 score 本身,故必须在 score 上做置信收缩。对触发充足的策略零影响,只压低小样本侥幸值。可调。
+_MIN_TRIGGERS_FULL_CONF = 8
+
 
 def compute_strategy_score(win_rate: float, avg_ret: float,
                            trigger_count: int, max_trigger: int = 1,
                            sample_stocks: int = 1, max_dd: float = 0.0) -> float:
-    """综合评分 0~100
+    """综合评分 0~100(×小样本置信收缩)
 
     权重(2026-06-28 加入风险项):
       - 胜率 35%（核心）
@@ -223,6 +229,8 @@ def compute_strategy_score(win_rate: float, avg_ret: float,
         偏好"高胜率高收益但深回撤"的过拟合变体,这是最伤的缺口）
       - 触发率 10%（信号多不多，避免"胜率高但一年就一次"的过拟合）
       - 样本量 10%（覆盖的股票数 / 30，避免小样本幻觉）
+    最后乘**置信收缩** min(1, trigger/_MIN_TRIGGERS_FULL_CONF):触发太少则整分缩向 0,
+    防小样本侥幸值(如 2 笔 100% 胜率)霸榜情报/选股权重(触发充足者不受影响)。
 
     max_dd: 平均最大回撤百分比(负值,如 -12.5;传 0 = 无回撤数据 → 风险项满分,向后兼容)。
     """
@@ -237,7 +245,9 @@ def compute_strategy_score(win_rate: float, avg_ret: float,
     risk_norm = min(1.0, max(0.0, 1.0 - dd / _RISK_DD_FULL_PENALTY))
 
     score = (wr * 35 + ar_norm * 25 + risk_norm * 20 + trig_norm * 10 + sample_norm * 10)
-    return round(score, 1)
+    # 小样本置信收缩(乘性):触发数充足→×1 不变;过少→按比例缩向 0
+    confidence = min(1.0, max(0, trigger_count) / _MIN_TRIGGERS_FULL_CONF)
+    return round(score * confidence, 1)
 
 
 # ══════════════════════════════════════════════════════════
@@ -806,6 +816,44 @@ def default_strategy_combos() -> List[Tuple[str, Dict[str, Any]]]:
 def _all_default_base() -> Dict[str, Dict[str, Any]]:
     """{sid: 默认参数} — auto_revert 触发时 get_live_strategy_set 的回退结果。"""
     return {sid: coerce_params(sid, default_params(sid)) for sid in STRATEGY_PARAM_SPACE}
+
+
+# 进化适应度评估的固定基准样本(跨行业大/中盘,非按近期涨幅筛选)。
+# 用途:替代 task_daily_backtest 原来的"昨日强势股 TOP20"——后者是被近期表现选出来的,
+# 在其上回测"买强势"类策略 = 选择偏差,系统性高估所有动量类策略的胜率/收益,使适应度失真。
+# 固定多元样本让变体适应度可比、无近期表现偏差。(仍有轻微幸存者偏差,但相比"昨日强势股"是
+# 数量级改善;名单可调,理想态是 point-in-time 指数成分。)
+EVOLUTION_FITNESS_UNIVERSE: Dict[str, str] = {
+    # 消费/家电
+    '600519': '贵州茅台', '000858': '五粮液', '000568': '泸州老窖', '603288': '海天味业',
+    '600887': '伊利股份', '000333': '美的集团', '000651': '格力电器', '600690': '海尔智家',
+    # 金融
+    '600036': '招商银行', '601318': '中国平安', '600030': '中信证券', '601166': '兴业银行',
+    '601398': '工商银行',
+    # 医药
+    '600276': '恒瑞医药', '300760': '迈瑞医疗', '603259': '药明康德', '000538': '云南白药',
+    # 科技/电子/新能源车
+    '002415': '海康威视', '002230': '科大讯飞', '300059': '东方财富', '002594': '比亚迪',
+    '300750': '宁德时代', '002475': '立讯精密', '000725': '京东方A',
+    # 电力/新能源/公用
+    '601012': '隆基绿能', '600900': '长江电力', '601985': '中国核电',
+    # 工业/材料/地产/能源
+    '600031': '三一重工', '601899': '紫金矿业', '600028': '中国石化', '601857': '中国石油',
+    '600585': '海螺水泥', '000002': '万科A', '600309': '万华化学',
+    # 汽车/交运/通信/其他
+    '600104': '上汽集团', '600009': '上海机场', '600050': '中国联通', '000063': '中兴通讯',
+    '601888': '中国中免', '002304': '洋河股份',
+}
+
+
+def evolution_fitness_pool(holdings: Dict[str, str] = None) -> Dict[str, str]:
+    """进化适应度评估股池 = 持仓 ∪ 固定多元基准样本(EVOLUTION_FITNESS_UNIVERSE)。
+    持仓是你真实持有的(合理纳入);基准样本替代"昨日强势股"以消除近期表现选择偏差。
+    返回 {code: name}(持仓优先保留其名称)。"""
+    pool = dict(holdings or {})
+    for code, name in EVOLUTION_FITNESS_UNIVERSE.items():
+        pool.setdefault(code, name)
+    return pool
 
 
 def save_evolution_ab(period_start: str, period_end: str, pool_n: int,
