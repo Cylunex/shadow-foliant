@@ -10,7 +10,9 @@
 归一工具统一在 data/sources/_common.py(norm_code / em_secid / sina_code / bs_code /
 to_ohlcv / http_get_json / throttle / ak_safe)。
 
-⚠️ 当前为**阶段 0 脚手架**:本包已建,但 datahub 尚未切到本包的源(各源仍在
-datahub.py / a_stock_data_adapter.py / data_source_manager.py 内联)。阶段 3 才把现有直连
-逐 provider 搬进 sources/*.py。本包先提供归一工具收口,供新写直连源即刻复用。
+现状(阶段 0–3 完成,阶段 4 收尾中,2026-06-28):datahub 各域 `_route` 已直挂本包原子源 ——
+sina / tencent / eastmoney / ths / baidu / cls / cninfo / jsl / baostock / mootdx / pywencai 直连真源,
+akshare(末位整合库)/ tushare(可选,无 token 不调)。`datahub.kline` raw/qfq 链均为一层直连原子源,
+无 fetcher/manager 嵌套。残留:`manager.get_stock_hist_data` 8 源链仅 info/情绪 2 个非热路径消费方仍用,
+`akshare.py` 的 sector_ranking_ths/sector_fund_flow_ths 待收。详见 docs/数据源原子化重构计划.md §7。
 """

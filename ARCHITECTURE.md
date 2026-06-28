@@ -3,7 +3,8 @@
 > **定位**：基于 **FastAPI + Vue3 SPA + DeepSeek + 多源数据直连(东财/腾讯/新浪/同花顺/akshare 等)** 的 A 股多智能体分析系统。
 > 单 Web 应用集成 选股 / 技术分析 / 龙虎榜 / 板块策略 / 宏观分析 / 持仓盯盘 / AI 决策 / 实时监测 / 自动推送 / 后台调度。
 >
-> **数据流**：`数据源（HTTP/akshare/tushare/yfinance/baostock）→ datahub 统一层(_route 健康度路由 + 三级缓存) → StockDataFetcher + MyTT 指标 → AI Agents (DeepSeek) → 决策落库 (PG/SQLite) → 邮件/Webhook 推送`
+> **数据流**：`原子源 data/sources/*（直连真源：新浪/东财/腾讯/baostock/通达信/同花顺/… + akshare 末位 + tushare 可选）→ datahub 统一层(_route 健康度路由 + 三级缓存) → data/indicators MyTT 指标 → AI Agents (DeepSeek) → 决策落库 (PG/SQLite) → 邮件/Webhook 推送`
+> （2026-06 源原子化重构后：一家真源一个 `data/sources/*.py` 原子模块；datahub.kline 等域函数的 `_route` 直挂原子源,无 fetcher/manager 嵌套;技术指标计算独立于源,在 `data/indicators.py`。`StockDataFetcher` 现仅作港股/美股 fetcher + 个股信息,A 股 K线已委托 datahub.kline。）
 
 ---
 
@@ -454,9 +455,9 @@ def _cmd_xxx(args, ctx):
 
 ### 3. MyTT 通达信指标接入
 - 新增 12 个指标：DMI（PDI/MDI/ADX）/ ATR / TRIX / ROC / CCI / BIAS（6/12/24） / WR
-- `stock_data.calculate_technical_indicators()` 自动计算
+- `data/indicators.calculate_technical_indicators()` 自动计算（2026-06-28 从 StockDataFetcher 拆出;`StockDataFetcher.calculate_technical_indicators`/`get_latest_indicators` 退化为委托,调用方零改）
 - `deepseek_client.technical_analysis()` prompt 自动注入 AI
-- 库源：[MyTT.py](MyTT.py)（8.6K，纯 numpy/pandas 实现，零额外依赖）
+- 库源：[data/MyTT.py](data/MyTT.py)（纯 numpy/pandas 实现，零额外依赖）
 
 ### 4. 资金/龙虎数据源直连（2026-06-27 阶段1：已移除 adata 二道贩子整合库）
 - 北向资金（沪深港通日度）：同花顺 hsgtApi 本地缓存为主源（jobs 每日 15:40 入库），akshare 兜底

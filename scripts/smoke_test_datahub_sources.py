@@ -126,7 +126,7 @@ def main():
             print('  ⚠️ mootdx 未安装或无可连服务器 → datahub.kline 第三源占位(无害);'
                   '装了再测:pip install "mootdx>=0.11.0" && pip install -U "httpx>=0.27.1"')
         else:
-            ref = fetch(lambda: datahub._fetcher().get_stock_data(codes[0], '6mo', '1d'))  # 新浪主源
+            ref = fetch(lambda: datahub._kline_sina_raw(codes[0], '6mo'))  # 新浪 raw 主源(摊平后直连原子源)
             mx = fetch(lambda: datahub._kline_mootdx(codes[0], '6mo'))
             n_ref = 0 if ref is None else len(ref)
             n_mx = 0 if mx is None else len(mx)
@@ -152,6 +152,43 @@ def main():
                     print(f'  小结:收盘 {pe}/5 一致、成交量单位 {ve}/5 对')
     except Exception as e:
         print(f'  kline 核对异常: {type(e).__name__}: {e}')
+
+    # 6. raw K线链「逐原子源直连可达 + 字段同构」(2026-06-28 阶段3⑤摊平后)：
+    #    datahub.kline(raw)._route 已摊平成一层直连原子源 [sina_raw, baostock, east, mootdx,
+    #    tencent, akshare(+tushare)]。逐个调一次,校验:① 是否可达(非空)② 列严格等于契约
+    #    OCHLV(混入 amount/turnover 等非契约列会污染 177 调用方)③ 末日收盘与主源 sina 一致
+    #    (全 raw 源,同票同日收盘应相等;偏差>1% 说明复权口径/取错票)。
+    c0 = codes[0]
+    print(f'\n########## raw K线链 逐原子源直连(契约 OCHLV + 同构)code={c0} ##########')
+    _CONTRACT = ['Open', 'High', 'Low', 'Close', 'Volume']
+    raw_srcs = [
+        ('sina_raw', lambda: datahub._kline_sina_raw(c0, '6mo')),
+        ('baostock', lambda: datahub._kline_baostock(c0, '6mo', '1d', 'raw')),
+        ('east', lambda: datahub._kline_eastmoney(c0, '6mo', '1d', 'raw')),
+        ('mootdx', lambda: datahub._kline_mootdx(c0, '6mo')),
+        ('tencent', lambda: datahub._kline_tencent_raw(c0, '6mo')),
+        ('akshare', lambda: datahub._kline_akshare_raw(c0, '6mo')),
+    ]
+    ref_close = None
+    for name, fn in raw_srcs:
+        df = fetch(fn)
+        if df is None or getattr(df, 'empty', True):
+            print(f'  ⚠️ {name:9s} 空 — 当前不可达(无害,_route 会跳过)')
+            continue
+        cols = list(df.columns)
+        col_ok = set(_CONTRACT).issubset(set(cols)) and not (set(cols) - set(_CONTRACT))
+        last_c = float(df['Close'].iloc[-1])
+        if ref_close is None:
+            ref_close = last_c
+        dev = abs(last_c - ref_close) / max(ref_close, 1e-9)
+        cflag = '✅契约OCHLV' if col_ok else f'❌列越界:{cols}'
+        pflag = '✅收盘对齐' if dev < 0.01 else f'❌收盘偏差{dev*100:.1f}%(查复权/取错票)'
+        print(f'  {name:9s} {len(df):3d}行 末收={last_c:<10.3f} {cflag}  {pflag}')
+    try:
+        from data.sources import tushare as _ts
+        print(f'  tushare   available()={_ts.available()}  (无 token → 不入 raw 链,符合设计)')
+    except Exception as e:
+        print(f'  tushare   自检异常: {type(e).__name__}')
 
     print('\n判读:✅一致=安全 / ⚠️空=暂不可达无害 / ❌不一致=摘掉该备源或修映射/修单位')
 

@@ -44,12 +44,13 @@
   - ✅ `sina.py`:新浪 qfq 日线(免 py_mini_racer,与 akshare 逐字段一致)/ 行业 spot / 财报三表 直连;datahub `_kline_sina_qfq`/`_sector_spot_sina`/`financials` 已切。
   - ✅ `eastmoney.py`:全球快讯(getFastNewsList)/ 可转债比价(push2 clist,f-code 直连,326 只 0 不一致)/ 基金净值(f10 lsjz)直连;datahub `_news_em`/`_cb_eastmoney`/`_fund_nav_eastmoney` 已切。
   - ✅ `jsl.py`:集思录可转债(POST cb_list_new,匿名约 30 只,与 akshare 30 只逐字段一致);datahub `_cb_jsl` 已切。
-- **阶段 3(进行中 2026-06-27)**:
+- **阶段 3(✅ 完成 2026-06-27/28)**:
   - ✅ 指数源归位:`sina.indices()` + 新建 `tencent.py`(qt.gtimg);datahub `_indices_*` 委托。
   - ✅ 东财 K线归位:`eastmoney.kline()`(push2his raw/qfq);datahub `_kline_eastmoney` 委托。
   - ✅ 独立原子源文件 git mv 进本包:`baostock.py` / `mootdx.py` / `pywencai.py`(旧 `data/*_safe.py`、`tdx_mootdx.py` 留 shim,15+ 处导入零改)。
   - ✅ **adapter 全 provider 归位**(1456→621 行):东财(eastmoney.py:行情ulist/资金流/datacenter个股/研报新闻基本面/板块排名/龙虎榜聚合)、腾讯·新浪(quotes/indices)、同花顺(ths.py)、百度(baidu.py)、财联社(cls.py)、巨潮(cninfo.py)。adapter 仅余派生计算/编排/接口类。
-  - ⏭️ **剩(最后一块,高风险)**:拆 `StockDataFetcher` + 摊平 `manager` 8 源链(动主 raw K线路径);`tushare.py`;阶段4 `akshare.py`(末位兜底层)+ 清 orphan `_sina_financial_report`。详见重构计划 §7。
+  - ✅ **拆 StockDataFetcher + 摊平 raw 链(2026-06-28,最高风险刀)**:技术指标 → `data/indicators.py`;`tencent.kline`(腾讯 fqkline raw,量纲随板块);新增 `akshare.py`(kline 末位)+ `tushare.py`(可选,`available()` 闸)。`datahub.kline(raw)._route` 摊平成一层直连原子源 `[sina_raw, baostock, east, mootdx, tencent, akshare(+tushare)]`;`StockDataFetcher._get_chinese_stock_data` 委托 `datahub.kline`。raw/qfq 75 项对照仅 8 项 ETF 差异(均为改进:列收敛 OCHLV + 修 ETF 成交量 手→股 100x)。
+- **阶段 4(收尾中 2026-06-28)**:✅ 清 orphan `_sina_financial_report` 死链;✅ 扩 smoke(raw 链逐原子源契约+同构);⏭️ `akshare.py` 再收 `_sector_ranking_ths`/`_sector_fund_flow_ths`;残留 `manager.get_stock_hist_data` 8 源链(仅 info/情绪 2 消费方用,非 kline 热路径)。详见重构计划 §7。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。
