@@ -871,6 +871,17 @@ def task_daily_backtest():
     except Exception as e:
         print(f'[daily_backtest] 因子评估预热失败: {e}')
 
+    # ── 10. 预热价量因子 IC 加权选股(闭环消费上一步的 IC;写 pv_ic_screen:000300,genome页秒读)──
+    try:
+        from multi_factor_screener import screen_pv_ic
+        pv = screen_pv_ic(index_code='000300', n=30)
+        if pv.get('top'):
+            from cache import cache_set
+            cache_set('pv_ic_screen:000300', pv, 6 * 3600)
+            print(f"[daily_backtest] 价量IC选股预热: {len(pv['top'])}只 (ic_weighted={pv.get('ic_weighted')})")
+    except Exception as e:
+        print(f'[daily_backtest] 价量IC选股预热失败: {e}')
+
 
 def task_ai_eval_weekly():
     """每周一 09:30：对过去 30 天 AI 推荐做评估，推送报告（开关 ai_eval_weekly，默认开）"""

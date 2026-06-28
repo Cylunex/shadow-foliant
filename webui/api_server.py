@@ -1234,6 +1234,21 @@ def factors_eval(horizon: int = 10):
         return _err(e)
 
 
+@app.get("/api/factors/pv-screen")
+def factors_pv_screen(n: int = 15, index: str = "000300"):
+    """价量因子 IC 加权选股(闭环消费 factor_eval 的 IC):各股最新价量因子按其 IC 加权 → TopN。
+    与基本面选股互补;需拉股池K线较慢 → 25s 护栏 + 6h 缓存。"""
+    try:
+        from multi_factor_screener import screen_pv_ic
+        return _ok(_cache_or(
+            f"pv_ic_screen:{index}", 6 * 3600,
+            lambda: _with_deadline(lambda: screen_pv_ic(index_code=index, n=max(n, 30)),
+                                   25, {"top": [], "error": "timeout(稍后重试/等周任务预热)"}),
+            keep=lambda v: isinstance(v, dict) and v.get("top")))
+    except Exception as e:
+        return _err(e)
+
+
 @app.get("/api/portfolio/optimize")
 def portfolio_optimize(codes: str = "", period: str = "6mo", method: str = ""):
     """组合权重优化:对给定 codes(逗号分隔)算 等权/逆波动/最小方差/风险平价 配比。

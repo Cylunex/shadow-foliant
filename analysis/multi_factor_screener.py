@@ -430,6 +430,95 @@ def screen_index_cached(index_code: str = '000300', n: int = 15,
     return out
 
 
+# =============================================================================
+# 价量因子 IC 加权选股 —— 闭环消费 factor_eval 的 IC,让"因子挖掘"从只展示变成进选股
+# (factor_eval 评的是 factor_zoo 的价量因子,本函数正是用同一套价量因子选股,权重来自其 IC)
+# =============================================================================
+def pv_ic_weights(cache_key: str = 'factor_eval:10', drop_noise: bool = True) -> Optional[Dict[str, float]]:
+    """把 factor_eval 缓存里的价量因子 IC 转成选股权重:❌噪声→0(drop_noise),其余按 |IC-IR| 加权。
+    无缓存/无数据 → None(调用方回退等权)。这是把因子有效性评估接进选股的关键一环(闭环)。"""
+    try:
+        from cache import cache_get
+    except Exception:
+        return None
+    rep = cache_get(cache_key)
+    if not isinstance(rep, dict) or not rep.get('factors'):
+        return None
+    w = {}
+    for f in rep['factors']:
+        if drop_noise and f.get('verdict') == '❌噪声':
+            continue
+        iw = abs(f.get('ic_ir') or 0.0)
+        if iw > 0:
+            w[f['key']] = iw
+    return w or None
+
+
+def build_pv_factor_frame(symbols: List[str], period: str = '6mo', workers: int = 8) -> pd.DataFrame:
+    """每只取 K线 → factor_zoo 全部价量因子的**最新值** → 横截面矩阵(index=code, col=因子key)。
+    走 datahub(多源+磁盘缓存);失败/数据不足的股票跳过。"""
+    import datahub
+    from factor_zoo import FACTORS, compute
+
+    def _one(sym):
+        try:
+            df = datahub.kline(sym, period, adjust='qfq')   # 价量因子须前复权
+            if df is None or len(df) < 60:
+                return sym, {}
+            row = {}
+            for k, ser in compute(df, list(FACTORS)).items():
+                v = ser.dropna()
+                if len(v):
+                    row[k] = float(v.iloc[-1])
+            return sym, row
+        except Exception:
+            return sym, {}
+
+    rows = {}
+    if workers and workers > 1 and len(symbols) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(workers, len(symbols))) as ex:
+            for sym, row in ex.map(_one, symbols):
+                if row:
+                    rows[sym] = row
+    else:
+        for sym in symbols:
+            _, row = _one(sym)
+            if row:
+                rows[sym] = row
+    return pd.DataFrame.from_dict(rows, orient='index')
+
+
+def screen_pv_ic(universe: Optional[List[str]] = None, n: int = 15,
+                 index_code: str = '000300', period: str = '6mo',
+                 add_sector_leaders: bool = True, limit: int = 60,
+                 workers: int = 8) -> Dict[str, Any]:
+    """价量因子 IC 加权选股:股池 → 各股最新价量因子 → 按 factor_eval 的 IC 加权合成 → TopN。
+    与基本面 screen_index 互补(价量 vs 基本面);权重直接来自因子有效性评估 → 评估结果真正进选股。
+    factor_eval 缓存不可用时回退**等权**(仍是价量多因子选股,只是不按 IC 加权)。"""
+    from factor_zoo import FACTORS
+    if universe is None:
+        u = get_default_universe(index_code, add_sector_leaders)
+        universe = (u.get('symbols') or [])[:limit]
+    if not universe:
+        return {'top': [], 'error': '股池为空(指数/板块龙头均失败)'}
+    frame = build_pv_factor_frame(universe, period=period, workers=workers)
+    if frame.empty:
+        return {'top': [], 'error': '无有效价量因子数据'}
+    weights = pv_ic_weights()       # None → composite_score 回退等权
+    directions = {k: FACTORS[k][2] for k in FACTORS}
+    ranked = rank_topn(frame, n=n, weights=weights, directions=directions)
+    cols = ['rank', 'composite'] + [c for c in frame.columns]
+    return {
+        'index_code': index_code, 'universe_size': len(frame),
+        'ic_weighted': weights is not None,
+        'factors_used': [c for c in frame.columns if (weights is None or c in weights)],
+        'weights': {k: round(v, 3) for k, v in (weights or {}).items()},
+        'top': ranked[[c for c in cols if c in ranked.columns]].reset_index()
+                     .rename(columns={'index': 'symbol'}).to_dict(orient='records'),
+    }
+
+
 if __name__ == '__main__':
     # 自测：合成 50 只股票 × 4 因子，验证引擎与 IC/IR（无需联网）
     rng = np.random.RandomState(42)

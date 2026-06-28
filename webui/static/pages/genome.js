@@ -133,6 +133,34 @@ export default {
       <div v-if="s.factors&&s.factors.length" class="sub" style="margin-top:8px;font-size:11px">⚠️ 未做行业/市值中性化:动量/位置类 IC 仍含 β/规模暴露,非纯 alpha。</div>
     </div>
 
+    <!-- 价量因子 IC 加权选股(闭环:用上面评出的 IC 给因子加权选股) -->
+    <div class="card" style="margin-top:16px">
+      <h3>🎯 价量因子选股(IC加权) <span style="font-weight:400;color:var(--muted);font-size:12px">（用上面的因子IC给价量因子加权 → TopN;❌噪声因子权重置0。与基本面选股互补）</span></h3>
+      <div v-if="!s.pv" class="loading">加载中…(首次较慢,需拉股池K线;周任务会预热)</div>
+      <div v-else-if="s.pvErr" class="sub">{{s.pvErr}}</div>
+      <template v-else-if="s.pv.top && s.pv.top.length">
+        <div class="sub" style="margin-bottom:8px;font-size:12px">
+          股池 {{s.pv.universe_size}} 只 ·
+          <span v-if="s.pv.ic_weighted">IC加权(权重最高:{{topWeightFactors}})</span>
+          <span v-else>等权(factor_eval 缓存未就绪,回退等权)</span>
+        </div>
+        <table style="width:100%">
+          <tr style="color:var(--muted);font-size:12px">
+            <th align=left>#</th><th align=left>代码</th><th align=right>合成分</th>
+            <th align=right>20日动量</th><th align=right>RSI14</th><th align=right>52周高点</th>
+          </tr>
+          <tr v-for="r in s.pv.top.slice(0,15)" :key="r.symbol" style="border-bottom:1px solid var(--bdr)">
+            <td>{{r.rank}}</td><td><b>{{r.symbol}}</b></td>
+            <td align=right :style="{fontWeight:700}" :class="cls(r.composite)">{{fmt(r.composite)}}</td>
+            <td align=right :class="cls(r.mom_20)">{{r.mom_20!=null?(r.mom_20*100).toFixed(1)+'%':'—'}}</td>
+            <td align=right>{{r.rsi_14!=null?r.rsi_14.toFixed(0):'—'}}</td>
+            <td align=right>{{r.high_52w!=null?(r.high_52w*100).toFixed(0)+'%':'—'}}</td>
+          </tr>
+        </table>
+      </template>
+      <div v-else class="sub">尚无价量选股数据(周任务预热后显示)</div>
+    </div>
+
     <!-- 个股适配度查询 -->
     <div class="card" style="margin-top:16px">
       <h3>🎯 个股策略适配度查询</h3>
@@ -166,7 +194,7 @@ export default {
       loading: false, varLoading: false,
       err: '', searchCode: '',
       factors: null, factorsErr: '',
-      ab: null,
+      ab: null, pv: null, pvErr: '',
     })
 
     async function loadFactors() {
@@ -184,6 +212,14 @@ export default {
       } catch(e) { s.ab = [] }
     }
 
+    async function loadPV() {
+      try {
+        const r = await api('factors/pv-screen?n=15')
+        if (r && r.error && (!r.top || !r.top.length)) s.pvErr = r.error
+        s.pv = r || { top: [] }
+      } catch(e) { s.pv = { top: [] }; s.pvErr = String(e) }
+    }
+
     // null 安全数字格式化(A/B 任一指标可能缺)
     const fmt = (v) => (v == null ? '--' : (typeof v === 'number' ? v.toFixed(2) : v))
 
@@ -191,6 +227,16 @@ export default {
     const abUnderperform = computed(() => {
       const xs = (s.ab || []).slice(0, 6).map(r => r.excess_return_pct).filter(v => v != null)
       return xs.length >= 3 && (xs.reduce((a, b) => a + b, 0) / xs.length) < 0
+    })
+
+    // 价量选股权重 Top3 因子名(展示"按什么加权选的")
+    const topWeightFactors = computed(() => {
+      const w = (s.pv && s.pv.weights) || {}
+      const NM = { mom_20:'20日动量', mom_60:'60日动量', mom_accel:'动量加速', reversal_5:'5日反转',
+        vol_20:'20日波动', range_20:'20日振幅', max_ret_20:'彩票', ma_bias_20:'乖离MA20',
+        close_pos_20:'价格分位', high_52w:'52周高点', rsi_14:'RSI14', vol_trend:'量能趋势',
+        amihud:'非流动性', ret_skew:'收益偏度' }
+      return Object.entries(w).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k])=>NM[k]||k).join('、') || '—'
     })
 
     const formatParams = (p) => {
@@ -226,9 +272,9 @@ export default {
       } catch(e) { s.affinity = [{ strategy_id: 'error', score: 0 }] }
     }
 
-    onMounted(() => { loadScores(); loadVariants(); loadFactors(); loadAB() })
+    onMounted(() => { loadScores(); loadVariants(); loadFactors(); loadAB(); loadPV() })
 
     // cls 必须 return 给模板(模板里多处 :class="cls(...)";漏 return → 运行时 cls is not a function)
-    return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform }
+    return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform, topWeightFactors }
   }
 }
