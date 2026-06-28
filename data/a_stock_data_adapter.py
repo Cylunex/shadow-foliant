@@ -279,29 +279,10 @@ from data.sources.cls import telegraph as _cls_telegraph   # noqa: E402
 # _eastmoney_stock_info 已归位 sources/eastmoney(见上方阶段3 再导出块)。
 
 
-def _sina_financial_report(code: str, report_type: str = "lrb") -> list[dict]:
-    """新浪财报三表"""
-    code = _normalize_code(code)
-    prefix = "sh" if code.startswith("6") else "sz"
-    paper_code = f"{prefix}{code}"
-    url = "https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022"
-    params = {
-        "paperCode": paper_code,
-        "source": report_type,
-        "type": "0", "page": "1", "num": "20",
-    }
-    headers = {"User-Agent": UA}
-    try:
-        r = _session.get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
-        result = d.get("result", {}).get("data", {})
-        items = result.get(report_type, [])
-        return items if isinstance(items, list) else []
-    except Exception as e:
-        print(f"[a-stock] 新浪财报请求失败: {e}")
-        return []
-
-
+# _sina_financial_report(新浪财报三表)已删(2026-06-28 阶段4):datahub.financials 改走
+# sources/sina.financials(读对 report_list 层级出真实科目);本 adapter orphan 读错层级
+# (result[report_type] 恒空)且已无调用方,连同 adapter.get_financial_reports /
+# manager.get_financial_reports_a_stock 一并删除。
 # _lockup_expiry 已归位 data/sources/eastmoney.lockup_expiry(见上方阶段3 再导出块)。
 
 
@@ -566,9 +547,8 @@ class AStockDataAdapter:
         })
         return info
 
-    def get_financial_reports(self, symbol: str, report_type: str = "lrb") -> list[dict]:
-        """新浪财报三表: fzb=资产负债表 lrb=利润表 llb=现金流量表"""
-        return _sina_financial_report(symbol, report_type)
+    # get_financial_reports 已删(2026-06-28 阶段4):datahub.financials 走 sources/sina.financials,
+    # 旧 adapter._sina_financial_report orphan 读错层级且无调用方,连同本方法删除。
 
     # ─── 公告 ──────────────────────────────────────────
 

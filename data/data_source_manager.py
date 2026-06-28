@@ -921,19 +921,8 @@ class DataSourceManager:
             print(f"[a-stock] get_concept_blocks 失败: {e}")
             return {"industry": [], "concept": [], "region": [], "concept_tags": []}
 
-    def get_financial_reports_a_stock(self, symbol: str, report_type: str = "lrb") -> list[dict]:
-        """
-        [a-stock HTTP直连] 获取新浪财报三表
-        替换: akshare stock_financial_report_sina
-        report_type: fzb=资产负债表 lrb=利润表 llb=现金流量表
-        """
-        if not self.a_stock_available:
-            return []
-        try:
-            return self.a_stock_adapter.get_financial_reports(symbol, report_type)
-        except Exception as e:
-            print(f"[a-stock] get_financial_reports 失败: {e}")
-            return []
+    # get_financial_reports_a_stock 已删(2026-06-28 阶段4):datahub.financials 走
+    # sources/sina.financials,本 orphan 包装(→ adapter._sina_financial_report 读错层级)无调用方。
 
     def get_stock_news_a_stock(self, symbol: str, page_size: int = 20) -> list[dict]:
         """
