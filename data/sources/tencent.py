@@ -8,8 +8,11 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Dict, List
+
+import pandas as pd
 
 from . import _common as C
 
@@ -62,6 +65,52 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
         }
     return result
 
+# ── K线(fqkline,raw/qfq 日线)────────────────────────────────────────────────
+# 腾讯 fqkline 行格式:[date, open, close, high, low, volume(手), ...] —— close 在 index 2。
+# raw(fq='')实测与新浪 raw 同价(volume 手→股 ×100,因腾讯按整手计与新浪股数有 <0.001% 量纲舍入);
+# 是真·独立公司源(东财/新浪全被机房墙时的兜底)。qfq 走 'qfqday' 键,缺失则返空不拿 raw 冒充。
+_KLINE_URL = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={sym},day,,,{n},{fq}"
+_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825}
+
+
+def _count(period: str) -> int:
+    """period → 取 K线根数(交易日 ≈ 自然日 ×0.72,加 30 缓冲;≤1y 兜底 365 对齐链内主源;封顶 1800)。"""
+    days = _PERIOD_DAYS.get(period, 365)
+    return min(max(int(days * 0.72) + 30, 365), 1800)
+
+
+def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw") -> pd.DataFrame:
+    """腾讯 fqkline 日线。adjust='raw' 不复权(实测对齐新浪 raw)/ 'qfq' 前复权(真 qfq 键,缺失返空)。
+    仅日线。返回项目契约:DatetimeIndex='Date' + 大写 OHLCV(volume 手→股 ×100),或空 DF。"""
+    if interval not in ('1d', 'daily', '101'):
+        return pd.DataFrame()
+    fq = 'qfq' if str(adjust) == 'qfq' else ''
+    sym = C.tencent_code(code)
+    try:
+        C.throttle('tencent')
+        txt = C.http_get_text(_KLINE_URL.format(sym=sym, n=_count(period), fq=fq),
+                              headers={"Referer": "https://gu.qq.com"}, timeout=12)
+        st = json.loads(txt)
+        stk = (st.get('data') or {}).get(sym) or {}
+    except Exception:
+        return pd.DataFrame()
+    # raw 用 'day';qfq 必须有 'qfqday'(没有就返空,绝不拿 raw 冒充 qfq 污染缓存)。
+    key = ('qfqday' if fq == 'qfq' else 'day')
+    buf = stk.get(key)
+    if not buf:
+        return pd.DataFrame()
+    try:
+        rows = [r[:6] for r in buf if isinstance(r, list) and len(r) >= 6]
+        df = pd.DataFrame(rows, columns=['date', 'open', 'close', 'high', 'low', 'volume'])
+        # 腾讯 volume 量纲**随板块**:主板/创业/ETF =「手」(×100→股);科创板(688/689)= 已是「股」(×1)。
+        # 实测对齐东财 raw(中芯 688981 east_V/tx_V=1,主板/ETF=100);写错会污染三方共享 K线缓存,故按板块定。
+        c6 = C.norm_code(code)
+        vol_mult = 1.0 if c6[:3] in ('688', '689') else 100.0
+        return C.to_ohlcv(df, date_col='date', vol_mult=vol_mult)
+    except Exception:
+        return pd.DataFrame()
+
+
 # 大盘指数:腾讯 qt.gtimg 代码(HK 用 r_hkHSI,与 A 股 s_ 前缀解析口径不同)。
 _INDICES = [
     ("上证指数", "s_sh000001"), ("深证成指", "s_sz399001"), ("创业板指", "s_sz399006"),
@@ -107,4 +156,8 @@ if __name__ == '__main__':
     print('=== data.sources.tencent 直连自检 ===')
     idx = indices()
     print(f'indices: {len(idx)} 个;', idx[:3])
-    print('OK' if idx else '⚠️ 空(可能网络/被封)')
+    kr = kline('600519', '3mo', adjust='raw')
+    print(f'kline raw 600519 3mo: {len(kr)} bars', '' if kr.empty else f"last={kr.index[-1].date()} C={kr['Close'].iloc[-1]}")
+    ke = kline('159915', '1mo', adjust='raw')
+    print(f'kline raw 159915(ETF) 1mo: {len(ke)} bars')
+    print('OK' if (idx and not kr.empty) else '⚠️ 部分空(可能网络/被封)')
