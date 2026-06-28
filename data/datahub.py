@@ -993,11 +993,11 @@ def kline_akshare_compat(code: str, period: str = "1y") -> pd.DataFrame:
 def kline_with_indicators(code: str, period: str = "1y") -> pd.DataFrame:
     """K线 + MyTT 技术指标(MA/MACD/KDJ/RSI/BOLL...)。失败返回空 DF。
     ⭐ 技术指标用前复权 qfq(除权跳空会让均线/MACD 失真);qfq 取不到时内部 fallback raw。"""
-    f = _fetcher()
+    import indicators   # 指标计算已拆出 data/indicators.py(2026-06-28 阶段3⑤),不再经 StockDataFetcher
     df = kline(code, period, adjust='qfq')   # qfq:技术指标行业标准
     if isinstance(df, dict) or df is None or len(df) == 0:
         return pd.DataFrame()
-    ind = f.calculate_technical_indicators(df)
+    ind = indicators.calculate_technical_indicators(df)
     return pd.DataFrame() if isinstance(ind, dict) else ind
 
 
