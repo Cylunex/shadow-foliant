@@ -260,38 +260,19 @@ class FundFlowAkshareDataFetcher:
 ═══════════════════════════════════════
 """)
             
-            # 显示每个交易日的数据
-            for idx, item in enumerate(fund_flow_data.get('data', []), 1):
-                date = item.get('日期', 'N/A')
-                close_price = item.get('收盘价', 'N/A')
-                change_pct = item.get('涨跌幅', 'N/A')
-                
-                text_parts.append(f"""
-第 {idx} 个交易日 ({date}):
-  基本信息:
-    - 收盘价: {close_price}
-    - 涨跌幅: {change_pct}%
-  
-  主力资金:
-    - 主力净流入-净额: {item.get('主力净流入-净额', 'N/A')}
-    - 主力净流入-净占比: {item.get('主力净流入-净占比', 'N/A')}%
-  
-  超大单:
-    - 超大单净流入-净额: {item.get('超大单净流入-净额', 'N/A')}
-    - 超大单净流入-净占比: {item.get('超大单净流入-净占比', 'N/A')}%
-  
-  大单:
-    - 大单净流入-净额: {item.get('大单净流入-净额', 'N/A')}
-    - 大单净流入-净占比: {item.get('大单净流入-净占比', 'N/A')}%
-  
-  中单:
-    - 中单净流入-净额: {item.get('中单净流入-净额', 'N/A')}
-    - 中单净流入-净占比: {item.get('中单净流入-净占比', 'N/A')}%
-  
-  小单:
-    - 小单净流入-净额: {item.get('小单净流入-净额', 'N/A')}
-    - 小单净流入-净占比: {item.get('小单净流入-净占比', 'N/A')}%
-""")
+            # 逐日数据(紧凑一行/日:2026-06-28 由每日 26 行 verbose 改紧凑表,信息量不变省 ~70% token,
+            # 对齐行也更利于 LLM 扫趋势)。金额单位元、占比%。
+            text_parts.append(
+                "逐日明细(每行=日期 收盘 涨跌% 主力净额(净占比%) 超大(占比) 大(占比) 中(占比) 小(占比)，金额单位元):")
+            for item in fund_flow_data.get('data', []):
+                text_parts.append(
+                    "%s 收%s 涨跌%s%% 主%s(%s) 超%s(%s) 大%s(%s) 中%s(%s) 小%s(%s)" % (
+                        item.get('日期', 'N/A'), item.get('收盘价', 'N/A'), item.get('涨跌幅', 'N/A'),
+                        item.get('主力净流入-净额', 'N/A'), item.get('主力净流入-净占比', 'N/A'),
+                        item.get('超大单净流入-净额', 'N/A'), item.get('超大单净流入-净占比', 'N/A'),
+                        item.get('大单净流入-净额', 'N/A'), item.get('大单净流入-净占比', 'N/A'),
+                        item.get('中单净流入-净额', 'N/A'), item.get('中单净流入-净占比', 'N/A'),
+                        item.get('小单净流入-净额', 'N/A'), item.get('小单净流入-净占比', 'N/A')))
             
             # 添加统计汇总
             text_parts.append("""
