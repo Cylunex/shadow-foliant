@@ -1429,7 +1429,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'fund_target_check':         600,
     'fund_nav_refresh':          900,
     'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
-    'weekend_portfolio':         1800,   # F 合并:周报(run_once 全持仓) + 8情景压力AI,串行给足
+    'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 全持仓 ~83只 LLM)。1800s 在外部源
+                                         # 降级日(东财封/问财熔断,每股~300s vs 健康~45s)只够~20只→超时(2026-06-28),提到 90min
     'eod_outcomes':              900,    # A 合并:等 prefetch(≤300) + 推荐池回填 + 信号后验
     'pg_backup':                 600,
 }
@@ -4560,10 +4561,13 @@ def task_weekly_analysis():
 
 
 def task_weekend_portfolio():
-    """📊 周末持仓深度合并(周日 15:00)—— 合 weekly_analysis + portfolio_stress_ai 为一个调度入口:
-    顺序跑 ①持仓综合周报(评级变化/减仓加仓Top5/4象限体检/已实现盈亏)→ ②全 8 宏观情景压力叙事
-    (最脆弱情景/风险担当持仓/具体减仓对冲)。两子任务各自开关(weekly_analysis/portfolio_stress_ai)+
-    日志仍独立有效、可单独关;本任务只统一顺序调度。开关 weekend_portfolio(默认开)。两段各自 try。"""
+    """📊 周末持仓深度合并(周日 15:00)—— 合 weekly_analysis + portfolio_stress_ai 为一个调度入口。
+    ⚠️ 顺序(2026-06-28 调整):**先跑①压力叙事**(单次 LLM、静态分析、~40s、独立于持仓批量)→
+    再跑②持仓综合周报(评级变化/减仓加仓Top5/4象限体检;内含 run_once 全持仓 ~83只多智能体 LLM,长)。
+    调序原因:外部源降级日(东财封/问财熔断)②每股可达 ~300s、83只远超时,若②在前会**饿死**①;
+    现①先出,即便②超时也已把压力预案推出、且②的周报读 get_all_latest_analysis 仍有部分产出。
+    两子任务各自开关(weekly_analysis/portfolio_stress_ai)+ 日志独立有效、可单独关;本任务只统一调度。
+    开关 weekend_portfolio(默认开)。两段各自 try。"""
     job = 'weekend_portfolio'
     try:
         from automation_config import is_enabled
@@ -4572,13 +4576,13 @@ def task_weekend_portfolio():
     except Exception:
         pass
     try:
-        task_weekly_analysis()          # ① 持仓综合周报(内含 is_enabled + _log_run)
+        task_portfolio_stress_ai()      # ① 8 情景压力叙事(快、独立,先出防被周报批量饿死)
     except Exception as e:
-        print(f'[weekend_portfolio] 周报异常(继续压力情景): {type(e).__name__}: {str(e)[:80]}')
+        print(f'[weekend_portfolio] 压力情景异常(继续周报): {type(e).__name__}: {str(e)[:80]}')
     try:
-        task_portfolio_stress_ai()      # ② 8 情景压力叙事
+        task_weekly_analysis()          # ② 持仓综合周报(全持仓批量 LLM,内含 is_enabled + _log_run)
     except Exception as e:
-        print(f'[weekend_portfolio] 压力情景异常: {type(e).__name__}: {str(e)[:80]}')
+        print(f'[weekend_portfolio] 周报异常: {type(e).__name__}: {str(e)[:80]}')
 
 
 # 默认注册一组适合大多数用户的任务时间表
