@@ -82,6 +82,18 @@ def chan_signal(code: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def price_levels(code: str) -> Dict[str, Any]:
+    """关键价位:11 类支撑/压力位(成交密集区POC/枢轴点/前高前低/布林/Keltner三档/
+    ATR止损/缺口/斐波那契/整数关口)+ 紧凑摘要。纯计算,前复权口径。"""
+    import datahub
+    from price_levels import analyze_levels
+    df = datahub.kline(code, '1y', adjust='qfq')   # 技术价位用前复权
+    if df is None or getattr(df, "empty", True):
+        return {"error": "无行情数据"}
+    return analyze_levels(df, code)
+
+
+@mcp.tool()
 def stock_risk(code: str, beta: float = 1.0) -> Dict[str, Any]:
     """量化风险:VaR/CVaR/最大回撤/夏普/蒙特卡洛/压力情景 + 摘要。"""
     from stress_testing import analyze_risk

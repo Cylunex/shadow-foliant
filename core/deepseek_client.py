@@ -170,12 +170,14 @@ class DeepSeekClient:
             return f"API调用失败: {str(e)}"
     
     def technical_analysis(self, stock_info: Dict, stock_data: Any, indicators: Dict,
-                           chan_summary: str = None) -> str:
+                           chan_summary: str = None, levels_summary: str = None) -> str:
         """技术面分析
 
         chan_summary: 可选的缠论结构摘要（来自 chan_theory.analyze_chan），传入则注入 prompt。
+        levels_summary: 可选的关键价位摘要（来自 price_levels.analyze_levels），传入则注入 prompt。
         """
         chan_block = f"\n缠论结构（缠中说禅）：\n{chan_summary}\n" if chan_summary else ""
+        levels_block = f"\n关键价位（量价/枢轴/通道/缺口/斐波那契）：\n{levels_summary}\n" if levels_summary else ""
         # ⭐ 缓存优化(2026-06-28):稳定框架(角色+指标口径+分析维度+输出要求)放 system —— 全批同 call_type
         # 逐字相同 → DeepSeek 上下文缓存命中;变量股票数据放 user。指标的口径说明随框架进 system,
         # user 只剩纯数值(原 7% 命中、框架在 prompt 末尾被前面变量数据顶得无法复用)。
@@ -197,7 +199,7 @@ class DeepSeekClient:
             "5. 乖离回归分析（BIAS 6/12/24 偏离度）\n"
             "6. 成交量分析\n"
             "7. 短期、中期、长期技术判断\n"
-            "8. 关键技术位分析\n"
+            "8. 关键技术位分析（若【股票数据】含关键价位：结合成交密集区/枢轴点/前高前低/缺口/斐波那契/整数关口，明确上方压力与下方支撑及其强度）\n"
             "9. 缠论分析（若【股票数据】含缠论结构：当前笔/中枢位置、背驰与一二三类买卖点，与传统指标互相印证）\n"
             "请给出专业、详细的技术分析报告，包含风险提示。"
         )
@@ -231,7 +233,7 @@ class DeepSeekClient:
 - CCI(14)：{indicators.get('cci', 'N/A')}
 - BIAS 乖离：6日={indicators.get('bias_6', 'N/A')} / 12日={indicators.get('bias_12', 'N/A')} / 24日={indicators.get('bias_24', 'N/A')}
 - 威廉 WR(10)：{indicators.get('wr_10', 'N/A')}
-{chan_block}"""
+{chan_block}{levels_block}"""
 
         messages = [
             {"role": "system", "content": system},

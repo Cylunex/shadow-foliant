@@ -34,10 +34,23 @@ class StockAnalysisAgents:
         except Exception as e:
             print(f"   ⚠ 缠论计算跳过：{e}")
 
+        # 关键价位（借鉴 tickflow-stock-panel 的 11 类价位，纯本地计算，失败不影响主流程）
+        levels_summary = None
+        levels_data = None
+        try:
+            from price_levels import analyze_levels
+            levels_data = analyze_levels(stock_data, stock_info.get('symbol', ''))
+            levels_summary = levels_data.get('summary') if isinstance(levels_data, dict) else None
+            if levels_summary and levels_data.get('count'):
+                print(f"   ✓ 关键价位已计算（{levels_data.get('count')}个价位点）")
+        except Exception as e:
+            print(f"   ⚠ 关键价位计算跳过：{e}")
+
         time.sleep(1)  # 模拟分析时间
 
         analysis = self.deepseek_client.technical_analysis(
-            stock_info, stock_data, indicators, chan_summary=chan_summary)
+            stock_info, stock_data, indicators, chan_summary=chan_summary,
+            levels_summary=levels_summary)
 
         return {
             "agent_name": "技术分析师",
@@ -45,6 +58,7 @@ class StockAnalysisAgents:
             "analysis": analysis,
             "focus_areas": ["技术指标", "趋势分析", "支撑阻力", "交易信号", "缠论买卖点"],
             "chan": chan_data if isinstance(chan_data, dict) else None,
+            "levels": levels_data if isinstance(levels_data, dict) else None,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
     

@@ -238,8 +238,13 @@ def stock_insights(code: str):
             import datahub
             return datahub.capital_flow_adata(code)
 
-        tasks = {"chan": chan, "chip": chip, "signals": signals, "forensics": forensics, "flow": flow}
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        def levels():
+            from price_levels import analyze_levels
+            return analyze_levels(df, code)
+
+        tasks = {"chan": chan, "chip": chip, "signals": signals, "forensics": forensics,
+                 "flow": flow, "levels": levels}
+        with ThreadPoolExecutor(max_workers=6) as ex:
             futs = {k: ex.submit(fn) for k, fn in tasks.items()}
             for k, fu in futs.items():
                 try:
