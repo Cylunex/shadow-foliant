@@ -302,28 +302,9 @@ class DeepSeekClient:
 以上是通过akshare获取的最近8期季度财务报告，请重点基于这些数据进行趋势分析。
 """
         
-        prompt = f"""
-你是一名资深的基本面分析师，拥有CFA资格和10年以上的证券分析经验。请基于以下详细信息进行深入的基本面分析：
-
-【基本信息】
-- 股票代码：{stock_info.get('symbol', 'N/A')}
-- 股票名称：{stock_info.get('name', 'N/A')}
-- 当前价格：{stock_info.get('current_price', 'N/A')}
-- 市值：{stock_info.get('market_cap', 'N/A')}
-- 行业：{stock_info.get('sector', 'N/A')}
-- 细分行业：{stock_info.get('industry', 'N/A')}
-
-【估值指标】
-- 市盈率(PE)：{stock_info.get('pe_ratio', 'N/A')}
-- 市净率(PB)：{stock_info.get('pb_ratio', 'N/A')}
-- 市销率(PS)：{stock_info.get('ps_ratio', 'N/A')}
-- Beta系数：{stock_info.get('beta', 'N/A')}
-- 52周最高：{stock_info.get('52_week_high', 'N/A')}
-- 52周最低：{stock_info.get('52_week_low', 'N/A')}
-{financial_section}
-{quarterly_section}
-
-请从以下维度进行专业、深入的分析：
+        # ⭐ 缓存优化(2026-06-28):稳定框架(分析维度+财务排雷方法论+输出要求)移入 system(逐字相同可缓存),
+        # 变量数据(基本信息/估值/财务/季报)放 user。forensics 红旗指南随框架进 system(原条件注入,现恒定)。
+        fund_framework = """请从以下维度进行专业、深入的分析：
 
 1. **公司质地分析**
    - 业务模式和核心竞争力
@@ -375,7 +356,7 @@ class DeepSeekClient:
    - 按下方"财务排雷方法论"做杜邦分解 + 盈利质量(净利vs经营现金流) + 造假红旗排查
    - 用 DCF 思路给一个内在价值的方向性判断(两阶段:高速增长N年+永续),
      与现价比较给出"低估/合理/高估"与安全边际(数据不足时定性说明假设)
-{forensics_block}
+
 **分析要求：**
 - 如果有季报数据，请重点分析8期数据的趋势变化
 - 识别改善或恶化的早期信号
@@ -383,11 +364,30 @@ class DeepSeekClient:
 - 数据分析要深入，结论要有依据
 - 结合当前市场环境和行业发展趋势
 
-请给出专业、详细的基本面分析报告。
-"""
-        
+请给出专业、详细的基本面分析报告。"""
+        system = ("你是一名资深的基本面分析师，拥有CFA资格和10年以上的证券分析经验。"
+                  "请基于 user 提供的【基本信息/估值/财务/季报】数据进行深入的基本面分析。\n\n"
+                  + fund_framework + (("\n\n" + RED_FLAG_GUIDE) if RED_FLAG_GUIDE else ""))
+        prompt = f"""【基本信息】
+- 股票代码：{stock_info.get('symbol', 'N/A')}
+- 股票名称：{stock_info.get('name', 'N/A')}
+- 当前价格：{stock_info.get('current_price', 'N/A')}
+- 市值：{stock_info.get('market_cap', 'N/A')}
+- 行业：{stock_info.get('sector', 'N/A')}
+- 细分行业：{stock_info.get('industry', 'N/A')}
+
+【估值指标】
+- 市盈率(PE)：{stock_info.get('pe_ratio', 'N/A')}
+- 市净率(PB)：{stock_info.get('pb_ratio', 'N/A')}
+- 市销率(PS)：{stock_info.get('ps_ratio', 'N/A')}
+- Beta系数：{stock_info.get('beta', 'N/A')}
+- 52周最高：{stock_info.get('52_week_high', 'N/A')}
+- 52周最低：{stock_info.get('52_week_low', 'N/A')}
+{financial_section}
+{quarterly_section}"""
+
         messages = [
-            {"role": "system", "content": "你是一名经验丰富的股票基本面分析师，擅长公司财务分析和行业研究。"},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt}
         ]
 
@@ -554,9 +554,42 @@ class DeepSeekClient:
         """
         philosophy_block = (f"\n投资哲学透镜复核(价值/长期/反向视角,作为独立参考客观纳入权衡——"
                             f"既警惕追高,也警惕因过度保守而踏空,不预设方向):\n{philosophy}\n" if philosophy else "")
-        prompt = f"""
-基于前期的综合分析讨论，现在需要做出最终的投资决策。
-
+        # ⭐ 缓存优化(2026-06-28):稳定框架(决策要点+评级原则+JSON格式)移入 system,变量【决策依据】放 user。
+        # 决策原 0% 命中(框架在巨大的综合讨论文本之后,前缀全被顶掉)。规则/格式入 system 还利于遵从。
+        system = (
+            "你是一名专业的投资决策专家，需要给出明确、可执行的投资建议。"
+            "请基于 user 提供的【决策依据】做出最终投资决策，必须包含以下内容：\n\n"
+            "1. 投资评级：买入/持有/卖出\n"
+            "2. 目标价位（具体数字）\n"
+            "3. 操作建议（具体的买入/卖出策略）\n"
+            "4. 进场位置（具体价位区间）\n"
+            "5. 止盈位置（具体价位）\n"
+            "6. 止损位置（具体价位）\n"
+            "7. 持有周期建议\n"
+            "8. 风险提示\n"
+            "9. 仓位建议（轻仓/中等仓位/重仓）\n\n"
+            "【评级原则 — 必须遵守，消除\"保守惯性\"】\n"
+            "- 多空证据要**对称权衡**，不要预设保守，也不要默认看空。\n"
+            "- **强势上行**（价格站上 MA20 且 ≥ MA60、MACD≥0 或翻红、出现缠论买点/底背离/超跌反弹、量化 VaR 低）→ 评级应为「买入」或「逢低买入(持有偏多)」；**不要仅因 RSI 偏高/短期超买就一律降级为「持有」**。\n"
+            "- 「卖出」**仅**用于：确有趋势破位、基本面恶化、重大风险事件、明显高估等下行风险。**仅仅\"性价比不高/不够便宜/估值偏上\"应给「持有」(观望)，不要给「卖出」**——尤其对当前并未持有的标的，\"不建议买入\"≠\"卖出\"。\n"
+            "- 目标价应反映**合理上行空间**，不得机械设在现价之下（除非确为高估）。\n"
+            "- 若【决策依据】的讨论中出现**缠论买点、底背离、超跌反弹**等多头信号，必须作为买入依据纳入权衡，不可被\"超买\"单一理由一票否决。\n"
+            "- **盈亏比硬约束**:给「买入」时,(目标价−进场价)/(进场价−止损价) **必须 ≥ 2:1**。若按合理目标/止损算不到 2:1,说明性价比不足,应改给「持有」(观望),不要勉强买入。止损可参考 进场价 − 2×ATR。\n\n"
+            "请以JSON格式输出决策结果，格式如下：\n"
+            "{\n"
+            '    "rating": "买入/持有/卖出",\n'
+            '    "target_price": "目标价位数字",\n'
+            '    "operation_advice": "具体操作建议",\n'
+            '    "entry_range": "进场价位区间",\n'
+            '    "take_profit": "止盈价位",\n'
+            '    "stop_loss": "止损价位",\n'
+            '    "holding_period": "持有周期",\n'
+            '    "position_size": "仓位建议",\n'
+            '    "risk_warning": "风险提示",\n'
+            '    "confidence_level": "信心度(1-10分)"\n'
+            "}"
+        )
+        prompt = f"""【决策依据】
 股票信息：
 - 股票代码：{stock_info.get('symbol', 'N/A')}
 - 股票名称：{stock_info.get('name', 'N/A')}
@@ -571,44 +604,10 @@ class DeepSeekClient:
 - 布林带下轨：{indicators.get('bb_lower', 'N/A')}
 - ATR(14)：{indicators.get('atr', 'N/A')}（建议止损 = 价格 - 2*ATR）
 - ADX 趋势强度：{indicators.get('adx', 'N/A')}（>25 趋势明确，<20 震荡）
-
-请给出最终投资决策，必须包含以下内容：
-
-1. 投资评级：买入/持有/卖出
-2. 目标价位（具体数字）
-3. 操作建议（具体的买入/卖出策略）
-4. 进场位置（具体价位区间）
-5. 止盈位置（具体价位）
-6. 止损位置（具体价位）
-7. 持有周期建议
-8. 风险提示
-9. 仓位建议（轻仓/中等仓位/重仓）
-
-【评级原则 — 必须遵守，消除"保守惯性"】
-- 多空证据要**对称权衡**，不要预设保守，也不要默认看空。
-- **强势上行**（价格站上 MA20 且 ≥ MA60、MACD≥0 或翻红、出现缠论买点/底背离/超跌反弹、量化 VaR 低）→ 评级应为「买入」或「逢低买入(持有偏多)」；**不要仅因 RSI 偏高/短期超买就一律降级为「持有」**。
-- 「卖出」**仅**用于：确有趋势破位、基本面恶化、重大风险事件、明显高估等下行风险。**仅仅"性价比不高/不够便宜/估值偏上"应给「持有」(观望)，不要给「卖出」**——尤其对当前并未持有的标的，"不建议买入"≠"卖出"。
-- 目标价应反映**合理上行空间**，不得机械设在现价之下（除非确为高估）。
-- 若上文讨论中出现**缠论买点、底背离、超跌反弹**等多头信号，必须作为买入依据纳入权衡，不可被"超买"单一理由一票否决。
-- **盈亏比硬约束**:给「买入」时,(目标价−进场价)/(进场价−止损价) **必须 ≥ 2:1**。若按合理目标/止损算不到 2:1,说明性价比不足,应改给「持有」(观望),不要勉强买入。止损可参考 进场价 − 2×ATR。
-
-请以JSON格式输出决策结果，格式如下：
-{{
-    "rating": "买入/持有/卖出",
-    "target_price": "目标价位数字",
-    "operation_advice": "具体操作建议",
-    "entry_range": "进场价位区间",
-    "take_profit": "止盈价位",
-    "stop_loss": "止损价位",
-    "holding_period": "持有周期",
-    "position_size": "仓位建议",
-    "risk_warning": "风险提示",
-    "confidence_level": "信心度(1-10分)"
-}}
 """
-        
+
         messages = [
-            {"role": "system", "content": "你是一名专业的投资决策专家，需要给出明确、可执行的投资建议。"},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt}
         ]
         
