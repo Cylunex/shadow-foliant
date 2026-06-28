@@ -777,6 +777,52 @@ def _kline_tickflow_qfq(code: str, period: str = "1y", interval: str = "1d") -> 
     return _slice_by_days(out, _period_days(period))
 
 
+# ── 摊平后的 raw 原子源(2026-06-28 阶段3⑤:直连 sources/*,无 fetcher/manager 嵌套)──
+def _kline_sina_raw(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """新浪不复权日线 —— 摊平后 raw 主源(直连 sources/sina.kline(raw);datalen 兜底 365 对齐旧行数)。"""
+    try:
+        from data.sources import sina as _sina
+        return _sina.kline(code, period, interval, adjust='raw')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_tencent_raw(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """腾讯 fqkline 不复权日线 —— 真·独立公司兜底(直连 sources/tencent.kline(raw);深市 ETF 补 sina 盲区)。"""
+    try:
+        from data.sources import tencent as _tx
+        return _tx.kline(code, period, interval, adjust='raw')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_akshare_raw(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """akshare 不复权日线 —— 末位整合库兜底(直连 sources/akshare.kline(raw))。"""
+    try:
+        from data.sources import akshare as _ak
+        return _ak.kline(code, period, interval, adjust='raw')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_tushare_raw(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """tushare 不复权日线 —— 可选源(直连 sources/tushare.kline(raw);无 token 不调,见 _tushare_available)。"""
+    try:
+        from data.sources import tushare as _ts
+        return _ts.kline(code, period, interval, adjust='raw')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _tushare_available() -> bool:
+    """tushare 是否可用(有 token 且初始化成功)。无 token → False,不进 raw 源链(不空转)。"""
+    try:
+        from data.sources import tushare as _ts
+        return _ts.available()
+    except Exception:
+        return False
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
           adjust: str = "raw") -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
@@ -821,16 +867,22 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
             return _bl
 
     if adjust == 'raw':
-        def _f():
-            df = _fetcher().get_stock_data(code, period, interval)   # StockDataFetcher 默认 raw
-            return pd.DataFrame() if isinstance(df, dict) else (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
-        # 新浪主源(可达+并发+有当日bar)→ baostock(免费稳定,**优先于常被封的东财**)→ 东财 → mootdx
-        df = _route("kline",
-                    [("fetcher", _f),
-                     ("baostock", lambda: _kline_baostock(code, period, interval, 'raw')),
-                     ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
-                     ("mootdx", lambda: _kline_mootdx(code, period, interval))],
-                    empty=pd.DataFrame(), timeout=45)
+        # 摊平 8 源链(2026-06-28 阶段3⑤):直连原子源,**无 fetcher 嵌套**——根治旧 east/mootdx
+        # 在 fetcher 内层降级链 + 外层 _route **双重出现**的重复路由,链路从 4-5 跳压成 1 层。
+        # 顺序:新浪(可达+并发+当日bar,主源)→ baostock(免费稳定全历史,优先于常被封东财)→ 东财
+        #   → mootdx(通达信独立协议,机房全墙时兜底)→ 腾讯(真独立公司,补深市ETF/sina盲区)
+        #   → akshare(末位整合库)→ tushare(可选,无 token 不入链)。健康度路由自动把可达源排前。
+        _srcs_raw = [
+            ("sina_raw", lambda: _kline_sina_raw(code, period, interval)),
+            ("baostock", lambda: _kline_baostock(code, period, interval, 'raw')),
+            ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
+            ("mootdx", lambda: _kline_mootdx(code, period, interval)),
+            ("tencent", lambda: _kline_tencent_raw(code, period, interval)),
+            ("akshare", lambda: _kline_akshare_raw(code, period, interval)),
+        ]
+        if _tushare_available():
+            _srcs_raw.append(("tushare", lambda: _kline_tushare_raw(code, period, interval)))
+        df = _route("kline", _srcs_raw, empty=pd.DataFrame(), timeout=45)
     else:  # qfq:east 走东财,sina_qfq/baostock_qfq 真非东财兜底
         # ⚡ 健康度短路(2026-06-25 修):qfq 源在**活跃冷却期**(连续失败,冷却额外 -1.0 → score<-0.5)
         # 时每只吃满源超时(原 45s×2=90s)会拖垮 unified_selection 等批量任务 → 直接走 raw,0 成本降级。
@@ -935,12 +987,13 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
     base = max(periods, key=_period_days) if periods else "1y"
     out = {"code": code, "bars": 0, "wrote": 0}
 
-    # ── raw(新浪全量)──
+    # ── raw(新浪全量;2026-06-28 阶段3⑤摊平后直连原子源,不再经 fetcher)──
     if adjust in ('raw', 'both'):
-        def _f():
-            d = _fetcher().get_stock_data(code, base, interval)
-            return pd.DataFrame() if isinstance(d, dict) else (d if isinstance(d, pd.DataFrame) else pd.DataFrame())
-        df = _route("kline", [("fetcher", _f)], empty=pd.DataFrame(), timeout=45)
+        df = _route("kline",
+                    [("sina_raw", lambda: _kline_sina_raw(code, base, interval)),
+                     ("baostock", lambda: _kline_baostock(code, base, interval, 'raw')),
+                     ("east", lambda: _kline_eastmoney(code, base, interval, 'raw'))],
+                    empty=pd.DataFrame(), timeout=45)
         if isinstance(df, pd.DataFrame) and not df.empty:
             out["bars"] = int(len(df))
             for p in periods:

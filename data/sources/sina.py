@@ -85,9 +85,12 @@ _PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 10
 
 
 def _datalen(period: str) -> int:
-    """period → getKLineData datalen(交易日 ≈ 自然日 ×0.72,加 30 缓冲;封顶 1100)。"""
+    """period → getKLineData datalen(交易日 ≈ 自然日 ×0.72,加 30 缓冲;封顶 1100)。
+    ⚠️ ≤1y 兜底 365 根:对齐旧 fetcher/manager 新浪路径(datalen=365 定值、raw 不按 period 截),
+    使摊平后 raw 行数与改前一致(下游 position_guardian/InStock 策略按既有行数预期)。
+    qfq 侧由 datahub._kline_sina_qfq 再 _slice_by_days 截到 period,故本兜底不改 qfq 行数。"""
     days = _PERIOD_DAYS.get(period, 365)
-    return min(int(days * 0.72) + 30, 1100)
+    return min(max(int(days * 0.72) + 30, 365), 1100)
 
 
 def _raw_daily(code: str, period: str) -> pd.DataFrame:
