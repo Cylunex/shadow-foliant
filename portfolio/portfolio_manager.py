@@ -14,6 +14,24 @@ from portfolio_db import portfolio_db
 import config
 
 
+# ETF/基金代码前缀(沪 51/56/58、深 15/16;与 data.sources.akshare._ETF_PREFIX 同口径)。
+_ETF_PREFIX = ('51', '56', '58', '15', '16')
+
+
+def _is_etf(code) -> bool:
+    """6 位 ETF/LOF 基金代码识别(深度批量分析用)。"""
+    c = str(code or '').strip()
+    return c.isdigit() and len(c) == 6 and c[:2] in _ETF_PREFIX
+
+
+def _position_value(stock: Dict) -> float:
+    """持仓市值估算 = 成本价 × 数量(缺值→0,用于 Top-N 排序)。"""
+    try:
+        return float(stock.get('cost_price') or 0) * float(stock.get('quantity') or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class PortfolioManager:
     """持仓管理器类"""
     
@@ -379,29 +397,44 @@ class PortfolioManager:
     def batch_analyze_portfolio(self, mode="sequential", period="1y",
                                 selected_agents: List[str] = None,
                                 max_workers: int = 3,
-                                progress_callback=None) -> Dict:
+                                progress_callback=None,
+                                exclude_etf: bool = False,
+                                top_n_by_value: int = None) -> Dict:
         """
         批量分析所有持仓股票
-        
+
         Args:
             mode: 分析模式 ("sequential" 或 "parallel")
             period: 数据周期
             selected_agents: 选中的分析师列表
             max_workers: 并行模式下的最大并发数（默认3）
             progress_callback: 进度回调函数
-            
+            exclude_etf: 排除 ETF/基金(51/56/58/15/16),不跑多智能体深度分析(2026-06-28)
+            top_n_by_value: 仅深度分析持仓市值(成本×数量)最大的 N 只,小尾仓跳过(None=全跑)
+
         Returns:
             批量分析结果字典
         """
-        # 获取所有持仓股票
+        # 获取所有持仓股票(get_all_stocks 默认已排清仓 quantity=0)
         stocks = self.get_all_stocks()
-        
+
         if not stocks:
             return {
                 "success": False,
                 "error": "没有持仓股票"
             }
-        
+
+        # 筛选(2026-06-28):深度批量分析聚焦重仓、省 token/时间。由调度层按 env 传入开关。
+        #   exclude_etf —— ETF/基金是一篮子,缠论/财务排雷/基本面打分对其无意义 → 不进深度分析;
+        #   top_n_by_value —— 按持仓市值取 Top-N,小尾仓跳过。先排 ETF 再取 Top-N。
+        _orig_n = len(stocks)
+        if exclude_etf:
+            stocks = [s for s in stocks if not _is_etf(s.get('code'))]
+        if top_n_by_value and len(stocks) > int(top_n_by_value):
+            stocks = sorted(stocks, key=_position_value, reverse=True)[:int(top_n_by_value)]
+        if len(stocks) != _orig_n:
+            print(f"[筛选] 深度批量分析 {_orig_n}→{len(stocks)} 只 (排ETF={exclude_etf} TopN={top_n_by_value})")
+
         stock_codes = [stock['code'] for stock in stocks]
         
         # 根据模式选择分析方法
