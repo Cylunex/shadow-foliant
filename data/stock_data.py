@@ -270,25 +270,17 @@ class StockDataFetcher:
             #     print(f"[Akshare] 获取实时数据失败: {e}")
             #     # 如果实时数据获取失败，尝试使用数据源管理器获取历史数据（支持tushare备用）
             try:
-                print(f"[数据源管理器] 尝试获取最近交易数据...")
-                hist_data = self.data_source_manager.get_stock_hist_data(
-                    symbol=symbol,
-                    start_date=(datetime.now() - timedelta(days=30)).strftime('%Y%m%d'),
-                    end_date=datetime.now().strftime('%Y%m%d'),
-                    adjust='qfq'
-                )
-                
-                if hist_data is not None and not hist_data.empty:
-                    # 标准化列名
-                    if 'close' in hist_data.columns:
-                        latest = hist_data.iloc[-1]
-                        info['current_price'] = latest['close']
-                        # 计算涨跌幅
-                        if len(hist_data) > 1:
-                            prev_close = hist_data.iloc[-2]['close']
-                            change_pct = ((latest['close'] - prev_close) / prev_close) * 100
-                            info['change_percent'] = round(change_pct, 2)
-                        print(f"[数据源管理器] ✅ 成功获取价格数据")
+                # 委托 datahub.kline(2026-06-28:摊平后多源+磁盘缓存;datahub 返大写列 + DatetimeIndex)
+                import datahub
+                kdf = datahub.kline(symbol, '1mo', adjust='qfq')
+                if isinstance(kdf, pd.DataFrame) and not kdf.empty and 'Close' in kdf.columns:
+                    latest = kdf.iloc[-1]
+                    info['current_price'] = latest['Close']
+                    # 计算涨跌幅
+                    if len(kdf) > 1:
+                        prev_close = kdf.iloc[-2]['Close']
+                        change_pct = ((latest['Close'] - prev_close) / prev_close) * 100
+                        info['change_percent'] = round(change_pct, 2)
             except Exception as e2:
                 print(f"获取历史数据也失败: {e2}")
             

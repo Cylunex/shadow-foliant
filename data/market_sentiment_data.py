@@ -133,23 +133,17 @@ class MarketSentimentDataFetcher:
         BR = (N日内(H-CY)之和 / N日内(CY-L)之和) × 100
         """
         try:
-            # 如果没有提供stock_data，则重新获取（支持akshare和tushare自动切换）
+            # 如果没有提供stock_data，则重新获取
             if stock_data is None or stock_data.empty:
-                end_date = datetime.now().strftime('%Y%m%d')
-                start_date = (datetime.now() - timedelta(days=150)).strftime('%Y%m%d')
-                
-                # 使用数据源管理器获取数据
-                df = data_source_manager.get_stock_hist_data(
-                    symbol=symbol,
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust='qfq'
-                )
-                
-                if df is None or df.empty:
+                # 委托 datahub.kline(2026-06-28:摊平后多源+缓存,取代旧 manager.get_stock_hist_data 8 源链);
+                # datahub 返大写列 + DatetimeIndex='Date',归一为本函数所需小写列 + date 列。
+                import datahub
+                kdf = datahub.kline(symbol, '6mo', adjust='qfq')
+                if kdf is None or kdf.empty:
                     return None
-                
-                # 数据源管理器返回的数据列名已经是小写，无需重命名
+                df = kdf.reset_index().rename(columns={
+                    'Date': 'date', 'Open': 'open', 'High': 'high',
+                    'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
             else:
                 # 使用已有数据
                 df = stock_data.copy()
