@@ -110,13 +110,14 @@ export default {
 
     <!-- 因子 IC 评估 -->
     <div class="card" style="margin-top:16px">
-      <h3>🔬 因子效能(IC评估) <span style="font-weight:400;color:var(--muted);font-size:12px">（RankIC/IC-IR/随机对照,科学衡量价量因子预测力）</span></h3>
+      <h3>🔬 因子效能(IC评估) <span style="font-weight:400;color:var(--muted);font-size:12px">（RankIC/IC-IR/置换检验p值+FDR,科学衡量价量因子预测力）</span></h3>
       <div v-if="!s.factors" class="loading">加载中…(首次较慢,需拉股池K线;周任务会预热)</div>
       <div v-else-if="s.factorsErr" class="sub">{{s.factorsErr}}</div>
       <table v-else-if="s.factors.length" style="width:100%">
         <tr style="color:var(--muted);font-size:12px">
           <th align=left>因子</th><th align=left>类别</th><th align=center>判定</th>
-          <th align=right>RankIC</th><th align=right>IC-IR</th><th align=right>胜率</th><th align=right>随机对照</th>
+          <th align=right>RankIC</th><th align=right>IC-IR</th><th align=right>胜率</th>
+          <th align=right>p值(FDR)</th><th align=right>噪声p95</th>
         </tr>
         <tr v-for="f in s.factors" :key="f.key" style="border-bottom:1px solid var(--bdr)">
           <td><b>{{f.name}}</b></td><td style="color:var(--muted)">{{f.category}}</td>
@@ -124,10 +125,12 @@ export default {
           <td align=right :class="cls(f.rank_ic)">{{f.rank_ic>0?'+':''}}{{f.rank_ic}}</td>
           <td align=right :style="{fontWeight:700,color:Math.abs(f.ic_ir)>=0.5?'var(--amber)':Math.abs(f.ic_ir)>=0.3?'var(--accent)':'var(--muted)'}">{{f.ic_ir>0?'+':''}}{{f.ic_ir}}</td>
           <td align=right>{{f.win_rate}}%</td>
-          <td align=right style="color:var(--muted)">{{f.random_ic!=null?(f.random_ic>0?'+':'')+f.random_ic:'—'}}</td>
+          <td align=right :style="{color:f.fdr_significant?'var(--accent)':'var(--muted)'}">{{f.p_value!=null?f.p_value:'—'}}<span v-if="f.fdr_significant"> ✓</span></td>
+          <td align=right style="color:var(--muted)">{{f.random_ic!=null?f.random_ic:'—'}}</td>
         </tr>
       </table>
       <div v-else class="sub">尚无因子评估数据(周任务 factor_eval 预热后显示)</div>
+      <div v-if="s.factors&&s.factors.length" class="sub" style="margin-top:8px;font-size:11px">⚠️ 未做行业/市值中性化:动量/位置类 IC 仍含 β/规模暴露,非纯 alpha。</div>
     </div>
 
     <!-- 个股适配度查询 -->
