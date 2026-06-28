@@ -617,11 +617,14 @@ class PortfolioDBPG:
             cur.close()
             conn.close()
 
-    def get_all_latest_analysis(self) -> List[Dict]:
+    def get_all_latest_analysis(self, include_cleared: bool = False) -> List[Dict]:
+        """持仓最新分析。include_cleared=False(默认)过滤 quantity=0 的清仓行,与 get_all_stocks 一致
+        —— 否则周报/持仓页会带出已清仓股票的陈旧分析(2026-06-28 修)。"""
+        where = '' if include_cleared else 'WHERE (p.quantity IS NULL OR p.quantity != 0)'
         conn = get_conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT DISTINCT ON (p.id)
                     p.*, h.rating, h.confidence, h.current_price, h.target_price,
                     h.entry_min, h.entry_max, h.take_profit, h.stop_loss,
@@ -629,6 +632,7 @@ class PortfolioDBPG:
                 FROM portfolio_stocks p
                 LEFT JOIN portfolio_analysis_history h
                     ON p.id = h.portfolio_stock_id
+                {where}
                 ORDER BY p.id, h.analysis_time DESC
             """)
             return [dict(r) for r in cur.fetchall()]

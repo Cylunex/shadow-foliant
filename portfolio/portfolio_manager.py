@@ -519,9 +519,9 @@ class PortfolioManager:
         """获取最新一次分析"""
         return self.db.get_latest_analysis(stock_id)
     
-    def get_all_latest_analysis(self) -> List[Dict]:
-        """获取所有持仓股票的最新分析"""
-        return self.db.get_all_latest_analysis()
+    def get_all_latest_analysis(self, include_cleared: bool = False) -> List[Dict]:
+        """获取所有持仓股票的最新分析(默认排除已清仓 quantity=0 行)"""
+        return self.db.get_all_latest_analysis(include_cleared=include_cleared)
     
     def get_rating_changes(self, stock_id: int, days: int = 30) -> List[Tuple]:
         """获取评级变化"""

@@ -558,19 +558,22 @@ class PortfolioDB:
         finally:
             conn.close()
     
-    def get_all_latest_analysis(self) -> List[Dict]:
+    def get_all_latest_analysis(self, include_cleared: bool = False) -> List[Dict]:
         """
-        获取所有持仓股票的最新分析记录
-        
+        获取所有持仓股票的最新分析记录。
+        include_cleared=False(默认)过滤 quantity=0 的清仓行,与 get_all_stocks 一致 ——
+        否则周报/持仓页会带出已清仓股票的陈旧分析(2026-06-28 修)。
+
         Returns:
             包含股票信息和最新分析的字典列表
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+        where = '' if include_cleared else 'WHERE (s.quantity IS NULL OR s.quantity != 0)'
+
         try:
-            cursor.execute('''
-                SELECT 
+            cursor.execute(f'''
+                SELECT
                     s.*,
                     h.rating, h.confidence, h.current_price, h.target_price,
                     h.entry_min, h.entry_max, h.take_profit, h.stop_loss,
@@ -584,12 +587,13 @@ class PortfolioDB:
                         FROM portfolio_analysis_history
                         GROUP BY portfolio_stock_id
                     ) h2
-                    ON h1.portfolio_stock_id = h2.portfolio_stock_id 
+                    ON h1.portfolio_stock_id = h2.portfolio_stock_id
                     AND h1.analysis_time = h2.max_time
                 ) h ON s.id = h.portfolio_stock_id
+                {where}
                 ORDER BY s.created_at DESC
             ''')
-            
+
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 

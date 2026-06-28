@@ -339,7 +339,24 @@ class PortfolioScheduler:
                 }
                 
                 monitors_data.append(monitor_data)
-            
+
+            # 清仓反向同步(2026-06-28):把已清仓(quantity=0)的持仓从监测列表移除 ——
+            # 否则 monitor_service 会持续对**已卖出**股票推止盈止损(_sync 只增不删的历史漏洞)。
+            # 精确只删 portfolio 中明确 quantity=0 的代码(不动手动/AI 推荐监测),复用既有 by_code/remove。
+            try:
+                cleared = [str(s.get('code')) for s in (portfolio_manager.get_all_stocks(include_cleared=True) or [])
+                           if s.get('quantity') == 0 and s.get('code')]
+                pruned = 0
+                for ccode in cleared:
+                    m = monitor_db.get_monitor_by_code(ccode)
+                    if m and m.get('id'):
+                        monitor_db.remove_monitored_stock(m['id'])
+                        pruned += 1
+                if pruned:
+                    print(f"[OK] 已从监测移除 {pruned} 只清仓股票")
+            except Exception as e:
+                print(f"[WARN] 清仓监测清理失败: {e}")
+
             # 使用批量API同步
             if monitors_data:
                 result = monitor_db.batch_add_or_update_monitors(monitors_data)
