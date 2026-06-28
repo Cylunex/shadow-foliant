@@ -412,23 +412,9 @@ class DeepSeekClient:
         else:
             fund_flow_section = "\n【资金流向数据】\n注意：未能获取到资金流向数据，将基于成交量进行分析。\n"
         
-        prompt = f"""
-你是一名资深的资金面分析师，擅长从资金流向数据中洞察主力行为和市场趋势。
-
-【基本信息】
-股票代码：{stock_info.get('symbol', 'N/A')}
-股票名称：{stock_info.get('name', 'N/A')}
-当前价格：{stock_info.get('current_price', 'N/A')}
-市值：{stock_info.get('market_cap', 'N/A')}
-
-【技术指标】
-- 量比：{indicators.get('volume_ratio', 'N/A')}
-- 当前成交量与5日均量比：{indicators.get('volume_ratio', 'N/A')}
-{fund_flow_section}
-
-【分析要求】
-
-请你**基于上述近20个交易日的完整资金流向数据**，从以下角度进行深入分析：
+        # ⭐ 缓存优化(2026-06-28):稳定框架(分析要求+8维度+分析原则)移入 system(逐字相同可缓存),
+        # 变量数据(基本信息/技术指标/资金流向)放 user。
+        ff_framework = """请你**基于 user 提供的【资金流向数据】中近20个交易日的完整数据**，从以下角度进行深入分析：
 
 1. **资金流向趋势分析** ⭐ 重点
    - 分析近20个交易日主力资金的累计净流入/净流出
@@ -497,11 +483,22 @@ class DeepSeekClient:
 - 主力资金流出 + 股价下跌 → 弱势信号，主力看空
 - 注意区分短期波动与趋势性变化
 
-请给出专业、详细、有深度的资金面分析报告。记住：要基于问财数据的实际内容进行分析，而不是假设！
-"""
-        
+请给出专业、详细、有深度的资金面分析报告。记住：要基于问财数据的实际内容进行分析，而不是假设！"""
+        system = ("你是一名经验丰富、擅长市场资金流向和主力行为分析的资金面分析师，"
+                  "能够深入解读资金数据背后的投资逻辑。\n\n" + ff_framework)
+        prompt = f"""【基本信息】
+股票代码：{stock_info.get('symbol', 'N/A')}
+股票名称：{stock_info.get('name', 'N/A')}
+当前价格：{stock_info.get('current_price', 'N/A')}
+市值：{stock_info.get('market_cap', 'N/A')}
+
+【技术指标】
+- 量比：{indicators.get('volume_ratio', 'N/A')}
+- 当前成交量与5日均量比：{indicators.get('volume_ratio', 'N/A')}
+{fund_flow_section}"""
+
         messages = [
-            {"role": "system", "content": "你是一名经验丰富的资金面分析师，擅长市场资金流向和主力行为分析，能够深入解读资金数据背后的投资逻辑。"},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt}
         ]
 
