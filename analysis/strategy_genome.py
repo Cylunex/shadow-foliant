@@ -301,6 +301,29 @@ def init_genome_tables():
             UNIQUE(stock_code, strategy_id)
         )
     """)
+    # 进化效果闭环:每次组合级 walk-forward A/B(进化集 vs 全默认集,同池同期)的结果。
+    # excess_*>0 = 进化集更优。get_live_strategy_set 据近 N 条 excess_return 均值决定是否自动回退默认。
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS evolution_ab (
+            id                 BIGSERIAL PRIMARY KEY,
+            eval_date          DATE NOT NULL DEFAULT CURRENT_DATE,
+            period_start       DATE,
+            period_end         DATE,
+            pool_n             INTEGER DEFAULT 0,
+            evolved_n_strat    INTEGER DEFAULT 0,
+            evolved_return_pct DOUBLE PRECISION,
+            default_return_pct DOUBLE PRECISION,
+            excess_return_pct  DOUBLE PRECISION,
+            evolved_cagr_pct   DOUBLE PRECISION,
+            default_cagr_pct   DOUBLE PRECISION,
+            evolved_sharpe     DOUBLE PRECISION,
+            default_sharpe     DOUBLE PRECISION,
+            evolved_max_dd_pct DOUBLE PRECISION,
+            default_max_dd_pct DOUBLE PRECISION,
+            created_at         TIMESTAMP DEFAULT NOW(),
+            UNIQUE(eval_date)
+        )
+    """)
 
     # 索引
     for idx in [
@@ -309,6 +332,7 @@ def init_genome_tables():
         "CREATE INDEX IF NOT EXISTS idx_ss_date ON strategy_scores(eval_date DESC)",
         "CREATE INDEX IF NOT EXISTS idx_ss_sid ON strategy_scores(strategy_id, eval_date DESC)",
         "CREATE INDEX IF NOT EXISTS idx_ssa_stock ON stock_strategy_affinity(stock_code, score DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_evab_date ON evolution_ab(eval_date DESC)",
     ]:
         cur.execute(idx)
 
@@ -696,13 +720,23 @@ def evolve_composed(mutants: int = 8, randoms: int = 4,
 
 def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 45,
                           require_holdout: bool = True,
-                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 3) -> Dict[str, Any]:
+                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 3,
+                          auto_revert: bool = True) -> Dict[str, Any]:
     """给实盘选股用的"当前最优策略集":
       base: {策略id: 最优变体参数}(已评估的活跃变体里分数最高者,含默认种子)
       composed: [{'vid','cn','genes','score'}](达标的组合策略 TopN)
     样本外部署门(require_holdout=True):**进化出的变体须 holdout(样本外)触发≥N 且平均收益≥下限才上线**,
       否则该策略回退 generation=0 默认参数(默认种子永远可部署=安全基线)→ 杜绝部署过拟合变体。
+    自动回退(auto_revert=True):若近 N 次组合级 A/B(evolution_ab)进化集持续跑输全默认集,
+      整体回退全默认参数(安全网)。A/B 测量自身须传 auto_revert=False 取真实进化集,避免自指。
     失败返回空集,调用方回退默认参数。"""
+    if auto_revert:
+        try:
+            if evolution_recently_underperforming():
+                print('[genome] 进化近期 A/B 跑输默认集 → get_live_strategy_set 自动回退全默认参数')
+                return {'base': _all_default_base(), 'composed': []}
+        except Exception:
+            pass
     out = {'base': {}, 'composed': []}
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -757,6 +791,115 @@ def promote_variant(variant_id: int):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ══════════════════════════════════════════════════════════
+#  进化效果闭环:A/B(进化集 vs 全默认集)度量 + 自动回退安全网
+# ══════════════════════════════════════════════════════════
+
+def default_strategy_combos() -> List[Tuple[str, Dict[str, Any]]]:
+    """全默认(generation=0)策略组合 — A/B 的对照基线(= 没有进化时系统会用的参数)。
+    只含 InStock 基础策略,不含 composed(组合策略是进化的产物,基线里没有)。"""
+    return [(sid, coerce_params(sid, default_params(sid))) for sid in STRATEGY_PARAM_SPACE]
+
+
+def _all_default_base() -> Dict[str, Dict[str, Any]]:
+    """{sid: 默认参数} — auto_revert 触发时 get_live_strategy_set 的回退结果。"""
+    return {sid: coerce_params(sid, default_params(sid)) for sid in STRATEGY_PARAM_SPACE}
+
+
+def save_evolution_ab(period_start: str, period_end: str, pool_n: int,
+                      evolved_n_strat: int,
+                      evolved: Dict[str, Any], default: Dict[str, Any]) -> int:
+    """保存一次 A/B 结果。evolved/default = portfolio_backtest 的 summary dict。
+    excess_* = evolved - default(>0 表示进化集更优;max_dd 越大[越接近0]越好,故同样相减)。"""
+    def _g(d, k):
+        v = d.get(k)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    ev_ret, df_ret = _g(evolved, 'total_return_pct'), _g(default, 'total_return_pct')
+    excess = (round(ev_ret - df_ret, 2) if ev_ret is not None and df_ret is not None else None)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO evolution_ab (eval_date, period_start, period_end, pool_n, evolved_n_strat,
+            evolved_return_pct, default_return_pct, excess_return_pct,
+            evolved_cagr_pct, default_cagr_pct, evolved_sharpe, default_sharpe,
+            evolved_max_dd_pct, default_max_dd_pct)
+        VALUES (CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (eval_date) DO UPDATE SET
+            period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end,
+            pool_n=EXCLUDED.pool_n, evolved_n_strat=EXCLUDED.evolved_n_strat,
+            evolved_return_pct=EXCLUDED.evolved_return_pct, default_return_pct=EXCLUDED.default_return_pct,
+            excess_return_pct=EXCLUDED.excess_return_pct,
+            evolved_cagr_pct=EXCLUDED.evolved_cagr_pct, default_cagr_pct=EXCLUDED.default_cagr_pct,
+            evolved_sharpe=EXCLUDED.evolved_sharpe, default_sharpe=EXCLUDED.default_sharpe,
+            evolved_max_dd_pct=EXCLUDED.evolved_max_dd_pct, default_max_dd_pct=EXCLUDED.default_max_dd_pct
+        RETURNING id
+    """, (period_start, period_end, pool_n, evolved_n_strat,
+          ev_ret, df_ret, excess,
+          _g(evolved, 'cagr_pct'), _g(default, 'cagr_pct'),
+          _g(evolved, 'sharpe'), _g(default, 'sharpe'),
+          _g(evolved, 'max_dd_pct'), _g(default, 'max_dd_pct')))
+    rid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return rid
+
+
+def get_evolution_ab_history(limit: int = 30) -> List[Dict]:
+    """取最近的 A/B 记录(新→旧)。表不存在/失败返回 []。"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT eval_date, period_start, period_end, pool_n, evolved_n_strat,
+                   evolved_return_pct, default_return_pct, excess_return_pct,
+                   evolved_cagr_pct, default_cagr_pct, evolved_sharpe, default_sharpe,
+                   evolved_max_dd_pct, default_max_dd_pct
+            FROM evolution_ab ORDER BY eval_date DESC LIMIT %s
+        """, (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _ab_excess_is_negative(history: List[Dict], min_records: int = 3) -> bool:
+    """纯判定:近 history 条里 excess_return 均值<0 且样本≥min_records 才算"持续跑输"。
+    样本不足→False(fail-safe:数据不够不轻易回退)。"""
+    vals = [h['excess_return_pct'] for h in history
+            if h.get('excess_return_pct') is not None]
+    if len(vals) < min_records:
+        return False
+    return (sum(vals) / len(vals)) < 0
+
+
+def evolution_recently_underperforming(lookback: int = 6, min_records: int = 3) -> bool:
+    """近 lookback 次 A/B 进化集是否持续跑输默认集(供 get_live_strategy_set 自动回退)。
+    带 1h 缓存避免每次选股都查库;缓存/查库失败一律 False(fail-safe,不影响现有行为)。"""
+    try:
+        from cache import cache_get, cache_set
+    except Exception:
+        cache_get = cache_set = None
+    ckey = f'evolution_ab_underperform:{lookback}:{min_records}'
+    if cache_get:
+        hit = cache_get(ckey)
+        if isinstance(hit, bool):
+            return hit
+    try:
+        verdict = _ab_excess_is_negative(get_evolution_ab_history(lookback), min_records)
+    except Exception:
+        verdict = False
+    if cache_set:
+        try:
+            cache_set(ckey, verdict, 3600)
+        except Exception:
+            pass
+    return verdict
 
 
 # ══════════════════════════════════════════════════════════

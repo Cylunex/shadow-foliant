@@ -40,6 +40,36 @@ export default {
       </table>
     </div>
 
+    <!-- 进化效果 A/B(进化到底有没有用) -->
+    <div class="card" style="margin-top:16px">
+      <h3>🧬 进化效果 A/B <span style="font-weight:400;color:var(--muted);font-size:12px">（进化集 vs 全默认集组合回测;超额&gt;0=进化更优;周更）</span></h3>
+      <div v-if="!s.ab" class="loading">加载中…</div>
+      <div v-else-if="!s.ab.length" class="sub">尚无 A/B 数据(周任务 wf_weekly_backtest 跑后显示)</div>
+      <template v-else>
+        <div style="margin-bottom:10px">
+          <span style="font-size:13px;color:var(--muted)">最新（{{s.ab[0].eval_date}}）：</span>
+          <b :class="cls(s.ab[0].excess_return_pct)" style="font-size:16px">超额 {{s.ab[0].excess_return_pct>=0?'+':''}}{{fmt(s.ab[0].excess_return_pct)}}%</b>
+          <span style="font-size:12px;color:var(--muted)">（进化 {{fmt(s.ab[0].evolved_return_pct)}}% vs 默认 {{fmt(s.ab[0].default_return_pct)}}%）</span>
+          <span v-if="abUnderperform" class="pill" style="background:var(--amber);color:#000;margin-left:8px">⚠️ 近期跑输，已自动回退默认</span>
+        </div>
+        <table style="width:100%">
+          <tr style="color:var(--muted);font-size:12px">
+            <th align=left>日期</th><th align=right>进化收益</th><th align=right>默认收益</th>
+            <th align=right>超额</th><th align=right>进化夏普</th><th align=right>默认夏普</th><th align=right>股池</th>
+          </tr>
+          <tr v-for="r in s.ab" :key="r.eval_date" style="border-bottom:1px solid var(--bdr)">
+            <td>{{r.eval_date}}</td>
+            <td align=right :class="cls(r.evolved_return_pct)">{{fmt(r.evolved_return_pct)}}%</td>
+            <td align=right :class="cls(r.default_return_pct)">{{fmt(r.default_return_pct)}}%</td>
+            <td align=right style="font-weight:700" :class="cls(r.excess_return_pct)">{{r.excess_return_pct>=0?'+':''}}{{fmt(r.excess_return_pct)}}%</td>
+            <td align=right style="color:var(--muted)">{{fmt(r.evolved_sharpe)}}</td>
+            <td align=right style="color:var(--muted)">{{fmt(r.default_sharpe)}}</td>
+            <td align=right style="color:var(--muted)">{{r.pool_n||0}}</td>
+          </tr>
+        </table>
+      </template>
+    </div>
+
     <!-- 变体列表 -->
     <div class="card" style="margin-top:16px">
       <h3>🧪 活跃策略变体 <span style="font-weight:400;color:var(--muted);font-size:12px">（含变异后代）</span></h3>
@@ -133,6 +163,7 @@ export default {
       loading: false, varLoading: false,
       err: '', searchCode: '',
       factors: null, factorsErr: '',
+      ab: null,
     })
 
     async function loadFactors() {
@@ -142,6 +173,22 @@ export default {
         s.factors = (r && r.factors) || []
       } catch(e) { s.factors = []; s.factorsErr = String(e) }
     }
+
+    async function loadAB() {
+      try {
+        const r = await api('strategy-genome/ab?limit=12')
+        s.ab = (r && r.rows) || []
+      } catch(e) { s.ab = [] }
+    }
+
+    // null 安全数字格式化(A/B 任一指标可能缺)
+    const fmt = (v) => (v == null ? '--' : (typeof v === 'number' ? v.toFixed(2) : v))
+
+    // 与后端 _ab_excess_is_negative 同口径:近 6 期≥3 条且 excess 均值<0 → 已自动回退
+    const abUnderperform = computed(() => {
+      const xs = (s.ab || []).slice(0, 6).map(r => r.excess_return_pct).filter(v => v != null)
+      return xs.length >= 3 && (xs.reduce((a, b) => a + b, 0) / xs.length) < 0
+    })
 
     const formatParams = (p) => {
       if (!p) return ''
@@ -176,9 +223,9 @@ export default {
       } catch(e) { s.affinity = [{ strategy_id: 'error', score: 0 }] }
     }
 
-    onMounted(() => { loadScores(); loadVariants(); loadFactors() })
+    onMounted(() => { loadScores(); loadVariants(); loadFactors(); loadAB() })
 
     // cls 必须 return 给模板(模板里多处 :class="cls(...)";漏 return → 运行时 cls is not a function)
-    return { s, CN_MAP, formatParams, searchAffinity, cls }
+    return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform }
   }
 }

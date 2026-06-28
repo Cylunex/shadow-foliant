@@ -3151,6 +3151,29 @@ def task_weekly_backtest():
         else:
             lines.append('（无足够样本）')
 
+        # ── 进化效果闭环 A/B:进化集 vs 全默认集(同池,过去 180 天更稳),结果入库 evolution_ab ──
+        # 这是"进化到底有没有让选股变好"唯一的可证伪度量;超额持续为负时 get_live_strategy_set 会自动回退默认。
+        try:
+            from analysis.strategy_genome import init_genome_tables
+            from analysis.portfolio_backtest import run_evolution_ab
+            init_genome_tables()  # 确保 evolution_ab 表就绪(幂等)
+            ab_start = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+            ab = run_evolution_ab(stocks, ab_start, end_date, persist=True,
+                                  hold_days=10, stop_pct=8, target_pct=15, max_positions=5)
+            ex = (ab.get('excess') or {}).get('return_pct')
+            ev_r = (ab.get('evolved') or {}).get('total_return_pct')
+            df_r = (ab.get('default') or {}).get('total_return_pct')
+            if ex is not None and ev_r is not None and df_r is not None:
+                tag = '✅进化跑赢' if ex > 0 else ('⚖️持平' if ex == 0 else '⚠️进化跑输(将自动回退默认)')
+                lines.append('')
+                lines.append(f'🧬 进化 vs 默认 A/B（{ab_start}~{end_date}）：'
+                             f'进化集 {ev_r:+.2f}% vs 默认集 {df_r:+.2f}% → 超额 {ex:+.2f}% {tag}')
+            else:
+                lines.append('')
+                lines.append('🧬 进化 vs 默认 A/B：本期样本不足(进化/默认任一臂无成交)')
+        except Exception as abe:
+            print(f'[wf_weekly_backtest] 进化A/B失败: {abe}')
+
         report = '\n'.join(lines)
         try:
             from notification_router import send

@@ -2391,6 +2391,23 @@ def strategy_genome_affinity(stock_code: str):
         return _err(e)
 
 
+@app.get("/api/strategy-genome/ab")
+def strategy_genome_ab(limit: int = 12):
+    """进化效果闭环:进化集 vs 全默认集 的组合级 A/B 历史(周任务 wf_weekly_backtest 写入)。
+    excess_return_pct>0 = 进化集跑赢默认集;近 N 期均值<0 时 get_live_strategy_set 自动回退默认。"""
+    try:
+        from analysis.strategy_genome import get_evolution_ab_history
+        rows = get_evolution_ab_history(limit=limit)
+        for r in rows:
+            for dk in ('eval_date', 'period_start', 'period_end'):
+                if r.get(dk) is not None and hasattr(r[dk], 'isoformat'):
+                    r[dk] = r[dk].isoformat()
+        latest = rows[0] if rows else None
+        return _ok({"rows": rows, "latest": latest})
+    except Exception as e:
+        return _err(e)
+
+
 @app.get("/api/strategy-genome/scores/history")
 def strategy_genome_scores_history(strategy_id: str, days: int = 30):
     """某策略评分历史趋势"""

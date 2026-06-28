@@ -573,6 +573,58 @@ def portfolio_backtest_live(stocks: List[Tuple[str, str]], start: str, end: str,
     return portfolio_backtest(stocks, start, end, strategy_combos=combos, **kwargs)
 
 
+def run_evolution_ab(stocks: List[Tuple[str, str]], start: str, end: str,
+                     persist: bool = True, **kwargs) -> Dict[str, Any]:
+    """进化效果闭环:进化集 vs 全默认集 的组合级 A/B(同池、同期、同风控)。
+
+    - 进化集: get_live_strategy_set(auto_revert=False) 的真实部署集(各策略最优变体 + 达标 composed);
+      强制 auto_revert=False,取真实进化集本身,避免"A/B 喂自动回退、回退又改变 A/B"的自指循环。
+    - 默认集: default_strategy_combos()(全 generation=0 InStock 默认参数,无 composed)= 没有进化时的系统。
+    返回 {evolved, default, excess, config};persist=True 写入 evolution_ab 表(供日报/UI/自动回退用)。
+    """
+    from strategy_genome import (get_live_strategy_set, default_strategy_combos,
+                                 save_evolution_ab)
+    ev_combos: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    try:
+        live = get_live_strategy_set(auto_revert=False) or {}
+        for sid, p in (live.get('base') or {}).items():
+            ev_combos.append((sid, p))
+        for c in (live.get('composed') or []):
+            ev_combos.append(('composed', {'genes': c.get('genes') or []}))
+    except Exception:
+        pass
+    if not ev_combos:
+        ev_combos = [('enter', None)]
+    df_combos = default_strategy_combos()
+
+    for k in ('strategy_id', 'params', 'strategy_combos'):
+        kwargs.pop(k, None)
+    kwargs.setdefault('benchmark', None)   # A/B 不需要基准,省两次额外取数
+
+    ev = portfolio_backtest(stocks, start, end, strategy_combos=ev_combos, **kwargs)
+    df = portfolio_backtest(stocks, start, end, strategy_combos=df_combos, **kwargs)
+    ev_s = ev.get('summary', {}) or {}
+    df_s = df.get('summary', {}) or {}
+
+    def _d(a, b):
+        return (round(a - b, 2) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None)
+    excess = {
+        'return_pct': _d(ev_s.get('total_return_pct'), df_s.get('total_return_pct')),
+        'cagr_pct': _d(ev_s.get('cagr_pct'), df_s.get('cagr_pct')),
+        'sharpe': _d(ev_s.get('sharpe'), df_s.get('sharpe')),
+        'max_dd_pct': _d(ev_s.get('max_dd_pct'), df_s.get('max_dd_pct')),
+    }
+    if persist:
+        try:
+            save_evolution_ab(start, end, len(stocks), evolved_n_strat=len(ev_combos),
+                              evolved=ev_s, default=df_s)
+        except Exception as e:
+            print(f'[evolution_ab] 保存失败: {e}')
+    return {'evolved': ev_s, 'default': df_s, 'excess': excess,
+            'config': {'pool_n': len(stocks), 'period': f'{start} ~ {end}',
+                       'evolved_n_strat': len(ev_combos)}}
+
+
 if __name__ == '__main__':
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
