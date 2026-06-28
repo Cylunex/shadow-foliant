@@ -107,9 +107,12 @@
 ### 5. 基础设施
 | 模块 | 功能 |
 |---|---|
-| `stock_data.py` | 行情数据获取 + 技术指标计算（TA + MyTT 12 个通达信指标） |
-| `data_source_manager.py` | 多源数据切换（a-stock HTTP > akshare > tushare；北向/龙虎/资金流走东财直连，adata 已于 2026-06-27 移除） |
-| `a_stock_data_adapter.py` | 直连东财 push2 + 腾讯 + 新浪 + 同花顺 + 巨潮 |
+| `data/datahub.py` | **统一取数门面**：~40 域函数 + `_route` 健康度路由/全源熔断/硬超时 + 三级缓存（K线另有 raw/qfq 两套磁盘缓存）。全项目取数唯一入口。 |
+| `data/sources/*.py` | **原子源**（2026-06 重构，一家真源一模块、直连归一）：sina/tencent/eastmoney/ths/baidu/cls/cninfo/jsl/baostock/mootdx/pywencai + akshare（末位兜底）/tushare（可选）。 |
+| `data/indicators.py` | 技术指标计算（TA + MyTT 12 个通达信指标；2026-06-28 从 stock_data 拆出，非数据源） |
+| `stock_data.py` | `StockDataFetcher`：港股/美股取数 + 个股信息；A 股 K线/指标已委托 `datahub`/`indicators` |
+| `data_source_manager.py` | datahub 下层内部编排（个股信息/实时行情/财务/北向缓存 + a-stock HTTP 适配器包装；K线 8 源链 2026-06-28 已删,取数收口 datahub.kline） |
+| `a_stock_data_adapter.py` | 接口类 + 派生计算（full_valuation/forward_pe/peg）；provider 直连源已归位 `data/sources/*`（adapter 1456→621 行） |
 | `deepseek_client.py` | DeepSeek API 封装（含 prompt 工程） |
 | `ai_agents.py` | 多 Agent 协同分析框架 |
 | `database.py` / `portfolio_db.py` / `longhubang_db.py` | 持久层（SQLite/PG 自动切换） |
@@ -405,8 +408,10 @@ python test_tdx_api.py
 
 ## 🔌 扩展点
 
-### 1. 加新数据源
-在 `data_source_manager.py` 加一个 `get_xxx_a_data()` 方法 + 在 `__init__` 加 `xxx_available` flag。
+### 1. 加新数据源（2026-06 源原子化重构后）
+1) 新建 `data/sources/<provider>.py` 原子模块：只直连本家真源、归一成项目契约（K线 = DatetimeIndex='Date' + 大写 OCHLV、volume「股」），**禁止 import 整合库**（akshare/tushare 除外），异常吞掉返空、不读缓存、不做跨源降级。
+2) 在 `data/datahub.py` 对应域的 `_route(...)` 源链里登记 1 行 `(源名, lambda: sources.<provider>.<cap>(...))`——健康度路由自动纳入升降级竞争（新源默认排已验证源之后）。
+3) 用 `scripts/smoke_test_datahub_sources.py` 与既有源逐字段核对同构。契约见 `data/sources/README.md`。
 
 ### 2. 加新 AI Agent
 继承 `StockAnalysisAgents` 的设计：

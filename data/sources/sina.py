@@ -75,7 +75,7 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
 
 
 # ── K线 ────────────────────────────────────────────────────────────────────
-# 清洁 JSON 日线(不复权),与 ashare_fallback._get_price_sina 同接口。volume 单位「股」。
+# 清洁 JSON 日线(不复权,money.finance.sina getKLineData)。volume 单位「股」。
 _KLINE_URL = ("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
               "CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={n}")
 # 前复权因子(稀疏,只在除权除息日变;最近日因子=1.0,历史>1.0)。返回 `var Xqfq={...};/*注释*/`。
