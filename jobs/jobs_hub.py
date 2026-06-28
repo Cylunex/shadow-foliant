@@ -1429,8 +1429,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'fund_target_check':         600,
     'fund_nav_refresh':          900,
     'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
-    'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 全持仓 ~83只 LLM)。1800s 在外部源
-                                         # 降级日(东财封/问财熔断,每股~300s vs 健康~45s)只够~20只→超时(2026-06-28),提到 90min
+    'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 深度批量,筛选后排 ETF+Top-N 个股,
+                                         # 默认 Top-20,见 PORTFOLIO_DEEP_TOP_N)。5400s 给降级日(每股~300s)足量头量(2026-06-28)
     'eod_outcomes':              900,    # A 合并:等 prefetch(≤300) + 推荐池回填 + 信号后验
     'pg_backup':                 600,
 }

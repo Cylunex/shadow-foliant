@@ -198,11 +198,11 @@ class PortfolioScheduler:
             # 1. 执行批量分析
             print("[1/4] 执行持仓批量分析...")
             # 筛选(2026-06-28,env 可调):深度批量聚焦重仓、省 token/时间。
-            #   PORTFOLIO_DEEP_EXCLUDE_ETF=true(默认)排 ETF/基金;PORTFOLIO_DEEP_TOP_N=40(默认)
+            #   PORTFOLIO_DEEP_EXCLUDE_ETF=true(默认)排 ETF/基金;PORTFOLIO_DEEP_TOP_N=20(默认)
             #   按持仓市值取 Top-N(设 0 关闭=全跑;EXCLUDE_ETF=false 关闭排 ETF)。清仓已由 get_all_stocks 排除。
             import os as _os
             _excl_etf = _os.getenv('PORTFOLIO_DEEP_EXCLUDE_ETF', 'true').lower() in ('1', 'true', 'yes', 'on')
-            _top_n = int(_os.getenv('PORTFOLIO_DEEP_TOP_N', '40') or 0) or None
+            _top_n = int(_os.getenv('PORTFOLIO_DEEP_TOP_N', '20') or 0) or None
             analysis_results = portfolio_manager.batch_analyze_portfolio(
                 mode=self.analysis_mode,
                 max_workers=self.max_workers,
