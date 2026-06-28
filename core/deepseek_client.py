@@ -176,10 +176,32 @@ class DeepSeekClient:
         chan_summary: 可选的缠论结构摘要（来自 chan_theory.analyze_chan），传入则注入 prompt。
         """
         chan_block = f"\n缠论结构（缠中说禅）：\n{chan_summary}\n" if chan_summary else ""
-        chan_point = "\n9. 缠论分析（结合上方缠论结构：当前笔/中枢位置、背驰与一二三类买卖点，与传统指标互相印证）" if chan_summary else ""
-        prompt = f"""
-你是一名资深的技术分析师。请基于以下股票数据进行专业的技术面分析：
-
+        # ⭐ 缓存优化(2026-06-28):稳定框架(角色+指标口径+分析维度+输出要求)放 system —— 全批同 call_type
+        # 逐字相同 → DeepSeek 上下文缓存命中;变量股票数据放 user。指标的口径说明随框架进 system,
+        # user 只剩纯数值(原 7% 命中、框架在 prompt 末尾被前面变量数据顶得无法复用)。
+        system = (
+            "你是一名经验丰富、功底深厚的股票技术分析师。请基于 user 提供的【股票数据】做专业技术面分析。\n\n"
+            "指标口径：\n"
+            "- DMI 动向：ADX>25 趋势强、<20 震荡\n"
+            "- ATR(14) 波动率：止损位 = 价格 - 2*ATR\n"
+            "- TRIX / 信号线：金叉为强买入信号\n"
+            "- ROC(12) / 均线：动量确认\n"
+            "- CCI(14)：>+100 超买、<-100 超卖\n"
+            "- BIAS 乖离 6/12/24：绝对值 >5 警惕回归\n"
+            "- 威廉 WR(10)：>80 超卖、<20 超买\n\n"
+            "请从以下角度进行分析：\n"
+            "1. 趋势分析（均线系统、价格走势、ADX 强度）\n"
+            "2. 超买超卖分析（RSI、KDJ、CCI、WR 多维交叉确认）\n"
+            "3. 动量分析（MACD、TRIX、ROC 多周期共振）\n"
+            "4. 支撑阻力分析（布林带、ATR 止损区）\n"
+            "5. 乖离回归分析（BIAS 6/12/24 偏离度）\n"
+            "6. 成交量分析\n"
+            "7. 短期、中期、长期技术判断\n"
+            "8. 关键技术位分析\n"
+            "9. 缠论分析（若【股票数据】含缠论结构：当前笔/中枢位置、背驰与一二三类买卖点，与传统指标互相印证）\n"
+            "请给出专业、详细的技术分析报告，包含风险提示。"
+        )
+        prompt = f"""【股票数据】
 股票信息：
 - 股票代码：{stock_info.get('symbol', 'N/A')}
 - 股票名称：{stock_info.get('name', 'N/A')}
@@ -202,29 +224,17 @@ class DeepSeekClient:
 - 量比：{indicators.get('volume_ratio', 'N/A')}
 
 通达信级进阶指标（MyTT）：
-- DMI 动向：+DI={indicators.get('pdi', 'N/A')} / -DI={indicators.get('mdi', 'N/A')} / ADX={indicators.get('adx', 'N/A')}（ADX>25 趋势强，<20 震荡）
-- ATR(14) 波动率：{indicators.get('atr', 'N/A')}（用于止损位 = 价格 - 2*ATR）
-- TRIX：{indicators.get('trix', 'N/A')} / 信号线：{indicators.get('trix_ma', 'N/A')}（金叉强买入信号）
-- ROC(12)：{indicators.get('roc', 'N/A')} / 均线：{indicators.get('roc_ma', 'N/A')}（动量确认）
-- CCI(14)：{indicators.get('cci', 'N/A')}（>+100 超买，<-100 超卖）
-- BIAS 乖离：6日={indicators.get('bias_6', 'N/A')} / 12日={indicators.get('bias_12', 'N/A')} / 24日={indicators.get('bias_24', 'N/A')}（绝对值 >5 警惕回归）
-- 威廉 WR(10)：{indicators.get('wr_10', 'N/A')}（>80 超卖，<20 超买）
-{chan_block}
-请从以下角度进行分析：
-1. 趋势分析（均线系统、价格走势、ADX 强度）
-2. 超买超卖分析（RSI、KDJ、CCI、WR 多维交叉确认）
-3. 动量分析（MACD、TRIX、ROC 多周期共振）
-4. 支撑阻力分析（布林带、ATR 止损区）
-5. 乖离回归分析（BIAS 6/12/24 偏离度）
-6. 成交量分析
-7. 短期、中期、长期技术判断
-8. 关键技术位分析{chan_point}
+- DMI 动向：+DI={indicators.get('pdi', 'N/A')} / -DI={indicators.get('mdi', 'N/A')} / ADX={indicators.get('adx', 'N/A')}
+- ATR(14)：{indicators.get('atr', 'N/A')}
+- TRIX：{indicators.get('trix', 'N/A')} / 信号线：{indicators.get('trix_ma', 'N/A')}
+- ROC(12)：{indicators.get('roc', 'N/A')} / 均线：{indicators.get('roc_ma', 'N/A')}
+- CCI(14)：{indicators.get('cci', 'N/A')}
+- BIAS 乖离：6日={indicators.get('bias_6', 'N/A')} / 12日={indicators.get('bias_12', 'N/A')} / 24日={indicators.get('bias_24', 'N/A')}
+- 威廉 WR(10)：{indicators.get('wr_10', 'N/A')}
+{chan_block}"""
 
-请给出专业、详细的技术分析报告，包含风险提示。
-"""
-        
         messages = [
-            {"role": "system", "content": "你是一名经验丰富的股票技术分析师，具有深厚的技术分析功底。"},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt}
         ]
 
