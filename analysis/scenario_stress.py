@@ -89,6 +89,67 @@ def stress_all(positions: List[Dict]) -> List[dict]:
     return sorted(out, key=lambda x: (x.get('total_pnl_pct') if x.get('total_pnl_pct') is not None else 0))
 
 
+def _estimate_betas(codes: List[str], index_code: str = '000300',
+                    period: str = '1y', cache_ttl: int = 7 * 86400) -> Dict[str, float]:
+    """估计个股对大盘(沪深300)的 β = cov(r_i, r_m)/var(r_m),近 period 日。
+    原 build_portfolio_positions 从不写 beta → 所有股票 β=1.0,index_shock 对每只一视同仁,
+    前瞻情景测试退化为"按市值均摊指数跌幅"。这里给每只算真实 β,使冲击按个股市场敏感度区分。
+    整批缓存(β 变化慢,默认 7 天);取数失败的股票不在结果里(调用方回退默认 1.0)。"""
+    if not codes:
+        return {}
+    import numpy as np
+    ckey = f'stock_betas:{index_code}:{period}'
+    out: Dict[str, float] = {}
+    try:
+        from cache import cache_get
+        hit = cache_get(ckey)
+        if isinstance(hit, dict):
+            out = dict(hit)
+    except Exception:
+        pass
+    missing = [c for c in codes if c not in out]
+    if not missing:
+        return {c: out[c] for c in codes if c in out}
+
+    import datahub
+
+    def _rets(df):
+        col = next((k for k in ('close', 'Close', '收盘') if df is not None and k in df.columns), None)
+        if col is None:
+            return None
+        cl = df[col].astype(float).values
+        return np.diff(cl) / cl[:-1] if len(cl) > 1 else None
+
+    try:
+        rm = _rets(datahub.kline(index_code, period))
+    except Exception:
+        rm = None
+    if rm is None or len(rm) < 30:
+        return {c: out[c] for c in codes if c in out}   # 无指数基准 → 只回已缓存
+
+    for c in missing:
+        try:
+            ri = _rets(datahub.kline(c, period, adjust='qfq'))
+            if ri is None:
+                continue
+            n = min(len(ri), len(rm))
+            if n < 30:
+                continue
+            a, b = np.asarray(ri[-n:]), np.asarray(rm[-n:])
+            vb = float(np.var(b))
+            if vb <= 0:
+                continue
+            out[c] = round(float(np.cov(a, b)[0, 1] / vb), 3)
+        except Exception:
+            continue
+    try:
+        from cache import cache_set
+        cache_set(ckey, out, cache_ttl)
+    except Exception:
+        pass
+    return {c: out[c] for c in codes if c in out}
+
+
 def build_portfolio_positions(include_funds: bool = True) -> List[Dict]:
     """从股票持仓(portfolio_db)+ 基金持仓(fund_db)构建压力测试持仓(best-effort)。
     股票市值用实时报价×数量(取不到退成本),基金市值用最新净值×份额。任一侧异常不影响另一侧。"""
@@ -104,6 +165,12 @@ def build_portfolio_positions(include_funds: bool = True) -> List[Dict]:
             quotes = datahub.quotes(codes) if codes else {}
         except Exception:
             quotes = {}
+        # 个股 β(对大盘)——使 index_shock 按个股市场敏感度区分,而非全 1.0 一刀切
+        betas = {}
+        try:
+            betas = _estimate_betas([str(c) for c in codes])
+        except Exception:
+            betas = {}
         for s in stocks:
             code = str(s.get('code'))
             qty = float(s.get('quantity') or s.get('shares') or 0)
@@ -113,6 +180,7 @@ def build_portfolio_positions(include_funds: bool = True) -> List[Dict]:
                 'market_value': qty * float(price),
                 'sector': s.get('industry') or s.get('sector'),
                 'asset_type': 'stock',
+                'beta': betas.get(code),   # None → _beta() 回退默认 1.0(取数失败的股票)
             })
     except Exception as e:
         print(f'[scenario_stress] 股票持仓读取失败: {type(e).__name__}')
