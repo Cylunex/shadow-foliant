@@ -13,6 +13,6 @@ to_ohlcv / http_get_json / throttle / ak_safe)。
 现状(阶段 0–3 完成,阶段 4 收尾中,2026-06-28):datahub 各域 `_route` 已直挂本包原子源 ——
 sina / tencent / eastmoney / ths / baidu / cls / cninfo / jsl / baostock / mootdx / pywencai 直连真源,
 akshare(末位整合库)/ tushare(可选,无 token 不调)。`datahub.kline` raw/qfq 链均为一层直连原子源,
-无 fetcher/manager 嵌套。残留:`manager.get_stock_hist_data` 8 源链仅 info/情绪 2 个非热路径消费方仍用,
-`akshare.py` 的 sector_ranking_ths/sector_fund_flow_ths 待收。详见 docs/数据源原子化重构计划.md §7。
+无 fetcher/manager 嵌套。akshare 调用已全收口 `akshare.py`(kline + 板块 ths)。残留:
+`manager.get_stock_hist_data` 8 源链仅 info/情绪 2 个非热路径消费方仍用。详见 docs/数据源原子化重构计划.md §7。
 """

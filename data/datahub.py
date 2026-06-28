@@ -1310,18 +1310,13 @@ def _sector_spot_sina() -> List[dict]:
 
 
 def _sector_spot_ths() -> List[dict]:
-    """板块快照同花顺行业源(真跨源:不走东财/新浪),产出与新浪源逐字段同构。列对不齐/空/异常→[]。"""
+    """板块快照同花顺行业源(真跨源:不走东财/新浪)。2026-06-28 阶段4:归位 data/sources/akshare.sector_spot。
+    产出与新浪源逐字段同构 [{板块,涨跌幅,领涨}](涨幅降序)。列对不齐/空/异常 → []。"""
     try:
-        import akshare as ak
-        from data.akshare_safe import call as ak_call
-        df = ak_call(ak.stock_board_industry_summary_ths, timeout=20)
+        from data.sources import akshare as _ak
+        return _ak.sector_spot()
     except Exception:
         return []
-    if df is None or getattr(df, 'empty', True) or '板块' not in df.columns or '涨跌幅' not in df.columns:
-        return []
-    rows = [{"板块": r.get("板块"), "涨跌幅": round(float(r.get("涨跌幅") or 0), 2),
-             "领涨": r.get("领涨股") or ""} for _, r in df.iterrows()]
-    return sorted(rows, key=lambda x: x["涨跌幅"], reverse=True)
 
 
 def sector_spot(top_n: int = 8, bottom_n: int = 5) -> dict:
