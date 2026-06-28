@@ -26,11 +26,14 @@ DEFAULT_DIRECTIONS: Dict[str, int] = {
     'roe': +1, 'net_profit_growth': +1, 'dividend_yield': +1, 'ocf_ratio': +1,
 }
 
-# 默认权重（复用 fundamental_scoring.FACTOR_WEIGHTS，缺失则等权）
+# 默认权重（复用 fundamental_scoring.DEFAULT_WEIGHTS，缺失则等权）
 def _default_weights() -> Dict[str, float]:
+    # 注:原导入名 `FACTOR_WEIGHTS` 在 fundamental_scoring 里不存在(只有 DEFAULT_WEIGHTS),
+    # 恒触发 ImportError → 静默退化等权,使 balanced 档(及所有未显式传权重的调用)从不按
+    # 设计的差异化权重(ROE 20%/PE 15%…)打分。改用真名 DEFAULT_WEIGHTS。
     try:
-        from fundamental_scoring import FACTOR_WEIGHTS
-        return dict(FACTOR_WEIGHTS)
+        from fundamental_scoring import DEFAULT_WEIGHTS
+        return dict(DEFAULT_WEIGHTS)
     except Exception:
         return {k: 1.0 for k in DEFAULT_DIRECTIONS}
 

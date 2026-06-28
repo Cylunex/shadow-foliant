@@ -206,16 +206,25 @@ def crossover_params(p1: Dict[str, Any], p2: Dict[str, Any]) -> Dict[str, Any]:
 #  评分函数
 # ══════════════════════════════════════════════════════════
 
+# 风险项阈值:平均最大回撤(绝对值%)达到该值则风险得分归零。短持有期(10~30 日)的
+# avg_max_dd 多落在 5~20%,取 20% 作满罚阈值,使变体间回撤差异有足够区分度。可调。
+_RISK_DD_FULL_PENALTY = 20.0
+
+
 def compute_strategy_score(win_rate: float, avg_ret: float,
                            trigger_count: int, max_trigger: int = 1,
-                           sample_stocks: int = 1) -> float:
+                           sample_stocks: int = 1, max_dd: float = 0.0) -> float:
     """综合评分 0~100
 
-    权重：
-      - 胜率 40%（核心）
-      - 均收益 30%（涨得多少）
-      - 触发率 15%（信号多不多，避免"胜率高但一年就一次"的过拟合）
-      - 样本量 15%（覆盖的股票数 / 30，避免小样本幻觉）
+    权重(2026-06-28 加入风险项):
+      - 胜率 35%（核心）
+      - 均收益 25%（涨得多少）
+      - 风险 20%（平均最大回撤越深得分越低；max_dd 此前算了存了却从不进评分→进化系统性
+        偏好"高胜率高收益但深回撤"的过拟合变体,这是最伤的缺口）
+      - 触发率 10%（信号多不多，避免"胜率高但一年就一次"的过拟合）
+      - 样本量 10%（覆盖的股票数 / 30，避免小样本幻觉）
+
+    max_dd: 平均最大回撤百分比(负值,如 -12.5;传 0 = 无回撤数据 → 风险项满分,向后兼容)。
     """
     if max_trigger <= 0:
         max_trigger = 1
@@ -223,8 +232,11 @@ def compute_strategy_score(win_rate: float, avg_ret: float,
     ar_norm = min(1.0, max(0.0, (avg_ret + 5) / 15))  # -5%→0, 10%→1
     trig_norm = min(1.0, trigger_count / max_trigger) if max_trigger > 0 else 0
     sample_norm = min(1.0, sample_stocks / 30)
+    # 回撤越深风险分越低:0 回撤→1.0,回撤≥阈值→0(线性)
+    dd = abs(max_dd or 0.0)
+    risk_norm = min(1.0, max(0.0, 1.0 - dd / _RISK_DD_FULL_PENALTY))
 
-    score = (wr * 40 + ar_norm * 30 + trig_norm * 15 + sample_norm * 15)
+    score = (wr * 35 + ar_norm * 25 + risk_norm * 20 + trig_norm * 10 + sample_norm * 10)
     return round(score, 1)
 
 
@@ -359,7 +371,7 @@ def save_strategy_score(strategy_id: str, variant_id: int,
     """保存某策略在某日的横截面评分"""
     score = compute_strategy_score(win_rate, avg_ret, triggered_n,
                                    max_trigger=stock_pool_n,
-                                   sample_stocks=sample_stocks)
+                                   sample_stocks=sample_stocks, max_dd=max_dd)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -397,7 +409,7 @@ def update_variant_fitness(variant_id: int, win_rate: float, avg_ret: float,
     holdout 传 None 时不覆盖既有值(COALESCE)。"""
     score = compute_strategy_score(win_rate, avg_ret, trigger_count,
                                    max_trigger=sample_stocks,
-                                   sample_stocks=sample_stocks)
+                                   sample_stocks=sample_stocks, max_dd=max_dd)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -927,8 +939,10 @@ if __name__ == '__main__':
         mutated = mutate_params(sid, base)
         print(f'  {sid} 原参数: {base}')
         print(f'  {sid} 变异: {mutated}')
-        score = compute_strategy_score(65, 8.2, 15, 30, 28)
-        print(f'  示例评分(胜率65%, 均收益8.2%, 15/30触发, 28样本): {score}')
+        score_shallow = compute_strategy_score(65, 8.2, 15, 30, 28, max_dd=-5.0)
+        score_deep = compute_strategy_score(65, 8.2, 15, 30, 28, max_dd=-18.0)
+        print(f'  示例评分(胜率65%, 均收益8.2%, 15/30触发, 28样本) '
+              f'浅回撤-5%: {score_shallow} | 深回撤-18%: {score_deep}（风险项已生效）')
 
     # 情报
     intel = get_strategy_intelligence()

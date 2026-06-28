@@ -51,16 +51,18 @@ def run_stock(task) -> List[Tuple[str, dict]]:
             ho_trades = [t for t in trades if (t.get('trigger_date') or '') >= split_date]
             tr_wr, tr_ar, tr_n = _agg(tr_trades)
             ho_wr, ho_ar, ho_n = _agg(ho_trades)
+            _dd = ws.get('avg_max_dd_pct', 0) or 0
             out.append((key, {
                 'code': code, 'name': name,
                 'win_rate': tr_wr, 'avg_ret': tr_ar,
-                'max_dd': ws.get('avg_max_dd_pct', 0) or 0,
+                'max_dd': _dd,
                 'best_ret': ws.get('max_win_pct', 0) or 0,
                 'worst_ret': ws.get('max_loss_pct', 0) or 0,
                 'trigger_count': tr_n,
                 'ho_wr': ho_wr, 'ho_ar': ho_ar, 'ho_n': ho_n,
                 'score': compute_strategy_score(tr_wr, tr_ar, tr_n,
-                                                max_trigger=n_pool, sample_stocks=1),
+                                                max_trigger=n_pool, sample_stocks=1,
+                                                max_dd=_dd),
             }))
         except Exception:
             continue

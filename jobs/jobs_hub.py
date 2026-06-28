@@ -792,7 +792,8 @@ def task_daily_backtest():
                 continue
 
             v_score = compute_strategy_score(avg_wr, avg_ar, n_triggered,
-                                             max_trigger=n_pool, sample_stocks=len(results))
+                                             max_trigger=n_pool, sample_stocks=len(results),
+                                             max_dd=avg_dd)
             prev = per_strategy_best.get(sr['strategy_id'])
             if prev is None or v_score > prev['score']:
                 per_strategy_best[sr['strategy_id']] = {

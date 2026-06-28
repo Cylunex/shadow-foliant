@@ -32,12 +32,13 @@ DEFAULT_UNIVERSE = [
 
 
 def _spearman(x: np.ndarray, y: np.ndarray) -> float:
-    def rank(a):
-        order = a.argsort()
-        r = np.empty_like(order, dtype=float)
-        r[order] = np.arange(len(a))
-        return r
-    return _pearson(rank(x), rank(y))
+    """Rank-IC:平均秩(tie-aware)后再算 Pearson。
+    原自实现 argsort 把并列值强排成 0..n-1 的斜坡(且结果依赖输入行序)→ Rank-IC 失真甚至变号;
+    pandas .rank() 默认 method='average' 对并列取平均秩,与 multi_factor_screener.factor_ic 口径一致。
+    退化(常数)向量经 rank 后仍为常数,_pearson 的 std==0 分支会正确返回 nan(自动剔除噪声因子)。"""
+    rx = pd.Series(x).rank().values
+    ry = pd.Series(y).rank().values
+    return _pearson(rx, ry)
 
 
 def _pearson(x: np.ndarray, y: np.ndarray) -> float:
