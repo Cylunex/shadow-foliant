@@ -178,8 +178,12 @@ def throttle(source: str = 'default') -> float:
 
 
 def ak_safe(fn: Callable[..., Any], *args, timeout: int = 30, **kwargs) -> Any:
-    """akshare 超时/异常薄封装(复用 data/akshare_safe.call)。**仅 sources/akshare.py 末位兜底层用**。"""
-    from akshare_safe import call as _call
+    """akshare 超时/异常薄封装(复用 data/akshare_safe.call)。**仅 sources/akshare.py 末位兜底层用**。
+    兼容扁平(_bootstrap 后 `akshare_safe`)与包(`data.akshare_safe`)两种导入路径。"""
+    try:
+        from akshare_safe import call as _call
+    except Exception:
+        from data.akshare_safe import call as _call
     return _call(fn, *args, timeout=timeout, **kwargs)
 
 
