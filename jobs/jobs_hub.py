@@ -3265,10 +3265,11 @@ def task_kline_prefetch():
                 _add(s.get('symbol') if isinstance(s, dict) else getattr(s, 'symbol', None))
         except Exception as e:
             print(f'[kline_prefetch] 监测加载失败: {e}')
-        # 3) 沪深300 成分
+        # 3) 选股池指数成分(默认中证A500,随 config.SELECTION_INDEX_UNIVERSE)——焐这些票的K线,
+        #    保证次日早盘多因子对新 universe 的因子读取是暖的(A500 含 300 外的中盘龙头需预焐)
         try:
             from multi_factor_screener import get_index_universe
-            for c in get_index_universe('000300') or []:
+            for c in get_index_universe() or []:
                 _add(c)
         except Exception as e:
             print(f'[kline_prefetch] 指数成分加载失败: {e}')
@@ -3302,11 +3303,12 @@ def task_kline_prefetch():
             print(f'[kline_prefetch] 因子焐热不可用: {e}')
         print(f'[kline_prefetch] 因子(含估值/问财)焐热 {vwarm}/{len(pool)}')
 
-        # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好沪深300横截面排名,写长 TTL(到次日早盘)。
-        # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉 300 只**。
+        # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好选股池(默认中证A500)横截面排名,写长 TTL(到次日早盘)。
+        # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉全池**。
+        # index_code 不显式传 → 继承 DEFAULT_INDEX(config.SELECTION_INDEX_UNIVERSE),与早盘读用同一键。
         try:
             from multi_factor_screener import screen_index_cached as _mfs
-            _mfr = _mfs(index_code='000300', n=25, add_sector_leaders=True, workers=1,
+            _mfr = _mfs(n=25, add_sector_leaders=True, workers=1,
                         force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
             print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
         except Exception as e:
@@ -3610,8 +3612,9 @@ def task_unified_selection():
         try:
             from multi_factor_screener import screen_index_cached
             # cache_only:只读盘后(kline_prefetch 尾)焐好的多因子缓存;冷了(盘后失败)就跳过多因子,
-            # **绝不在 09:45 选股高峰现拉 300 只沪深300**(那是当年东财被封 + 雪崩的量源)。
-            mf_result = screen_index_cached(index_code='000300', n=25, add_sector_leaders=True,
+            # **绝不在 09:45 选股高峰现拉全池**(那是当年东财被封 + 雪崩的量源)。
+            # index_code 不显式传 → 继承 DEFAULT_INDEX(默认中证A500),与盘后焐用同一缓存键。
+            mf_result = screen_index_cached(n=25, add_sector_leaders=True,
                                             workers=1, force=False, ttl=3600, cache_only=True)
             for item in mf_result.get('top', []):
                 sym = item.get('symbol', '')

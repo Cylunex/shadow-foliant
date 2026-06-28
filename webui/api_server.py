@@ -1744,7 +1744,7 @@ def market_news(code: str):
 
 # ============================ 选股 ============================
 @app.get("/api/screen/multifactor")
-def screen_multifactor(index: str = "000300", n: int = 15, refresh: bool = False,
+def screen_multifactor(index: str = "", n: int = 15, refresh: bool = False,
                        style: str = "balanced"):
     """多因子选股。Redis 缓存同指数"已打分池"6h(并发取因子);首算较慢、之后秒回。
     style: balanced/value/growth/quality/dividend —— 同一缓存池上重新加权,切换零成本。
@@ -1754,7 +1754,8 @@ def screen_multifactor(index: str = "000300", n: int = 15, refresh: bool = False
     冷则返回空(cache_only_miss),且**盘中忽略 refresh/force**(用户连点"强制刷新"不会在交易时段
     现拉 ~87 次东财板块成分接口 + 60 只因子)。强制刷新只在盘后允许,与盘中定时选股(cache_only)对齐。"""
     try:
-        from multi_factor_screener import screen_index_cached
+        from multi_factor_screener import screen_index_cached, DEFAULT_INDEX
+        index = index or DEFAULT_INDEX   # 空 → 默认池(中证A500,config 可配);显式传指数仍可覆盖
         try:
             from datahub import _is_trading_hours
             _trading = _is_trading_hours()

@@ -130,14 +130,15 @@ def stock_context(code: str, groups: Optional[List[str]] = None) -> Dict[str, An
 
 # =========================== 选股 ===========================
 @mcp.tool()
-def multi_factor_screen(index_code: str = '000300', n: int = 15, limit: int = 60) -> Dict[str, Any]:
+def multi_factor_screen(index_code: str = '', n: int = 15, limit: int = 60) -> Dict[str, Any]:
     """多因子横截面选股:股票池=指数成分∪行业龙头,返回综合分 TopN。
-    index_code: 000300沪深300/000905中证500;limit 控制实算只数(防慢)。
+    index_code: 留空=默认池(中证A500,config 可配);000300沪深300/000905中证500/000852中证1000;limit 控制实算只数(防慢)。
 
     ⚠️ 2026-06-27:改走带缓存版 screen_index_cached(复用盘后 16:30 焐好的池),且**盘中
     cache_only**——交易时段只读暖缓存、冷则返回空(cache_only_miss),绝不在盘中现拉 ~87 次东财
     板块接口 + 60 只因子(原直调 screen_index 每次冷算 = 盘中封东财源)。盘后正常现算。"""
-    from multi_factor_screener import screen_index_cached
+    from multi_factor_screener import screen_index_cached, DEFAULT_INDEX
+    index_code = index_code or DEFAULT_INDEX   # 空 → 默认池(随 config.SELECTION_INDEX_UNIVERSE)
     try:
         from datahub import _is_trading_hours
         _trading = _is_trading_hours()

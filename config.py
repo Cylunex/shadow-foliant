@@ -48,3 +48,10 @@ PROXIES = {'http': PROXY, 'https': PROXY} if PROXY else None
 # 全项目选股统一入口:问财 5 策略本就在 query 里写"非科创板",妙想镜像/多因子等其余源由 unified_selection
 # 的候选过滤兜底。设 env EXCLUDE_KCB=false 可放开纳入科创板。
 EXCLUDE_KCB = os.getenv("EXCLUDE_KCB", "true").lower() not in ("false", "0", "no", "off")
+
+# 多因子选股的默认 universe(指数成分股池)。默认 000510=中证A500(逐行业选龙头、ESG筛、
+# 横跨大中小盘,比沪深300更均衡、更偏新经济,对技术因子选股是更优默认池)。
+# 可选:000300沪深300(纯大盘) / 000905中证500(纯中盘) / 000852中证1000(小盘)。
+# 改 env SELECTION_INDEX_UNIVERSE 可回退或 A/B(缓存键含 index_code,切换天然换键不串味;
+# 盘后焐与早盘读共用此默认,保持 cache_only 命中)。仅作用于多因子选股族,不影响 5 大问财策略/妙想。
+SELECTION_INDEX_UNIVERSE = os.getenv("SELECTION_INDEX_UNIVERSE", "000510")

@@ -19,6 +19,14 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 import numpy as np
 
+try:
+    import config
+    # 多因子选股默认 universe(单一真相源,env SELECTION_INDEX_UNIVERSE 可配/A/B,默认中证A500)。
+    # 全族函数默认值与各自动调用方(unified_selection / 盘后焐 / 晨报 / API / MCP)统一读它。
+    DEFAULT_INDEX = getattr(config, 'SELECTION_INDEX_UNIVERSE', '000510')
+except Exception:
+    DEFAULT_INDEX = '000510'
+
 
 # 因子方向：+1 = 越大越好，-1 = 越小越好（与 fundamental_scoring 一致）
 DEFAULT_DIRECTIONS: Dict[str, int] = {
@@ -137,10 +145,11 @@ def ic_ir(ic_series: List[float]) -> Dict[str, float]:
 # =============================================================================
 # 可选 loader：指数成分股 + 因子取数（默认股票池，复用现有取数）
 # =============================================================================
-def get_index_universe(index_code: str = '000300') -> List[str]:
-    """取指数成分股代码列表（默认沪深300）。优先 akshare 中证指数接口。
+def get_index_universe(index_code: str = DEFAULT_INDEX) -> List[str]:
+    """取指数成分股代码列表（默认 DEFAULT_INDEX=中证A500）。优先 akshare 中证指数接口。
 
-    常用：'000300' 沪深300 / '000905' 中证500 / '000852' 中证1000。
+    常用：'000510' 中证A500 / '000300' 沪深300 / '000905' 中证500 / '000852' 中证1000。
+    中证官网接口(index_stock_cons_csindex)覆盖全部中证系列,A500 可直接取。
     失败返回空列表（调用方应降级）。
     """
     try:
@@ -235,7 +244,7 @@ def get_sector_leaders(leaders_per_board: int = 2, max_boards: Optional[int] = N
     return out
 
 
-def get_default_universe(index_code: str = '000300', add_sector_leaders: bool = True,
+def get_default_universe(index_code: str = DEFAULT_INDEX, add_sector_leaders: bool = True,
                          leaders_per_board: int = 2, max_boards: Optional[int] = None) -> Dict[str, Any]:
     """默认股票池 = 指数成分股 ∪ 各行业板块龙头股（去重）。
 
@@ -302,7 +311,7 @@ def build_factor_frame(symbols: List[str], progress: bool = True,
     return pd.DataFrame.from_dict({s: rows.get(s, {}) for s in symbols}, orient='index')
 
 
-def screen_index(index_code: str = '000300', n: int = 20,
+def screen_index(index_code: str = DEFAULT_INDEX, n: int = 20,
                  weights: Optional[Dict[str, float]] = None,
                  limit: Optional[int] = None,
                  add_sector_leaders: bool = True,
@@ -383,7 +392,7 @@ def _rescore_pool(rows: List[Dict], weights: Dict[str, float], n: int) -> List[D
     return out
 
 
-def screen_index_cached(index_code: str = '000300', n: int = 15,
+def screen_index_cached(index_code: str = DEFAULT_INDEX, n: int = 15,
                         add_sector_leaders: bool = True, limit: int = _CANON_LIMIT,
                         workers: int = 8, force: bool = False,
                         ttl: int = _CACHE_TTL, style: str = 'balanced',

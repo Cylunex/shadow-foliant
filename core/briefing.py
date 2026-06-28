@@ -118,8 +118,9 @@ def build_briefing(sell_n: int = 5, buy_n: int = 6) -> dict:
            "buy": [], "sell": [], "hold_buy": [], "scanned": 0}
     try:
         from multi_factor_screener import screen_index_cached
-        # cache_only:晨报(09:00)也只读盘后焐好的多因子缓存,冷了就空着这段,不在早盘现拉 300 只
-        r = _bounded(lambda: screen_index_cached(index_code="000300", n=buy_n, add_sector_leaders=True,
+        # cache_only:晨报(09:00)也只读盘后焐好的多因子缓存,冷了就空着这段,不在早盘现拉全池。
+        # index_code 不显式传 → 继承 DEFAULT_INDEX(默认中证A500),与盘后焐/早盘选股用同一键。
+        r = _bounded(lambda: screen_index_cached(n=buy_n, add_sector_leaders=True,
                                                  workers=1, cache_only=True),
                      25, {}) or {}
         buy = [{"code": x.get("symbol"), "composite": round(float(x.get("composite") or 0), 3)}
