@@ -186,6 +186,22 @@ def source_stats() -> Dict[str, dict]:
     return out
 
 
+def unhealthy_sources(window_sec: int = 600, max_n: int = 8) -> List[str]:
+    """当前不健康的源(冷却中 / 近 window_sec 秒内连续失败过)。供任务超时通知"具体到哪个源",
+    不再只说"数据源暂不可用"。返回如 ['quotes:a_stock×4', 'kline:east', 'full_valuation:a_stock×2'],
+    最近失败的在前。⚠️ 只覆盖走 _route 的源;问财/妙想不走 _route,各自单独查(见 pywencai.breaker_open)。"""
+    now = _time.time()
+    bad = []
+    for key, s in _STATS.items():
+        if s.streak_fail <= 0 or s.last_fail <= 0:
+            continue
+        cooling = s.streak_fail >= _COOLDOWN_FAILS and (now - s.last_fail) < _COOLDOWN_SEC
+        if cooling or (now - s.last_fail) < window_sec:
+            bad.append((key, s.last_fail, s.streak_fail))
+    bad.sort(key=lambda x: -x[1])   # 最近失败的排前
+    return [(f"{k}×{sf}" if sf > 1 else k) for k, _, sf in bad[:max_n]]
+
+
 # ══════════════════════════════════════════════════════════
 #  统一缓存层(L0 内存 → L1 Redis → L2 文件 pickle;非实时域避免频繁外部调用)
 # ══════════════════════════════════════════════════════════

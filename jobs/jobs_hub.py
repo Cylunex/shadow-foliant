@@ -1371,9 +1371,27 @@ def _notify_data_unavailable(name: str, detail: str = ''):
             cn = REGISTRY.get(name, {}).get('cn', name)
         except Exception:
             pass
-        body = f"任务「{cn}」({name}) 因外部数据源暂不可用而结束本次{('(' + detail + ')') if detail else ''}, 已自动跳过, 下个周期重试。"
+        # 具体到源:列出当前卡死/冷却中的外部源(datahub _route 各源 + 问财熔断),
+        # 让通知不只是笼统的"数据源暂不可用"。
+        bad_srcs = []
+        try:
+            import datahub
+            bad_srcs = list(datahub.unhealthy_sources())
+        except Exception:
+            pass
+        try:
+            from data.sources.pywencai import breaker_open as _pw_break
+            if _pw_break():
+                bad_srcs.append('问财熔断')
+        except Exception:
+            pass
+        src_line = (f"\n🔴 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
+                    else "\n(未捕到具体源,可能是妙想等非 _route 慢源或整体网络抽风)")
+        title_hint = f" ({bad_srcs[0].split(':')[0].split('×')[0]})" if bad_srcs else ""
+        body = (f"任务「{cn}」({name}) 因外部数据源暂不可用而结束本次"
+                f"{('(' + detail + ')') if detail else ''}, 已自动跳过, 下个周期重试。{src_line}")
         from notification_router import send
-        send('report', f"📡 数据源暂不可用: {cn}", body)
+        send('report', f"📡 数据源暂不可用: {cn}{title_hint}", body)
     except Exception:
         pass
 

@@ -35,6 +35,12 @@ _BREAK_LOG_LAST = 0.0
 _BREAK_LOG_GAP = 60.0
 
 
+def breaker_open() -> bool:
+    """问财熔断是否生效中(连续失败达阈值且仍在冷却期)。供任务超时通知"具体到问财"。"""
+    import time as _t
+    return _streak_fail >= _BREAK_FAILS and (_t.time() - _last_fail) < _BREAK_COOLDOWN
+
+
 def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
     """带硬超时 + 熔断的 pywencai.get 包装。
 
