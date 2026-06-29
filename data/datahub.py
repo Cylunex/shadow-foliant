@@ -872,7 +872,16 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     # 而 _route 按健康度排序会让健康的新浪抢先返回 365 根 → 静态把 baostock 放第一也没用。故长历史直接
     # 优先调 baostock,非空即用、写缓存返回;未装/失败/空 再落下面常规多源链(只能~365,有数据胜无)。
     if _long_hist:
-        _bl = _sanitize_kline(_kline_baostock(code, period, interval, adjust))
+        # ⚠️ 套硬超时:baostock 登录握手偶发卡死(实测可挂 2min+),而这条是绕过 _route 的直调、
+        # 无超时保护 → 卡死会拖垮回测任务。60s 切断后落下面常规多源链(只能~365根,胜过卡死)。
+        _bl = pd.DataFrame()
+        try:
+            _bfut = _ROUTE_POOL.submit(_kline_baostock, code, period, interval, adjust)
+            _bl = _sanitize_kline(_bfut.result(timeout=60))
+        except _cf.TimeoutError:
+            _bfut.cancel()   # 孤儿线程留底层自然结束
+        except Exception:
+            pass
         if isinstance(_bl, pd.DataFrame) and not _bl.empty:
             if use_cache:
                 try:
