@@ -131,6 +131,11 @@ _ROUTE_POOL = _cf.ThreadPoolExecutor(max_workers=64, thread_name_prefix="datahub
 _TO_LOG_LAST: Dict[str, float] = {}
 _TO_LOG_GAP = 60.0
 
+# ── 临时诊断埋点(2026-06-29):查"全源超时"到底是①池排队(submit 后没轮到跑=池被占满)
+# 还是②函数自己慢(throttle 限流排队 / HTTP 慢)。只打慢调用,env DATAHUB_ROUTE_DEBUG=0 可关。
+_ROUTE_DEBUG = _os_route.getenv("DATAHUB_ROUTE_DEBUG", "1") != "0"
+_ROUTE_SLOW_LOG = float(_os_route.getenv("DATAHUB_ROUTE_SLOW_LOG", "8"))   # 成功但超过这么多秒才打拆分
+
 
 def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
            timeout: int = None):
@@ -149,16 +154,30 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
     for name, fn in ordered:
         key = f"{capability}:{name}"
         t0 = _time.time()
+        _start = []   # 诊断:工作线程真正开始执行时记时间戳 → 区分"池里排队"(空)vs"函数自己慢"(有值)
+        def _timed(_fn=fn):
+            _start.append(_time.time())
+            return _fn()
         try:
-            fut = _ROUTE_POOL.submit(fn)
+            fut = _ROUTE_POOL.submit(_timed)
             v = fut.result(timeout=to)
+            if _ROUTE_DEBUG:
+                el = _time.time() - t0
+                if el >= _ROUTE_SLOW_LOG:
+                    qw = (_start[0] - t0) if _start else el
+                    print(f"[route] ⏳ {key} 慢成功 总{el:.1f}s = 池排队{qw:.1f}s + 运行{el-qw:.1f}s", flush=True)
         except _cf.TimeoutError:
             fut.cancel()  # 孤儿线程留底层自然结束, 不阻塞
             _record(key, False, _time.time() - t0)
             _t = _time.time()
             if _t - _TO_LOG_LAST.get(key, 0) >= _TO_LOG_GAP:
                 _TO_LOG_LAST[key] = _t
-                print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源(60s 内同源仅提示一次)", flush=True)
+                if _ROUTE_DEBUG and not _start:
+                    print(f"[datahub] ⏱️ {key} 源超时 {to}s —— ⚠️池排队({to}s 内压根没轮到执行,_ROUTE_POOL 被占满)", flush=True)
+                elif _ROUTE_DEBUG:
+                    print(f"[datahub] ⏱️ {key} 源超时 {to}s —— 函数已跑但没完成(排队{_start[0]-t0:.1f}s,疑 throttle限流/HTTP慢)", flush=True)
+                else:
+                    print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源(60s 内同源仅提示一次)", flush=True)
             continue
         except Exception:
             _record(key, False, _time.time() - t0)
