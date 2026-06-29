@@ -884,7 +884,7 @@ def task_daily_backtest():
 
 
 def task_ai_eval_weekly():
-    """每周一 09:30：对过去 30 天 AI 推荐做评估，推送报告（开关 ai_eval_weekly，默认开）"""
+    """每周日 20:30：对过去 30 天 AI 推荐做评估，推送报告（开关 ai_eval_weekly，默认开;2026-06-29 从周一09:30挪开早高峰）"""
     job = 'ai_eval_weekly'
     try:
         from automation_config import is_enabled
@@ -4705,8 +4705,8 @@ def register_default_jobs():
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
       22:00 fund_evening                — 🏦 基金晚间合并(B:净值入库→定投止盈检查) · 22:30 daily_pnl_snapshot
       02:00/02:30 pg_backup / rag_ingest
-      周日 10:00/15:00/20:00 mx_weekend_outlook / weekend_portfolio(F:周报+8情景压力合并) / wf_weekly_backtest
-      周一 03:00/09:30 weekly_db_cleanup / ai_eval_weekly
+      周日 10:00/15:00/20:00/20:30 mx_weekend_outlook / weekend_portfolio(F:周报+8情景压力合并) / wf_weekly_backtest / ai_eval_weekly
+      周一 03:00 weekly_db_cleanup
       ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
          selection_debate/lockup_radar/research_digest(已并入 unified_selection / announcement_scan)。
 
@@ -4806,12 +4806,14 @@ def register_default_jobs():
     except Exception as e:
         print(f'[jobs_hub] wf_weekly_backtest 注册失败: {e}')
 
-    # ---- 📅 周一 ----
+    # ---- 📅 ai_eval_weekly(2026-06-29 周一09:30→周日20:30)----
+    # 纯报告任务(评估过去30天推荐+推周报),不喂选股(_source_feedback 按需现算 evaluate_by_source),
+    # 故从周一早高峰(morning_strategy/strategy_prefetch/unified_selection 挤一堆)挪到周日晚、和周末批作伴。
     try:
         wrapped = hub._wrap('ai_eval_weekly', task_ai_eval_weekly)
-        job = schedule.every().monday.at('09:30').do(wrapped)
+        job = schedule.every().sunday.at('20:30').do(wrapped)
         hub._registered.append({
-            'name': 'ai_eval_weekly', 'when': 'mon 09:30 CST', 'job': job,
+            'name': 'ai_eval_weekly', 'when': 'sun 20:30 CST', 'job': job,
         })
     except Exception as e:
         print(f'[jobs_hub] ai_eval_weekly 注册失败: {e}')

@@ -169,7 +169,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'ai_eval_weekly': {
         'cn': 'AI 推荐周度评估推送',
-        'schedule': '周一 09:30',
+        'schedule': '周日 20:30',
         'category': '核心',
         'default': True,  # 盈利反馈环:按 source 出真实盈亏评估,回喂选股决策;无 AI 调用,开销低
         'description': '按 source 评估过去 30 天推荐真实盈亏(胜率/平均收益/盈亏比)',
