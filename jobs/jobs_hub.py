@@ -3304,6 +3304,16 @@ def task_kline_prefetch():
                 pass
         msg = f'universe={len(pool)} warmed={ok} total_bars={bars}'
         print(f'[kline_prefetch] {msg}')
+        # 优化(2026-06-29):K线焐热命中率过低 = 外部源整体不可达 → **跳过**后面更慢的因子焐热 + 多因子海选。
+        # 它们注定也焐不上(同样的源),硬跑只会:①磨到 1800s 硬超时 ②占着源/_ROUTE_POOL 拖垮并发跑的
+        # factor_collection/portfolio_indicator。健康时(命中≈95%)照常跑;<30% 才判定源挂、提前干净收尾。
+        _warm_rate = (ok / len(pool)) if pool else 0.0
+        if pool and _warm_rate < 0.3:
+            print(f'[kline_prefetch] ⚠️ K线仅焐热 {ok}/{len(pool)}({_warm_rate:.0%}),源疑全挂 → '
+                  f'跳过因子焐热+多因子海选(免磨满超时、免拖垮并发任务)', flush=True)
+            _log_run(job, 'error', error=f'sources_down? {msg}; 已跳过因子/海选',
+                     started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+            return
         # 顺便焐 collect_factors(内部含 full_valuation 同花顺 + pywencai 问财,都是慢源,TTL 1天)→
         # 盘中选股/取因子读暖缓存、0 调慢源,不再 09:45 逐只现调把线程池打满(雪崩的真主因)。
         # 盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
