@@ -1417,7 +1417,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
-    'strategy_prefetch':         900,    # 盘前预取 5 问财+5 妙想(串行,各≤90s);慢慢来,给足 15 分钟
+    'strategy_prefetch':         1000,   # 盘前预取 5 问财+5 妙想(串行,各套 90s 逐策略硬超时);10×90+开销,给 1000s
     'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
@@ -1694,7 +1694,7 @@ def _call_with_hard_timeout(label: str, fn: Callable, timeout: int = 120):
     global _STRATEGY_TIMEOUT_POOL
     if _STRATEGY_TIMEOUT_POOL is None:
         _STRATEGY_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
-            max_workers=5, thread_name_prefix='strategy-timeout')
+            max_workers=16, thread_name_prefix='strategy-timeout')   # 16:strategy_prefetch 串行10个,卡死的孤儿留池里,5 worker 会让后续排队成假超时
     fut = _STRATEGY_TIMEOUT_POOL.submit(fn)
     try:
         return fut.result(timeout=timeout)
@@ -3469,16 +3469,18 @@ def task_strategy_prefetch():
         return
     started = datetime.now().isoformat()
     done, total = 0, 10   # 5 问财 + 5 妙想镜像
-    # ① 主力资金:自带缓存,强制现取回写
+    # ① 主力资金:自带缓存,强制现取回写。⚠️套逐策略硬超时:某策略(尤其问财)卡死必被砍,
+    # 不再像 2026-06-29 那样第一个卡满 900s 把后面 9 个(含独立源的 5 个妙想)全堵死。
     try:
         from main_force_selector import MainForceStockSelector
-        ok, df, msg = MainForceStockSelector().get_main_force_stocks_cached(days_ago=5, use_cache=False)
+        ok, df, msg = _call_with_hard_timeout('主力资金',
+            lambda: MainForceStockSelector().get_main_force_stocks_cached(days_ago=5, use_cache=False), 90)
         n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
         if n:
             done += 1
         print(f'[strategy_prefetch] {"✅" if n else "⚠️"} 主力资金 {n} 只 ({msg})', flush=True)
     except Exception as e:
-        print(f'[strategy_prefetch] ⚠️ 主力资金异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+        print(f'[strategy_prefetch] ⚠️ 主力资金异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
     # ② 其余 4 个问财策略:走通用 strategy_cache,各自现取回写当日缓存(串行)
     import strategy_cache as _sc
     _jobs = [
@@ -3491,25 +3493,27 @@ def task_strategy_prefetch():
         try:
             _m = __import__(mod)
             sel = getattr(_m, cls)()
-            ok, df, msg = _sc.cached(name, lambda s=sel, f=fn: getattr(s, f)(top_n=5), use_cache=False)
+            ok, df, msg = _call_with_hard_timeout(name,
+                lambda s=sel, f=fn, nm=name: _sc.cached(nm, lambda: getattr(s, f)(top_n=5), use_cache=False), 90)
             n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
             if n:
                 done += 1
             print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
         except Exception as e:
-            print(f'[strategy_prefetch] ⚠️ {name} 异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+            print(f'[strategy_prefetch] ⚠️ {name} 异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
     # ③ 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
     try:
         import mx_strategies
         for name, query, st in mx_strategies.MX_STRATEGIES:
             try:
-                ok, df, msg = mx_strategies.run_one(name, query, st, use_cache=False)
+                ok, df, msg = _call_with_hard_timeout(name,
+                    lambda n=name, q=query, s=st: mx_strategies.run_one(n, q, s, use_cache=False), 90)
                 n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
                 if n:
                     done += 1
                 print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
             except Exception as e:
-                print(f'[strategy_prefetch] ⚠️ {name} 异常: {type(e).__name__}: {str(e)[:60]}', flush=True)
+                print(f'[strategy_prefetch] ⚠️ {name} 异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
     except Exception as e:
         print(f'[strategy_prefetch] ⚠️ 妙想镜像整体跳过: {type(e).__name__}: {str(e)[:60]}', flush=True)
     _log_run(job, 'success' if done else 'error',
@@ -4728,7 +4732,7 @@ def register_default_jobs():
     hub.register('fund_premarket',              '08:55', task_fund_premarket)
 
     # ---- 09:45 整合选股 ----
-    hub.register('strategy_prefetch',           '09:10', task_strategy_prefetch)  # 盘前预取 5 大问财策略入缓存(拉早到 09:10,留足 35min)
+    hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 问财+5 妙想入缓存(逐策略 90s 硬超时,卡死不堵后面)
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
