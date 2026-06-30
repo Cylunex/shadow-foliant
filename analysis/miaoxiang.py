@@ -7,7 +7,9 @@
 实现:仅 stdlib(urllib),零新依赖。供 MCP 调用(见 mcp_server.py 的 `mx_*` 工具),不接 UI。
 
 ⚠️ 三方 SaaS:问句/数据会发往东财服务器(数据出境/合规请自行评估),敏感分析慎用。
-⚠️ EM_API_KEY:默认内置 demo key(很可能限流/临时),生产请在 `.env` 配 `EM_API_KEY=<自有key>`。
+⚠️ EM_API_KEY:**只从 `.env` 的 `EM_API_KEY` 读,代码不内置任何 key**。未配置则妙想整体不可用
+   —— 它是可选的"第二意见/外部数据"源,缺失时各入口优雅降级(query 返 error、screen 返空 DF),
+   不影响项目自研多智能体主路径。在 `.env` 配 `EM_API_KEY=<自有key>` 后启用。
 """
 
 import json
@@ -15,7 +17,6 @@ import os
 from urllib import request as _req, error as _err
 
 BASE = "https://ai-saas.eastmoney.com/proxy/"
-_DEMO_KEY = "em_2MutTwTdZO2LjFnrMJA59NUV4YLV590L"  # 来自官方 skill 的共享 demo key,生产请覆盖
 TIMEOUT = 90
 
 # 技能注册:name -> (endpoint 路径, 入参字段)。新增能力只需在此登记一行。
@@ -37,11 +38,13 @@ SKILLS = {
 
 
 def _api_key() -> str:
-    return (os.getenv('EM_API_KEY') or _DEMO_KEY).strip()
+    """妙想 API key —— 只从 `.env` 的 EM_API_KEY 读,代码不内置任何 key。未配置返回空串。"""
+    return (os.getenv('EM_API_KEY') or '').strip()
 
 
-def using_demo_key() -> bool:
-    return not os.getenv('EM_API_KEY')
+def available() -> bool:
+    """是否已配置 EM_API_KEY。妙想为可选源,未配置时各入口优雅降级(不发请求)。"""
+    return bool(_api_key())
 
 
 def _extract(raw):
@@ -66,10 +69,12 @@ def _extract(raw):
 def query(skill: str, text: str, timeout: int = TIMEOUT) -> dict:
     """通用调用。skill ∈ SKILLS 键;text 为自然语言问句。
 
-    返回 {skill, content, using_demo_key} 或 {error, skill}。
+    返回 {skill, content} 或 {error, skill}。
     """
     if skill not in SKILLS:
         return {'error': f'未知 skill: {skill};可选 {list(SKILLS)}'}
+    if not available():
+        return {'error': '未配置 EM_API_KEY(妙想为可选第二意见源,在 .env 配 EM_API_KEY 后启用)', 'skill': skill}
     text = (text or '').strip()
     if not text:
         return {'error': 'text 为空', 'skill': skill}
@@ -91,7 +96,7 @@ def query(skill: str, text: str, timeout: int = TIMEOUT) -> dict:
     except Exception as e:
         return {'error': f'妙想API失败: {e}', 'skill': skill}
     content = _extract(raw if isinstance(raw, dict) else {'data': raw})
-    out = {'skill': skill, 'content': content or '(无内容返回)', 'using_demo_key': using_demo_key()}
+    out = {'skill': skill, 'content': content or '(无内容返回)'}
     if not content:
         out['raw'] = raw  # 没抽到正文时附原始响应,便于排查
     return out
@@ -115,7 +120,7 @@ def screen(query_text: str, select_type: str = 'A股', timeout: int = 40):
     except Exception:
         return None
     text = (query_text or '').strip()
-    if not text:
+    if not text or not available():   # 无 EM_API_KEY → 妙想不可用,优雅返空(可选源)
         return _pd.DataFrame()
     try:  # 与其他妙想调用同源限流(1s 最小间隔)
         from rate_limiter import throttle as _throttle

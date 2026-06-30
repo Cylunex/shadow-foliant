@@ -2052,7 +2052,7 @@ def rag_search(q: str, top_k: int = 8, sources: str = ""):
 def miaoxiang_query(skill: str = "ask", q: str = ""):
     """妙想(东方财富 AI)外部第二意见。skill ∈ stock_diagnosis/ask/hotspot/comparable/
     finance_search/macro_data/industry_report/topic_report/fund_diagnosis。
-    ⚠️ 问句会发往东财服务器(合规自评);未配 EM_API_KEY 用 demo key(易限流)。"""
+    ⚠️ 问句会发往东财服务器(合规自评);未配 EM_API_KEY 则妙想不可用(代码不内置 key)。"""
     try:
         import miaoxiang
         if not (q or "").strip():

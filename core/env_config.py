@@ -38,7 +38,7 @@ SCHEMA: List[Dict[str, str]] = [
     {'key': 'LLM_TIMEOUT', 'label': '单 provider 超时(秒)', 'group': 'LLM 主路由', 'type': 'int',
      'help': '默认 40;thinking 模型自动放宽到 120'},
     {'key': 'EM_API_KEY', 'label': '妙想东财 Key', 'group': 'LLM 主路由', 'type': 'secret',
-     'help': '可选,mx_* 工具第二意见;留空用 demo key(易限流)'},
+     'help': '可选,mx_* 工具第二意见;留空则妙想不可用(代码不内置 key)'},
     # —— LLM 降级(可选) —— 配齐 API_KEY + BASE_URL 才会真正进入降级链
     # 留空 → 该 provider 不激活;BASE_URL 是兜底官方端点, 用第三方反代直接改这里
     {'key': 'SILICONFLOW_API_KEY', 'label': '硅基流动 Key', 'group': 'LLM 降级(可选)', 'type': 'secret',

@@ -380,7 +380,7 @@ def deep_analysis(code: str) -> Dict[str, Any]:
 
 
 # =========================== 妙想(东财 AI SaaS)外部服务 — 第二意见/外部数据 ===========================
-# ⚠️ 三方 SaaS:问句发往东财服务器;需 .env 配 EM_API_KEY(否则用 demo key,易限流)。
+# ⚠️ 三方 SaaS:问句发往东财服务器;需 .env 配 EM_API_KEY(未配则妙想不可用,代码不内置 key)。
 # 定位:与自研多智能体互补的"第二意见 / 外部成品",不是核心决策来源。
 @mcp.tool()
 def mx_stock_diagnosis(question: str) -> Dict[str, Any]:
