@@ -13,11 +13,44 @@
 volume 单位「股」(实测 baostock 即股,与新浪/东财×100 后同口径)。
 """
 import threading
+import time as _time
 from datetime import datetime, timedelta
 
 _LOCK = threading.Lock()          # 串行化所有 baostock 调用(不可并发连接)
 _BS = None                        # baostock 模块(惰性 import)
 _LOGGED_IN = False
+
+# ⚠️ 2026-06-30 防 baostock 雪崩:连续失败计数 + 冷却。
+# 根因:baostock 用底层 socket(无 socket-level timeout),服务端慢响应时孤儿线程持 _LOCK 卡 OS RTO 120s,
+# 后续 kline 调用 with _LOCK 等不到锁、又重 login 又卡 → 单源 100s+ 拖累 _route 一直 cooldown 不到。
+# 修法:
+#  ① 等锁最多 2s,拿不到立即返空让 _route 跳源(不持锁等 100s+)
+#  ② 自带"连续失败 2 次 → 冷却 5 分钟"短路,期间秒返空,baostock 服务恢复后自动重试
+_FAIL_COUNT = 0
+_LAST_FAIL = 0.0
+_COOLDOWN_FAILS = 2
+_COOLDOWN_SEC = 300       # 5 分钟
+
+
+def _in_cooldown() -> bool:
+    return _FAIL_COUNT >= _COOLDOWN_FAILS and (_time.time() - _LAST_FAIL) < _COOLDOWN_SEC
+
+
+def _mark_fail():
+    global _FAIL_COUNT, _LAST_FAIL, _LOGGED_IN
+    _FAIL_COUNT += 1
+    _LAST_FAIL = _time.time()
+    _LOGGED_IN = False    # 失败一律重置登录,下次重连
+
+
+def _mark_ok():
+    global _FAIL_COUNT
+    _FAIL_COUNT = 0
+
+
+def breaker_open() -> bool:
+    """对外查询冷却状态(供 _notify_data_unavailable 显示具体卡死的源)。"""
+    return _in_cooldown()
 
 # 与 datahub._PERIOD_DAYS 对齐(自然日)
 _PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825}
@@ -66,29 +99,37 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
         return None
     if interval not in ('1d', 'daily', '101'):
         return pd.DataFrame()                  # 仅日线,其余交回主链
+    # ⭐ 冷却期:连续失败 2 次 → 5 分钟内秒拒,让 _route 跳源(不再卡 100s+ OS RTO)
+    if _in_cooldown():
+        return pd.DataFrame()
     days = _PERIOD_DAYS.get(period, 365)
     start = (datetime.now() - timedelta(days=int(days) + 10)).strftime('%Y-%m-%d')  # +10 冗余
     end = datetime.now().strftime('%Y-%m-%d')
     bscode = _bs_code(code)
     adjustflag = '2' if str(adjust) == 'qfq' else '3'   # 2=前复权 3=不复权
     rows = []
-    with _LOCK:                                 # 串行化(不可并发连接)
+    # ⭐ 等锁最多 2s,拿不到立即返空(防孤儿持锁拖累后续调用)。锁里 login/query 卡到 OS RTO 是它的事,
+    # 但本调用 2s 内一定脱身让 _route 跳源,且累计失败触发冷却 → 整链最多卡 1 次孤儿,不再雪崩。
+    if not _LOCK.acquire(timeout=2):
+        return pd.DataFrame()
+    try:
         try:
             bs = _ensure()
             rs = bs.query_history_k_data_plus(
                 bscode, "date,open,high,low,close,volume",
                 start_date=start, end_date=end, frequency='d', adjustflag=adjustflag)
             if getattr(rs, 'error_code', '1') != '0':
-                # 可能是会话失效 → 标记重登,下次调用重新 login
-                global _LOGGED_IN
-                _LOGGED_IN = False
+                _mark_fail()
                 return pd.DataFrame()
             while rs.next():
                 rows.append(rs.get_row_data())
         except Exception:
-            _LOGGED_IN = False                  # 异常一律重置登录,下次重连
+            _mark_fail()
             return pd.DataFrame()
+    finally:
+        _LOCK.release()
     if not rows:
+        _mark_fail()
         return pd.DataFrame()
     try:
         df = pd.DataFrame(rows, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
@@ -103,6 +144,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
         # 严格对齐 datahub:大写 Open/Close/High/Low/Volume(volume 已是「股」)
         out = df[['open', 'close', 'high', 'low', 'volume']].copy()
         out.columns = ['Open', 'Close', 'High', 'Low', 'Volume']
+        _mark_ok()   # 成功重置失败计数 → 解除冷却
         return out
     except Exception:
         return pd.DataFrame()

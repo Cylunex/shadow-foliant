@@ -75,20 +75,35 @@ def _debate_one(code: str, ctx: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return {'verdict': verdict, 'confidence': conf, 'reason': why}
 
 
+def _debate_with_ctx(code: str) -> Optional[Dict[str, Any]]:
+    """单只票的对抗 + ctx 一次性返回(便于并发)。"""
+    ctx = _context(code)
+    v = _debate_one(code, ctx)
+    if not v:
+        return None
+    return {'code': code, 'ctx': ctx, 'v': v}
+
+
 def run_selection_debate(codes: List[str], max_stocks: int = 10,
                          record_signals: bool = True) -> Dict[str, Any]:
-    """对 codes 逐只红蓝对抗。返回 {ok, items, text, summary}。"""
+    """对 codes 逐只红蓝对抗。返回 {ok, items, text, summary}。
+    ⚡ 2026-06-30 改并发:此前串行 10 只 LLM 调用 ≈ 150s,改并发 5 → ≈ 30s。
+    DeepSeek API 支持并发(rate-limit 宽松),decision_signal 写 PG 是 row-level 锁,无竞争。"""
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
     codes = [str(c).strip() for c in (codes or []) if c][:max_stocks]
     if not codes:
         out['summary'] = '无候选'
         return out
+
+    import concurrent.futures as _cf
     items, n_pass, n_reject = [], 0, 0
-    for code in codes:
-        ctx = _context(code)
-        v = _debate_one(code, ctx)
-        if not v:
+    with _cf.ThreadPoolExecutor(max_workers=5, thread_name_prefix='selection-debate') as pool:
+        results = list(pool.map(_debate_with_ctx, codes))
+
+    for r in results:
+        if not r:
             continue
+        code, ctx, v = r['code'], r['ctx'], r['v']
         action = _VERDICT_ACTION.get(v['verdict'], 'watch')
         items.append({'code': code, 'name': ctx.get('name', ''), 'verdict': v['verdict'],
                       'action': action, 'confidence': v['confidence'], 'reason': v['reason']})
