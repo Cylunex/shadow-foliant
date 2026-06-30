@@ -34,17 +34,23 @@ def now() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def find_jobs_hub_pid() -> int | None:
-    """找 stock-jobs-hub 进程 PID。"""
-    try:
-        r = subprocess.run(["pgrep", "-f", "stock-jobs-hub|jobs_hub"],
-                           capture_output=True, text=True, timeout=3)
-        pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
-        if pids:
-            return pids[0]
-    except Exception:
-        pass
-    return None
+def find_pids() -> dict:
+    """找两个进程:jobs-hub(定时调度)+ webui(网页"立即运行"实际跑这)。
+    ⭐ webui 网页触发的任务 threading.Thread 在 webui 进程跑,
+       池雪崩出现在 webui 而非 jobs-hub — 必须同时监控两者。"""
+    out = {}
+    patterns = [("jobs-hub", "jobs_hub|jobs\\.jobs_hub"),
+                ("webui", "uvicorn.*api_server|webui\\.api_server")]
+    for label, pat in patterns:
+        try:
+            r = subprocess.run(["pgrep", "-f", pat],
+                               capture_output=True, text=True, timeout=3)
+            pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+            if pids:
+                out[label] = pids[0]
+        except Exception:
+            pass
+    return out
 
 
 def proc_snapshot(pid: int) -> str:
@@ -130,13 +136,14 @@ def curl_one(url: str, name: str, timeout: int = 8) -> str:
 def run_round(do_proc: bool, do_datahub: bool) -> None:
     print(f"\n========== {now()} ==========")
 
-    # [P] 进程状态
+    # [P] 进程状态(同时打 jobs-hub + webui;网页触发跑在 webui!)
     if do_proc:
-        pid = find_jobs_hub_pid()
-        if pid:
-            print(f"[P] jobs-hub pid={pid}  {proc_snapshot(pid)}")
+        pids = find_pids()
+        if pids:
+            for label, pid in pids.items():
+                print(f"[P] {label:8s} pid={pid}  {proc_snapshot(pid)}")
         else:
-            print("[P] jobs-hub 没找到(本机/进程没起?)")
+            print("[P] 进程没找到(本机/没起?)")
 
     # [N] 网络层 curl(跟 datahub 调用完全无关,排除机房网络)
     print("[N] 网络层 curl:")
