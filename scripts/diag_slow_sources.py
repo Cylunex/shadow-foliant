@@ -50,19 +50,32 @@ def find_jobs_hub_pid() -> int | None:
 def proc_snapshot(pid: int) -> str:
     """fd 数 / 线程数 / ESTABLISHED 数(Linux /proc)。Mac 没有 /proc/<pid>/fd, 用 lsof。"""
     fd, threads, tcp = "?", "?", "?"
+    sockets = "?"   # 仅 socket fd 数(socket:[xxx] 软链),更直接反映"网络连接"
     if os.path.isdir(f"/proc/{pid}/fd"):
         try:
-            fd = str(len(os.listdir(f"/proc/{pid}/fd")))
+            fd_dir = f"/proc/{pid}/fd"
+            entries = os.listdir(fd_dir)
+            fd = str(len(entries))
+            # 统计 socket: 那些 readlink 出来是 'socket:[xxx]' 的 fd
+            sk = 0
+            for e in entries:
+                try:
+                    if os.readlink(f"{fd_dir}/{e}").startswith("socket:"):
+                        sk += 1
+                except Exception:
+                    pass
+            sockets = str(sk)
         except Exception:
             pass
         try:
             threads = str(len(os.listdir(f"/proc/{pid}/task")))
         except Exception:
             pass
+        # ⭐ 用 PID 过滤,只数本进程的 ESTAB 连接(否则是整机数,严重失真)
         try:
-            r = subprocess.run(["ss", "-tn", "state", "established"],
-                               capture_output=True, text=True, timeout=3)
-            tcp = str(len([l for l in r.stdout.splitlines() if l.strip()]) - 1)
+            r = subprocess.run(["ss", "-tnp"], capture_output=True, text=True, timeout=3)
+            tcp = str(sum(1 for l in r.stdout.splitlines()
+                          if f"pid={pid}," in l and "ESTAB" in l))
         except Exception:
             pass
     else:
@@ -73,9 +86,10 @@ def proc_snapshot(pid: int) -> str:
             lines = r.stdout.splitlines()[1:]
             fd = str(len(lines))
             tcp = str(sum(1 for l in lines if "TCP" in l and "ESTAB" in l))
+            sockets = str(sum(1 for l in lines if "IPv4" in l or "IPv6" in l))
         except Exception:
             pass
-    return f"fd={fd} threads={threads} tcp_est={tcp}"
+    return f"fd={fd} sockets={sockets} threads={threads} tcp_est={tcp}"
 
 
 def time_call(label: str, fn, *args, **kwargs) -> str:
