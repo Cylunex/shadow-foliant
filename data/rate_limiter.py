@@ -12,8 +12,25 @@ import time
 import threading
 from collections import defaultdict
 
-_lock = threading.Lock()
+# ⚠️ 2026-06-30 大坑修复:此前是全局唯一 `_lock`,所有源(tencent/sina/east/akshare/eastmoney_saas/
+# tickflow/pywencai...)共享一把锁 + 锁里 `time.sleep(wait)` ——
+# 一个 tickflow 调用 sleep 6s 期间, 其他全部源的调用都被挡在 `with _lock:` 外面排队,
+# 多线程并发(strategy_prefetch 16 worker + datahub-route 32 worker)被串行成 90s+ 假超时。
+# py-spy 实证 webui 几乎所有线程都堵在 rate_limiter.py:58 `with _lock:`。
+# 修法:per-key 独立锁(_lock_for(source)) → 不同源互不阻塞, 同源仍按 _gap 串行(原意保留)。
+# 与 core/rate_limiter.py 实现对齐。
+_registry_lock = threading.Lock()             # 只保护 _locks dict 增减(秒级释放)
+_locks: dict[str, threading.Lock] = {}
 _last_call: dict[str, float] = defaultdict(float)
+
+
+def _lock_for(source: str) -> threading.Lock:
+    """取该源的独立锁(首次访问按需创建)。"""
+    with _registry_lock:
+        lk = _locks.get(source)
+        if lk is None:
+            lk = _locks[source] = threading.Lock()
+        return lk
 
 # 惯例基线(秒): 任何源的最小间隔都不得低于此值。
 # ⭐ 间隔只增不减: _gap_for 最终返回 max(_DEFAULT_GAP, 该源配置), 杜绝任何源低于 1s。
@@ -52,10 +69,12 @@ def _gap_for(source: str) -> float:
 
 def throttle(source: str = "default") -> float:
     """若距上次 source 调用不足该源最小间隔则阻塞等待，返回实际等待秒数。
-    akshare ≥3s / pywencai ≥2s / 其余 ≥1s(见 _GAP_BY_SOURCE)。"""
+    akshare ≥3s / pywencai ≥2s / 其余 ≥1s(见 _GAP_BY_SOURCE)。
+    ⭐ per-key 独立锁:同源仍串行(原意),不同源互不阻塞(防一个慢源拖垮全部)。"""
     min_gap = _gap_for(source)
-    now = time.monotonic()
-    with _lock:
+    lk = _lock_for(source)
+    with lk:
+        now = time.monotonic()
         gap = now - _last_call[source]
         wait = min_gap - gap
         if wait > 0:
@@ -86,8 +105,9 @@ def throttled_session(session):
     def _throttled_send(request, **kwargs):
         host = urlparse(request.url or "").netloc or "default"
         min_gap = _gap_for(host)
-        now = time.monotonic()
-        with _lock:
+        lk = _lock_for(host)               # ⭐ per-host 锁,不再全局阻塞
+        with lk:
+            now = time.monotonic()
             gap = now - _last_call[host]
             wait = min_gap - gap
             if wait > 0:
