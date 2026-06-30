@@ -53,6 +53,11 @@ def check_volume(code_name, data, date=None, threshold=60,
 
     mean_vol = data.iloc[-1]['vol_ma5']
 
+    # ⚠️ mean_vol 可能为 0(line 35 fillna(0.0)) / NaN — 新股不足5日 / 长停牌恢复。
+    # 不防的话 last_vol/0 = inf, inf >= vol_ratio_min 永真 → 误判"放量突破"(隐性 bug)。
+    if not mean_vol or np.isnan(mean_vol) or mean_vol <= 0:
+        return False
+
     vol_ratio = last_vol / mean_vol
     if vol_ratio >= vol_ratio_min:
         return True

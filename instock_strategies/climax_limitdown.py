@@ -52,6 +52,10 @@ def check(code_name, data, date=None, threshold=60,
 
     mean_vol = data.iloc[-1]['vol_ma5']
 
+    # ⚠️ 同 enter.py:mean_vol 可能为 0 / NaN, 不防会 inf >= 阈值永真,误判放量跌停
+    if not mean_vol or np.isnan(mean_vol) or mean_vol <= 0:
+        return False
+
     vol_ratio = last_vol / mean_vol
     if vol_ratio >= vol_ratio_min:
         return True
