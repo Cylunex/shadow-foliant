@@ -77,6 +77,18 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
         _streak_fail += 1
         _last_fail = _time.time()
         raise TimeoutError(f'pywencai 查询超时 {timeout}s')
+    except AttributeError as e:
+        # ⚠️ pywencai 0.13.1(2025-05 最新版)bug:wencai.py:185 `params.get('data')` 没校验
+        # get_robot_data() 返 None,直接 `.get()` 崩 AttributeError。
+        # 触发条件:超长复杂 query / 同花顺反爬返坏结构。库已升级到最新仍未修。
+        # 对策:转 None 视同问财无数据,调用方原本就处理 None(if result is None: continue)。
+        if "NoneType" in str(e) and "get" in str(e):
+            _streak_fail += 1
+            _last_fail = _time.time()
+            return None
+        _streak_fail += 1
+        _last_fail = _time.time()
+        raise
     except Exception:
         _streak_fail += 1
         _last_fail = _time.time()
