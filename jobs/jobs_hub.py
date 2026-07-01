@@ -741,8 +741,18 @@ def task_daily_backtest():
                 print(f'[daily_backtest] 进程池不可用/超时,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
                 _per_stock = None
         if _per_stock is None:
+            # 串行回退加截止时间守护(2026-07-01):进程池 timeout 抛出后,原来无脑串行,
+            # 单只慢就磨到 3600s 硬超时被切断、后面聚合入库全不执行(2026-06-30 撞过)。
+            # 现在给串行 25min 预算,超时 break、用已完成的部分数据继续聚合入库。
             from genome_bt_worker import run_stock as _gbt
-            _per_stock = [_gbt(t) for t in _bt_tasks]
+            _per_stock = []
+            _serial_deadline = time.time() + 1500   # 25 min
+            for _i, _t in enumerate(_bt_tasks):
+                if time.time() > _serial_deadline:
+                    print(f'[daily_backtest] ⚠️ 串行回退撞 25min 上限,'
+                          f'{_i}/{len(_bt_tasks)} 只已完成,余下跳过(避免撞 3600s 硬超时)', flush=True)
+                    break
+                _per_stock.append(_gbt(_t))
         for _stock_out in _per_stock:
             for key, res in (_stock_out or []):
                 if key in strategy_results:

@@ -23,7 +23,7 @@ except Exception:
         return 0.0
 
 # 常用宽基指数(乐咕乐股 stock_index_pe_lg 接受的 symbol)
-COMMON_INDEXES = ['上证50', '沪深300', '中证500', '中证1000', '创业板指', '科创50']
+COMMON_INDEXES = ['上证50', '沪深300', '中证500', '中证1000', '创业板50']  # 2026-07-01:'创业板指'→'创业板50'(乐咕乐股口径);'科创50'无源数据,删
 
 _LEVELS = [
     (30, '低估', 2.0),
@@ -53,6 +53,14 @@ def valuation_multiplier(percentile: float) -> float:
 def index_pe_percentile(index: str = '沪深300', years: Optional[int] = None) -> Optional[dict]:
     """指数当前滚动 PE 在历史中的分位。years 限定回溯年数(None=全历史)。
     返回 {index, pe, percentile(0-100,越小越低估), level, multiplier, source, n} 或 None。"""
+    # akshare 乐咕乐股(stock_index_pe_lg)支持的 symbol 白名单——传其他值会直接 KeyError。
+    # 2026-07-01:实测原 COMMON_INDEXES 里的 "创业板指"/"科创50" 不在白名单,前者应为"创业板50"、
+    # 后者乐咕乐股无对应数据。校验不过直接返 None(温和 log,不再报 KeyError)。
+    _AK_INDEX_WHITELIST = {"上证50", "沪深300", "上证380", "创业板50", "中证500", "上证180",
+                           "深证红利", "深证100", "中证1000", "上证红利", "中证100", "中证800"}
+    if index not in _AK_INDEX_WHITELIST:
+        print(f'[fund_valuation] ⚠️ 指数「{index}」不在乐咕乐股支持白名单,跳过')
+        return None
     try:
         import akshare as ak
     except Exception:
