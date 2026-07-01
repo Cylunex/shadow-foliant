@@ -3324,6 +3324,19 @@ def task_kline_prefetch():
             _log_run(job, 'error', error=f'sources_down? {msg}; 已跳过因子/海选',
                      started_at=started, finished_at=datetime.now().isoformat(), notify=False)
             return
+        # 优化 2026-07-01:问财已熔断 → 直接跳过因子焐热+多因子海选(都依赖问财)。
+        # 之前 6-30 17:00 现象:K线焐完 572/583 后 collect_factors 逐只撞问财熔断日志刷 5 分钟到 1800s 硬顶。
+        # 现在:检测到 pywencai.breaker_open() → 干净收尾,不再无意义空磨。
+        try:
+            from data.sources.pywencai import breaker_open as _pw_open
+            if _pw_open():
+                print(f'[kline_prefetch] ⚡ 问财已熔断 → 跳过因子焐热+多因子海选(都依赖问财) → 干净收尾', flush=True)
+                _log_run(job, 'ok', error=f'{msg}; 问财熔断,已跳过 factor+mf',
+                         started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+                return
+        except Exception:
+            pass
+
         # 顺便焐 collect_factors(内部含 full_valuation 同花顺 + pywencai 问财,都是慢源,TTL 1天)→
         # 盘中选股/取因子读暖缓存、0 调慢源,不再 09:45 逐只现调把线程池打满(雪崩的真主因)。
         # 盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
