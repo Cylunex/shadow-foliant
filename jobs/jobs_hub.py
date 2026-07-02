@@ -1267,11 +1267,12 @@ def task_fund_valuation_signal():
                 print(f'[fund_valuation] ❌ {idx} {type(e).__name__}: {str(e)[:80]} ({time.time()-_t0:.1f}s)', flush=True)
         cheap = [v for v in rows if v['multiplier'] >= 1.5]
         if rows:
-            lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}] {v['multiplier']}x"
+            lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}]（定投建议 {v['multiplier']}倍）"
                      for v in sorted(rows, key=lambda x: x['percentile'])]
-            text = "🏦 宽基估值分位(定投择时)\n" + "\n".join(lines)
-            if cheap:
-                text += "\n\n💡 偏低估、可加投:" + "、".join(v['index'] for v in cheap)
+            # 结论先行(2026-07-02):可加投的指数放第一行,不用扫完整表才知道
+            head = ("💡 偏低估、本期可加投:" + "、".join(v['index'] for v in cheap)
+                    if cheap else "本期无明显低估指数,按常规定投即可")
+            text = "🏦 宽基估值分位(定投择时)\n" + head + "\n\n" + "\n".join(lines)
             try:
                 from notification_router import send
                 send('report', '基金估值分位', text)
@@ -3785,7 +3786,14 @@ def task_unified_selection():
 
         # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
-        body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n\n'
+        body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
+        # 结论先行(2026-07-02):红蓝复核结果放最上面,不用滚到表格底部才知道几只可买
+        if debate_map:
+            _nb = sum(1 for v in debate_map.values() if v.get('verdict') == '买入')
+            _nw = sum(1 for v in debate_map.values() if v.get('verdict') == '谨慎')
+            _nr = sum(1 for v in debate_map.values() if v.get('verdict') == '否决')
+            body += f'结论:红蓝复核 🔴可买{_nb}只 · 🟡观望{_nw}只 · 🟢避开{_nr}只(详见表格与文末)\n'
+        body += '\n'
         body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 分 | 红蓝 | 来源 |\n'
         body += '|:-:|:---------|:---:|:---:|:---:|:-:|:--:|:----|\n'
         _debate_tag = {'买入': '🔴可买', '谨慎': '🟡观望', '否决': '🟢避开'}
@@ -3840,7 +3848,6 @@ def task_unified_selection():
             ranked_weights = sorted(strategy_weights.items(), key=lambda x: -x[1])[:5]
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
-            body += '\n💡 跑几天后策略会自进化，选股自动向高效策略倾斜'
 
         # 缓存选股结果供 mx_selection_review 读取（挪到 _log_run 前，防 _log_run 异常吞掉）
         try:
@@ -3962,7 +3969,10 @@ def task_morning_portfolio():
         movers = sorted([s for s in scans if abs(s.get('change') or 0) >= 3],
                         key=lambda x: x['change'], reverse=True)[:6]
 
-        lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
+        # 结论先行(2026-07-02):标题下第一行给动作汇总
+        _hsum = (f'今日:需减/清 {len(sell_list)} 只 · 买点 {len(buy_list)} 只 · 异动 {len(movers)} 只'
+                 if (sell_list or buy_list or movers) else '今日:持仓无预警,整体平稳')
+        lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', _hsum, '']
 
         # 大盘速览(轻量,新浪源)
         mkt_line = ''
@@ -4139,8 +4149,7 @@ def task_noon_portfolio():
                     quotes.update(datahub.quotes(codes[i:i + 20]) or {})
             except Exception:
                 pass
-            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
-                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
+            rows_q = []
             for p in picks:
                 q = quotes.get(p['code']) or {}
                 try:
@@ -4148,7 +4157,16 @@ def task_noon_portfolio():
                     chg = float(q.get('change_pct') or 0)
                 except (TypeError, ValueError):
                     price, chg = 0, 0
-                mark = '🔴' if chg <= -3 else ('🟢' if chg >= 3 else '·')
+                rows_q.append((p, price, chg))
+            n_up = sum(1 for _, _, c in rows_q if c >= 3)
+            n_dn = sum(1 for _, _, c in rows_q if c <= -3)
+            head_sum = (f'异动:涨超3%有{n_up}只·跌超3%有{n_dn}只' if (n_up or n_dn)
+                        else '无明显异动,午间平稳')
+            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")} | {head_sum}',
+                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
+            for p, price, chg in rows_q:
+                # 红涨绿跌(2026-07-02 修:原来涨标🟢跌标🔴,反了)
+                mark = '🔴' if chg >= 3 else ('🟢' if chg <= -3 else '·')
                 price_s = f'¥{price}' if price else ''
                 lines.append(f"  {mark} {p['name']} {p['code']} {price_s} {chg:+.1f}%  {p.get('tag', '')}")
             _push_daily('🕦 午间重点盯盘', '\n'.join(lines))
