@@ -3346,8 +3346,22 @@ def task_kline_prefetch():
             print(f'[kline_prefetch] 指数成分加载失败: {e}')
 
         pool = list(codes)
-        ok = bars = 0
+        # ⏳ 循环内截止(2026-07-02):源况差的日子(东财封禁+新浪超时+baostock 反复重登)581 只
+        # K线焐热单独就能吃 33min(超 1800s 硬超时),切断后孤儿线程还在继续磨(7-2 实锤:17:00 切断,
+        # 17:03 才焐完,17:03-17:17+ 孤儿继续跑因子)。现在留 5min 余量提前收尾:已焐的全有效,
+        # 余下明天再焐(kline 缓存有历史回退,不至于裸奔)。
+        _t0k = time.time()
+        _hard = _TASK_HARD_TIMEOUTS.get(job, 1800)
+
+        def _left():
+            return _hard - (time.time() - _t0k)
+
+        ok = bars = attempted = 0
         for c in pool:
+            if _left() < 300:
+                print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,K线焐热提前收尾({attempted}/{len(pool)} 已试)', flush=True)
+                break
+            attempted += 1
             try:
                 r = datahub.prefetch_kline(c)
                 if r.get('bars'):
@@ -3355,16 +3369,22 @@ def task_kline_prefetch():
                     bars += r['bars']
             except Exception:
                 pass
-        msg = f'universe={len(pool)} warmed={ok} total_bars={bars}'
+        msg = f'universe={len(pool)} attempted={attempted} warmed={ok} total_bars={bars}'
         print(f'[kline_prefetch] {msg}')
         # 优化(2026-06-29):K线焐热命中率过低 = 外部源整体不可达 → **跳过**后面更慢的因子焐热 + 多因子海选。
         # 它们注定也焐不上(同样的源),硬跑只会:①磨到 1800s 硬超时 ②占着源/_ROUTE_POOL 拖垮并发跑的
         # factor_collection/portfolio_indicator。健康时(命中≈95%)照常跑;<30% 才判定源挂、提前干净收尾。
-        _warm_rate = (ok / len(pool)) if pool else 0.0
-        if pool and _warm_rate < 0.3:
-            print(f'[kline_prefetch] ⚠️ K线仅焐热 {ok}/{len(pool)}({_warm_rate:.0%}),源疑全挂 → '
+        # (分母用 attempted:截止提前收尾时不把"没轮到的"算成失败,防误判"源挂")
+        _warm_rate = (ok / attempted) if attempted else 0.0
+        if attempted and _warm_rate < 0.3:
+            print(f'[kline_prefetch] ⚠️ K线仅焐热 {ok}/{attempted}({_warm_rate:.0%}),源疑全挂 → '
                   f'跳过因子焐热+多因子海选(免磨满超时、免拖垮并发任务)', flush=True)
             _log_run(job, 'error', error=f'sources_down? {msg}; 已跳过因子/海选',
+                     started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+            return
+        # K线阶段已把预算吃得只剩收尾余量 → 因子/海选没时间了,干净收尾(别撞硬超时留孤儿)
+        if _left() < 300:
+            _log_run(job, 'success', error=f'{msg}; 预算不足已跳过因子/海选',
                      started_at=started, finished_at=datetime.now().isoformat(), notify=False)
             return
         # 优化 2026-07-01:问财已熔断 → 直接跳过因子焐热+多因子海选(都依赖问财)。
@@ -3384,9 +3404,26 @@ def task_kline_prefetch():
         # 盘中选股/取因子读暖缓存、0 调慢源,不再 09:45 逐只现调把线程池打满(雪崩的真主因)。
         # 盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
         vwarm = 0
+        _pw_seen_open = 0
         try:
             from fundamental_scoring import collect_factors as _cf
+            try:
+                from data.sources.pywencai import breaker_open as _pw_open2
+            except Exception:
+                def _pw_open2():
+                    return False
             for c in pool:
+                if _left() < 180:
+                    print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,因子焐热提前收尾', flush=True)
+                    break
+                # ⚠️ 问财熔断是瞬时状态(120s 冷却会过期),入口单点检查有时序漏洞(7-2 实锤:
+                # 17:03 入口检查时冷却恰好过期没跳过 → 进循环逐只再撞、熔断反复重开磨 15min+)。
+                # → 循环内持续检查:累计 3 次见它开着,断定问财今天不行,整段收尾。
+                if _pw_open2():
+                    _pw_seen_open += 1
+                    if _pw_seen_open >= 3:
+                        print(f'[kline_prefetch] ⚡ 问财熔断循环内反复触发 → 因子焐热提前收尾(已焐 {vwarm})', flush=True)
+                        break
                 try:
                     f = _cf(c)
                     if f and any(v is not None for v in f.values()):
@@ -3400,13 +3437,16 @@ def task_kline_prefetch():
         # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好选股池(默认中证A500)横截面排名,写长 TTL(到次日早盘)。
         # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉全池**。
         # index_code 不显式传 → 继承 DEFAULT_INDEX(config.SELECTION_INDEX_UNIVERSE),与早盘读用同一键。
-        try:
-            from multi_factor_screener import screen_index_cached as _mfs
-            _mfr = _mfs(n=25, add_sector_leaders=True, workers=1,
-                        force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
-            print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
-        except Exception as e:
-            print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
+        if _left() < 120:
+            print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,跳过多因子海选焐热(早盘将跳过多因子,不现拉)', flush=True)
+        else:
+            try:
+                from multi_factor_screener import screen_index_cached as _mfs
+                _mfr = _mfs(n=25, add_sector_leaders=True, workers=1,
+                            force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
+                print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
+            except Exception as e:
+                print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
         _log_run(job, 'success' if ok else 'error',
                  error=f'{msg} fv={vwarm}' if ok else f'no_kline_warmed; {msg}',
                  started_at=started, finished_at=datetime.now().isoformat())
