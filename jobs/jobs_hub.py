@@ -1482,7 +1482,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
     'factor_collection':         1200,
-    'kline_prefetch':            1800,   # 焐 raw+qfq 两套 K线 + full_valuation(2026-06-25),给足时间
+    'kline_prefetch':            2700,   # 焐 raw+qfq 两套 K线 + 因子/海选;源况差实测 K线段 33min(7-2),
+                                         # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
@@ -1650,7 +1651,12 @@ class _JobsHub:
                     with _TASK_LOCK:
                         for n, ts in list(_TASK_START_TS.items()):
                             age = now - ts
-                            if age > SOFT_DEADLINE_SEC:
+                            # ⭐ 软阈值按任务取大(2026-07-02):专属预算 > 全局 30min 的任务
+                            # (daily_backtest 3600 / kline_prefetch 2700 / rag_ingest 3600),
+                            # 在自己预算内跑着不算异常 —— 此前 daily_backtest 跑到 30min 就被
+                            # 推"⚠️任务异常"吓人告警(soft→_log_run('error') 自动推),纯误报。
+                            _soft_n = max(SOFT_DEADLINE_SEC, _TASK_HARD_TIMEOUTS.get(n, 0))
+                            if age > _soft_n:
                                 over_soft.append((n, ts, int(age)))
                                 if (n, ts) not in _TASK_ALERTED:
                                     new_alerts.append((n, int(age)))
