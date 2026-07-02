@@ -598,6 +598,7 @@ def task_daily_backtest():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    _t0 = time.time()   # 全任务起点:末尾预热步骤按剩余预算决定跑不跑(见第 9/10 步)
     try:
         from portfolio_db import portfolio_db
         from backtest_engine import backtest_one
@@ -728,17 +729,37 @@ def task_daily_backtest():
         if len(valid_stocks) > 1 and _workload >= 200:
             try:
                 import os as _os4
-                from concurrent.futures import ProcessPoolExecutor
+                from concurrent.futures import (ProcessPoolExecutor,
+                                                as_completed as _bt_as_completed,
+                                                TimeoutError as _BtTimeout)
                 from genome_bt_worker import run_stock as _gbt
                 _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
-                # 整体超时:单 worker 在 numpy/pandas 卡死时,map 无 timeout 会无限阻塞 →
-                # 只能等 deadman 90min 硬杀(连累并发任务)。给整体上限,超时则回退串行收尾。
-                _bt_timeout = max(600, 8 * len(_bt_tasks))   # 每股~8s 上限,至少 10min
+                # 预算按实测校准(2026-07-02):单股全变体串行 ~60s(7-1 日志 25只/25min 实锤),
+                # 按 worker 数摊薄 + 5min 启动/长尾余量。旧公式 8s/股 低估 7 倍 → 880s 预算差
+                # 一分钟跑完就 Timeout,而 map() 一抛把已完成的 ~100 只全丢了再串行重跑(三倍浪费)。
+                _bt_timeout = max(900, int(len(_bt_tasks) * 60 / _nw) + 300)
+                # submit+as_completed(而非 map):超时只丢"还没跑完的",已完成结果全保留。
                 with ProcessPoolExecutor(max_workers=_nw) as _ex:
-                    _per_stock = list(_ex.map(_gbt, _bt_tasks, timeout=_bt_timeout))
-                print(f'[daily_backtest] 进程池并行回测: {len(valid_stocks)}股 × {len(all_variants)}变体, {_nw} 进程')
+                    _futs = [_ex.submit(_gbt, t) for t in _bt_tasks]
+                    _per_stock = []
+                    try:
+                        for _f in _bt_as_completed(_futs, timeout=_bt_timeout):
+                            try:
+                                _per_stock.append(_f.result())
+                            except Exception:
+                                pass   # 单股 worker 崩,丢这只、不丢全局
+                    except _BtTimeout:
+                        _n_pend = sum(1 for _f in _futs if not _f.done())
+                        for _f in _futs:
+                            _f.cancel()   # 取消未开跑的;正在跑的等 with 退出自然结束
+                        print(f'[daily_backtest] ⚠️ 进程池 {_bt_timeout}s 预算用尽: '
+                              f'完成 {len(_per_stock)}/{len(_bt_tasks)} 只,余 {_n_pend} 只跳过'
+                              f'(已完成结果保留,不再串行重跑)', flush=True)
+                print(f'[daily_backtest] 进程池并行回测: {len(_per_stock)}/{len(valid_stocks)}股 '
+                      f'× {len(all_variants)}变体, {_nw} 进程')
             except Exception as _pe:
-                print(f'[daily_backtest] 进程池不可用/超时,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
+                # 到这里 = 池本身起不来(受限环境无法 fork/spawn),才回退串行
+                print(f'[daily_backtest] 进程池不可用,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
                 _per_stock = None
         if _per_stock is None:
             # 串行回退加截止时间守护(2026-07-01):进程池 timeout 抛出后,原来无脑串行,
@@ -870,6 +891,15 @@ def task_daily_backtest():
     except Exception as e:
         print(f'[daily_backtest] 策略扫描子任务失败: {e}')
 
+    # ── 9/10. 尾部纯预热步骤 — 按剩余预算决定跑不跑(2026-07-02)──
+    # 这两步只是给 genome 页焐缓存(页面可现算),非必须。7-1 撞过:回测串行拖到 19:45 后,
+    # 这两步无截止继续跑 → 顶过 3600s 硬超时被切断 + 发"数据源暂不可用"误报 + 孤儿跑到 20:18。
+    # 现在:距硬超时不足 10min 就整体跳过,保任务干净收尾。
+    _budget = _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0)
+    if _budget < 600:
+        print(f'[daily_backtest] ⏳ 剩余预算 {_budget:.0f}s 不足,跳过因子IC/价量IC预热(genome页可现算)', flush=True)
+        return
+
     # ── 9. 预热因子IC评估(写 webui 同缓存键 factor_eval:10,genome页秒读)──
     try:
         from analysis.factor_eval import evaluate as _fe
@@ -882,6 +912,9 @@ def task_daily_backtest():
         print(f'[daily_backtest] 因子评估预热失败: {e}')
 
     # ── 10. 预热价量因子 IC 加权选股(闭环消费上一步的 IC;写 pv_ic_screen:000300,genome页秒读)──
+    if _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0) < 600:
+        print(f'[daily_backtest] ⏳ 剩余预算不足,跳过价量IC预热', flush=True)
+        return
     try:
         from multi_factor_screener import screen_pv_ic
         pv = screen_pv_ic(index_code='000300', n=30)
