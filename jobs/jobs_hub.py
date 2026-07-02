@@ -427,21 +427,30 @@ def task_portfolio_indicator_snapshot():
         # 2026-06-18: save_snapshot 已挪到循环开头先执行(防循环卡死导致当日 row 不写),
         # 这里不再重复调。
 
-        # ── 风险聚合预警（原 wf_portfolio_risk）:VaR95>5% 或 最大回撤<-40% ──
+        # ── 风险聚合预警（原 wf_portfolio_risk）:VaR95>5% 或 半年最大回撤<-40% ──
+        # 2026-07-02 通俗化改版(memory: 通知要通俗/直接/结论先行):
+        # ① 结论先行:第一句说"几只异常+该干什么",不再上来一堵 VaR 术语墙;
+        # ② 每只一句人话:"单日可能亏超X%/近半年最深跌过X%",标明触发的是哪条;
+        # ③ 删"VaR 排名 Top10"段(与预警段同一批票出现两遍,纯重复);预警按风险从高到低排。
         try:
-            risk_alerts = [
-                f"⚠️ {n}({c}): VaR95 {v*100:.1f}% / 最大回撤 {(d or 0)*100:.0f}%"
-                for n, c, v, d in risk_rows
-                if (v is not None and v > 0.05) or (d is not None and d < -0.40)
-            ]
-            if risk_alerts:
-                risk_rows.sort(key=lambda x: (x[2] or 0), reverse=True)
-                top = '\n'.join(f"{n}({c}): VaR95 {(v or 0)*100:.1f}% 回撤 {(d or 0)*100:.0f}%"
-                                for n, c, v, d in risk_rows[:10])
-                _push_error('🛡️ 持仓量化风险预警',
-                            f"持仓量化风险 — {datetime.now().strftime('%Y-%m-%d')}\n"
-                            f"持仓 {len(holding_syms)} 只\n\n━━ 高风险预警 ━━\n"
-                            + '\n'.join(risk_alerts) + '\n\nVaR 排名(Top10):\n' + top)
+            hits = [(nm, c, v, d) for nm, c, v, d in risk_rows
+                    if (v is not None and v > 0.05) or (d is not None and d < -0.40)]
+            if hits:
+                hits.sort(key=lambda x: -(x[2] or 0))
+                body = [f"持仓 {len(holding_syms)} 只里有 {len(hits)} 只波动/回撤异常偏高,"
+                        f"建议优先设好止损、反弹时考虑减仓:", '']
+                for nm, c, v, d in hits[:10]:
+                    why = []
+                    if v is not None and v > 0.05:
+                        why.append(f"波动大,单日可能亏超 {v*100:.1f}%")
+                    if d is not None and d < -0.40:
+                        why.append(f"近半年最深跌过 {abs(d)*100:.0f}%")
+                    body.append(f"• {nm} {c} — " + ';'.join(why))
+                if len(hits) > 10:
+                    body.append(f"…另有 {len(hits)-10} 只未展示")
+                body.append('')
+                body.append('(口径:按近6个月日K估算;单日95%风险值>5% 或 半年最大回撤>40% 才触发,其余持仓正常)')
+                _push_error('🛡️ 持仓量化风险预警', '\n'.join(body))
         except Exception:
             pass
 
