@@ -743,10 +743,11 @@ def task_daily_backtest():
                                                 TimeoutError as _BtTimeout)
                 from genome_bt_worker import run_stock as _gbt
                 _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
-                # 预算按实测校准(2026-07-02):单股全变体串行 ~60s(7-1 日志 25只/25min 实锤),
-                # 按 worker 数摊薄 + 5min 启动/长尾余量。旧公式 8s/股 低估 7 倍 → 880s 预算差
-                # 一分钟跑完就 Timeout,而 map() 一抛把已完成的 ~100 只全丢了再串行重跑(三倍浪费)。
-                _bt_timeout = max(900, int(len(_bt_tasks) * 60 / _nw) + 300)
+                # 预算按实测校准(2026-07-02 定 60s/股;2026-07-06 再校准):7-3 实测进程池内
+                # 每股槽位 ~154s(1208s×7worker÷55只完成,并行下 pandas 争核比串行 60s 慢),
+                # 60s 估算只够评一半(55/106)。改 150s/股 + 封顶 2400s(给后面扫描/IC 段留
+                # ~20min,总预算 3600s 内)。超预算仍只丢未完成的,已完成保留。
+                _bt_timeout = min(2400, max(900, int(len(_bt_tasks) * 150 / _nw) + 300))
                 # submit+as_completed(而非 map):超时只丢"还没跑完的",已完成结果全保留。
                 with ProcessPoolExecutor(max_workers=_nw) as _ex:
                     _futs = [_ex.submit(_gbt, t) for t in _bt_tasks]
@@ -3443,14 +3444,22 @@ def task_kline_prefetch():
         # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好选股池(默认中证A500)横截面排名,写长 TTL(到次日早盘)。
         # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉全池**。
         # index_code 不显式传 → 继承 DEFAULT_INDEX(config.SELECTION_INDEX_UNIVERSE),与早盘读用同一键。
-        if _left() < 120:
+        if _left() < 300:
             print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,跳过多因子海选焐热(早盘将跳过多因子,不现拉)', flush=True)
         else:
+            # ⚠️ screen_index_cached 是无界调用(2026-07-06 修):源况差时实测跑 44min —— 7-3 检查点
+            # 剩 13min 预算放行后,它把任务顶穿 2700s 切断+发"数据源暂不可用"误报,孤儿 17:46 才完。
+            # 套硬超时=剩余预算-60s:超时留孤儿给底层,任务自身按时干净收尾。
             try:
                 from multi_factor_screener import screen_index_cached as _mfs
-                _mfr = _mfs(n=25, add_sector_leaders=True, workers=1,
-                            force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
+                _mfr = _call_with_hard_timeout(
+                    '多因子海选焐热',
+                    lambda: _mfs(n=25, add_sector_leaders=True, workers=1,
+                                 force=True, ttl=24 * 3600),   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
+                    timeout=max(60, int(_left()) - 60))
                 print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
+            except TimeoutError:
+                print('[kline_prefetch] ⏳ 多因子海选焐热超预算,放弃(早盘将跳过多因子,不现拉)', flush=True)
             except Exception as e:
                 print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
         _log_run(job, 'success' if ok else 'error',
@@ -3681,7 +3690,18 @@ def task_unified_selection():
             _exclude_kcb = True
 
         def _add(code, pts, src):
-            code = str(code)
+            # ⭐ 代码归一成 6 位(2026-07-06 修):问财/妙想返回的代码常带 '.SZ/.SH' 后缀
+            # ('603719.SH'),不归一的话:①同票 '600711' 与 '600711.SH' 被当两只,双源交叉
+            # +2分从未生效;②带后缀进 top_list → quotes/stock_names 全取不到 → 推送里
+            # 非持仓票只有代码没名字没价格(7-6 实锤);③持仓判断/推荐池也错位。
+            import re as _re6
+            s = str(code or '').strip().upper()
+            s = _re6.sub(r'\.(SH|SZ|BJ|SS)$', '', s)
+            s = _re6.sub(r'^(SH|SZ|BJ)', '', s)
+            digits = ''.join(ch for ch in s if ch.isdigit())
+            if len(digits) != 6:   # A股代码恒6位;≠6 的是脏数据(价格/空值),丢弃
+                return
+            code = digits
             if _exclude_kcb and (code.startswith('688') or code.startswith('689')):
                 return  # 科创板,排除(不入候选池)
             c = candidates.setdefault(code, {'score': 0.0, 'src': []})
