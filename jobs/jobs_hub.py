@@ -610,6 +610,7 @@ def task_daily_backtest():
             build_evolution_report, default_params,
             coerce_params, STRATEGY_PARAM_SPACE,
             FIXED_STRATEGIES, evolve_composed, ensure_composed_population,
+            cull_variants,
         )
 
         # 确保表 + 种子就绪(含组合策略种群保底)
@@ -839,6 +840,19 @@ def task_daily_backtest():
             new_variant_count += len(evolve_composed(mutants=8, randoms=4, keep_top=40))
         except Exception as ce:
             print(f'[daily_backtest] 组合策略进化失败: {ce}')
+
+        # ── 6b. 无条件淘汰兜底(2026-07-16 修复种群膨胀) ──
+        # evolve_generation 无达标父代时提前 return、走不到内部 cull → 那些策略只生不汰;
+        # 且 cull 现会退役"永远排不到评估的老未评估变体"。故对全部策略(+composed)显式再 cull 一遍,
+        # 保证每策略活跃种群有界(≤ keep_top 已评分 + keep_unevaluated 新生 + 种子),不再堆 1500+ 垃圾。
+        culled = 0
+        for _sid in list(STRATEGY_PARAM_SPACE) + ['composed']:
+            try:
+                culled += cull_variants(_sid, keep_top=30, keep_unevaluated=20)
+            except Exception:
+                continue
+        if culled:
+            print(f'[daily_backtest] 淘汰兜底退役 {culled} 个变体(超额已评分/score<=0/老未评估)')
 
         # ── 7. 推送进化日报 ──
         report = build_evolution_report()

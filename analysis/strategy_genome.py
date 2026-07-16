@@ -532,23 +532,43 @@ def get_variants_for_eval(strategy_id: str, top_n: int = 5, fresh_n: int = 5) ->
     return rows
 
 
-def cull_variants(strategy_id: str, keep_top: int = 30) -> int:
-    """优存劣汰的"汰":已评估的活跃变体只保留分数前 keep_top,其余退役。
-    generation=0 的种子永不退役(保底);未评估的新生变体不动(等评估)。
-    返回退役数量。(修复:原进化只生不汰,种群无限膨胀)"""
+def cull_variants(strategy_id: str, keep_top: int = 30, keep_unevaluated: int = 20) -> int:
+    """优存劣汰的"汰"。generation=0 种子永不退役(保底)。退役三类:
+      1. 已评分活跃变体按 score DESC 只保留前 keep_top,其余退役;
+      2. 已评分但 score<=0 的(0触发/净亏,永无价值)一律退役;
+      3. 未评估(score IS NULL)只保留**最新** keep_unevaluated 个,更老的退役
+         —— get_variants_for_eval 按 created_at DESC 取新生评估,老的未评估永远排不到、
+         只堆成垃圾(实测最老 35 天仍 NULL);按同序保留新的、退役老的,零损失。
+    返回退役总数。
+    (修复 2026-07-16:原只汰"已评分 top_n 之外",从不碰未评分 → 1582 个未评估无限堆积;
+     叠加 evolve_generation 无达标父代时提前 return、走不到本函数 → 部分策略只生不汰。)"""
     conn = get_conn()
     cur = conn.cursor()
+    n = 0
+    # 1. 已评分:score DESC 保留前 keep_top,其余退役
     cur.execute("""
         UPDATE strategy_variants SET status = 'retired'
         WHERE id IN (
             SELECT id FROM strategy_variants
-            WHERE status = 'active' AND base_strategy = %s
-              AND score IS NOT NULL AND generation > 0
-            ORDER BY score DESC
-            OFFSET %s
-        )
+            WHERE status='active' AND base_strategy=%s AND score IS NOT NULL AND generation>0
+            ORDER BY score DESC OFFSET %s)
     """, (strategy_id, keep_top))
-    n = cur.rowcount
+    n += cur.rowcount
+    # 2. 已评分但 score<=0 的垃圾一律退役(0触发/净亏,永无价值)
+    cur.execute("""
+        UPDATE strategy_variants SET status = 'retired'
+        WHERE status='active' AND base_strategy=%s AND score IS NOT NULL AND score<=0 AND generation>0
+    """, (strategy_id,))
+    n += cur.rowcount
+    # 3. 未评估:created_at DESC 保留最新 keep_unevaluated,更老的退役(它们永远排不到评估)
+    cur.execute("""
+        UPDATE strategy_variants SET status = 'retired'
+        WHERE id IN (
+            SELECT id FROM strategy_variants
+            WHERE status='active' AND base_strategy=%s AND score IS NULL AND generation>0
+            ORDER BY created_at DESC OFFSET %s)
+    """, (strategy_id, keep_unevaluated))
+    n += cur.rowcount
     conn.commit()
     cur.close()
     conn.close()
