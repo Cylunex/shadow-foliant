@@ -427,21 +427,30 @@ def task_portfolio_indicator_snapshot():
         # 2026-06-18: save_snapshot 已挪到循环开头先执行(防循环卡死导致当日 row 不写),
         # 这里不再重复调。
 
-        # ── 风险聚合预警（原 wf_portfolio_risk）:VaR95>5% 或 最大回撤<-40% ──
+        # ── 风险聚合预警（原 wf_portfolio_risk）:VaR95>5% 或 半年最大回撤<-40% ──
+        # 2026-07-02 通俗化改版(memory: 通知要通俗/直接/结论先行):
+        # ① 结论先行:第一句说"几只异常+该干什么",不再上来一堵 VaR 术语墙;
+        # ② 每只一句人话:"单日可能亏超X%/近半年最深跌过X%",标明触发的是哪条;
+        # ③ 删"VaR 排名 Top10"段(与预警段同一批票出现两遍,纯重复);预警按风险从高到低排。
         try:
-            risk_alerts = [
-                f"⚠️ {n}({c}): VaR95 {v*100:.1f}% / 最大回撤 {(d or 0)*100:.0f}%"
-                for n, c, v, d in risk_rows
-                if (v is not None and v > 0.05) or (d is not None and d < -0.40)
-            ]
-            if risk_alerts:
-                risk_rows.sort(key=lambda x: (x[2] or 0), reverse=True)
-                top = '\n'.join(f"{n}({c}): VaR95 {(v or 0)*100:.1f}% 回撤 {(d or 0)*100:.0f}%"
-                                for n, c, v, d in risk_rows[:10])
-                _push_error('🛡️ 持仓量化风险预警',
-                            f"持仓量化风险 — {datetime.now().strftime('%Y-%m-%d')}\n"
-                            f"持仓 {len(holding_syms)} 只\n\n━━ 高风险预警 ━━\n"
-                            + '\n'.join(risk_alerts) + '\n\nVaR 排名(Top10):\n' + top)
+            hits = [(nm, c, v, d) for nm, c, v, d in risk_rows
+                    if (v is not None and v > 0.05) or (d is not None and d < -0.40)]
+            if hits:
+                hits.sort(key=lambda x: -(x[2] or 0))
+                body = [f"持仓 {len(holding_syms)} 只里有 {len(hits)} 只波动/回撤异常偏高,"
+                        f"建议优先设好止损、反弹时考虑减仓:", '']
+                for nm, c, v, d in hits[:10]:
+                    why = []
+                    if v is not None and v > 0.05:
+                        why.append(f"波动大,单日可能亏超 {v*100:.1f}%")
+                    if d is not None and d < -0.40:
+                        why.append(f"近半年最深跌过 {abs(d)*100:.0f}%")
+                    body.append(f"• {nm} {c} — " + ';'.join(why))
+                if len(hits) > 10:
+                    body.append(f"…另有 {len(hits)-10} 只未展示")
+                body.append('')
+                body.append('(口径:按近6个月日K估算;单日95%风险值>5% 或 半年最大回撤>40% 才触发,其余持仓正常)')
+                _push_error('🛡️ 持仓量化风险预警', '\n'.join(body))
         except Exception:
             pass
 
@@ -598,6 +607,7 @@ def task_daily_backtest():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    _t0 = time.time()   # 全任务起点:末尾预热步骤按剩余预算决定跑不跑(见第 9/10 步)
     try:
         from portfolio_db import portfolio_db
         from backtest_engine import backtest_one
@@ -729,21 +739,52 @@ def task_daily_backtest():
         if len(valid_stocks) > 1 and _workload >= 200:
             try:
                 import os as _os4
-                from concurrent.futures import ProcessPoolExecutor
+                from concurrent.futures import (ProcessPoolExecutor,
+                                                as_completed as _bt_as_completed,
+                                                TimeoutError as _BtTimeout)
                 from genome_bt_worker import run_stock as _gbt
                 _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
-                # 整体超时:单 worker 在 numpy/pandas 卡死时,map 无 timeout 会无限阻塞 →
-                # 只能等 deadman 90min 硬杀(连累并发任务)。给整体上限,超时则回退串行收尾。
-                _bt_timeout = max(600, 8 * len(_bt_tasks))   # 每股~8s 上限,至少 10min
+                # 预算按实测校准(2026-07-02 定 60s/股;2026-07-06 再校准):7-3 实测进程池内
+                # 每股槽位 ~154s(1208s×7worker÷55只完成,并行下 pandas 争核比串行 60s 慢),
+                # 60s 估算只够评一半(55/106)。改 150s/股 + 封顶 2400s(给后面扫描/IC 段留
+                # ~20min,总预算 3600s 内)。超预算仍只丢未完成的,已完成保留。
+                _bt_timeout = min(2400, max(900, int(len(_bt_tasks) * 150 / _nw) + 300))
+                # submit+as_completed(而非 map):超时只丢"还没跑完的",已完成结果全保留。
                 with ProcessPoolExecutor(max_workers=_nw) as _ex:
-                    _per_stock = list(_ex.map(_gbt, _bt_tasks, timeout=_bt_timeout))
-                print(f'[daily_backtest] 进程池并行回测: {len(valid_stocks)}股 × {len(all_variants)}变体, {_nw} 进程')
+                    _futs = [_ex.submit(_gbt, t) for t in _bt_tasks]
+                    _per_stock = []
+                    try:
+                        for _f in _bt_as_completed(_futs, timeout=_bt_timeout):
+                            try:
+                                _per_stock.append(_f.result())
+                            except Exception:
+                                pass   # 单股 worker 崩,丢这只、不丢全局
+                    except _BtTimeout:
+                        _n_pend = sum(1 for _f in _futs if not _f.done())
+                        for _f in _futs:
+                            _f.cancel()   # 取消未开跑的;正在跑的等 with 退出自然结束
+                        print(f'[daily_backtest] ⚠️ 进程池 {_bt_timeout}s 预算用尽: '
+                              f'完成 {len(_per_stock)}/{len(_bt_tasks)} 只,余 {_n_pend} 只跳过'
+                              f'(已完成结果保留,不再串行重跑)', flush=True)
+                print(f'[daily_backtest] 进程池并行回测: {len(_per_stock)}/{len(valid_stocks)}股 '
+                      f'× {len(all_variants)}变体, {_nw} 进程')
             except Exception as _pe:
-                print(f'[daily_backtest] 进程池不可用/超时,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
+                # 到这里 = 池本身起不来(受限环境无法 fork/spawn),才回退串行
+                print(f'[daily_backtest] 进程池不可用,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
                 _per_stock = None
         if _per_stock is None:
+            # 串行回退加截止时间守护(2026-07-01):进程池 timeout 抛出后,原来无脑串行,
+            # 单只慢就磨到 3600s 硬超时被切断、后面聚合入库全不执行(2026-06-30 撞过)。
+            # 现在给串行 25min 预算,超时 break、用已完成的部分数据继续聚合入库。
             from genome_bt_worker import run_stock as _gbt
-            _per_stock = [_gbt(t) for t in _bt_tasks]
+            _per_stock = []
+            _serial_deadline = time.time() + 1500   # 25 min
+            for _i, _t in enumerate(_bt_tasks):
+                if time.time() > _serial_deadline:
+                    print(f'[daily_backtest] ⚠️ 串行回退撞 25min 上限,'
+                          f'{_i}/{len(_bt_tasks)} 只已完成,余下跳过(避免撞 3600s 硬超时)', flush=True)
+                    break
+                _per_stock.append(_gbt(_t))
         for _stock_out in _per_stock:
             for key, res in (_stock_out or []):
                 if key in strategy_results:
@@ -874,6 +915,15 @@ def task_daily_backtest():
     except Exception as e:
         print(f'[daily_backtest] 策略扫描子任务失败: {e}')
 
+    # ── 9/10. 尾部纯预热步骤 — 按剩余预算决定跑不跑(2026-07-02)──
+    # 这两步只是给 genome 页焐缓存(页面可现算),非必须。7-1 撞过:回测串行拖到 19:45 后,
+    # 这两步无截止继续跑 → 顶过 3600s 硬超时被切断 + 发"数据源暂不可用"误报 + 孤儿跑到 20:18。
+    # 现在:距硬超时不足 10min 就整体跳过,保任务干净收尾。
+    _budget = _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0)
+    if _budget < 600:
+        print(f'[daily_backtest] ⏳ 剩余预算 {_budget:.0f}s 不足,跳过因子IC/价量IC预热(genome页可现算)', flush=True)
+        return
+
     # ── 9. 预热因子IC评估(写 webui 同缓存键 factor_eval:10,genome页秒读)──
     try:
         from analysis.factor_eval import evaluate as _fe
@@ -886,6 +936,9 @@ def task_daily_backtest():
         print(f'[daily_backtest] 因子评估预热失败: {e}')
 
     # ── 10. 预热价量因子 IC 加权选股(闭环消费上一步的 IC;写 pv_ic_screen:000300,genome页秒读)──
+    if _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0) < 600:
+        print(f'[daily_backtest] ⏳ 剩余预算不足,跳过价量IC预热', flush=True)
+        return
     try:
         from multi_factor_screener import screen_pv_ic
         pv = screen_pv_ic(index_code='000300', n=30)
@@ -1229,11 +1282,12 @@ def task_fund_valuation_signal():
                 print(f'[fund_valuation] ❌ {idx} {type(e).__name__}: {str(e)[:80]} ({time.time()-_t0:.1f}s)', flush=True)
         cheap = [v for v in rows if v['multiplier'] >= 1.5]
         if rows:
-            lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}] {v['multiplier']}x"
+            lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}]（定投建议 {v['multiplier']}倍）"
                      for v in sorted(rows, key=lambda x: x['percentile'])]
-            text = "🏦 宽基估值分位(定投择时)\n" + "\n".join(lines)
-            if cheap:
-                text += "\n\n💡 偏低估、可加投:" + "、".join(v['index'] for v in cheap)
+            # 结论先行(2026-07-02):可加投的指数放第一行,不用扫完整表才知道
+            head = ("💡 偏低估、本期可加投:" + "、".join(v['index'] for v in cheap)
+                    if cheap else "本期无明显低估指数,按常规定投即可")
+            text = "🏦 宽基估值分位(定投择时)\n" + head + "\n\n" + "\n".join(lines)
             try:
                 from notification_router import send
                 send('report', '基金估值分位', text)
@@ -1443,7 +1497,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
     'factor_collection':         1200,
-    'kline_prefetch':            1800,   # 焐 raw+qfq 两套 K线 + full_valuation(2026-06-25),给足时间
+    'kline_prefetch':            2700,   # 焐 raw+qfq 两套 K线 + 因子/海选;源况差实测 K线段 33min(7-2),
+                                         # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
@@ -1611,7 +1666,12 @@ class _JobsHub:
                     with _TASK_LOCK:
                         for n, ts in list(_TASK_START_TS.items()):
                             age = now - ts
-                            if age > SOFT_DEADLINE_SEC:
+                            # ⭐ 软阈值按任务取大(2026-07-02):专属预算 > 全局 30min 的任务
+                            # (daily_backtest 3600 / kline_prefetch 2700 / rag_ingest 3600),
+                            # 在自己预算内跑着不算异常 —— 此前 daily_backtest 跑到 30min 就被
+                            # 推"⚠️任务异常"吓人告警(soft→_log_run('error') 自动推),纯误报。
+                            _soft_n = max(SOFT_DEADLINE_SEC, _TASK_HARD_TIMEOUTS.get(n, 0))
+                            if age > _soft_n:
                                 over_soft.append((n, ts, int(age)))
                                 if (n, ts) not in _TASK_ALERTED:
                                     new_alerts.append((n, int(age)))
@@ -3307,8 +3367,22 @@ def task_kline_prefetch():
             print(f'[kline_prefetch] 指数成分加载失败: {e}')
 
         pool = list(codes)
-        ok = bars = 0
+        # ⏳ 循环内截止(2026-07-02):源况差的日子(东财封禁+新浪超时+baostock 反复重登)581 只
+        # K线焐热单独就能吃 33min(超 1800s 硬超时),切断后孤儿线程还在继续磨(7-2 实锤:17:00 切断,
+        # 17:03 才焐完,17:03-17:17+ 孤儿继续跑因子)。现在留 5min 余量提前收尾:已焐的全有效,
+        # 余下明天再焐(kline 缓存有历史回退,不至于裸奔)。
+        _t0k = time.time()
+        _hard = _TASK_HARD_TIMEOUTS.get(job, 1800)
+
+        def _left():
+            return _hard - (time.time() - _t0k)
+
+        ok = bars = attempted = 0
         for c in pool:
+            if _left() < 300:
+                print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,K线焐热提前收尾({attempted}/{len(pool)} 已试)', flush=True)
+                break
+            attempted += 1
             try:
                 r = datahub.prefetch_kline(c)
                 if r.get('bars'):
@@ -3316,25 +3390,61 @@ def task_kline_prefetch():
                     bars += r['bars']
             except Exception:
                 pass
-        msg = f'universe={len(pool)} warmed={ok} total_bars={bars}'
+        msg = f'universe={len(pool)} attempted={attempted} warmed={ok} total_bars={bars}'
         print(f'[kline_prefetch] {msg}')
         # 优化(2026-06-29):K线焐热命中率过低 = 外部源整体不可达 → **跳过**后面更慢的因子焐热 + 多因子海选。
         # 它们注定也焐不上(同样的源),硬跑只会:①磨到 1800s 硬超时 ②占着源/_ROUTE_POOL 拖垮并发跑的
         # factor_collection/portfolio_indicator。健康时(命中≈95%)照常跑;<30% 才判定源挂、提前干净收尾。
-        _warm_rate = (ok / len(pool)) if pool else 0.0
-        if pool and _warm_rate < 0.3:
-            print(f'[kline_prefetch] ⚠️ K线仅焐热 {ok}/{len(pool)}({_warm_rate:.0%}),源疑全挂 → '
+        # (分母用 attempted:截止提前收尾时不把"没轮到的"算成失败,防误判"源挂")
+        _warm_rate = (ok / attempted) if attempted else 0.0
+        if attempted and _warm_rate < 0.3:
+            print(f'[kline_prefetch] ⚠️ K线仅焐热 {ok}/{attempted}({_warm_rate:.0%}),源疑全挂 → '
                   f'跳过因子焐热+多因子海选(免磨满超时、免拖垮并发任务)', flush=True)
             _log_run(job, 'error', error=f'sources_down? {msg}; 已跳过因子/海选',
                      started_at=started, finished_at=datetime.now().isoformat(), notify=False)
             return
+        # K线阶段已把预算吃得只剩收尾余量 → 因子/海选没时间了,干净收尾(别撞硬超时留孤儿)
+        if _left() < 300:
+            _log_run(job, 'success', error=f'{msg}; 预算不足已跳过因子/海选',
+                     started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+            return
+        # 优化 2026-07-01:问财已熔断 → 直接跳过因子焐热+多因子海选(都依赖问财)。
+        # 之前 6-30 17:00 现象:K线焐完 572/583 后 collect_factors 逐只撞问财熔断日志刷 5 分钟到 1800s 硬顶。
+        # 现在:检测到 pywencai.breaker_open() → 干净收尾,不再无意义空磨。
+        try:
+            from data.sources.pywencai import breaker_open as _pw_open
+            if _pw_open():
+                print(f'[kline_prefetch] ⚡ 问财已熔断 → 跳过因子焐热+多因子海选(都依赖问财) → 干净收尾', flush=True)
+                _log_run(job, 'ok', error=f'{msg}; 问财熔断,已跳过 factor+mf',
+                         started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+                return
+        except Exception:
+            pass
+
         # 顺便焐 collect_factors(内部含 full_valuation 同花顺 + pywencai 问财,都是慢源,TTL 1天)→
         # 盘中选股/取因子读暖缓存、0 调慢源,不再 09:45 逐只现调把线程池打满(雪崩的真主因)。
         # 盘后非高峰 + 全源熔断保护,慢源失败快速跳过。
         vwarm = 0
+        _pw_seen_open = 0
         try:
             from fundamental_scoring import collect_factors as _cf
+            try:
+                from data.sources.pywencai import breaker_open as _pw_open2
+            except Exception:
+                def _pw_open2():
+                    return False
             for c in pool:
+                if _left() < 180:
+                    print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,因子焐热提前收尾', flush=True)
+                    break
+                # ⚠️ 问财熔断是瞬时状态(120s 冷却会过期),入口单点检查有时序漏洞(7-2 实锤:
+                # 17:03 入口检查时冷却恰好过期没跳过 → 进循环逐只再撞、熔断反复重开磨 15min+)。
+                # → 循环内持续检查:累计 3 次见它开着,断定问财今天不行,整段收尾。
+                if _pw_open2():
+                    _pw_seen_open += 1
+                    if _pw_seen_open >= 3:
+                        print(f'[kline_prefetch] ⚡ 问财熔断循环内反复触发 → 因子焐热提前收尾(已焐 {vwarm})', flush=True)
+                        break
                 try:
                     f = _cf(c)
                     if f and any(v is not None for v in f.values()):
@@ -3348,13 +3458,24 @@ def task_kline_prefetch():
         # 盘后焐多因子选股结果(mf_screen Redis 缓存):盘后算好选股池(默认中证A500)横截面排名,写长 TTL(到次日早盘)。
         # → 09:45 综合选股/晨报用 cache_only 只读暖缓存,**本步失败(缓存冷)就跳过,绝不在选股高峰现拉全池**。
         # index_code 不显式传 → 继承 DEFAULT_INDEX(config.SELECTION_INDEX_UNIVERSE),与早盘读用同一键。
-        try:
-            from multi_factor_screener import screen_index_cached as _mfs
-            _mfr = _mfs(n=25, add_sector_leaders=True, workers=1,
-                        force=True, ttl=24 * 3600)   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
-            print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
-        except Exception as e:
-            print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
+        if _left() < 300:
+            print(f'[kline_prefetch] ⏳ 预算剩 {_left():.0f}s,跳过多因子海选焐热(早盘将跳过多因子,不现拉)', flush=True)
+        else:
+            # ⚠️ screen_index_cached 是无界调用(2026-07-06 修):源况差时实测跑 44min —— 7-3 检查点
+            # 剩 13min 预算放行后,它把任务顶穿 2700s 切断+发"数据源暂不可用"误报,孤儿 17:46 才完。
+            # 套硬超时=剩余预算-60s:超时留孤儿给底层,任务自身按时干净收尾。
+            try:
+                from multi_factor_screener import screen_index_cached as _mfs
+                _mfr = _call_with_hard_timeout(
+                    '多因子海选焐热',
+                    lambda: _mfs(n=25, add_sector_leaders=True, workers=1,
+                                 force=True, ttl=24 * 3600),   # 24h:盘后焐,次日早盘读得到;每日盘后覆盖刷新
+                    timeout=max(60, int(_left()) - 60))
+                print(f'[kline_prefetch] 多因子选股焐热 {len(_mfr.get("top", []))} 只')
+            except TimeoutError:
+                print('[kline_prefetch] ⏳ 多因子海选焐热超预算,放弃(早盘将跳过多因子,不现拉)', flush=True)
+            except Exception as e:
+                print(f'[kline_prefetch] 多因子选股焐热失败(早盘将跳过多因子,不现拉): {type(e).__name__}: {str(e)[:60]}')
         _log_run(job, 'success' if ok else 'error',
                  error=f'{msg} fv={vwarm}' if ok else f'no_kline_warmed; {msg}',
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -3583,7 +3704,18 @@ def task_unified_selection():
             _exclude_kcb = True
 
         def _add(code, pts, src):
-            code = str(code)
+            # ⭐ 代码归一成 6 位(2026-07-06 修):问财/妙想返回的代码常带 '.SZ/.SH' 后缀
+            # ('603719.SH'),不归一的话:①同票 '600711' 与 '600711.SH' 被当两只,双源交叉
+            # +2分从未生效;②带后缀进 top_list → quotes/stock_names 全取不到 → 推送里
+            # 非持仓票只有代码没名字没价格(7-6 实锤);③持仓判断/推荐池也错位。
+            import re as _re6
+            s = str(code or '').strip().upper()
+            s = _re6.sub(r'\.(SH|SZ|BJ|SS)$', '', s)
+            s = _re6.sub(r'^(SH|SZ|BJ)', '', s)
+            digits = ''.join(ch for ch in s if ch.isdigit())
+            if len(digits) != 6:   # A股代码恒6位;≠6 的是脏数据(价格/空值),丢弃
+                return
+            code = digits
             if _exclude_kcb and (code.startswith('688') or code.startswith('689')):
                 return  # 科创板,排除(不入候选池)
             c = candidates.setdefault(code, {'score': 0.0, 'src': []})
@@ -3734,7 +3866,14 @@ def task_unified_selection():
 
         # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
-        body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n\n'
+        body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
+        # 结论先行(2026-07-02):红蓝复核结果放最上面,不用滚到表格底部才知道几只可买
+        if debate_map:
+            _nb = sum(1 for v in debate_map.values() if v.get('verdict') == '买入')
+            _nw = sum(1 for v in debate_map.values() if v.get('verdict') == '谨慎')
+            _nr = sum(1 for v in debate_map.values() if v.get('verdict') == '否决')
+            body += f'结论:红蓝复核 🔴可买{_nb}只 · 🟡观望{_nw}只 · 🟢避开{_nr}只(详见表格与文末)\n'
+        body += '\n'
         body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 分 | 红蓝 | 来源 |\n'
         body += '|:-:|:---------|:---:|:---:|:---:|:-:|:--:|:----|\n'
         _debate_tag = {'买入': '🔴可买', '谨慎': '🟡观望', '否决': '🟢避开'}
@@ -3789,7 +3928,6 @@ def task_unified_selection():
             ranked_weights = sorted(strategy_weights.items(), key=lambda x: -x[1])[:5]
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
-            body += '\n💡 跑几天后策略会自进化，选股自动向高效策略倾斜'
 
         # 缓存选股结果供 mx_selection_review 读取（挪到 _log_run 前，防 _log_run 异常吞掉）
         try:
@@ -3911,7 +4049,10 @@ def task_morning_portfolio():
         movers = sorted([s for s in scans if abs(s.get('change') or 0) >= 3],
                         key=lambda x: x['change'], reverse=True)[:6]
 
-        lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
+        # 结论先行(2026-07-02):标题下第一行给动作汇总
+        _hsum = (f'今日:需减/清 {len(sell_list)} 只 · 买点 {len(buy_list)} 只 · 异动 {len(movers)} 只'
+                 if (sell_list or buy_list or movers) else '今日:持仓无预警,整体平稳')
+        lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', _hsum, '']
 
         # 大盘速览(轻量,新浪源)
         mkt_line = ''
@@ -4088,8 +4229,7 @@ def task_noon_portfolio():
                     quotes.update(datahub.quotes(codes[i:i + 20]) or {})
             except Exception:
                 pass
-            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
-                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
+            rows_q = []
             for p in picks:
                 q = quotes.get(p['code']) or {}
                 try:
@@ -4097,7 +4237,16 @@ def task_noon_portfolio():
                     chg = float(q.get('change_pct') or 0)
                 except (TypeError, ValueError):
                     price, chg = 0, 0
-                mark = '🔴' if chg <= -3 else ('🟢' if chg >= 3 else '·')
+                rows_q.append((p, price, chg))
+            n_up = sum(1 for _, _, c in rows_q if c >= 3)
+            n_dn = sum(1 for _, _, c in rows_q if c <= -3)
+            head_sum = (f'异动:涨超3%有{n_up}只·跌超3%有{n_dn}只' if (n_up or n_dn)
+                        else '无明显异动,午间平稳')
+            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")} | {head_sum}',
+                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
+            for p, price, chg in rows_q:
+                # 红涨绿跌(2026-07-02 修:原来涨标🟢跌标🔴,反了)
+                mark = '🔴' if chg >= 3 else ('🟢' if chg <= -3 else '·')
                 price_s = f'¥{price}' if price else ''
                 lines.append(f"  {mark} {p['name']} {p['code']} {price_s} {chg:+.1f}%  {p.get('tag', '')}")
             _push_daily('🕦 午间重点盯盘', '\n'.join(lines))

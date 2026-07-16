@@ -16,6 +16,36 @@ import logging
 from db_compat import connect as db_connect, USE_POSTGRES
 
 
+# ── SQLite → PG upsert 方言适配 ─────────────────────────────────────────────
+# 背景:本模块 12 处 `INSERT OR REPLACE`(SQLite 语法),PG 拒收 → 服务器每天 sector_rotation
+# 任务表面成功、数据默默丢失(2026-06-30 起实测)。改法:_ior() 自动翻译成 PG 的
+# `INSERT ... ON CONFLICT DO UPDATE`。table 与 conflict 键从建表 UNIQUE 一一对应。
+_IOR_CONFLICT = {
+    'sector_raw_data': ('data_date', 'sector_code', 'data_type'),
+    'data_versions':   ('data_type', 'data_date', 'version'),
+    # sector_news_data 无 UNIQUE:SQLite `INSERT OR REPLACE` 无冲突源时等同 INSERT,PG 同。
+}
+
+
+def _ior(cursor, sql, params=()):
+    """执行 `INSERT OR REPLACE INTO ...`。SQLite 原生执行;PG 转 `ON CONFLICT DO UPDATE`。"""
+    if not USE_POSTGRES:
+        cursor.execute(sql, params); return
+    import re as _re
+    m = _re.match(r'\s*INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]+)\)', sql, _re.IGNORECASE)
+    if not m:
+        cursor.execute(sql, params); return
+    table = m.group(1)
+    cols = [c.strip() for c in m.group(2).split(',')]
+    new_sql = _re.sub(r'INSERT\s+OR\s+REPLACE\s+INTO', 'INSERT INTO', sql, count=1, flags=_re.IGNORECASE)
+    ct = _IOR_CONFLICT.get(table)
+    if ct:
+        ct_set = set(ct)
+        updates = ', '.join(f'{c}=EXCLUDED.{c}' for c in cols if c not in ct_set)
+        new_sql = f'{new_sql} ON CONFLICT ({", ".join(ct)}) DO UPDATE SET {updates}'
+    cursor.execute(new_sql, params)
+
+
 class SectorStrategyDatabase:
     """智策板块数据库管理类"""
     
@@ -229,7 +259,7 @@ class SectorStrategyDatabase:
                 self._save_news_data(cursor, data_date, data_df, version)
             
             # 记录版本信息
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_type, data_date, version, status, fetch_success, record_count)
             VALUES (?, ?, ?, 'active', 1, ?)
@@ -242,7 +272,7 @@ class SectorStrategyDatabase:
         except Exception as e:
             conn.rollback()
             # 记录失败版本
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_type, data_date, version, status, fetch_success, error_message, record_count)
             VALUES (?, ?, ?, 'failed', 0, ?, 0)
@@ -256,7 +286,7 @@ class SectorStrategyDatabase:
     def _save_sector_data(self, cursor, data_date, data_df, version):
         """保存板块数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_raw_data 
             (data_date, sector_code, sector_name, price, change_pct, volume, 
              turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
@@ -278,7 +308,7 @@ class SectorStrategyDatabase:
     def _save_news_data(self, cursor, data_date, data_df, version):
         """保存新闻数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_news_data 
             (news_date, title, content, source, url, related_sectors, 
              sentiment_score, importance_score, data_version)
@@ -575,7 +605,7 @@ class SectorStrategyDatabase:
                 self._save_news_data_raw(cursor, data_date, data_df, version)
             
             # 记录版本信息
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_date, data_type, version, fetch_success, record_count)
             VALUES (?, ?, ?, 1, ?)
@@ -594,7 +624,7 @@ class SectorStrategyDatabase:
     def _save_sector_data_raw(self, cursor, data_date, data_df, data_type, version):
         """保存板块原始数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_raw_data 
             (data_date, sector_code, sector_name, price, change_pct, volume, 
              turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
@@ -617,7 +647,7 @@ class SectorStrategyDatabase:
     def _save_fund_flow_data(self, cursor, data_date, data_df, version):
         """保存资金流向数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_raw_data 
             (data_date, sector_code, sector_name, price, change_pct, volume, 
              turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
@@ -639,7 +669,7 @@ class SectorStrategyDatabase:
     def _save_market_overview_data(self, cursor, data_date, data_df, version):
         """保存市场概况数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_raw_data 
             (data_date, sector_code, sector_name, price, change_pct, volume, 
              turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
@@ -659,7 +689,7 @@ class SectorStrategyDatabase:
     def _save_north_fund_data(self, cursor, data_date, data_df, version):
         """保存北向资金数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_raw_data 
             (data_date, sector_code, sector_name, price, change_pct, volume, 
              turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
@@ -680,7 +710,7 @@ class SectorStrategyDatabase:
     def _save_news_data_raw(self, cursor, data_date, data_df, version):
         """保存新闻数据"""
         for _, row in data_df.iterrows():
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO sector_news_data 
             (news_date, title, content, source, url, related_sectors, 
              sentiment_score, importance_score, data_version)
@@ -766,7 +796,7 @@ class SectorStrategyDatabase:
             version = self._get_next_version(news_date, 'news')
             inserted = 0
             for item in news_list:
-                cursor.execute('''
+                _ior(cursor,'''
                 INSERT OR REPLACE INTO sector_news_data 
                 (news_date, title, content, source, url, related_sectors, 
                  sentiment_score, importance_score, data_version)
@@ -785,7 +815,7 @@ class SectorStrategyDatabase:
                 inserted += 1
 
             # 记录版本信息
-            cursor.execute('''
+            _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_date, data_type, version, fetch_success, record_count)
             VALUES (?, ?, ?, 1, ?)

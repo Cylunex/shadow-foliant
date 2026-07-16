@@ -43,10 +43,6 @@ _last: dict = {}
 _locks: dict = {}
 _registry_lock = threading.Lock()
 
-# 临时诊断(2026-06-29):限流阻塞(等锁+睡眠)超过此秒数就打一条 → 定位"全源超时"是不是
-# 并发抢同源、throttle 持锁睡眠把调用串成长队所致。env RATE_LIMIT_SLOW_LOG=0 可关。
-_SLOW_LOG = float(os.getenv("RATE_LIMIT_SLOW_LOG", "3"))
-
 
 def _interval(key: str) -> float:
     env = os.getenv(f'RATE_LIMIT_{key.upper()}')
@@ -79,7 +75,6 @@ def throttle(key: str = 'default', min_interval: float = None) -> float:
     if iv <= 0:
         return 0.0
     lk = _lock_for(key)
-    _t0 = time.monotonic()   # 诊断:进入起点(含等锁)
     with lk:
         now = time.monotonic()
         last = _last.get(key, 0.0)
@@ -89,10 +84,7 @@ def throttle(key: str = 'default', min_interval: float = None) -> float:
             slept = wait + random.uniform(0, iv * 0.25)  # 抖动,避免整齐撞车
             time.sleep(slept)
         _last[key] = time.monotonic()
-    _blocked = time.monotonic() - _t0   # 等锁 + 睡眠 的总阻塞
-    if _SLOW_LOG and _blocked >= _SLOW_LOG:
-        print(f"[throttle] ⏳ {key} 阻塞 {_blocked:.1f}s(含等锁;并发抢同源→限流排队累加)", flush=True)
-    return slept
+        return slept
 
 
 # host 关键字 -> 数据源 key

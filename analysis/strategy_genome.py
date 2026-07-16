@@ -364,19 +364,31 @@ def init_genome_tables():
     conn.close()
 
 
+# 策略英文 id → 中文名(2026-07-02 提到模块级:进化日报等推送要用人话,别让用户读 'enter'/'low_atr')
+STRATEGY_CN = {
+    'enter': '放量上涨', 'keep_increasing': '均线多头', 'turtle_trade': '海龟交易',
+    'parking_apron': '停机坪', 'low_atr': '低ATR成长', 'high_tight_flag': '高而窄旗形',
+    'breakthrough_platform': '突破平台', 'backtrace_ma250': '回踩年线',
+    'climax_limitdown': '放量跌停', 'low_backtrace_increase': '无大幅回撤',
+    'rsi_oversold_bounce': 'RSI超卖反弹', 'bollinger_squeeze_breakout': '布林收窄突破',
+    'weekly_trend_daily_signal': '周线趋势+日线',
+}
+
+
+def strategy_cn(sid: str) -> str:
+    """策略 id 转中文展示名:基础策略查表;组合策略给统一中文前缀;其余保底原 id。"""
+    s = str(sid or '')
+    if s in STRATEGY_CN:
+        return STRATEGY_CN[s]
+    if s.startswith('composed'):
+        return '组合策略'
+    return s
+
+
 def seed_default_variants():
     """首次运行时，把 10 套默认策略作为 generation=0 种子入库"""
     conn = get_conn()
     cur = conn.cursor()
-
-    STRATEGY_CN = {
-        'enter': '放量上涨', 'keep_increasing': '均线多头', 'turtle_trade': '海龟交易',
-        'parking_apron': '停机坪', 'low_atr': '低ATR成长', 'high_tight_flag': '高而窄旗形',
-        'breakthrough_platform': '突破平台', 'backtrace_ma250': '回踩年线',
-        'climax_limitdown': '放量跌停', 'low_backtrace_increase': '无大幅回撤',
-        'rsi_oversold_bounce': 'RSI超卖反弹', 'bollinger_squeeze_breakout': '布林收窄突破',
-        'weekly_trend_daily_signal': '周线趋势+日线',
-    }
 
     for sid in STRATEGY_PARAM_SPACE:
         params = default_params(sid)
@@ -1107,11 +1119,11 @@ def build_evolution_report() -> str:
             trig = t.get('triggered_n', 0) or 0
             pool = t.get('stock_pool_n', 1) or 1
             lines.append(
-                f"  {tag} {t['strategy_id']}"
+                f"  {tag} {strategy_cn(t['strategy_id'])}"
                 f" 评分{t.get('score', 0):.0f}"
                 f" 胜率{t.get('win_rate_pct', 0):.0f}%"
                 f" 均收益{t.get('avg_ret_pct', 0):+.1f}%"
-                f" ({trig}/{pool})"
+                f" (触发{trig}/{pool}只)"
             )
 
     if new_variants:

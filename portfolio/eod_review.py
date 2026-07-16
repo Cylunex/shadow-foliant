@@ -141,7 +141,22 @@ def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
 
 
 def _format(items, scans, n, target, over, strategy) -> str:
-    lines = [f"🧹 尾盘持仓总结 — 持仓 {n} 只" + (f"(目标~{target},过度分散建议瘦身)" if over else "")]
+    """2026-07-02 通俗化改版(memory: 通知要通俗/直接/结论先行):
+    ① 标题一句话给动作汇总(清仓X只·减仓X只),不用读到中间才知道结论;
+    ② 去掉"紧迫72"内部黑话,只留人话分类(割肉止损/止盈锁定/死钱调出/破位减仓);
+    ③ 盈亏写"赚/亏X%"而非"浮盈亏+X%";
+    ④ 修计数 bug:建议处理超过展示上限时,被截断的不再被算成"暂持有";
+    ⑤ 尾盘强势用 🔴(红涨绿跌约定,涨=红)。"""
+    n_sell = sum(1 for it in items if it['action'] == 'sell')
+    n_reduce = sum(1 for it in items if it['action'] == 'reduce')
+    n_add = sum(1 for it in items if it['action'] == 'add')
+    verdict = '·'.join(s for s in (
+        f'清仓{n_sell}只' if n_sell else '',
+        f'减仓{n_reduce}只' if n_reduce else '',
+        f'加仓{n_add}只' if n_add else '') if s) or '全部持有,无需动作'
+    lines = [f"🧹 尾盘持仓总结 — 持仓 {n} 只 | 今日建议:{verdict}"]
+    if over:
+        lines.append(f"(持仓偏多,建议逐步收敛到约 {target} 只)")
     if strategy:
         lines.append('\n🧠 瘦身策略\n' + strategy + '\n')
     act = sorted([it for it in items if it['action'] in ('sell', 'reduce', 'add')],
@@ -149,21 +164,39 @@ def _format(items, scans, n, target, over, strategy) -> str:
     if act:
         lines.append('━━ 建议处理(按紧迫度)━━')
         for it in act:
-            pnl = f"{it['pnl']:+.0f}%" if it.get('pnl') is not None else '—'
-            lines.append(f"  {_ACT_TAG.get(it['action'])} {it['name']} {it['code']} "
-                         f"[{it['category']}·紧迫{it['exit_score']:.0f}] 浮盈亏{pnl}\n      {it['reason']}")
-        hold_n = n - len(act)
+            pnl = it.get('pnl')
+            if pnl is None:
+                pnl_txt = '盈亏不明'
+            elif pnl > 0:
+                pnl_txt = f'赚{pnl:.0f}%'
+            elif pnl < 0:
+                pnl_txt = f'亏{abs(pnl):.0f}%'
+            else:
+                pnl_txt = '持平'
+            hd = it.get('holding_days')
+            hd_txt = f'·持有{hd}天' if isinstance(hd, (int, float)) else ''
+            lines.append(f"  {_ACT_TAG.get(it['action'])} {it['name']} {it['code']} — {pnl_txt}{hd_txt} [{it['category']}]")
+            if it.get('reason'):
+                lines.append(f"      {it['reason']}")
+        n_actionable = n_sell + n_reduce + n_add
+        hidden = n_actionable - len(act)
+        hold_n = n - n_actionable
+        tail = []
+        if hidden > 0:
+            tail.append(f'另有 {hidden} 只建议处理(未展示,见App清仓助手)')
         if hold_n > 0:
-            lines.append(f"  …其余 {hold_n} 只暂持有")
+            tail.append(f'其余 {hold_n} 只持有')
+        if tail:
+            lines.append('  (' + ';'.join(tail) + ')')
     else:
         lines.append('当前无紧迫清仓/减仓信号,持仓相对健康。')
-    # 尾盘强势机会(复用 scan 的当日涨幅)
+    # 尾盘强势机会(复用 scan 的当日涨幅;红涨绿跌 → 涨用 🔴)
     buys = sorted([s for s in scans.values() if (s.get('change') or 0) > 3],
                   key=lambda x: -(x.get('change') or 0))[:5]
     if buys:
-        lines.append('\n🟢 尾盘强势(持仓内)')
+        lines.append('\n🔴 尾盘强势(持仓内,今日涨超3%)')
         for s in buys:
-            lines.append(f"  • {s.get('name')} {s.get('code')} ¥{s.get('price','')} 尾盘 {s.get('change'):+.1f}%")
+            lines.append(f"  • {s.get('name')} {s.get('code')} 现价{s.get('price', '?')}元 今日{s.get('change'):+.1f}%")
     return '\n'.join(lines)
 
 
