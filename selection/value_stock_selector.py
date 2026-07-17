@@ -49,8 +49,11 @@ class ValueStockSelector:
             print(f"排序: 按流通市值由小到大")
             print(f"目标: 筛选前{top_n}只股票")
 
-            # 优先尝试统一数据源（screen_stocks → dataapi 兜底）
-            unified = screen_stocks(pe_max=20, mcap_min=0, top_n=top_n)
+            # need_fundamental=True → 能力守卫跳过 push2/dataapi 直接走问财:低估值的股息率≥1%/
+            # 资产负债率≤30% 是核心条件,clist 完全没有这些字段(原来只按 PE≤20 + 默认涨跌幅排序,
+            # 选出的是"涨幅榜里 PE<20"的追涨票冒充低估值污染推荐池;2026-07-17 修)。
+            unified = screen_stocks(pe_max=20, mcap_min=0, top_n=top_n,
+                                    need_fundamental=True, sort_field='f20', sort_asc=True)
             if unified['success'] and unified['data']:
                 import pandas as _pd
                 df_result = _pd.DataFrame(unified['data'])

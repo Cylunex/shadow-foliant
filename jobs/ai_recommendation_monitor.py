@@ -428,9 +428,13 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
 
 
 def _parse_dt(val):
-    """容错解析时间(datetime / ISO字符串)。"""
+    """容错解析时间(datetime / ISO字符串)→ **naive 本地时间**。
+    ⚠️ 2026-07-17 修:PG 的 recommended_at 是 timestamptz,psycopg2 返回 tz-aware datetime,
+    与 naive 的 datetime.now() 相减抛 `TypeError: can't subtract offset-naive and offset-aware`,
+    被 check_all_active 的 `except: age=0` 吞掉 → 90 天到期了结永不触发(candidate 推荐无限堆积、
+    'expired' 桶恒空)。SQLite 返字符串走 strptime 路径本就是 naive,故本地测不出。统一归一 naive。"""
     if isinstance(val, datetime):
-        return val
+        return val.astimezone().replace(tzinfo=None) if val.tzinfo is not None else val
     s = str(val).replace('T', ' ').replace('+00:00', '')
     for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
         try:

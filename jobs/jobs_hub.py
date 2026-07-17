@@ -3985,6 +3985,8 @@ def task_unified_selection():
             if is_enabled('wf_selection_to_rec'):
                 from ai_recommendation_monitor import save_recommendation
                 rec_n = 0
+                rec_fail = 0
+                _rec_err = None
                 for code in top_list[:10]:
                     if code in held_codes:
                         continue  # 已持仓的不算"新推荐"
@@ -4001,12 +4003,22 @@ def task_unified_selection():
                         )
                         if rid:
                             rec_n += 1
-                    except Exception:
+                    except Exception as _re:
+                        rec_fail += 1
+                        if _rec_err is None:
+                            _rec_err = _re
                         continue
                 if rec_n:
                     print(f'[unified_selection] {rec_n} 只入推荐池追踪(source=unified_selection)')
+                # 全部写失败(PG 抖动等)不能无声无息:胜率闭环头部断供会静默失真数周(同已修的
+                # eod_outcomes)。打日志 + 让 job_runs 备注带 rec_fail 标记(2026-07-17 修)。
+                if rec_fail:
+                    print(f'[unified_selection] ⚠️ 推荐池写入失败 {rec_fail} 只,'
+                          f'首个异常: {type(_rec_err).__name__}: {str(_rec_err)[:80]}')
+                    globals()['_UNIFIED_REC_FAIL'] = rec_fail
         except Exception as e:
             print(f'[unified_selection] 战绩闭环失败: {e}')
+            globals()['_UNIFIED_REC_FAIL'] = -1   # -1=闭环整体异常(import/is_enabled)
 
         # 多源回喂:附本 source 近90天真实战绩(Y3.1 已让 candidate 能算战绩),闭合"选股→战绩→可见→校准"环
         try:
@@ -4017,7 +4029,9 @@ def task_unified_selection():
             pass
 
         _push_daily('🎯 综合选股 TOP 15', body)
-        _log_run(job, 'success', error=f'picks={len(top_list)}',
+        _rf = globals().pop('_UNIFIED_REC_FAIL', 0)
+        _note = f'picks={len(top_list)}' + (f' rec_fail={_rf}' if _rf else '')
+        _log_run(job, 'success', error=_note,
                  started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:

@@ -25,7 +25,21 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 app = FastAPI(title="shadow-foliant WebUI 原型", version="0.1")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# CORS 收敛(2026-07-17 安全修):原 allow_origins=["*"] 让任意恶意网页可跨源读/写本地 API
+# (POST /api/env 改 .env 外泄 DEEPSEEK key、POST /api/jobs/*/run 触发任务)。SPA 与本 API 同源
+# (StaticFiles 挂在 "/"),同源请求不受 CORS 限制 → 收敛不影响任何正常访问,只挡跨源。
+# 默认只放行本机同源常见形态;需跨源时 env WEBUI_ALLOWED_ORIGINS=逗号分隔(设 "*" 恢复旧的全放行)。
+_cors_env = os.getenv("WEBUI_ALLOWED_ORIGINS", "").strip()
+if _cors_env == "*":
+    _cors_origins = ["*"]
+elif _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    _cors_origins = [f"http://{h}:{p}" for h in ("localhost", "127.0.0.1")
+                     for p in ("8601", "8600")]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
+                   allow_methods=["*"], allow_headers=["*"])
 
 _STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 

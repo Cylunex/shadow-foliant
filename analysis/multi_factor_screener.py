@@ -336,6 +336,16 @@ def screen_index(index_code: str = DEFAULT_INDEX, n: int = 20,
     if limit:
         universe = universe[:limit]
     factor_df = build_factor_frame(universe, workers=workers)
+    # 有效因子覆盖率守卫(2026-07-17):collect_factors 全失败时返回全 NaN 帧,composite 恒 0、
+    # rank_topn 按股票池原序 head(N) 照样"成榜"——一份看似有效实为随机排序的假选股,还会被
+    # screen_index_cached 写 24h 缓存、次日早盘各票当多因子命中 +1 分污染 unified。慢源(问财/同花顺)
+    # 盘后全挂的日子必踩。覆盖率过低直接返回空 top(空 top 天然不被 screen_index_cached 写缓存 →
+    # 次日 cache_only miss → 早盘跳过多因子,正是"宁空不拉"的设计降级)。
+    _valid_ratio = float(factor_df.notna().mean().mean()) if factor_df.size else 0.0
+    if _valid_ratio < 0.10:
+        return {'error': f'因子覆盖率过低({_valid_ratio:.0%}),慢源疑全挂,放弃本次海选',
+                'top': [], 'index_code': index_code, 'pool': pool_meta,
+                'universe_size': len(universe), 'factors_used': []}
     ranked = rank_topn(factor_df, n=n, weights=weights)
     keep = ['rank', 'composite'] + [c for c in factor_df.columns]
     return {

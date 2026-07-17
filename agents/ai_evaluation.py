@@ -185,8 +185,10 @@ def _evaluate(recs: List[Dict[str, Any]], days: int, source: str = '') -> Evalua
 
 
 def _parse_dt(val) -> datetime:
+    # 归一 naive 本地时间:PG timestamptz 返回 aware datetime,与 naive datetime.now() 相减会抛
+    # TypeError(见 jobs/ai_recommendation_monitor._parse_dt;此处防御性对齐,2026-07-17)
     if isinstance(val, datetime):
-        return val
+        return val.astimezone().replace(tzinfo=None) if val.tzinfo is not None else val
     s = str(val).replace('T', ' ').replace('+00:00', '')
     for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
         try:

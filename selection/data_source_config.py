@@ -50,9 +50,12 @@ except Exception:
         return 0.0
 
 
-# 东财push2字段: f2=现价 f3=涨跌% f7=净利润增长% f9=PE(动)
-# f12=代码 f14=名称 f20=总市值(亿) f23=PB f25=最新价
-FIELDS = 'f2,f3,f7,f9,f12,f14,f20,f23,f25,f37'
+# 东财push2 clist 字段(2026-07-17 修正:此前 f7 被误注/误用为"净利润增长率",实为**振幅**;
+# f37 被 selector 误当"成交额",实为**加权ROE**——成交额是 f6。以 data/sources/eastmoney.py
+# 的已验证映射为准)。⚠️ clist 只有价量+PE/PB/市值,**没有净利/营收增长率、股息率、资产负债率**,
+# 故涉及这些财务条件的策略一律走问财(见 screen_stocks 能力守卫)。
+# f2=现价 f3=涨跌% f6=成交额 f7=振幅 f9=PE(动) f12=代码 f14=名称 f20=总市值(元) f23=PB f37=加权ROE
+FIELDS = 'f2,f3,f6,f7,f9,f12,f14,f20,f23,f37'
 
 # 全A股(沪深主板+创业板+科创板) — 不含北交所，不含ST
 MARKET_FS = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23'
@@ -76,7 +79,9 @@ def fetch_stocks_push2(
     # 取前200只按排序字段排列,客户端再做条件过滤
     fetch_n = max(top_n * 5, 200)
     params = {
-        'pn': 1, 'pz': fetch_n, 'po': 1 if sort_asc else 0,
+        # po 排序方向(2026-07-17 修:东财 po=0=升序、po=1=降序,原 `1 if sort_asc else 0` 反了,
+        # 让所有"升序取样"策略实际取到降序榜首)
+        'pn': 1, 'pz': fetch_n, 'po': 0 if sort_asc else 1,
         'np': 1,
         'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
         'fltt': 2, 'invt': 2, 'fid': sort_field,
@@ -107,19 +112,22 @@ def fetch_stocks_push2(
             result = []
             for item in items:
                 code = str(item.get('f12', ''))
-                # 客户端兜底过滤科创板
-                if not include_kcb and code.startswith('688'):
-                    continue
                 name = str(item.get('f14', ''))
+                # 客户端兜底过滤:科创板 688/689 + 北交所(43/83/87/92)+ ST/退市
+                # (MARKET_FS 的 m:0/m:1 分段本不含北交所,但兜底更稳;ST 只能靠名称拦)
+                if not include_kcb and code[:3] in ('688', '689'):
+                    continue
+                if code[:2] in ('43', '83', '87', '92'):
+                    continue
+                if 'ST' in name.upper() or '退' in name:
+                    continue
                 price = item.get('f2')
                 pe = item.get('f9')
-                growth = item.get('f7')
                 mcap = item.get('f20')
 
                 try:
                     price_f = float(price) if price is not None else None
                     pe_f = float(pe) if pe is not None else None
-                    growth_f = float(growth) if growth is not None else None
                     mcap_f = float(mcap) if mcap is not None else None
                 except (ValueError, TypeError):
                     continue
@@ -127,8 +135,8 @@ def fetch_stocks_push2(
                     continue
                 if pe_max is not None and (pe_f is None or pe_f > pe_max):
                     continue
-                if profit_growth_min is not None and (growth_f is None or growth_f < profit_growth_min):
-                    continue
+                # profit_growth_min 不在此过滤:clist 无净利增长字段(f7 是振幅),涉及成长的策略
+                # 由 screen_stocks 能力守卫拦在前面走问财,不会进到这里
                 if mcap_max is not None and (mcap_f is None or mcap_f / 1e8 > mcap_max):
                     continue
                 if mcap_min is not None and (mcap_f is None or mcap_f / 1e8 < mcap_min):
@@ -139,8 +147,9 @@ def fetch_stocks_push2(
                     'name': name,
                     'price': price,
                     'pe': pe,
-                    'growth': growth,       # f7 净利润增长率
-                    'change_pct': item.get('f3'),  # f3 涨跌幅(原误引未定义变量 change_pct → NameError)
+                    'growth': None,             # clist 无净利增长率(勿用 f7 冒充,f7=振幅)
+                    'amplitude': item.get('f7'),  # f7=振幅
+                    'change_pct': item.get('f3'),
                     'mcap': mcap,
                     'pb': item.get('f23'),
                 })
@@ -160,16 +169,23 @@ def screen_stocks(
     price_max=None, pe_max=None, profit_growth_min=None,
     mcap_max=None, mcap_min=None,
     top_n=10, sort_field='f3', sort_asc=False,
-    include_kcb=False,
+    include_kcb=False, need_fundamental=False, pb_max=None,
 ):
     """
     统一选股入口，自动切换数据源
     环境变量 STRATEGY_DATA_SOURCE: auto / push2 / pywencai / dataapi
+
+    ⚠️ 能力守卫(2026-07-17):push2 clist / dataapi 选股器都只有价量+PE/PB/市值,**没有**
+    净利/营收增长率、股息率、资产负债率等财务字段。当策略要求这些能力时
+    (profit_growth_min 非空 或 need_fundamental=True),这两条快路径无法正确表达该策略
+    (此前用 f7=振幅冒充净利增长 → 恒空或产出语义全错的票污染推荐池),**直接走问财**
+    (query 能完整编码策略条件);问财失败才退 dataapi 近似(仅价量兜底,不假装满足财务条件)。
     """
     strategy = get_strategy()
+    _need_wencai = (profit_growth_min is not None) or need_fundamental
 
-    # dataapi 直接走东财选股器，跳过 push2 / pywencai
-    if strategy == 'dataapi':
+    # dataapi 直接走东财选股器，跳过 push2 / pywencai(但需要财务能力时不走,落问财)
+    if strategy == 'dataapi' and not _need_wencai:
         try:
             result = fetch_stocks_dataapi(
                 price_max=price_max, pe_max=pe_max,
@@ -185,7 +201,7 @@ def screen_stocks(
             logger.warning('dataapi异常: %s' % e)
         return {'success': False, 'data': [], 'msg': 'dataapi不可用'}
 
-    if strategy in ('auto', 'push2'):
+    if strategy in ('auto', 'push2') and not _need_wencai:
         result = fetch_stocks_push2(
             price_max=price_max, pe_max=pe_max,
             profit_growth_min=profit_growth_min,
@@ -193,12 +209,9 @@ def screen_stocks(
             top_n=top_n, sort_field=sort_field, sort_asc=sort_asc,
             include_kcb=include_kcb,
         )
-        if result['success']:
+        if result['success'] and result['data']:   # 空 data 也落兜底,别当成功短路
             return result
-        logger.warning('push2失败: %s, 尝试pywencai' % result['msg'])
-        if strategy == 'push2':
-            # 不直接 return, 继续尝试 fallback
-            pass
+        logger.warning('push2失败/空: %s, 尝试pywencai' % result['msg'])
 
     # pywencai fallback (统一从 data.pywencai_safe 走, 自带 30s 硬超时)
     try:
@@ -222,27 +235,68 @@ def screen_stocks(
         except TimeoutError:
             logger.warning('pywencai 超时(30s)，降级到 dataapi')
             result = None
-        if result is not None:
-            if isinstance(result, pd.DataFrame):
-                return {'success': True, 'data': result.to_dict('records'), 'msg': 'pywencai: %s只' % len(result)}
-            return {'success': True, 'data': result, 'msg': 'pywencai成功'}
+        if isinstance(result, pd.DataFrame) and not result.empty:
+            # ⚠️ 问财原生是中文列(股票代码/最新价...),须归一成统一英文契约(code/name/price/...),
+            # 否则消费方按 df['price']/df['mcap'] 直接 KeyError→整策略静默失败(2026-07-17 修)
+            norm = _normalize_wencai(result)
+            if norm is not None:
+                return {'success': True, 'data': norm.to_dict('records'), 'msg': 'pywencai: %s只' % len(norm)}
+            logger.warning('pywencai 列无法映射统一契约,降级 dataapi: %s' % list(result.columns)[:8])
     except Exception as e:
         logger.warning('pywencai失败: %s' % e)
 
     # dataapi fallback — 走 data.eastmoney.com (push2/pywencai 都不可用时的兜底)
-    try:
-        result = fetch_stocks_dataapi(
-            price_max=price_max, pe_max=pe_max,
-            profit_growth_min=profit_growth_min,
-            mcap_max=mcap_max, mcap_min=mcap_min,
-            top_n=top_n, sort_field=sort_field, sort_asc=sort_asc,
-            include_kcb=include_kcb,
-        )
-        if result['success']:
-            return result
-        logger.warning('dataapi失败: %s' % result['msg'])
-    except Exception as e:
-        logger.warning('dataapi异常: %s' % e)
+    # ⚠️ 需要财务能力的策略即便走到这里,dataapi 也表达不了成长/股息/负债 → 不 fabricate,
+    #    宁可返回失败让 selector 自己的完整问财兜底接管(见各 selector 的 pywencai 分支)
+    if not _need_wencai:
+        try:
+            result = fetch_stocks_dataapi(
+                price_max=price_max, pe_max=pe_max,
+                profit_growth_min=profit_growth_min,
+                mcap_max=mcap_max, mcap_min=mcap_min,
+                top_n=top_n, sort_field=sort_field, sort_asc=sort_asc,
+                include_kcb=include_kcb,
+            )
+            if result['success'] and result['data']:
+                return result
+            logger.warning('dataapi失败/空: %s' % result['msg'])
+        except Exception as e:
+            logger.warning('dataapi异常: %s' % e)
+
+    # 三源全失败:必须显式返回(原来隐式 None → 4 个 selector 的 result['success'] 抛 TypeError,
+    # 反而跳过它们自己的问财兜底;2026-07-17 修)
+    return {'success': False, 'data': [], 'msg': '所有数据源均不可用(push2/pywencai/dataapi)'}
+
+
+_WENCAI_COL_MAP = {
+    '股票代码': 'code', '代码': 'code', '股票简称': 'name', '名称': 'name',
+    '最新价': 'price', '股价': 'price', '收盘价': 'price', '现价': 'price',
+    '市盈率(pe)': 'pe', '市盈率': 'pe', '市盈率(动)': 'pe', '市盈率(ttm)': 'pe',
+    '市净率(pb)': 'pb', '市净率': 'pb', '总市值': 'mcap', '流通市值': 'float_mcap',
+    '净利润增长率': 'growth', '净利润同比增长率': 'growth',
+}
+
+
+def _normalize_wencai(df):
+    """问财 DataFrame 中文列 → 统一英文契约(code/name/price/pe/pb/mcap/growth)。
+    列名常带日期后缀(如 '总市值[20241211]'),按去后缀基名匹配。缺 code/price 关键列 → None。"""
+    import re
+    import pandas as pd
+    rename = {}
+    for c in df.columns:
+        base = re.sub(r'\[.*?\]$', '', str(c)).strip().lower()
+        if base in _WENCAI_COL_MAP and _WENCAI_COL_MAP[base] not in rename.values():
+            rename[c] = _WENCAI_COL_MAP[base]
+    out = df.rename(columns=rename)
+    if 'code' not in out.columns or 'price' not in out.columns:
+        return None
+    out['code'] = out['code'].astype(str).str.split('.').str[0]   # 600519.SH → 600519
+    for k in ('name', 'pe', 'pb', 'mcap', 'growth'):
+        if k not in out.columns:
+            out[k] = None
+    for k in ('price', 'mcap', 'pe', 'pb'):
+        out[k] = pd.to_numeric(out[k], errors='coerce')
+    return out
 
 def fetch_stocks_dataapi(
     price_max=None, pe_max=None, profit_growth_min=None,
@@ -321,10 +375,14 @@ def fetch_stocks_dataapi(
             result = []
             for item in rows:
                 code = str(item.get('SECURITY_CODE', ''))
-                # 客户端兜底过滤科创板
-                if not include_kcb and code.startswith('688'):
-                    continue
                 name = str(item.get('SECURITY_NAME_ABBR', ''))
+                # 客户端兜底过滤:科创板 688/689 + 北交所 + ST/退市(dataapi 无市场过滤,全靠这里)
+                if not include_kcb and code[:3] in ('688', '689'):
+                    continue
+                if code[:2] in ('43', '83', '87', '92'):
+                    continue
+                if 'ST' in name.upper() or '退' in name:
+                    continue
                 raw_price = item.get('NEW_PRICE')
                 raw_pe = item.get('PE_TTM')
                 raw_mcap = item.get('TOTAL_MARKET_CAP')

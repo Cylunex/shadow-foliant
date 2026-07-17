@@ -45,11 +45,13 @@ class ProfitGrowthSelector:
         try:
             from data.pywencai_safe import pywencai_get
 
-            # 先尝试统一数据源（screen_stocks → dataapi 兜底，不传 profit_growth_min）
+            # 传真实净利增长门槛(≥10%,原来误传 None=零过滤,返回按ROE排的全市场前5污染推荐池)。
+            # profit_growth_min 非空 → screen_stocks 能力守卫会跳过 push2/dataapi(clist 无净利增长
+            # 字段)直接走问财;问财 query 完整编码策略条件,这里只是触发守卫的入口(2026-07-17 修)。
             self.logger.info('尝试统一数据源筛选...')
             unified = screen_stocks(
-                price_max=None, pe_max=None, profit_growth_min=None,
-                top_n=top_n, sort_field='f37', sort_asc=True,
+                price_max=None, pe_max=None, profit_growth_min=10,
+                top_n=top_n, sort_field='f6', sort_asc=True,
             )
             if unified['success'] and unified['data']:
                 df_result = pd.DataFrame(unified['data'])

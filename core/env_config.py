@@ -163,9 +163,10 @@ def get_config() -> List[Dict[str, Any]]:
         v = raw.get(f['key'], '')
         item: Dict[str, Any] = {**f, 'set': bool(v)}
         if f['type'] == 'secret':
-            # 密钥:不回明文,仅给"是否已设置 + 尾 4 位提示"
+            # 密钥:不回明文,也不回尾 4 位(2026-07-17 安全修:GET /api/env 无鉴权,尾4位+内网
+            # 拓扑本可被跨源读走;CORS 已收敛,这里再纵深防御,前端仅需知道是否已设置)
             item['value'] = ''
-            item['hint'] = ('••••' + v[-4:]) if v and len(v) >= 4 else ('已设置' if v else '')
+            item['hint'] = '已设置' if v else ''
         else:
             item['value'] = v
         out.append(item)
