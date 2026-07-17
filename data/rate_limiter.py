@@ -52,6 +52,31 @@ _GAP_BY_SOURCE: dict[str, float] = {
 }
 
 
+# host 子串 → 规范源键(把同一 provider 的多个子域折进同一限流预算)。
+# ⚠️ 2026-07-17 修:throttled_session 原来按裸 netloc 分锁/分计时器,东财 8+ 子域
+# (push2/push2his/datacenter-web/data/reportapi/search-api-web/...)虽然 _gap_for 都命中 3s,
+# 但**各拿独立锁+独立时钟** → 对东财单一机房 IP 段实际约 N× 于预期速率(注释自述"共享3s"落空),
+# 正是要防的"海量调用→整域被封 RemoteDisconnected"。折叠后同 provider 共享一把锁+一个 3s 预算。
+_HOST_FOLD = (
+    ('ai-saas', 'eastmoney_saas'),   # 妙想:须在 eastmoney 之前匹配
+    ('eastmoney', 'eastmoney'),
+    ('10jqka', 'ths'), ('hexin', 'ths'),
+    ('gtimg', 'tencent'), ('qq.com', 'tencent'),
+    ('sinajs', 'sina'), ('sina.com', 'sina'), ('sina.cn', 'sina'),
+    ('iwencai', 'pywencai'),
+    ('cninfo', 'cninfo'),
+)
+
+
+def _fold_host(host: str) -> str:
+    """把 host 折叠成规范源键(子域归一到同一 provider 的限流预算);无匹配返回原 host。"""
+    h = (host or '').lower()
+    for frag, key in _HOST_FOLD:
+        if frag in h:
+            return key
+    return host or 'default'
+
+
 def _gap_for(source: str) -> float:
     """取某源的最小间隔: 精确命中 > 子串命中(host 场景) > 默认; 并以 _DEFAULT_GAP 为下限。
     ⭐ 只增不减: 配置值若 < 1s, 一律按 1s 处理(惯例基线不可破)。"""
@@ -95,7 +120,7 @@ def throttled_session(session):
         pass
 
     def _pre_hook(prepared_request):
-        host = urlparse(prepared_request.url or "").netloc or "default"
+        host = _fold_host(urlparse(prepared_request.url or "").netloc)
         throttle(host)
 
     # 使用 Session.hooks['response'] 做「本次请求后等待」不太精准，
@@ -103,7 +128,8 @@ def throttled_session(session):
     original_send = session.send
 
     def _throttled_send(request, **kwargs):
-        host = urlparse(request.url or "").netloc or "default"
+        # 折叠子域到规范源键:东财 push2/push2his/datacenter… 共享同一把锁+同一 3s 预算(2026-07-17)
+        host = _fold_host(urlparse(request.url or "").netloc)
         min_gap = _gap_for(host)
         lk = _lock_for(host)               # ⭐ per-host 锁,不再全局阻塞
         with lk:

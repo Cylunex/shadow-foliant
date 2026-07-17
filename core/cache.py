@@ -59,6 +59,21 @@ def available() -> bool:
     return _redis() is not None
 
 
+def _mark_down(e: Exception):
+    """连接/超时类异常 → 作废客户端 + 冷却 30s,让后续调用经 _down_until 立即短路。
+    2026-07-17 修:原来首连成功后 Redis 中途宕机,_client 不置空、_down_until 不设 → outage 期间
+    每次 cache 操作都吃满 2s socket 超时(datahub L1 读+写各 2s,批量任务累积到分钟级、可撞任务硬超时),
+    与"Redis 不可用自动降级、绝不拖垮主流程"的承诺相悖。数据/解析类异常不误杀客户端。"""
+    try:
+        import redis
+        if isinstance(e, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)):
+            global _client, _down_until
+            _client = None
+            _down_until = time.time() + 30
+    except Exception:
+        pass
+
+
 def cache_get(key: str):
     c = _redis()
     if not c:
@@ -66,7 +81,8 @@ def cache_get(key: str):
     try:
         v = c.get(_NS + key)
         return json.loads(v) if v is not None else None
-    except Exception:
+    except Exception as e:
+        _mark_down(e)
         return None
 
 
@@ -77,7 +93,8 @@ def cache_set(key: str, value, ttl: int = 60):
     try:
         c.set(_NS + key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl)
         return True
-    except Exception:
+    except Exception as e:
+        _mark_down(e)
         return False
 
 
@@ -86,8 +103,8 @@ def cache_del(key: str):
     if c:
         try:
             c.delete(_NS + key)
-        except Exception:
-            pass
+        except Exception as e:
+            _mark_down(e)
 
 
 def cached(prefix: str, ttl: int = 60):

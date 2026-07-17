@@ -846,17 +846,29 @@ _此消息由AI股票分析系统自动发送_"""
             msg.attach(part1)
             msg.attach(part2)
             
-            with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port']) as server:
+            # 2026-07-17 修:按端口选连接方式 + 统一 15s 超时(与 _send_email_notification 对齐)。
+            # 原裸 SMTP()+starttls 无超时(SMTP 卡死时发送线程无限挂起)、也不处理 465(SSL 端口)——
+            # 用户配 SMTP_PORT=465(QQ/163 SSL 常用)时 archive/持仓邮件恒失败,而测试邮件走 SMTP_SSL 却"OK"。
+            if self.config['smtp_port'] == 465:
+                server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
+            else:
+                server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
                 server.starttls()
+            try:
                 server.login(self.config['email_from'], self.config['email_password'])
                 server.send_message(msg)
-            
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+
             return True
-            
+
         except Exception as e:
             print(f"[ERROR] 邮件发送失败: {str(e)}")
             return False
-    
+
     def _send_portfolio_webhook(self, analysis_results: dict, sync_result: dict = None) -> bool:
         """发送持仓分析Webhook通知"""
         try:
@@ -867,18 +879,19 @@ _此消息由AI股票分析系统自动发送_"""
             failed = total - succeeded
             elapsed_time = analysis_results.get("elapsed_time", 0)
             
-            # 构建Markdown消息
-            content = f"### 持仓定时分析完成\\n\\n"
-            content += f"**分析概况**\\n"
-            content += f"- 总数: {total} 只\\n"
-            content += f"- 成功: {succeeded} 只\\n"
-            content += f"- 失败: {failed} 只\\n"
-            content += f"- 耗时: {elapsed_time:.2f} 秒\\n\\n"
-            
+            # 构建Markdown消息(2026-07-17 修:原用字面量 \\n(反斜杠+n)→ 推送里整篇挤成一行并夹字面 \n;
+            # 钉钉/QQ markdown 需真实换行 \n。与同文件 _send_dingtalk_webhook 口径对齐。)
+            content = f"### 持仓定时分析完成\n\n"
+            content += f"**分析概况**\n"
+            content += f"- 总数: {total} 只\n"
+            content += f"- 成功: {succeeded} 只\n"
+            content += f"- 失败: {failed} 只\n"
+            content += f"- 耗时: {elapsed_time:.2f} 秒\n\n"
+
             if sync_result:
-                content += f"**监测同步**\\n"
-                content += f"- 新增: {sync_result.get('added', 0)} 只\\n"
-                content += f"- 更新: {sync_result.get('updated', 0)} 只\\n\\n"
+                content += f"**监测同步**\n"
+                content += f"- 新增: {sync_result.get('added', 0)} 只\n"
+                content += f"- 更新: {sync_result.get('updated', 0)} 只\n\n"
             
             # 根据webhook类型构建请求
             if self.config['webhook_type'] == 'dingtalk':
@@ -886,7 +899,7 @@ _此消息由AI股票分析系统自动发送_"""
                     "msgtype": "markdown",
                     "markdown": {
                         "title": f"{self.config['webhook_keyword']}",
-                        "text": f"{self.config['webhook_keyword']}\\n\\n{content}"
+                        "text": f"{self.config['webhook_keyword']}\n\n{content}"
                     }
                 }
             else:  # feishu

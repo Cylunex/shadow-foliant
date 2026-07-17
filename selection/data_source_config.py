@@ -213,6 +213,16 @@ def screen_stocks(
             return result
         logger.warning('push2失败/空: %s, 尝试pywencai' % result['msg'])
 
+    # ⚠️ need_fundamental=True(仅 value_stock_selector 传)表示策略含**内部通用 query 无法表达**的
+    # 财务条件(股息率/资产负债率/PB 均无对应参数;pb_max 是死参数)。内部 pywencai 只会用退化 query
+    # (低估值退化成"市盈率<20,成交额升序")返回大量非空 → 短路掉 selector 自己含股息率/负债率/PB 的
+    # 完整问财 query,伪低估值票进推荐池污染胜率(2026-07-17 修:R2 只在 push2/dataapi 层堵住,漏了这层)。
+    # 直接返回失败,交 selector 完整 query 接管。profit_growth/small_cap/low_price_bull 走 profit_growth_min
+    # (内部 query 能编码 净利增长/市值/股价),不受影响。
+    if _need_wencai and need_fundamental:
+        return {'success': False, 'data': [],
+                'msg': 'need_fundamental: 条件超出内部query表达力,交selector完整问财接管'}
+
     # pywencai fallback (统一从 data.pywencai_safe 走, 自带 30s 硬超时)
     try:
         from data.pywencai_safe import pywencai_get

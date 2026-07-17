@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
+
+_log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、对外回通用文案
 
 # 路径引导(webui/ 子目录)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -163,6 +166,16 @@ def _ok(data):
 
 
 def _err(msg):
+    # 异常对象 → 脱敏(2026-07-17):裸 SQL 端点 except 传的是 psycopg2 异常,其 str 形如
+    # `connection to server at "<内网PG>", port 55432 failed` / `relation "..." does not exist`,
+    # 直接回前端会泄内网 PG 地址+端口/表结构(CWE-209)。完整异常只进服务端日志,对外回通用文案。
+    # 开发者显式写的 _err("字面文案") 是对外文案,原样回。
+    if isinstance(msg, BaseException):
+        try:
+            _log_webui.exception("API error", exc_info=msg)
+        except Exception:
+            pass
+        return {"ok": False, "error": "服务暂不可用，请稍后重试"}
     return {"ok": False, "error": str(msg)}
 
 
@@ -246,7 +259,14 @@ def stock_insights(code: str):
         def forensics():
             from fundamental_scoring import collect_factors
             from financial_forensics import analyze_forensics
-            return analyze_forensics(collect_factors(code) or {})
+            # 盘中只读缓存:未预热个股(非持仓/监测/A500)缓存冷时不现拉同花顺+问财慢源
+            # (2026-07-17,对齐 cache_only 约定;analyze_forensics 对全 None 因子帧优雅降级)
+            try:
+                from datahub import _is_trading_hours
+                _co = _is_trading_hours()
+            except Exception:
+                _co = False
+            return analyze_forensics(collect_factors(code, cache_only=_co) or {})
 
         def flow():
             import datahub
@@ -1629,10 +1649,13 @@ def market_lhb_ai(days: int = 14):
     """龙虎榜机构/游资 AI 解读:把机构买卖榜喂给 LLM,解读资金动向 + 值得关注标的。
     ⚠️ 需 LLM key。Redis 缓存 30min。"""
     def compute():
-        from cache import cache_get
-        rows = cache_get(f"lhbinst:{days}") or []
+        # 2026-07-17 修:原裸 cache_get 只读 Redis(L2),生产常无 Redis → 恒 None、恒报空且误导
+        # (提示"请先打开机构页"但用户已打开、数据在 L1 内存缓存里)。改调同进程生产方端点,走
+        # _cache_or 的 L1 命中/冷则 _try(_jgmm,_detail) 重算兜底,不再单点依赖 Redis L2。
+        resp = market_lhb_institution(days)
+        rows = (resp.get("data") or []) if isinstance(resp, dict) and resp.get("ok") else []
         if not rows:
-            return {"error": "龙虎榜数据为空,请先打开龙虎榜·机构页"}
+            return {"error": "龙虎榜数据源暂不可用,请稍后重试"}
         top = rows[:18]
         lines = []
         for r in top:
@@ -2034,8 +2057,11 @@ def macro_data():
     """宏观周期数据快照(GDP/CPI/PMI/货币/利率…)。冷抓 ~70s,但宏观指标按月/季更新 →
     缓存 12h(冷加载极少触发;生产可由后台任务预热)。"""
     try:
+        # 冷抓正常 ~70s(~18 次串行直连 akshare,不走 datahub,无源级超时护栏)→ 卡源时可挂分钟级×3重试。
+        # 套 90s 截止封顶病态卡死(90>70 → 正常冷抓仍能落 12h 缓存;空 {} 被 keep 拒缓存,下轮重试)。
+        # 全站慢端点唯一漏配 _with_deadline 的(2026-07-17 补)。
         data = _cache_or("macro:all", 43200,
-                         lambda: MacroCycleDataFetcher_get(),
+                         lambda: _with_deadline(MacroCycleDataFetcher_get, 90, {}),
                          keep=lambda v: isinstance(v, dict) and bool(v))
         return _ok(data)
     except Exception as e:
@@ -2333,8 +2359,28 @@ def convertible_screen(top_n: int = 30, max_price: float = 135.0,
 
 @app.get("/api/screen/strategy/{name}")
 def screen_strategy(name: str, top_n: int = 10):
-    """问财策略选股(需 pywencai)。name: value/small_cap/profit_growth/low_price_bull/main_force。"""
+    """问财策略选股(需 pywencai)。name: value/small_cap/profit_growth/low_price_bull/main_force。
+    ⚠️ 盘中只读 09:15 strategy_prefetch 焐好的当日缓存(2026-07-17,与 /api/screen/multifactor 的
+    cache_only 对齐 + 约定"盘中绝不逐只现调问财"):命中即返、冷则空;仅盘后现调 selector。"""
     import pandas as pd
+    try:
+        from datahub import _is_trading_hours
+        _trading = _is_trading_hours()
+    except Exception:
+        _trading = False
+    # 盘中优先读 strategy_prefetch 的当日缓存(问财 4 策略用中文键;主力资金走其自带缓存)
+    _CN = {"value": "低估值", "small_cap": "小市值", "profit_growth": "净利增长", "low_price_bull": "低价擒牛"}
+    try:
+        if name in _CN:
+            import strategy_cache as _sc
+            cdf = _sc.load(_CN[name])
+            if cdf is not None and len(cdf):
+                return _ok({"rows": cdf.head(top_n).where(pd.notna(cdf.head(top_n)), None).to_dict("records"),
+                            "msg": "%s(当日缓存)" % _CN[name]})
+            if _trading:   # 盘中缓存冷:宁空不现拉问财
+                return _ok({"rows": [], "msg": "盘中仅读缓存,当日缓存冷(cache_only_miss),盘后再试"})
+    except Exception:
+        pass
     try:
         if name == "value":
             from value_stock_selector import ValueStockSelector
@@ -2351,7 +2397,8 @@ def screen_strategy(name: str, top_n: int = 10):
         elif name == "main_force":
             from main_force_selector import MainForceStockSelector
             sel = MainForceStockSelector()
-            raw = sel.get_main_force_stocks()
+            # 盘中只读自带缓存,不现拉;盘后正常现算
+            raw = sel.get_main_force_stocks_cached(use_cache=True) if _trading else sel.get_main_force_stocks()
             df = raw if isinstance(raw, pd.DataFrame) else sel._convert_to_dataframe(raw)
             if df is not None and len(df):
                 df = sel.get_top_stocks(df, top_n)

@@ -139,7 +139,8 @@ def _action(score: float) -> str:
     return '基本面较差 — 不建议持有'
 
 
-def collect_factors(symbol: str, use_cache: bool = True) -> Dict[str, Optional[float]]:
+def collect_factors(symbol: str, use_cache: bool = True,
+                    cache_only: bool = False) -> Dict[str, Optional[float]]:
     """聚合 8 因子原始值，优先 a-stock full_valuation + 同花顺 EPS，备 pywencai
 
     返回的 dict 即使部分字段缺也返回，缺字段值为 None。
@@ -147,6 +148,8 @@ def collect_factors(symbol: str, use_cache: bool = True) -> Dict[str, Optional[f
     (同花顺,慢,走 datahub._route 全源熔断)+ pywencai(问财,限流2s+30s超时,**自带熔断 见 pywencai_safe**)
     → 盘中 60 只逐只现调是取因子"累计156s"+池耗尽雪崩的真主因。盘后 kline_prefetch 焐热,盘中读缓存 0 调慢源。
     慢源整体不可达时两者都在连续失败后秒级短路降级(不再逐只吃满 timeout 拖垮焐热/采集任务)。
+    cache_only=True(2026-07-17):缓存冷时**只返回空因子帧、不现拉慢源**(盘中用,与项目 cache_only 约定
+    对齐 —— 任何盘中逐只现调问财/同花顺的路径都应盘后预热+盘中读缓存;调用方对全 None 帧能优雅降级)。
     """
     if use_cache:
         try:
@@ -156,6 +159,8 @@ def collect_factors(symbol: str, use_cache: bool = True) -> Dict[str, Optional[f
                 return _c
         except Exception:
             pass
+    if cache_only:
+        return {k: None for k in SUB_SCORERS}   # 缓存冷 + 盘中:宁空不现拉慢源
     factors: Dict[str, Optional[float]] = {k: None for k in SUB_SCORERS}
 
     try:

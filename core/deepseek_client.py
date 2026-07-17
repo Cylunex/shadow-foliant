@@ -246,11 +246,13 @@ class DeepSeekClient:
         """基本面分析"""
 
         # 财务排雷方法论(借鉴 财务报表深度解读 skill)；失败则空串,不影响主流程
+        # ⚠️ 2026-07-17 修:RED_FLAG_GUIDE 必须在 except 里也绑定 —— 它是函数局部名,导入失败时
+        # 下方 line ~372 `... if RED_FLAG_GUIDE else ''` 会 UnboundLocalError 炸掉整只股票分析
+        # (降级护栏本意"取不到就空串继续",原来反而硬崩)。forensics_block 已是死变量(重构后不用)。
         try:
             from financial_forensics import RED_FLAG_GUIDE
-            forensics_block = "\n" + RED_FLAG_GUIDE + "\n"
         except Exception:
-            forensics_block = ""
+            RED_FLAG_GUIDE = ""
 
         # 构建财务数据部分
         financial_section = ""

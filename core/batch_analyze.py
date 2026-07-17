@@ -118,6 +118,19 @@ def analyze_single_stock_for_batch(symbol, period, enabled_analysts_config=None,
         discussion_result = agents.conduct_team_discussion(agents_results, stock_info)
         final_decision = agents.make_final_decision(discussion_result, stock_info, indicators)
 
+        # ⚠️ 2026-07-17 修:LLM 全挂(provider key 失效/额度耗尽/429,而行情走 datahub 缓存仍可得)时,
+        # call_api 会把异常当普通字符串返回("API调用失败:.../[LLM-Router]/API返回空响应"),原来会被
+        # 当正常分析入库 + 抽伪决策信号,污染 saved_analysis 与胜率闭环。此处以"全部 analysis 都是
+        # 失败串"为门槛(单个可选 agent 抖动不误杀)判定 LLM 全挂 → 不入库、不抽信号、标 success=False。
+        _LLM_FAIL = ('API调用失败', 'API返回空响应', '[LLM-Router]')
+        _analyses = [v.get('analysis', '') for v in (agents_results or {}).values()
+                     if isinstance(v, dict)]
+        _valid = [a for a in _analyses if isinstance(a, str) and a.strip()]
+        if _valid and all(a.lstrip().startswith(_LLM_FAIL) for a in _valid):
+            _first = next((a for a in _valid), 'LLM 调用失败')
+            print(f"❌ {symbol} LLM 全部失败,未入库: {_first[:100]}")
+            return {"symbol": symbol, "error": f"LLM 全部失败: {_first[:120]}", "success": False}
+
         saved_to_db, db_error, record_id = False, None, None
         try:
             record_id = db.save_analysis(
