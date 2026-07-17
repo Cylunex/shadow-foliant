@@ -199,16 +199,30 @@ CREATE TABLE IF NOT EXISTS smart_monitor_notifications (
     success      BOOLEAN
 );
 
+-- trade_records:成交流水 + 持仓变动统一时间线(2026-06 合并 portfolio_changes;2026-07-17 补齐
+-- DDL 与代码对齐 —— 生产库是手工 ALTER 过的,新库缺列会让 _log_change 静默失败、bulk_import
+-- 共享事务 aborted、"自动变动记录"名存实亡)
 CREATE TABLE IF NOT EXISTS trade_records (
-    id           BIGSERIAL PRIMARY KEY,
-    stock_code   TEXT NOT NULL,
-    stock_name   TEXT,
-    trade_type   TEXT,
-    quantity     INTEGER,
-    price        DOUBLE PRECISION,
-    amount       DOUBLE PRECISION,
-    trade_time   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    extra        JSONB
+    id             BIGSERIAL PRIMARY KEY,
+    stock_code     TEXT NOT NULL,
+    stock_name     TEXT,
+    trade_type     TEXT,               -- 买入/卖出(成交行) 或 新增/调整/删除(变动行)
+    quantity       INTEGER,
+    price          DOUBLE PRECISION,
+    amount         DOUBLE PRECISION,
+    pos_quantity   INTEGER,            -- 变更后持仓数量快照
+    pos_cost_price DOUBLE PRECISION,   -- 变更后持仓成本快照
+    delta_qty      INTEGER,            -- 本次数量增减(加仓+/减仓-)
+    source         TEXT,               -- ui_manual/bulk_import/import_trades/ai_auto/api...
+    note           TEXT,
+    commission     DOUBLE PRECISION,   -- 佣金
+    tax            DOUBLE PRECISION,   -- 印花税
+    profit_loss    DOUBLE PRECISION,   -- 卖出已实现盈亏
+    order_id       TEXT,
+    change_id      BIGINT,
+    trade_time     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    extra          JSONB,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_trade_records_code_time ON trade_records (stock_code, trade_time DESC);
 

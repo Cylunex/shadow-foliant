@@ -63,28 +63,18 @@ def _get_current_price(symbol: str) -> Optional[float]:
 
 
 def _get_add_times(symbol: str) -> int:
-    """从 portfolio_changes 拉过去 365 天加仓次数"""
+    """过去 365 天加仓次数(delta_qty>0 的变动记录)。
+
+    2026-07-17 修:原直查 portfolio_changes 表 —— 该表已并入 trade_records(生产 PG 无此表,
+    SQLite 更从未建过),查询必抛、被裸 except 吞成恒返 0 → evaluate_one 的加仓次数上限风控
+    (max_add)从未生效、推送恒显示"已加 0 次"。改走 portfolio_db.get_change_history(合并表
+    的统一抽象,PG 读 trade_records;SQLite 模式本就无变动记录,返 0 与文档一致)。"""
     try:
-        from db_compat import connect, USE_POSTGRES
-        snap_db = _bootstrap.db_path('jobs_snapshots.db')
-        conn = connect(snap_db)
-        cur = conn.cursor()
-        if USE_POSTGRES:
-            cur.execute('''
-                SELECT COUNT(*) FROM portfolio_changes
-                WHERE code = ? AND delta_qty > 0
-                  AND changed_at >= NOW() - INTERVAL '365 days'
-            ''', (symbol,))
-        else:
-            cur.execute('''
-                SELECT COUNT(*) FROM portfolio_changes
-                WHERE code = ? AND delta_qty > 0
-                  AND changed_at >= datetime('now', '-365 days')
-            ''', (symbol,))
-        n = cur.fetchone()[0] or 0
-        conn.close()
-        return int(n)
-    except Exception:
+        from portfolio_db import portfolio_db
+        rows = portfolio_db.get_change_history(code=symbol, since_days=365, limit=1000) or []
+        return sum(1 for r in rows if (r.get('delta_qty') or 0) > 0)
+    except Exception as e:
+        print(f'[position_guardian] 加仓次数查询失败(按0处理): {type(e).__name__}: {str(e)[:60]}')
         return 0
 
 

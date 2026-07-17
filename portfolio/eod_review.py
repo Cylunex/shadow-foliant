@@ -27,8 +27,12 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
     try:
         from portfolio_db import portfolio_db
+        # 与 DB 层语义对齐(2026-07-17 修):quantity=0=已清仓(get_all_stocks 已过滤),
+        # NULL=未填数量(代码记账用户)须保留 —— 原 `or 0` 把 NULL 当 0 踢掉,
+        # 全 NULL 用户尾盘总结恒"当前无持仓"(早午盘任务却照跑,同一持仓两套口径)。
         holdings = [h for h in (portfolio_db.get_all_stocks() or [])
-                    if float(h.get('quantity') or h.get('shares') or 0) > 0]
+                    if h.get('quantity', h.get('shares')) is None
+                    or float(h.get('quantity') or h.get('shares') or 0) > 0]
     except Exception as e:
         out['summary'] = f'持仓读取失败: {type(e).__name__}: {str(e)[:50]}'
         return out

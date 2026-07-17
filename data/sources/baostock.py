@@ -88,10 +88,21 @@ def _bs_code(code: str) -> str:
     return f'sz.{c}'
 
 
-def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw"):
+def index_kline(code: str, period: str = "3y", interval: str = "1d"):
+    """指数日线(沪深300/中证500 等)。baostock 支持指数历史,但指数代码规则与个股不同:
+    000xxx 中证/上证系列 → sh.、399xxx 深证系列 → sz.(个股规则 _bs_code 会把 000300 误判成
+    sz.000300 取空)。供 datahub.index_kline 域调用,勿走个股 kline 的代码推断。"""
+    c = ''.join(ch for ch in str(code) if ch.isdigit())[-6:].zfill(6)
+    bs = ('sz.' if c.startswith('399') else 'sh.') + c
+    return kline(code, period, interval, 'raw', bs_code=bs)
+
+
+def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw",
+          bs_code: str = None):
     """返回 datahub 同款 K线 DataFrame(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。
 
     adjust='qfq'→前复权(adjustflag=2,真·非东财 qfq 源)/'raw'→不复权(adjustflag=3)。仅日线。
+    bs_code: 显式指定 baostock 代码(如指数 'sh.000300'),不传按个股规则 _bs_code 推断。
     任何异常/未装/登录失败 → 返回空 DF(纯兜底,绝不抛)。"""
     try:
         import pandas as pd
@@ -105,7 +116,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
     days = _PERIOD_DAYS.get(period, 365)
     start = (datetime.now() - timedelta(days=int(days) + 10)).strftime('%Y-%m-%d')  # +10 冗余
     end = datetime.now().strftime('%Y-%m-%d')
-    bscode = _bs_code(code)
+    bscode = bs_code or _bs_code(code)
     adjustflag = '2' if str(adjust) == 'qfq' else '3'   # 2=前复权 3=不复权
     rows = []
     # ⭐ 等锁最多 2s,拿不到立即返空(防孤儿持锁拖累后续调用)。锁里 login/query 卡到 OS RTO 是它的事,
@@ -129,7 +140,10 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
     finally:
         _LOCK.release()
     if not rows:
-        _mark_fail()
+        # 查询成功但 0 行 =「该代码无数据」(北交所/退市/指数误入个股规则),不是源故障
+        # —— 不计熔断、不重置登录(2026-07-17 修:原来一只北交所码 raw+qfq 各查一次就把
+        # baostock 整源打进 5 分钟冷却,期间所有 2y/3y 长历史静默退化 ~365 根;
+        # 口径与 pywencai_safe「返回空 df ≠ 失败」一致)。
         return pd.DataFrame()
     try:
         df = pd.DataFrame(rows, columns=['date', 'open', 'high', 'low', 'close', 'volume'])

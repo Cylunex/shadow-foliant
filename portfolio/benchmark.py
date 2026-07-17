@@ -40,7 +40,9 @@ def _portfolio_cum_series() -> List[Tuple[str, float]]:
     cum = 1.0
     for i in range(1, len(eq)):
         mv_prev, mv_cur = eq[i - 1][1], eq[i][1]
-        flow = float(flows.get(eq[i][0], 0.0))
+        # flow 累计 (d_prev, d_cur] 区间全部成交(与 performance.twr 同修,2026-07-17):
+        # 快照缺日时中段买卖原来匹配不上、被算进收益
+        flow = sum(float(v) for d, v in flows.items() if eq[i - 1][0] < d <= eq[i][0])
         r = (mv_cur - mv_prev - flow) / mv_prev if mv_prev > 0 else 0.0
         if -0.5 < r < 0.5:
             cum *= (1 + r)

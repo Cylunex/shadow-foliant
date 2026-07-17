@@ -45,7 +45,10 @@ def twr(equity: List[Tuple[str, float]], flows: Dict[str, float]) -> Optional[di
     for i in range(1, len(eq)):
         d_prev, mv_prev = eq[i - 1]
         d_cur, mv_cur = eq[i]
-        flow = float(flows.get(d_cur, 0.0))
+        # flow 累计区间 (d_prev, d_cur] 全部成交(2026-07-17 修):快照缺日(任务失败是已知常态)时,
+        # 中段日期的买卖原来永远匹配不上、被算进收益 → 当日买入直接抬高 TWR/夏普。
+        # ISO 日期字符串字典序=时间序,直接比较。
+        flow = sum(float(v) for d, v in flows.items() if d_prev < d <= d_cur)
         if mv_prev <= 0:
             continue
         r = (mv_cur - mv_prev - flow) / mv_prev

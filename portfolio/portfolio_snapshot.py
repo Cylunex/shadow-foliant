@@ -44,6 +44,23 @@ def init_db():
     conn.close()
 
 
+def _net_trade_flow(after_date: str, upto_date: str) -> float:
+    """(after_date, upto_date] 区间真实成交净流入(买入+ / 卖出-),来自 trade_records 成交行。
+    走 portfolio_db.get_trades(两后端同构);无记录/异常返回 0(不影响快照主流程)。"""
+    try:
+        from portfolio_db import portfolio_db
+        flow = 0.0
+        for t in (portfolio_db.get_trades(limit=1000) or []):
+            d = str(t.get('trade_time') or '')[:10]
+            if not d or not (after_date < d <= upto_date):
+                continue
+            amt = float(t.get('amount') or 0)
+            flow += amt if t.get('trade_type') == '买入' else -amt
+        return round(flow, 2)
+    except Exception:
+        return 0.0
+
+
 def save_snapshot(snap_date: str) -> Optional[Dict]:
     """按当前股票持仓 + 实时价算组合市值,落一行(幂等 upsert)。无持仓返回 None。"""
     try:
@@ -80,13 +97,18 @@ def save_snapshot(snap_date: str) -> Optional[Dict]:
     cur = conn.cursor()
     cur.execute("DELETE FROM stock_portfolio_snapshots WHERE snap_date=?", (snap_date,))
 
-    # 算当日涨跌：对比上一次快照
+    # 算当日涨跌:对比上一次快照,并**剔除区间内买卖资金流**(2026-07-17 修)——
+    # 原来 daily_mv_change = 今日市值-上次市值:当天买入 10 万会被当"+10 万收益"推送、
+    # 清仓一只显示巨额假亏损(与 performance.twr 的剔 flow 口径不一致)。
+    # 净流 = (prev_date, snap_date] 内 trade_records 成交行的 买入金额-卖出金额;
+    # 上次快照缺日(任务失败)时为多日差值,flow 同窗口累计,口径仍一致。
     daily_mv_change = 0.0
-    cur.execute("""SELECT total_mv FROM stock_portfolio_snapshots
+    cur.execute("""SELECT total_mv, snap_date FROM stock_portfolio_snapshots
                    ORDER BY snap_date DESC LIMIT 1""")
     prev = cur.fetchone()
     if prev is not None and prev[0] is not None:
-        daily_mv_change = round(total_mv - float(prev[0]), 2)
+        flow = _net_trade_flow(str(prev[1])[:10], str(snap_date)[:10])
+        daily_mv_change = round(total_mv - float(prev[0]) - flow, 2)
 
     cur.execute("""INSERT INTO stock_portfolio_snapshots
         (snap_date, total_mv, total_cost, pnl_pct, n_stocks, holdings_json, daily_mv_change)

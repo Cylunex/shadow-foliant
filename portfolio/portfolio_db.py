@@ -40,6 +40,12 @@ class PortfolioDB:
         """获取数据库连接"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # 使查询结果可以通过列名访问
+        # SQLite 外键约束默认每连接关闭:不开的话 delete_stock 注释宣称的
+        # ON DELETE CASCADE 不生效,删股后 portfolio_analysis_history 留孤儿行(2026-07-17 修)
+        try:
+            conn.execute('PRAGMA foreign_keys = ON')
+        except Exception:
+            pass
         return conn
     
     def _init_database(self):
@@ -626,8 +632,12 @@ class PortfolioDB:
                 if code.isdigit() and len(code) <= 6:
                     code = code.zfill(6)
                 name = s.get('name') or s.get('股票名称') or s.get('股票简称') or code
-                cost_price = s.get('cost_price') or s.get('成本价')
-                quantity = s.get('quantity') or s.get('数量')
+                # 不能用 or 链:0 是 falsy,quantity=0(清仓)会被吞成 NULL(语义=未填,分析照跑)。
+                # 与 PG 版同修(2026-07-17)。
+                cost_price = next((s.get(k) for k in ('cost_price', '成本价')
+                                   if s.get(k) is not None), None)
+                quantity = next((s.get(k) for k in ('quantity', '数量')
+                                 if s.get(k) is not None), None)
                 note = s.get('note') or s.get('备注') or ''
                 try:
                     cost_price = float(cost_price) if cost_price not in (None, '') else None

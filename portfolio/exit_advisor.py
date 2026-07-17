@@ -98,8 +98,10 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
     try:
         from portfolio_db import portfolio_db
+        # quantity NULL=未填数量(保留),0=清仓(DB 层已滤);同 eod_review(2026-07-17 修)
         holdings = [h for h in (portfolio_db.get_all_stocks() or [])
-                    if float(h.get('quantity') or h.get('shares') or 0) > 0]
+                    if h.get('quantity', h.get('shares')) is None
+                    or float(h.get('quantity') or h.get('shares') or 0) > 0]
     except Exception as e:
         out['summary'] = f'持仓读取失败: {type(e).__name__}: {str(e)[:50]}'
         return out

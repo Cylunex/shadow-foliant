@@ -49,23 +49,30 @@ _LOG_DB_CACHE: dict = {'conn': None, 'pid': None}
 
 
 def _get_log_db():
-    """获取缓存后的 SQLite 连接（断线自动重连），仅用于 _log_run"""
-    with _LOG_DB_LOCK:
-        pid = os.getpid()
-        cache = _LOG_DB_CACHE
-        if cache['conn'] is not None and cache['pid'] == pid:
+    """获取缓存后的连接（断线自动重连），仅用于 _log_run。
+    ⚠️ 调用方必须已持有 _LOG_DB_LOCK:缓存连接是共享对象,取用/写入/失效都要在同一把锁内,
+    否则两个任务线程并发收尾时 A 关/换连接会撞坏 B 正在用的(2026-07-16 修竞态)。"""
+    pid = os.getpid()
+    cache = _LOG_DB_CACHE
+    if cache['conn'] is not None and cache['pid'] == pid:
+        try:
+            cache['conn'].execute('SELECT 1')
+            return cache['conn']
+        except Exception:
             try:
-                cache['conn'].execute('SELECT 1')
-                return cache['conn']
+                cache['conn'].close()
             except Exception:
                 pass
-        conn = db_connect(_SNAPSHOT_DB_PATH)
-        from db_compat import USE_POSTGRES
-        if not USE_POSTGRES:
-            conn.execute('PRAGMA journal_mode=WAL')
-        cache['conn'] = conn
-        cache['pid'] = pid
-        return conn
+    from db_compat import USE_POSTGRES
+    # SQLite 传 check_same_thread=False:连接被缓存、可能由不同任务线程复用,
+    # 全部使用都在 _LOG_DB_LOCK 内串行,跨线程安全。
+    conn = db_connect(_SNAPSHOT_DB_PATH) if USE_POSTGRES else \
+        db_connect(_SNAPSHOT_DB_PATH, check_same_thread=False)
+    if not USE_POSTGRES:
+        conn.execute('PRAGMA journal_mode=WAL')
+    cache['conn'] = conn
+    cache['pid'] = pid
+    return conn
 
 
 def _init_snapshot_db():
@@ -224,18 +231,29 @@ def _log_run(job_name: str, status: str, error: str = None,
     # 必须设防:SQLite 写锁(database is locked)或连接失效时,遥测写失败绝不能击穿任务执行/调度
     # (尤其 except 路径与 _skip_if_not_trading 内的调用,二次抛出会丢日志/让静默跳过变异常)。
     try:
-        conn = _get_log_db()
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT INTO job_runs(job_name, started_at, finished_at, status, error)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (job_name, started_at or datetime.now().isoformat(), finished_at, status, error))
-        conn.commit()
+        # 整个写入持锁串行(INSERT 极小,无争用之忧):缓存连接是共享对象,取用与写入必须原子,
+        # 否则并发任务收尾时互相 close/换连接 → INSERT 撞 closed connection、记录静默丢失。
+        # 连接不 close(缓存本意就是复用;之前每次 close 让缓存从未生效,PG 下每条遥测新建 TCP)。
+        with _LOG_DB_LOCK:
+            conn = _get_log_db()
+            cur = conn.cursor()
+            cur.execute('''
+                INSERT INTO job_runs(job_name, started_at, finished_at, status, error)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (job_name, started_at or datetime.now().isoformat(), finished_at, status, error))
+            conn.commit()
+    except Exception as _le:
+        # 写失败连接可能处于 aborted 态 → 作废缓存,下次重连(探活 SELECT 1 也会兜住,这里更主动)
         try:
-            conn.close()
+            with _LOG_DB_LOCK:
+                if _LOG_DB_CACHE.get('conn') is not None:
+                    try:
+                        _LOG_DB_CACHE['conn'].close()
+                    except Exception:
+                        pass
+                    _LOG_DB_CACHE['conn'] = None
         except Exception:
             pass
-    except Exception as _le:
         print(f'[_log_run] 写 job_runs 失败(忽略,不阻断任务): {type(_le).__name__}: {str(_le)[:80]}',
               flush=True)
     # 任务失败自动推送告警(本身已设防,不让推送失败再冒泡)。
@@ -636,9 +654,12 @@ def task_daily_backtest():
         # ── 0b. 市场环境(牛/熊/震荡)→ 写入 strategy_scores.market_regime ──
         # (2026-06-12:该列建表时就有但从来没写过;突破类策略牛熊效能天差地别,评分必须带环境)
         market_regime = None
-        for _idx_code in ('000300', '510300'):  # 沪深300指数,不行用300ETF
+        # 沪深300 走指数专用域(个股 kline 链取不到指数,还会污染健康度/触发熔断,
+        # 详见 datahub.index_kline);失败再用 300ETF(510300 是基金,个股链可取)。
+        for _idx_code, _idx_fn in (('000300', lambda: datahub.index_kline('000300', '1y')),
+                                   ('510300', lambda: fetcher.get_stock_data('510300', '1y'))):
             try:
-                _idx_df = fetcher.get_stock_data(_idx_code, '1y')
+                _idx_df = _idx_fn()
                 if _idx_df is not None and not isinstance(_idx_df, dict) and len(_idx_df) > 60:
                     from strategy_signals import detect_regime
                     market_regime = detect_regime(_idx_df)
@@ -802,10 +823,11 @@ def task_daily_backtest():
                 continue
             n_triggered = sum(1 for r in results if r['trigger_count'] > 0)
 
-            # 聚合统计
+            # 聚合统计(dd 同样只算有触发的股票:零交易股 max_dd=0,混入会把 avg_dd 稀释到近 0,
+            # 20% 回撤风险项被架空、进化重新偏好深回撤变体;2026-07-16 修,与 wr/ar 口径对齐)
             wr_all = [r['win_rate'] for r in results if r['trigger_count'] > 0]
             ar_all = [r['avg_ret'] for r in results if r['trigger_count'] > 0]
-            dd_all = [r['max_dd'] for r in results]
+            dd_all = [r['max_dd'] for r in results if r['trigger_count'] > 0]
             best_all = [r['best_ret'] for r in results if r['trigger_count'] > 0]
             worst_all = [r['worst_ret'] for r in results if r['trigger_count'] > 0]
 
@@ -831,9 +853,11 @@ def task_daily_backtest():
             if n_triggered == 0:
                 continue
 
+            # confidence_n=总交易笔数(置信收缩按笔数立论;trigger_count 仍传触发股票数供触发率项)
+            _total_trades = sum(r['trigger_count'] for r in results)
             v_score = compute_strategy_score(avg_wr, avg_ar, n_triggered,
                                              max_trigger=n_pool, sample_stocks=len(results),
-                                             max_dd=avg_dd)
+                                             max_dd=avg_dd, confidence_n=_total_trades)
             prev = per_strategy_best.get(sr['strategy_id'])
             if prev is None or v_score > prev['score']:
                 per_strategy_best[sr['strategy_id']] = {
@@ -865,20 +889,25 @@ def task_daily_backtest():
         #   FIXED(经典4套): 只小步微调,变体少,保稳定
         #   DYNAMIC(其余9套): 大步动态调整(原列表漏了 climax_limitdown/high_tight_flag,现全覆盖)
         #   COMPOSED: 条件积木组合产出全新策略(结构进化+随机新血)
+        # ⚠️ 生成量对齐评估量(2026-07-16 再校准):每策略每天只评 fresh 5 个(composed 10 个),
+        # 原 DYNAMIC 每天生成 ~18 个(3精英+10中游变异+5交叉)→ 七成子代评不上就被 cull 退役,
+        # 纯属"插入即丢弃"的 DB churn(表膨胀的另一半根源,与淘汰缺口叠加成 2900+ 行)。
+        # 现 FIXED ~5/日(2+2变异+1交叉)、DYNAMIC ~7/日(3+3+1)、composed ~10/日(6变异+2交叉+2随机),
+        # 与评估吞吐持平 → 生成的变体基本都能被评估,进化不再靠"骰子灌库"。
         new_variant_count = 0
         for sid in STRATEGY_PARAM_SPACE:
             try:
                 if sid in FIXED_STRATEGIES:
                     new_ids = evolve_generation(sid, population_size=10, elites=2,
-                                                mutants=4, mutation_strength=0.10, keep_top=15)
+                                                mutants=2, mutation_strength=0.10, keep_top=15)
                 else:
                     new_ids = evolve_generation(sid, population_size=20, elites=3,
-                                                mutants=10, mutation_strength=0.30, keep_top=30)
+                                                mutants=3, mutation_strength=0.30, keep_top=30)
                 new_variant_count += len(new_ids)
             except Exception:
                 continue
         try:
-            new_variant_count += len(evolve_composed(mutants=8, randoms=4, keep_top=40))
+            new_variant_count += len(evolve_composed(mutants=6, randoms=2, keep_top=40))
         except Exception as ce:
             print(f'[daily_backtest] 组合策略进化失败: {ce}')
 
@@ -889,7 +918,10 @@ def task_daily_backtest():
         culled = 0
         for _sid in list(STRATEGY_PARAM_SPACE) + ['composed']:
             try:
-                culled += cull_variants(_sid, keep_top=30, keep_unevaluated=20)
+                # composed 与 evolve_composed(keep_top=40) 对齐,否则兜底每天把组合策略
+                # 排 31-40 名的已评分变体再砍一刀,主路径参数被静默覆盖(2026-07-16 修)
+                _kt = 40 if _sid == 'composed' else 30
+                culled += cull_variants(_sid, keep_top=_kt, keep_unevaluated=20)
             except Exception:
                 continue
         if culled:
@@ -1026,12 +1058,14 @@ def task_eod_outcomes():
     _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完缓存再后验(读暖缓存,不冷拉)
     started = datetime.now().isoformat()
     parts = []
+    fails = 0
     # ① 推荐池收盘价回填(原 ai_rec_check)
     try:
         from ai_recommendation_monitor import check_all_active
         s = check_all_active()
         parts.append(f"rec: checked={s['checked']} tp={s['hit_target']} sl={s['hit_stop']}")
     except Exception as e:
+        fails += 1
         parts.append(f"rec_err={type(e).__name__}:{str(e)[:50]}")
     # ② 决策信号后验(原 decision_signal_outcomes)
     try:
@@ -1039,9 +1073,13 @@ def task_eod_outcomes():
         r = run_outcomes(days=35)   # 35天足覆盖最长 horizon(long=20交易日)+缓冲
         parts.append(f"signals: eval={r.get('evaluated')} hit={r.get('hit')} miss={r.get('miss')}")
     except Exception as e:
+        fails += 1
         parts.append(f"signal_err={type(e).__name__}:{str(e)[:50]}")
-    _log_run(job, 'success', error=' | '.join(parts),
-             started_at=started, finished_at=datetime.now().isoformat())
+    # 两段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
+    # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
+    # 单段失败仍记 success(两段隔离是有意设计,另一段照常工作)。
+    _log_run(job, 'error' if fails >= 2 else 'success', error=' | '.join(parts),
+             started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
 def _fund_gate(job: str) -> bool:
@@ -3415,7 +3453,9 @@ def task_kline_prefetch():
             from data.sources.pywencai import breaker_open as _pw_open
             if _pw_open():
                 print(f'[kline_prefetch] ⚡ 问财已熔断 → 跳过因子焐热+多因子海选(都依赖问财) → 干净收尾', flush=True)
-                _log_run(job, 'ok', error=f'{msg}; 问财熔断,已跳过 factor+mf',
+                # status 必须是 success/error/skipped(PG job_runs.status 是枚举,'ok' 会 INSERT 失败被吞 →
+                # 当日无运行记录,下游 _wait_kline_prefetch 空等满 300s;2026-07-16 修)
+                _log_run(job, 'success', error=f'{msg}; 问财熔断,已跳过 factor+mf',
                          started_at=started, finished_at=datetime.now().isoformat(), notify=False)
                 return
         except Exception:
@@ -3856,9 +3896,11 @@ def task_unified_selection():
         debate_map = {}
         try:
             from selection_debate import run_selection_debate
-            from concurrent.futures import ThreadPoolExecutor as _TPE
-            with _TPE(max_workers=1) as _dex:
-                _dres = _dex.submit(run_selection_debate, top_list[:10], 10, True).result(timeout=360)
+            # ⚠️ 不能用 `with ThreadPoolExecutor(...)`:result(timeout) 抛超时后,退出 with 会
+            # shutdown(wait=True) 等 worker 跑完 → 护栏形同虚设(红蓝卡死照样拖满 1800s)。
+            # 改走 _call_with_hard_timeout(常驻池+不 join,孤儿线程留给底层自然结束;2026-07-16 修)。
+            _dres = _call_with_hard_timeout(
+                '红蓝对抗', lambda: run_selection_debate(top_list[:10], 10, True), timeout=360)
             for _it in (_dres.get('items') or []):
                 debate_map[str(_it.get('code'))] = _it
         except Exception as _de:
@@ -4219,8 +4261,9 @@ def task_noon_portfolio():
         snap = get_indicator_snapshot('focus_candidates') or {}
         picks = (snap.get('picks') or []) if snap.get('date') == today else []
         if not picks:
-            _log_run(job, 'success', error='no focus candidates (早盘未挑/无持仓)',
-                     started_at=started, finished_at=datetime.now().isoformat())
+            # 无候选:不在此单独 _log_run(否则和末尾那条重复,同一次运行写两行 job_runs;
+            # 2026-07-16 修)。也不能 return —— 后面的持仓急跌兜底仍须执行。
+            pass
         else:
             codes = [p['code'] for p in picks]
             quotes = {}
@@ -4250,7 +4293,8 @@ def task_noon_portfolio():
                 price_s = f'¥{price}' if price else ''
                 lines.append(f"  {mark} {p['name']} {p['code']} {price_s} {chg:+.1f}%  {p.get('tag', '')}")
             _push_daily('🕦 午间重点盯盘', '\n'.join(lines))
-        _log_run(job, 'success', error=f'candidates={len(picks)}',
+        _log_run(job, 'success',
+                 error=f'candidates={len(picks)}' + ('' if picks else ' (早盘未挑/无持仓)'),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),

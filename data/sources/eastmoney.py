@@ -163,7 +163,10 @@ def ulist_quote(codes: List[str]) -> dict:
         cc = C.norm_code(c)
         mk = '1' if C.a_prefix(cc) == 'sh' else '0'
         secids.append(f'{mk}.{cc}')
-    fields = 'f2,f3,f4,f5,f6,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10'
+    # f7=振幅 f51=涨停价 f52=跌停价 f114=静态市盈率(2026-07-17 补齐:与腾讯/新浪源逐键同构,
+    # 否则 _batch_quote 用腾讯主源+东财补缺失代码时,同一次返回里两种键集混存,
+    # 下游按 q['limit_up']/amplitude_pct 取值对东财补的票 KeyError 或静默丢字段)
+    fields = 'f2,f3,f4,f5,f6,f7,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10,f51,f52,f114'
     url = ('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2'
            f'&ut=bd1d9ddb04089700cf9c27f6f7426281&fields={fields}&secids=' + ','.join(secids))
     try:
@@ -193,6 +196,9 @@ def ulist_quote(codes: List[str]) -> dict:
             'pe_ttm': _f(r.get('f9')), 'mcap_yi': _f(r.get('f20')) / 1e8,
             'float_mcap_yi': _f(r.get('f21')) / 1e8, 'pb': _f(r.get('f23')),
             'vol_ratio': _f(r.get('f10')),
+            # 与腾讯源同构补齐(缺数据 _f→0.0,对齐 sina 源零占位做法)
+            'amplitude_pct': _f(r.get('f7')), 'limit_up': _f(r.get('f51')),
+            'limit_down': _f(r.get('f52')), 'pe_static': _f(r.get('f114')),
         }
     return result
 

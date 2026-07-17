@@ -41,10 +41,21 @@ class PortfolioDBPG:
                      note=None, conn=None, cur=None, trade_time=None):
         """记录持仓变动到 trade_records；如果调用方传了 conn/cur 复用避免新连接。
         trade_time: 实际成交时间(导入成交记录时传入),缺省用 NOW()。"""
+        # 词表统一(2026-07-17):migrate_optimize_20260606 已把存量 trade_type 归一为中文
+        # (add→新增/update→调整/delete→删除),但本方法一直写英文 → 同一动作两套词混存,
+        # get_change_stats 的 by_type 拆桶、按类型过滤漏行。写入口统一转中文。
+        change_type = {'add': '新增', 'update': '调整', 'delete': '删除'}.get(change_type, change_type)
         own_conn = conn is None
         if own_conn:
             conn = get_conn()
             cur = conn.cursor()
+        else:
+            # 共享连接(bulk_import 等):INSERT 失败会把外层事务打进 aborted 态,后续所有语句
+            # 全抛 InFailedSqlTransaction → 整批静默完蛋。SAVEPOINT 隔离本条日志(2026-07-17 修)。
+            try:
+                cur.execute('SAVEPOINT _lc')
+            except Exception:
+                pass
         try:
             delta_qty = None
             if old_data and new_data:
@@ -78,6 +89,11 @@ class PortfolioDBPG:
             print(f'[trade_records] 记录失败（不影响主操作）: {e}')
             if own_conn:
                 conn.rollback()
+            else:
+                try:
+                    cur.execute('ROLLBACK TO SAVEPOINT _lc')   # 只回滚本条日志,不毒化外层批量事务
+                except Exception:
+                    pass
         finally:
             if own_conn:
                 cur.close()
@@ -283,8 +299,13 @@ class PortfolioDBPG:
                     continue
                 code = str(code).strip().zfill(6) if str(code).strip().isdigit() and len(str(code).strip()) <= 6 else str(code).strip()
                 name = s.get('name') or s.get('股票名称') or s.get('股票简称') or code
-                cost_price = s.get('cost_price') or s.get('成本价') or s.get('cost')
-                quantity = s.get('quantity') or s.get('数量') or s.get('qty')
+                # ⚠️ 不能用 or 链取数(2026-07-17 修):0 是 falsy,quantity=0(清仓)会被吞成 NULL,
+                # 而项目约定 quantity=0=已清仓(get_all_stocks 过滤)、NULL=未填数量(分析照跑)——
+                # 语义被翻转成"清仓股继续被全系统分析/监控",清仓反向摘监测(==0 判断)也不命中。
+                cost_price = next((s.get(k) for k in ('cost_price', '成本价', 'cost')
+                                   if s.get(k) is not None), None)
+                quantity = next((s.get(k) for k in ('quantity', '数量', 'qty')
+                                 if s.get(k) is not None), None)
                 note = s.get('note') or s.get('备注') or ''
                 try:
                     cost_price = float(cost_price) if cost_price not in (None, '') else None
@@ -398,6 +419,12 @@ class PortfolioDBPG:
         try:
             for n in norm:
                 try:
+                    # ⚠️ 每行套 SAVEPOINT(2026-07-17 修):单行 INSERT 失败(典型:trade_time
+                    # '2026/6/31' 之类 ::timestamptz cast 不了)会把整个事务打进 aborted 态 →
+                    # 后续行全抛 InFailedSqlTransaction、批末 commit 被 PG 当 ROLLBACK 静默执行,
+                    # 此前"成功"的行全丢、返回的 imported 计数是假的;而持仓更新走独立连接已即时
+                    # commit —— 持仓改了流水没了。SAVEPOINT 把坏行隔离,好行真正落库。
+                    cur.execute('SAVEPOINT _tr')
                     # 先按时序更新持仓,拿到这笔成交后的持仓快照(数量/成本/增减)
                     pos_q = pos_c = delta = None
                     if update_position:
@@ -427,6 +454,10 @@ class PortfolioDBPG:
                     failed += 1
                     if len(errors) < 5:
                         errors.append(str(e))
+                    try:
+                        cur.execute('ROLLBACK TO SAVEPOINT _tr')   # 回滚坏行,保住已成功的行
+                    except Exception:
+                        pass
             conn.commit()
         except Exception:
             conn.rollback()
@@ -510,6 +541,8 @@ class PortfolioDBPG:
                 where.append("stock_code = %s")
                 params.append(code)
             if change_type:
+                # 兼容英文别名(历史调用习惯)→ 中文词表(写入口已统一,2026-07-17)
+                change_type = {'add': '新增', 'update': '调整', 'delete': '删除'}.get(change_type, change_type)
                 where.append("trade_type = %s")
                 params.append(change_type)
             sql = f"""

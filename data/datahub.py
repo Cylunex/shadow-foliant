@@ -298,8 +298,14 @@ def _nonempty(v) -> bool:
         return False
     if isinstance(v, pd.DataFrame):
         return not v.empty
-    if isinstance(v, dict) and "success" in v:   # screen() 形态:失败不缓存
-        return bool(v.get("success"))
+    if isinstance(v, dict):
+        if "success" in v:                       # screen() 形态:失败不缓存
+            return bool(v.get("success"))
+        # 结构性空:键齐值空的 dict(如全源失败时 concept_blocks 的 {'industry':[],'concept':[]}、
+        # sector_ranking 的 {'top':[],'bottom':[],'total':0})是 truthy,裸 bool 会当有效结果缓存
+        # → 源瞬时抖动一次,空结果被毒化整个 TTL(concept_blocks 长达 7 天)。2026-07-17 修:
+        # 至少有一个 truthy 值才算非空(0/''/None/[]/{} 都不算数据)。
+        return any(bool(x) for x in v.values())
     return bool(v)
 
 
@@ -968,7 +974,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
 # 主源(新浪日K / 东财 push2his)均返回**不复权(raw)**完整日线序列(2026-06-24 实测两源
 # 同票同日 raw 价一致, 见 _kline_eastmoney 注释)。全项目 K线统一 raw 口径。
 # 主拉 1y 写缓存,6mo/1mo 由切片派生(零额外外部调用),命名与 kline() 读路径一致即被其命中。
-_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095}
+_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095,
+                "5y": 1825}   # 5y 缺失曾让 baostock 失败时 5y 请求被兜底源截成 365 天还写 *_5y_* 缓存
 
 
 def _period_days(period: str) -> int:
@@ -1019,6 +1026,7 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
                      ("baostock", lambda: _kline_baostock(code, base, interval, 'raw')),
                      ("east", lambda: _kline_eastmoney(code, base, interval, 'raw'))],
                     empty=pd.DataFrame(), timeout=45)
+        df = _sanitize_kline(df)   # 与 qfq 侧/kline() 对齐:脏 bar(倒挂/0价)不写共享磁盘缓存
         if isinstance(df, pd.DataFrame) and not df.empty:
             out["bars"] = int(len(df))
             for p in periods:
@@ -1042,6 +1050,63 @@ def prefetch_kline(code: str, periods=("1y", "6mo", "1mo"), interval: str = "1d"
         except Exception:
             pass
     return out
+
+
+def _kline_index_akshare(code: str, period: str) -> pd.DataFrame:
+    """指数日线 akshare 源(ak.stock_zh_index_daily,新浪指数接口)。归一 datahub K线格式。"""
+    from akshare_safe import call as _ak_call
+    import akshare as ak
+    c = _norm_code(code)
+    sym = ('sz' if c.startswith('399') else 'sh') + c
+    df = _ak_call(ak.stock_zh_index_daily, symbol=sym, timeout=20)
+    if df is None or getattr(df, 'empty', True):
+        return pd.DataFrame()
+    df = df.rename(columns={'date': 'Date', 'open': 'Open', 'high': 'High',
+                            'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.dropna(subset=['Date']).set_index('Date')
+    cols = [c2 for c2 in ('Open', 'Close', 'High', 'Low', 'Volume') if c2 in df.columns]
+    return _slice_by_days(df[cols], _period_days(period))
+
+
+def _kline_index_baostock(code: str, period: str) -> pd.DataFrame:
+    """指数日线 baostock 源(全历史;指数代码映射与个股不同,走 sources.baostock.index_kline)。"""
+    from data.sources import baostock as _bs
+    df = _bs.index_kline(code, period)
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+
+def index_kline(code: str, period: str = "3y", use_cache: bool = True) -> pd.DataFrame:
+    """⭐ 指数历史日线(沪深300=000300/中证500=000905/中证A500=000510/创业板指=399006…)。
+
+    2026-07-17 新增独立域,**指数取数别再走 kline()**:个股 kline 的 6 源链没有一个按指数
+    代码规则取数(baostock 把 000300 推成 sz.000300、sina 推成 sz000300、east 对指数集主动返空…),
+    全链必败还给 kline 域全部源各记一次连败 → 污染健康度/触发 baostock 熔断,两次指数请求就能
+    让 kline 域全源熔断黑掉所有个股 120s(2026-06-28 摊平删掉指数专路后引入的回归)。
+    本域独立 _route('index_kline')记账,与个股 kline 健康度互不影响。
+    ⚠️ 指数代码与个股重码(000001=上证综指vs平安银行),调用方须明确意图:取指数用本函数,
+    kline() 对重码代码仍按个股取(行为不变)。"""
+    cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_idx.pkl")
+    if use_cache:
+        try:
+            if _os.path.isfile(cache_f) and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl():
+                df = pd.read_pickle(cache_f)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    return df
+        except Exception:
+            pass
+    df = _route("index_kline",
+                [("baostock_idx", lambda: _kline_index_baostock(code, period)),
+                 ("akshare_idx", lambda: _kline_index_akshare(code, period))],
+                empty=pd.DataFrame(), timeout=30)
+    df = _sanitize_kline(df)
+    if isinstance(df, pd.DataFrame) and not df.empty and use_cache:
+        try:
+            _os.makedirs(_KLINE_DIR, exist_ok=True)
+            df.to_pickle(cache_f)
+        except Exception:
+            pass
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
 
 def kline_akshare_compat(code: str, period: str = "1y") -> pd.DataFrame:
@@ -1080,9 +1145,17 @@ def kline_with_indicators(code: str, period: str = "1y") -> pd.DataFrame:
 
 
 def stock_info(code: str) -> dict:
-    """个股基础信息(名称/价格/PE/PB/市值/行业...)。走 StockDataFetcher(多源兜底)。"""
-    info = _fetcher().get_stock_info(code)
-    return info if isinstance(info, dict) else {}
+    """个股基础信息(名称/价格/PE/PB/市值/行业...)。走 StockDataFetcher(多源兜底)。
+    2026-07-17 修两洞:① 经 _route 获得每源硬超时(原直调 fetcher,内层 akshare 无超时可无限卡,
+    是唯一绕过硬超时约定的域);② error/占位结果(name='未知'/'N/A')返回 {} → _nonempty 判空
+    不缓存(原来一次瞬时失败的占位 dict 被缓存 12h,毒化该股基础信息半天)。"""
+    info = _route("stock_info", [("fetcher", lambda: _fetcher().get_stock_info(code))],
+                  empty={})
+    if not isinstance(info, dict) or info.get('error'):
+        return {}
+    if str(info.get('name') or '') in ('', '未知', 'N/A'):
+        return {}
+    return info
 
 
 def _indices_sina() -> List[dict]:

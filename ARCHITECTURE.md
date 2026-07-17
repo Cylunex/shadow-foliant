@@ -140,7 +140,7 @@
 | `analysis_records` | AI 股票分析（仅存关键摘要，原 prompt 大段文本已剥离） | 中 |
 | `portfolio_stocks` | 持仓股票清单 | 小（数十只） |
 | `portfolio_analysis_history` | 持仓分析记录 | 中 |
-| `portfolio_changes` | **持仓变动历史**（add/update/delete/bulk_import 自动记录） | 中（每次变动 1 行） |
+| `trade_records` | **成交流水+持仓变动统一时间线**（新增/调整/删除/买入/卖出 自动记录;2026-06 合并原 portfolio_changes,该表已退役） | 中（每次变动 1 行） |
 | `longhubang_records` | 龙虎榜原始数据 | 大（每日 100+ 行） |
 | `longhubang_analysis` | 龙虎榜分析报告 | 小 |
 | `stock_tracking` | 龙虎榜推荐股票追踪 | 小 |
@@ -212,7 +212,7 @@
 
 | Tab | 功能 |
 |---|---|
-| 📝 持仓管理 | 手动添加/编辑/删除（自动写 `portfolio_changes`） |
+| 📝 持仓管理 | 手动添加/编辑/删除（自动写 `trade_records` 变动行） |
 | 📤 **批量导入** | CSV / Excel / 粘贴文本 → 一键导入；3 种模式（upsert / add / replace） |
 | 📊 **数据洞察** | 5 个子 tab：估值 / 变动时间线 / 持有时长 / 交易频次 / AI 诊断 |
 | 🔄 批量分析 | AI 对持仓做批量深度分析（耗 token） |
@@ -233,20 +233,20 @@
 
 ### 持仓变动自动记录
 
-所有写操作都会自动写一行到 `portfolio_changes` 表：
+所有写操作都会自动写一行到 `trade_records` 表（变动行;原 portfolio_changes 已并入）：
 
 ```python
 portfolio_db.add_stock('600519', '贵州茅台', cost_price=1800, quantity=100)
-# → portfolio_stocks 新增 1 行 + portfolio_changes 自动记录 (change_type='add', delta_qty=+100)
+# → portfolio_stocks 新增 1 行 + trade_records 自动记录 (trade_type='新增', delta_qty=+100)
 
 portfolio_db.update_stock(id, quantity=200)
-# → portfolio_stocks 更新 + portfolio_changes 记录 (change_type='update', delta_qty=+100)
+# → portfolio_stocks 更新 + trade_records 记录 (trade_type='调整', delta_qty=+100)
 
 portfolio_db.delete_stock(id)
-# → portfolio_stocks 删除 + portfolio_changes 记录 (change_type='delete', delta_qty=-200)
+# → portfolio_stocks 删除 + trade_records 记录 (trade_type='删除', delta_qty=-200)
 
 portfolio_db.bulk_import([...], mode='upsert')
-# → portfolio_stocks 批量插入/更新 + portfolio_changes 每条都记录
+# → portfolio_stocks 批量插入/更新 + trade_records 每条都记录
 ```
 
 变动数据来源 `source` 字段：`ui_manual` / `ui_bulk_upsert` / `ui_bulk_replace` / `bulk_import` / `ai_auto` / `api` 等，便于后续追溯。

@@ -132,7 +132,10 @@ class StockDataFetcher:
                 _saved_HTTP_PROXY = os.environ.pop('HTTP_PROXY', None)
                 _saved_HTTPS_PROXY = os.environ.pop('HTTPS_PROXY', None)
                 
-                stock_info = ak.stock_individual_info_em(symbol=symbol)
+                # akshare_safe:akshare 内部 requests 不带 timeout,裸调会永久卡住底层 socket
+                # (本方法是 datahub.stock_info 域,曾是唯一绕过"每源硬超时"约定的调用路径)
+                from akshare_safe import call as _ak_safe_call
+                stock_info = _ak_safe_call(ak.stock_individual_info_em, symbol=symbol, timeout=20)
                 if stock_info is not None and not stock_info.empty:
                     for _, row in stock_info.iterrows():
                         key = row['item']

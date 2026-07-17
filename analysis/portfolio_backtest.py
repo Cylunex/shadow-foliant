@@ -163,10 +163,13 @@ def _benchmark_series(code: str) -> Dict[str, float]:
 
 
 def _benchmark_series_fetch(code: str) -> Dict[str, float]:
-    # 1) 首选 datahub.kline(磁盘缓存 + 多源路由), 2026-06-17 由兜底升为主路径
+    # 1) 首选 datahub.index_kline(指数专用域:baostock 全历史 + akshare 指数接口,磁盘缓存)。
+    #    ⚠️ 别再用 datahub.kline():那是个股链,000300 等指数代码在 6 个个股源上全链必败,
+    #    每次基准取数给 kline 域全部源各记一次连败 → 污染健康度/触发 baostock 熔断,
+    #    严重时全源熔断黑掉所有个股 K线 120s(2026-07-17 修,详见 datahub.index_kline)。
     try:
         import datahub
-        df = datahub.kline(code, '3y')
+        df = datahub.index_kline(code, '3y')
         norm = _normalize_df(df)
         if norm is not None and len(norm):
             return dict(zip(norm['date'], norm['close'].astype('float64')))

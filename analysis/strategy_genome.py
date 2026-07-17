@@ -219,7 +219,8 @@ _MIN_TRIGGERS_FULL_CONF = 8
 
 def compute_strategy_score(win_rate: float, avg_ret: float,
                            trigger_count: int, max_trigger: int = 1,
-                           sample_stocks: int = 1, max_dd: float = 0.0) -> float:
+                           sample_stocks: int = 1, max_dd: float = 0.0,
+                           confidence_n: int = None) -> float:
     """综合评分 0~100(×小样本置信收缩)
 
     权重(2026-06-28 加入风险项):
@@ -233,6 +234,10 @@ def compute_strategy_score(win_rate: float, avg_ret: float,
     防小样本侥幸值(如 2 笔 100% 胜率)霸榜情报/选股权重(触发充足者不受影响)。
 
     max_dd: 平均最大回撤百分比(负值,如 -12.5;传 0 = 无回撤数据 → 风险项满分,向后兼容)。
+    confidence_n: 置信收缩的样本数(**交易笔数**,_MIN_TRIGGERS_FULL_CONF 按笔数立论)。
+        2026-07-16 修量纲:横截面调用点原来只传 trigger_count=触发股票数 → "2 只股各 15 笔
+        (30 笔样本)"被压 0.25 折、"8 只股各 1 笔(仅 8 笔)"反而满置信,与防小样本本意相反。
+        不传时回退 trigger_count(genome_bt_worker 逐股路径本就传交易笔数,行为不变)。
     """
     if max_trigger <= 0:
         max_trigger = 1
@@ -245,8 +250,9 @@ def compute_strategy_score(win_rate: float, avg_ret: float,
     risk_norm = min(1.0, max(0.0, 1.0 - dd / _RISK_DD_FULL_PENALTY))
 
     score = (wr * 35 + ar_norm * 25 + risk_norm * 20 + trig_norm * 10 + sample_norm * 10)
-    # 小样本置信收缩(乘性):触发数充足→×1 不变;过少→按比例缩向 0
-    confidence = min(1.0, max(0, trigger_count) / _MIN_TRIGGERS_FULL_CONF)
+    # 小样本置信收缩(乘性):样本充足→×1 不变;过少→按比例缩向 0(样本数=交易笔数,见 docstring)
+    _cn = confidence_n if confidence_n is not None else trigger_count
+    confidence = min(1.0, max(0, _cn) / _MIN_TRIGGERS_FULL_CONF)
     return round(score * confidence, 1)
 
 
@@ -525,8 +531,16 @@ def get_active_variants(strategy_id: str = None, min_score: float = 0,
 
 
 def get_variants_for_eval(strategy_id: str, top_n: int = 5, fresh_n: int = 5) -> List[Dict]:
-    """取某策略本轮要回测的变体:已评估的高分 top_n + 未评估的新生 fresh_n。
-    (修复:原 daily_backtest 全局 LIMIT 100 按分数排,未评估变体 NULLS LAST 永远轮不到 → 新变体从不被评估)"""
+    """取某策略本轮要回测的变体:已评估 top_n(高分保底+随机轮换) + 未评估随机 fresh_n。
+    (修复:原 daily_backtest 全局 LIMIT 100 按分数排,未评估变体 NULLS LAST 永远轮不到 → 新变体从不被评估)
+    2026-07-16 两处改随机:
+      - 已评估名额拆成"前 60% 按分数 + 其余随机轮换":原来只取 score top5,排名 6~keep_top 的
+        变体 score/holdout 永久冻结在数月前的行情里,却仍以旧高分赢 get_live_strategy_set 的
+        DISTINCT ON 竞争 → 陈旧参数长期霸占实盘。轮换让全体已评估变体 ~2 周内都被复评一遍,分数可比。
+      - 未评估名额由 created_at DESC 改随机:插入顺序是"变异→交叉",按最新取恒命中交叉子代,
+        精英变异子代系统性饿死(评不上→次日被 cull),GA 的核心 exploitation 被静默废掉。"""
+    top_keep = max(1, int(top_n * 0.6))          # 高分保底名额(top5 → 3)
+    top_rotate = max(0, top_n - top_keep)        # 随机轮换名额(top5 → 2)
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -535,9 +549,18 @@ def get_variants_for_eval(strategy_id: str, top_n: int = 5, fresh_n: int = 5) ->
          ORDER BY score DESC LIMIT %s)
         UNION ALL
         (SELECT * FROM strategy_variants
+         WHERE status = 'active' AND base_strategy = %s AND score IS NOT NULL
+           AND id NOT IN (SELECT id FROM strategy_variants
+                          WHERE status = 'active' AND base_strategy = %s AND score IS NOT NULL
+                          ORDER BY score DESC LIMIT %s)
+         ORDER BY random() LIMIT %s)
+        UNION ALL
+        (SELECT * FROM strategy_variants
          WHERE status = 'active' AND base_strategy = %s AND score IS NULL
-         ORDER BY created_at DESC LIMIT %s)
-    """, (strategy_id, top_n, strategy_id, fresh_n))
+         ORDER BY random() LIMIT %s)
+    """, (strategy_id, top_keep,
+          strategy_id, strategy_id, top_keep, top_rotate,
+          strategy_id, fresh_n))
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
@@ -661,11 +684,16 @@ def _insert_variant(base_strategy: str, strategy_cn: str,
         INSERT INTO strategy_variants (base_strategy, strategy_cn, generation, params, status, parent_id)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (base_strategy, params) DO UPDATE SET
-            generation = EXCLUDED.generation,
+            generation = CASE WHEN strategy_variants.generation = 0
+                              THEN 0 ELSE EXCLUDED.generation END,
             status = 'active',
             parent_id = COALESCE(strategy_variants.parent_id, EXCLUDED.parent_id)
         RETURNING id
     """, (base_strategy, strategy_cn, generation, json.dumps(params), status, parent_id))
+    # ⚠️ generation 用 CASE 保护种子(2026-07-16 修):交叉/变异子代撞回默认参数时(参数空间粗网格,
+    # turtle_trade 仅 2 参,数日内必现),原来会把 generation=0 种子覆写成 genN → 种子失去
+    # cull_variants 的永不退役豁免 + get_live_strategy_set 的 generation=0 回退分支消失,
+    # 且 seed_default_variants 是 DO NOTHING 永远修不回来。
     vid = cur.fetchone()[0]
     conn.commit()
     cur.close()
@@ -698,7 +726,10 @@ def ensure_composed_population(min_active: int = 12) -> int:
     created = 0
     for _ in range(max(0, min_active - n_active)):
         genes = random_genes()
-        _insert_variant(COMPOSED_BASE, '🧪' + genes_cn(genes, max_len=28), 0,
+        # generation=1(2026-07-16 修):随机基因组合不是"默认参数安全基线",不该享受
+        # generation=0 的永不退役豁免 —— 原来传 0,cull_variants 三条退役规则(都带
+        # generation>0)全碰不到它们,score<=0 的垃圾组合永久滞留 active(只生不汰翻版)。
+        _insert_variant(COMPOSED_BASE, '🧪' + genes_cn(genes, max_len=28), 1,
                         {'genes': genes}, 'active')
         created += 1
     return created
@@ -746,11 +777,12 @@ def evolve_composed(mutants: int = 8, randoms: int = 4,
                 COMPOSED_BASE, '🧪' + genes_cn(genes, max_len=28),
                 gen, {'genes': genes}, 'active', p1['id']))
 
-    # 随机新血:保持探索,防局部最优
+    # 随机新血:保持探索,防局部最优。generation=1(同 ensure_composed_population,
+    # 2026-07-16 修):不给随机组合 gen=0 的永生豁免,否则每天 +N 个不可退役变体无限堆积。
     for _ in range(randoms):
         genes = random_genes()
         new_ids.append(_insert_variant(
-            COMPOSED_BASE, '🧪' + genes_cn(genes, max_len=28), 0,
+            COMPOSED_BASE, '🧪' + genes_cn(genes, max_len=28), 1,
             {'genes': genes}, 'active'))
 
     try:
@@ -807,15 +839,20 @@ def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 45,
         params = r['params'] if isinstance(r['params'], dict) else json.loads(r['params'])
         out['base'][r['base_strategy']] = coerce_params(r['base_strategy'], params)
 
-    # 组合策略:require_holdout 时,排除"已评估且 holdout 收益不达标"的(未评估的 NULL 给探索宽限)
+    # 组合策略:require_holdout 时,排除"已评估且 holdout 不达标"的(未评估的 NULL 给探索宽限)。
+    # 2026-07-16 补最低样本量门(与基础策略的 holdout_trigger>=N 对齐):原来只查收益不查触发数,
+    # 1 笔幸运样本外交易(如 +6%)即可过门上实盘,且 COALESCE 让该状态长期存续 —— 结构风险
+    # 更高的组合策略反而没有样本量门,是小样本幻觉在部署口的漏网。
     cur.execute("""
         SELECT id, strategy_cn, params, score
         FROM strategy_variants
         WHERE status = 'active' AND base_strategy = %s
           AND score IS NOT NULL AND score >= %s
-          AND (NOT %s OR holdout_avg_ret_pct IS NULL OR holdout_avg_ret_pct >= %s)
+          AND (NOT %s OR holdout_avg_ret_pct IS NULL
+               OR (holdout_trigger >= %s AND holdout_avg_ret_pct >= %s))
         ORDER BY score DESC LIMIT %s
-    """, (COMPOSED_BASE, composed_min_score, require_holdout, holdout_min_ret, max_composed))
+    """, (COMPOSED_BASE, composed_min_score, require_holdout,
+          holdout_min_trigger, holdout_min_ret, max_composed))
     for r in cur.fetchall():
         params = r['params'] if isinstance(r['params'], dict) else json.loads(r['params'])
         out['composed'].append({'vid': r['id'], 'cn': r['strategy_cn'],
