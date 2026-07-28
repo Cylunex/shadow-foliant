@@ -143,7 +143,6 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     "chip":         {"name": "筹码分布", "scope": "stock", "fn": _p_chip},
     "signals":      {"name": "策略信号", "scope": "stock", "fn": _p_signals},
     "flow":         {"name": "资金流", "scope": "stock", "fn": _p_flow},
-    "rag":          {"name": "RAG语义检索", "scope": "stock", "fn": _p_rag},
     "indices":      {"name": "大盘指数", "scope": "market", "fn": _p_indices},
     "news":         {"name": "财经快讯", "scope": "market", "fn": _p_news},
     "sector":       {"name": "板块强弱", "scope": "market", "fn": _p_sector},
@@ -152,6 +151,12 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     "holdings":     {"name": "我的持仓", "scope": "portfolio", "fn": _p_holdings},
     "fund_score":   {"name": "基金评分", "scope": "fund", "fn": _p_fund_score},
 }
+try:
+    from rag_config import is_rag_enabled
+    if is_rag_enabled():
+        PROVIDERS["rag"] = {"name": "RAG语义检索", "scope": "stock", "fn": _p_rag}
+except Exception:
+    pass
 
 
 def list_providers() -> List[Dict[str, str]]:
@@ -504,4 +509,3 @@ def ensure_seeds():
     for s in SEED_WORKFLOWS:
         if s["name"] not in existing:
             save_workflow(None, s["name"], s["scope"], s["description"], s["config"])
-

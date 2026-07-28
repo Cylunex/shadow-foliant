@@ -128,6 +128,63 @@ def stock_context(code: str, groups: Optional[List[str]] = None) -> Dict[str, An
     return collect(g, code)
 
 
+@mcp.tool()
+def research_stock(code: str, depth: str = 'quick',
+                   view: str = 'summary') -> Dict[str, Any]:
+    """Agent 高层个股研究入口，统一返回质量元数据。
+    depth:quick=基础/技术/资金/风险，deep=再加基本面/缠论/筹码/情绪；
+    view:summary 会移除 K线明细和截断新闻，full 保留完整 context。"""
+    import copy
+    from agent_contract import envelope, context_warnings
+    from agent_tool_groups import collect
+    code = ''.join(ch for ch in str(code or '') if ch.isdigit())[-6:]
+    if len(code) != 6:
+        return envelope(None, status='failed', warnings=['code 必须是 6 位 A 股代码'])
+    groups = ['base', 'kline_technical', 'fund_flow', 'risk']
+    if depth == 'deep':
+        groups += ['fundamentals', 'chan_theory', 'chipset', 'sentiment']
+    elif depth != 'quick':
+        return envelope(None, status='failed', warnings=['depth 仅支持 quick/deep'])
+    context = collect(groups, code)
+    warnings = context_warnings(context)
+    if view == 'summary':
+        context = copy.deepcopy(context)
+        technical = context.get('kline_technical')
+        if isinstance(technical, dict):
+            technical.pop('df_tail', None)
+        sentiment = context.get('sentiment')
+        news = sentiment.get('news') if isinstance(sentiment, dict) else None
+        if isinstance(news, list):
+            sentiment['news'] = news[:5]
+    elif view != 'full':
+        return envelope(None, status='failed', warnings=['view 仅支持 summary/full'])
+    try:
+        from decision_signal import get_latest_active
+        signal = get_latest_active(code)
+    except Exception as exc:
+        signal = None
+        warnings.append(f'decision_signal: {exc}')
+    try:
+        from ai_recommendation_monitor import list_active
+        recommendations = list_active(symbol=code, limit=20)
+    except Exception as exc:
+        recommendations = []
+        warnings.append(f'ai_recommendations: {exc}')
+    return envelope(
+        {
+            'code': code,
+            'depth': depth,
+            'context': context,
+            'latest_decision_signal': signal,
+            'active_recommendations': recommendations,
+        },
+        status='partial' if warnings else 'success',
+        warnings=warnings,
+        sources=groups + ['decision_signals', 'ai_recommendations'],
+        view=view,
+    )
+
+
 # =========================== 选股 ===========================
 @mcp.tool()
 def multi_factor_screen(index_code: str = '', n: int = 15, limit: int = 60) -> Dict[str, Any]:
@@ -294,6 +351,72 @@ def list_trades(code: Optional[str] = None, limit: int = 200) -> List[Dict[str, 
     """查询已导入的成交记录,按时间倒序。"""
     from portfolio_db import portfolio_db
     return portfolio_db.get_trades(code, limit)
+
+
+# =========================== Agent 管理写操作 ===========================
+@mcp.tool()
+def list_monitors() -> Dict[str, Any]:
+    """列出当前盯盘监控及进场/止盈/止损条件。"""
+    from agent_operations import list_monitors as _list
+    return _list()
+
+
+@mcp.tool()
+def upsert_monitor(code: str, name: str = '', rating: str = '持有',
+                   entry_low: Optional[float] = None,
+                   entry_high: Optional[float] = None,
+                   take_profit: Optional[float] = None,
+                   stop_loss: Optional[float] = None,
+                   check_interval: int = 60,
+                   notification_enabled: bool = True,
+                   trading_hours_only: bool = True,
+                   dry_run: bool = True) -> Dict[str, Any]:
+    """新增或更新盯盘条件。默认 dry_run=true，只预览 before/after；明确确认后传 false。"""
+    from agent_operations import upsert_monitor as _upsert
+    return _upsert(
+        code, name, rating, entry_low, entry_high, take_profit, stop_loss,
+        check_interval, notification_enabled, trading_hours_only, dry_run)
+
+
+@mcp.tool()
+def remove_monitor(code: str, dry_run: bool = True) -> Dict[str, Any]:
+    """移除某股盯盘。默认 dry_run=true，确认后传 false。"""
+    from agent_operations import remove_monitor as _remove
+    return _remove(code, dry_run=dry_run)
+
+
+@mcp.tool()
+def active_recommendations(code: str = '', monitored_only: bool = False,
+                           limit: int = 100) -> Dict[str, Any]:
+    """查询活跃 AI 推荐及止盈止损/监控状态。"""
+    from agent_operations import list_recommendations
+    return list_recommendations(code, monitored_only, limit)
+
+
+@mcp.tool()
+def enable_recommendation_monitor(rec_id: int,
+                                  dry_run: bool = True) -> Dict[str, Any]:
+    """将推荐加入实时监控池。默认只预览，确认后 dry_run=false。"""
+    from agent_operations import enable_recommendation_monitor as _enable
+    return _enable(rec_id, dry_run=dry_run)
+
+
+@mcp.tool()
+def close_recommendation(rec_id: int, reason: str = 'manual',
+                         close_price: Optional[float] = None,
+                         dry_run: bool = True) -> Dict[str, Any]:
+    """关闭活跃推荐并固化真实收益。默认只预览；close_price 留空会取实时价。"""
+    from agent_operations import close_recommendation as _close
+    return _close(rec_id, reason=reason, close_price=close_price, dry_run=dry_run)
+
+
+@mcp.tool()
+def set_decision_signal_status(signal_id: int, status: str = 'closed',
+                               dry_run: bool = True) -> Dict[str, Any]:
+    """关闭/归档/作废决策信号。status:closed/archived/invalidated/expired；
+    默认 dry_run=true。"""
+    from agent_operations import set_signal_status
+    return set_signal_status(signal_id, status, dry_run=dry_run)
 
 
 @mcp.tool()
@@ -679,10 +802,13 @@ def fund_holdings() -> Any:
 # =========================== 向量语义检索(RAG) ===========================
 @mcp.tool()
 def semantic_search(query: str, top_k: int = 8, source_types: Optional[List[str]] = None) -> Any:
-    """语义检索本地知识库(历史分析/新闻/推荐/研报):BGE-M3 嵌入 → pgvector 余弦召回 → TEI rerank 精排。
+    """可选语义检索本地知识库。默认关闭；RAG_ENABLED=true 后才执行。
     source_types 可选过滤:analysis/news/reco/report。⚠️ 需嵌入(Ollama)+rerank(TEI)+pgvector 在线;
     任一不可用返回空(不影响其它功能)。返回 [{score,source_type,title,content,meta}]。"""
     try:
+        from rag_config import is_rag_enabled
+        if not is_rag_enabled():
+            return {'enabled': False, 'hits': [], 'reason': 'RAG_ENABLED=false'}
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rag'))
         import service
@@ -728,47 +854,72 @@ _TASKS = {
 }
 
 
-# 注册名 → 任务函数名(少数不等于 task_{name} 的别名,与 webui 一致)
-_JOB_FN_ALIAS = {'wf_weekly_backtest': 'task_weekly_backtest'}
-
-
-def _run_task(name: str):
-    """导入并执行指定任务函数(同步,返回结果)。.env 已由顶部 import _bootstrap 加载。
-    2026-06-12 修:原 `_bootstrap.bootstrap()` 是不存在的函数(必 AttributeError),手动触发从来跑不通。"""
-    from jobs import jobs_hub
-    fn = getattr(jobs_hub, _JOB_FN_ALIAS.get(name, f'task_{name}'), None)
-    if fn is None or not callable(fn):
-        return {'error': f'未知任务: {name}'}
-    try:
-        fn()
-        return {'ok': True, 'task': name}
-    except Exception as e:
-        import traceback
-        return {'ok': False, 'task': name, 'error': str(e), 'trace': traceback.format_exc()}
-
-
 @mcp.tool()
 def list_tasks() -> Dict[str, Any]:
-    """列出所有可手动触发的定时任务(名称+描述+计划时间)。"""
+    """列出可手动触发的定时任务，并附启用状态、最近调度结果和最近手动运行。"""
+    from jobs.task_control import enrich_task_catalog
+    try:
+        from automation_config import list_all
+        rows_by_name = {item['name']: dict(item) for item in list_all()}
+    except Exception:
+        rows_by_name = {}
+    for name, (description, schedule) in _TASKS.items():
+        row = rows_by_name.setdefault(
+            name, {'name': name, 'description': description, 'schedule': schedule})
+        row.setdefault('description', description)
+        row.setdefault('schedule', schedule)
+    rows = enrich_task_catalog(list(rows_by_name.values()))
     return {
-        'count': len(_TASKS),
-        'tasks': [
-            {'name': k, 'description': v[0], 'schedule': v[1]}
-            for k, v in _TASKS.items()
-        ]
+        'count': len(rows),
+        'tasks': rows,
     }
 
 
 @mcp.tool()
-def trigger_task(task_name: str) -> Dict[str, Any]:
-    """手动触发指定的定时任务。task_name 来自 list_tasks 返回的 name 字段。
+def trigger_task(task_name: str, idempotency_key: str = '') -> Dict[str, Any]:
+    """异步触发指定定时任务，立即返回 run_id；用 task_run_status 查询结果。
+    idempotency_key 可由 Agent 为一次意图生成，重试时复用可避免重复执行。
+    task_name 来自 list_tasks 返回的 name 字段。
     常用: morning_strategy(晨间报告,含昨日收益+持仓买卖提示), unified_selection(综合选股),
     morning_portfolio(早盘持仓), afternoon_portfolio(尾盘持仓), daily_pnl_snapshot(当日盈亏),
-    fund_nav_refresh(基金净值), mx_daily_analysis(收盘复盘)。"""
-    if task_name not in _TASKS:
-        return {'error': f'无效任务名: {task_name}，请用 list_tasks 查看可用任务'}
-    desc, schedule = _TASKS[task_name]
-    return _run_task(task_name)
+    mx_daily_analysis(收盘复盘)。重任务不会阻塞 MCP 会话；需 jobs_hub 常驻消费队列。"""
+    from jobs.task_control import submit_task
+    try:
+        return submit_task(task_name, requested_by='mcp', idempotency_key=idempotency_key)
+    except Exception as e:
+        return {'accepted': False, 'status': 'error', 'error': f'{type(e).__name__}: {e}'}
+
+
+@mcp.tool()
+def task_run_status(run_id: str) -> Dict[str, Any]:
+    """查询 trigger_task 返回的 run_id 状态及结果。状态:queued/running/success/
+    degraded/partial/skipped/timeout/error/interrupted。"""
+    from jobs.task_control import get_task_run
+    row = get_task_run(run_id)
+    return row or {'error': f'未找到任务运行: {run_id}'}
+
+
+@mcp.tool()
+def task_runs(task_name: str = '', limit: int = 30) -> Dict[str, Any]:
+    """查询 Agent/Web 最近手动触发的任务运行；task_name 留空返回全部。"""
+    from jobs.task_control import list_task_runs
+    rows = list_task_runs(task_name=task_name, limit=limit)
+    return {'count': len(rows), 'runs': rows}
+
+
+@mcp.tool()
+def latest_selection() -> Dict[str, Any]:
+    """读取最近一次综合选股持久化产物，不现算、不拉外部数据；会标明快照是否过期。"""
+    from jobs.task_control import latest_selection_artifact
+    return latest_selection_artifact()
+
+
+@mcp.tool()
+def agent_cockpit(recent_limit: int = 12) -> Dict[str, Any]:
+    """Agent 主入口总览：任务异常/核心开关、综合选股产物、持仓数、活跃推荐/
+    决策信号和数据源健康度。只读已有数据库与运行遥测，不触发重分析。"""
+    from jobs.task_control import agent_cockpit as _cockpit
+    return _cockpit(recent_limit=recent_limit)
 
 
 # =========================== 市场上下文 + 观测 ===========================

@@ -156,6 +156,36 @@ CREATE TABLE IF NOT EXISTS job_runs (
     status      TEXT NOT NULL,
     error       TEXT
 );
+
+-- Agent/Web 手动触发任务：异步提交后可跨连接按 run_id 查询状态。
+CREATE TABLE IF NOT EXISTS manual_task_runs (
+    run_id          TEXT PRIMARY KEY,
+    task_name       TEXT NOT NULL,
+    requested_by    TEXT NOT NULL,
+    idempotency_key TEXT,
+    status          TEXT NOT NULL,
+    requested_at    TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    result_json     TEXT,
+    error           TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 2,
+    worker_id       TEXT,
+    heartbeat_at    TEXT,
+    UNIQUE(requested_by, task_name, idempotency_key)
+);
+-- 兼容已由上一版创建的表；CREATE TABLE IF NOT EXISTS 不会补列。
+ALTER TABLE manual_task_runs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE manual_task_runs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 2;
+ALTER TABLE manual_task_runs ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE manual_task_runs ADD COLUMN IF NOT EXISTS heartbeat_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_manual_task_runs_recent
+    ON manual_task_runs(requested_at);
+CREATE INDEX IF NOT EXISTS idx_manual_task_runs_task
+    ON manual_task_runs(task_name, requested_at);
+CREATE INDEX IF NOT EXISTS idx_manual_task_runs_queue
+    ON manual_task_runs(status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_job_runs_name_time ON job_runs (job_name, started_at DESC);
 
 
@@ -260,11 +290,23 @@ CREATE TABLE IF NOT EXISTS monitored_stocks (
     stop_loss             DOUBLE PRECISION,
     check_interval        INTEGER DEFAULT 60,
     notification_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
+    trading_hours_only    BOOLEAN NOT NULL DEFAULT TRUE,
+    quant_enabled         BOOLEAN NOT NULL DEFAULT FALSE,
+    quant_config          JSONB,
+    current_price         DOUBLE PRECISION,
+    last_checked          TIMESTAMPTZ,
     last_price            DOUBLE PRECISION,
     last_check_at         TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS current_price DOUBLE PRECISION;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS last_checked TIMESTAMPTZ;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS trading_hours_only BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS quant_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS quant_config JSONB;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS last_price DOUBLE PRECISION;
+ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS monitor_notifications (
     id            BIGSERIAL PRIMARY KEY,
@@ -423,8 +465,20 @@ CREATE TABLE IF NOT EXISTS ai_recommendations (
     hit_target_at   TIMESTAMPTZ,
     hit_stop_at     TIMESTAMPTZ,
     recommended_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ref_price       DOUBLE PRECISION,
+    last_price      DOUBLE PRECISION,
+    last_price_at   TIMESTAMPTZ,
+    realized_pnl_pct DOUBLE PRECISION,
+    closed_at       TIMESTAMPTZ,
+    close_reason    TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS ref_price DOUBLE PRECISION;
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS last_price DOUBLE PRECISION;
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS last_price_at TIMESTAMPTZ;
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS realized_pnl_pct DOUBLE PRECISION;
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+ALTER TABLE ai_recommendations ADD COLUMN IF NOT EXISTS close_reason TEXT;
 CREATE INDEX IF NOT EXISTS idx_air_symbol_time ON ai_recommendations (symbol, recommended_at DESC);
 CREATE INDEX IF NOT EXISTS idx_air_active ON ai_recommendations (is_active, is_monitored);
 

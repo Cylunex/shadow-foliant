@@ -25,7 +25,7 @@ description: A股多智能体分析平台的 Agent 技能文档。提供个股�
 
 ### ❌ 不适合 MCP
 - **所有 `*_ui.py` / `app.py`(46 个文件含 streamlit)** — 是 Streamlit 界面渲染,无请求/响应语义,无法 MCP 化。
-- **调度器/守护进程**:`jobs_hub` / `monitor_service` / `*_scheduler` / `autostart` — 是常驻后台 daemon,不是一次性调用。
+- **调度器/守护进程本身**:`jobs_hub` / `monitor_service` / `*_scheduler` / `autostart` — 常驻生命周期不由 MCP 托管；但一次性任务可通过异步 `trigger_task` 提交，由 `task_run_status` 查询。
 - **通知服务** `notification_service`(可包一个"发送"工具,但非核心)。
 
 ---
@@ -215,15 +215,31 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - **限流**:所有外部抓取已内置自限流(防封),批量调用会稍慢,**不要并发猛拉**。
 - **成本**:`run_multi_agent_analysis` 单次多次 LLM 调用、几十秒、耗 token —— 仅在"深度研判"时用;日常用 B/C/E 的纯计算函数。
 - **数据时效**:行情可能延迟;盘后数据(龙虎榜/北向)收盘后才全。
+- **先看总览**:新会话优先调用 `agent_cockpit`，只读已有快照/运行遥测，不会触发重分析。
+- **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号和推荐；只有需要更细证据时再调用底层工具。
+- **重任务异步**:`trigger_task(task_name,idempotency_key)` 只返回 `run_id`；后续轮询 `task_run_status`。同一意图重试必须复用幂等键。
+- **写操作先预演**:监控、推荐关闭、信号归档等工具默认 `dry_run=true`；核对 `before/after` 后再显式传 `false`。
+- **结果可信度**:`latest_selection`/`agent_cockpit` 返回 `status` 和 `meta.warnings`；`stale/degraded/partial` 不能按完整成功解释。主力资金源缺少真实资金字段时宁可无结果，不用普通候选替代。
 
 ---
 
 ## 四、MCP 适配落地(✅ 已建)
 MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(stdio),
 客户端配 `{ "command":"python", "args":["<项目根>/mcp_server.py"] }`,env 传 `DEEPSEEK_API_KEY`/`EM_API_KEY`/`USE_POSTGRES` 等。
-已封装:A–E 的数据/计算/选股/组合函数 + F(`deep_analysis` 重工具)+ G(妙想 `mx_*` 外部服务)+ H(基金 `fund_*`/`asset_*` 14 工具)+ I(决策信号 + AI 赋能 ~15 工具)。共 **80+ 工具**。
-- miniQMT 实盘下单**未**暴露;UI/调度器**不封**。
+已封装:A–E 的数据/计算/选股/组合函数 + F(`deep_analysis` 重工具)+ G(妙想 `mx_*` 外部服务)+ H(基金 `fund_*`/`asset_*` 14 工具)+ I(决策信号 + AI 赋能 ~15 工具)。共 **90+ 工具**。
+- Agent 控制面:
+  - `agent_cockpit(recent_limit)`：任务健康、核心开关、选股快照、持仓/推荐/信号数量、数据源状态。
+  - `list_tasks()`：任务计划、启用状态、最近调度与手动运行。
+  - `trigger_task(task_name,idempotency_key)` → `run_id`：异步提交，不阻塞 MCP。
+  - `task_run_status(run_id)` / `task_runs(task_name,limit)`：跨连接读取任务状态；worker 失联时先按次数自动重入队，耗尽后才标为 `interrupted`。
+  - `latest_selection()`：读取最近综合选股产物（代码、评分、来源、行情、持仓标记、红蓝结论）并明确标记过期。
+  - `research_stock(code,depth,view)`：面向 Agent 的低轮次个股研究入口，统一返回 `data/status/meta`。
+  - `list_monitors` / `upsert_monitor` / `remove_monitor`：盯盘读取与管理。
+  - `active_recommendations` / `enable_recommendation_monitor` / `close_recommendation`：推荐生命周期管理。
+  - `set_decision_signal_status`：关闭/归档/作废信号。上述写操作默认 dry-run。
+- miniQMT 实盘下单**未**暴露；Web 只作为观测和应急操作面。
 
 ## 五、相关待办
 - ✅ **批量导入成交记录**:已实现(`import_trades`,自动更新持仓 + 持仓快照)。详见 [交接说明.md](交接说明.md) §6。
-- ⏳ 未做:成交→已实现盈亏计算;成交记录列名中文化;SQLite 兜底版的持仓自动更新;`event_scoring`/`report_templates` 接入业务。
+- ✅ **已实现盈亏**:成交与持仓变动进入统一流水，组合页面/绩效模块可读取。
+- ⏳ 未做:成交记录列名中文化;SQLite 兜底版的持仓自动更新;`event_scoring`/`report_templates` 接入业务。

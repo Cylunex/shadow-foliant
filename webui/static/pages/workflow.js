@@ -33,7 +33,7 @@ export default {
         <div style="flex:2;min-width:220px"><label>名称</label><input v-model="wf.name" placeholder="如 个股双层研判" style="width:100%"/></div>
         <div><label>类型(scope)</label><select v-model="wf.scope"><option v-for="s in scopes" :value="s.k">{{s.t}}</option></select></div>
         <div v-if="needCode"><label>运行参数:代码</label><input v-model="run.code" placeholder="如 600519" style="width:130px"/></div>
-        <div v-if="wf.scope==='stock'"><label>(可选)RAG查询</label><input v-model="run.query" placeholder="留空用代码" style="width:150px"/></div>
+        <div v-if="wf.scope==='stock'"><label>(可选)查询上下文</label><input v-model="run.query" placeholder="留空用代码" style="width:150px"/></div>
       </div>
     </div>
 

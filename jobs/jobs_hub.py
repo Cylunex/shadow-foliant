@@ -331,7 +331,10 @@ def task_portfolio_indicator_snapshot():
     job = 'portfolio_indicator_snapshot'
     if _skip_if_not_trading(job):
         return
-    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完缓存再逐只算快照(读暖缓存,不冷拉)
+    if not _wait_kline_prefetch(job):
+        _log_run(job, 'skipped', error='dependency kline_prefetch not ready',
+                 started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+        return
     started = datetime.now().isoformat()
     try:
         from portfolio_db import portfolio_db
@@ -559,18 +562,23 @@ def _intraday_plunge_check(drop_pct: float = -5.0):
         pass
 
 
-def _wait_kline_prefetch(job: str, max_wait: int = 300, poll: int = 10) -> bool:
+def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool:
     """F(盘后链依赖显式化):盘后"读暖缓存"的任务(因子采集/持仓快照/后验)开头调用,**等当日
     kline_prefetch 焐完缓存再继续** —— 把"靠 16:30→16:40→16:45 时钟间隔保证 prefetch 先跑"的
     隐式依赖,变成显式 barrier。根治 prefetch 跑超时(东财封)时下游在缓存没焐好就冷拉。
 
     每个任务在独立 worker 线程跑(线程池 6),此处 sleep 不阻塞调度线程,只占一个 worker。
-    返回 True=缓存视为已暖(prefetch 当日已结束) / False=等超时或无法判定 → **fail-open 照常继续**
-    (绝不因依赖检查误杀盘后任务;DB 读不了/prefetch 没开 一律放行)。"""
+    返回 True=缓存已暖或依赖明确关闭 / False=prefetch 失败或等待超时。
+    生产实测预热可能超过 30 分钟，默认等 45 分钟，避免下游在冷缓存上雪崩。"""
+    if max_wait is None:
+        try:
+            max_wait = max(60, int(os.getenv('KLINE_PREFETCH_WAIT_SEC', '2700')))
+        except Exception:
+            max_wait = 2700
     try:
         from automation_config import is_enabled
         if not is_enabled('kline_prefetch'):
-            return False   # prefetch 没开 → 无可等,直接放行
+            return True    # 明确关闭依赖时允许下游自己取数
     except Exception:
         pass
     waited = 0
@@ -581,22 +589,25 @@ def _wait_kline_prefetch(job: str, max_wait: int = 300, poll: int = 10) -> bool:
             # ⚠️ PG 里 started_at 是 timestamptz,不能 LIKE(会 operator 报错);按"当日"过滤分库:
             #    PG 用 ::date = CURRENT_DATE、SQLite 用 DATE()(started_at 为 ISO 文本)。
             if USE_POSTGRES:
-                cur.execute("""SELECT finished_at FROM job_runs
+                cur.execute("""SELECT finished_at, status, error FROM job_runs
                                WHERE job_name='kline_prefetch' AND started_at::date = CURRENT_DATE
                                ORDER BY id DESC LIMIT 1""")
             else:
-                cur.execute("""SELECT finished_at FROM job_runs
+                cur.execute("""SELECT finished_at, status, error FROM job_runs
                                WHERE job_name='kline_prefetch' AND DATE(started_at) = DATE('now')
                                ORDER BY id DESC LIMIT 1""")
             row = cur.fetchone()
             conn.close()
         except Exception:
-            return False   # 读不了 job_runs → fail-open
-        if row and row[0]:          # 当日已有 finished 记录 → 缓存已暖
-            return True
-        if waited >= max_wait:      # 等够仍未完(还在跑/未起) → fail-open 继续
-            print(f'[{job}] 等 kline_prefetch 焐缓存超 {max_wait}s 仍未结束,照常继续'
-                  f'(prefetch 慢/未跑?datahub 已有全源熔断兜底)', flush=True)
+            return True    # 观测库不可用不误杀业务任务
+        if row and row[0]:
+            if str(row[1]) == 'success':
+                return True
+            print(f'[{job}] kline_prefetch 当日状态={row[1]}，下游跳过: {str(row[2])[:120]}',
+                  flush=True)
+            return False
+        if waited >= max_wait:      # 等够仍未完(还在跑/未起) → 下游显式跳过
+            print(f'[{job}] 等 kline_prefetch 超 {max_wait}s 仍未结束，下游跳过', flush=True)
             return False
         time.sleep(poll)
         waited += poll
@@ -1055,7 +1066,10 @@ def task_eod_outcomes():
         pass
     if _skip_if_not_trading(job):   # 非交易日不跑(K线无新 bar)
         return
-    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完缓存再后验(读暖缓存,不冷拉)
+    if not _wait_kline_prefetch(job):
+        _log_run(job, 'skipped', error='dependency kline_prefetch not ready',
+                 started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+        return
     started = datetime.now().isoformat()
     parts = []
     fails = 0
@@ -1361,8 +1375,17 @@ def task_fund_premarket():
 
 
 def task_rag_ingest():
-    """🔎 每日把历史分析/新闻/推荐 嵌入入 pgvector(语义检索语料保鲜)。开关 rag_ingest,默认开。"""
+    """🔎 可选 RAG 摄取；默认关闭，须同时启用全局开关和任务开关。"""
     job = 'rag_ingest'
+    try:
+        from rag_config import is_rag_enabled
+        if not is_rag_enabled():
+            _log_run(job, 'skipped', error='RAG_ENABLED=false',
+                     started_at=datetime.now().isoformat(),
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        return
     try:
         from automation_config import is_enabled
         if not is_enabled(job):
@@ -1616,6 +1639,17 @@ class _JobsHub:
         self._running = False
         # ⭐ 线程池：所有任务异步执行，不阻塞调度 loop
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        # Agent/Web 手动任务走独立持久队列。默认单 worker，避免与盘中/盘后自动任务
+        # 同时猛烈拉外部数据；可用 MANUAL_TASK_WORKERS=1..2 调整。
+        try:
+            manual_workers = max(1, min(int(os.getenv('MANUAL_TASK_WORKERS', '1')), 2))
+        except (TypeError, ValueError):
+            manual_workers = 1
+        self._manual_worker_count = manual_workers
+        self._manual_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=manual_workers, thread_name_prefix='manual-task')
+        self._manual_futures = set()
+        self._manual_worker_id = f'jobs_hub:{os.getpid()}'
 
     def register(self, name: str, when: str, func: Callable, *args, **kwargs):
         """注册定时任务
@@ -1670,15 +1704,43 @@ class _JobsHub:
              'status': r[3], 'error': r[4]} for r in rows
         ]
 
+    def _poll_manual_tasks(self):
+        """从 PG/SQLite 原子领取 Agent/Web 任务并交给专用 worker。"""
+        self._manual_futures = {f for f in self._manual_futures if not f.done()}
+        capacity = self._manual_worker_count - len(self._manual_futures)
+        if capacity <= 0:
+            return
+        from jobs.task_control import (
+            claim_next_task, execute_claimed_task, requeue_claimed_task,
+        )
+        for _ in range(capacity):
+            run = claim_next_task(self._manual_worker_id)
+            if not run:
+                break
+            try:
+                future = self._manual_executor.submit(
+                    execute_claimed_task, run, _run_with_log)
+                self._manual_futures.add(future)
+                print(f'[jobs_hub] ▶ 手动任务已领取: {run["task_name"]} '
+                      f'run_id={run["run_id"][:8]} attempt={run.get("attempts")}', flush=True)
+            except Exception as exc:
+                requeue_claimed_task(run['run_id'], f'提交 worker 失败: {exc}')
+                raise
+
     def start(self):
         if self._running:
             return
         self._running = True
 
         def _loop():
+            last_manual_poll = 0.0
             while self._running:
                 try:
                     schedule.run_pending()
+                    now = time.monotonic()
+                    if now - last_manual_poll >= 2:
+                        self._poll_manual_tasks()
+                        last_manual_poll = now
                 except Exception as e:
                     print(f'[jobs_hub] 调度线程异常: {e}')
                     import traceback
@@ -1761,6 +1823,10 @@ class _JobsHub:
 
     def stop(self):
         self._running = False
+        try:
+            self._manual_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 hub = _JobsHub()
@@ -1895,8 +1961,10 @@ def _run_strategy_scans() -> dict:
         from main_force_selector import MainForceStockSelector
         def _do_main_force():
             mf = MainForceStockSelector()
-            # 读盘前 09:10 strategy_prefetch 写的当日缓存;冷了才现调问财(选股高峰不卡问财)
-            r_ok, r_df, r_msg = mf.get_main_force_stocks_cached(days_ago=5, use_cache=True)
+            # 只读盘前 strategy_prefetch 写的当日缓存；缓存冷则该策略缺席，
+            # 绝不在 09:45 选股高峰现拉问财。
+            r_ok, r_df, r_msg = mf.get_main_force_stocks_cached(
+                days_ago=5, use_cache=True, cache_only=True)
             if r_ok and r_df is not None and len(r_df) > 0:
                 r_df = mf.get_top_stocks(r_df, top_n=5)
             return r_ok, r_df, r_msg
@@ -3172,7 +3240,10 @@ def task_factor_collection():
     job = 'factor_collection'
     if _skip_if_not_trading(job):   # 非交易日无新行情:跳过,免采集重复/陈旧因子快照
         return
-    _wait_kline_prefetch(job)       # F: 等 kline_prefetch 焐完 K线+因子缓存再采集(读暖缓存,不冷拉)
+    if not _wait_kline_prefetch(job):
+        _log_run(job, 'skipped', error='dependency kline_prefetch not ready',
+                 started_at=datetime.now().isoformat(), finished_at=datetime.now().isoformat())
+        return
     started = datetime.now().isoformat()
     try:
         import factor_collector
@@ -3958,6 +4029,7 @@ def task_unified_selection():
         # ── 红蓝对抗门控(2026-06-26):被「否决」的票剔出推荐池/盘后扫描快照,不再当推荐追踪胜率 ──
         # 此前否决票照样入池污染胜率闭环(ai_eval_weekly)。表格仍显示🟢避开(可见性不丢),只停止入池。
         # 只拦「否决」,不误伤「谨慎/买入」。开关 SELECTION_DEBATE_GATE(默认开;设 false/0/no/off 关闭)。
+        _vetoed = []
         if debate_map and os.getenv('SELECTION_DEBATE_GATE', 'true').lower() not in ('false', '0', 'no', 'off'):
             _vetoed = [c for c in top_list if debate_map.get(c, {}).get('verdict') == '否决']
             if _vetoed:
@@ -3971,9 +4043,34 @@ def task_unified_selection():
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
 
-        # 缓存选股结果供 mx_selection_review 读取（挪到 _log_run 前，防 _log_run 异常吞掉）
+        # 持久化 Agent 可直接读取的选股产物。保留 picks 兼容历史消费者，同时补齐评分/
+        # 来源/行情/红蓝结论，避免 Agent 触发任务后只能拿到代码、还要重复调用十几次工具。
         try:
-            save_indicator_snapshot('_last_selection', {'picks': top_list})
+            artifact_rows = []
+            for rank, code in enumerate(top_list, 1):
+                cinfo = candidates.get(code) or {}
+                q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
+                debate = debate_map.get(code) or {}
+                artifact_rows.append({
+                    'rank': rank,
+                    'code': code,
+                    'name': q.get('name') or name_map.get(code) or code,
+                    'score': round(float(cinfo.get('score') or 0), 2),
+                    'sources': cinfo.get('src') or [],
+                    'held': code in held_codes,
+                    'price': _safe_float(q.get('price')),
+                    'change_pct': _safe_float(q.get('change_pct')),
+                    'pe_ttm': _safe_float(q.get('pe_ttm')),
+                    'debate_verdict': debate.get('verdict'),
+                    'debate_reason': debate.get('reason') or debate.get('summary'),
+                })
+            save_indicator_snapshot('_last_selection', {
+                'picks': top_list,
+                'rows': artifact_rows,
+                'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                'vetoed': _vetoed,
+                'source_breakdown': source_count,
+            })
         except Exception:
             pass
 

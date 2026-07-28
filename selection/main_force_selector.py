@@ -29,6 +29,24 @@ except Exception:
 # 盘前 09:15 预取写当日缓存 → 09:45 综合选股的主力资金策略读缓存,不在选股高峰现调问财
 # (问财熔断/卡死时主力选股会退化成"按市值选股")。缓存键=当日+days_ago+市值档,跨交易日自然失效。
 _MF_CACHE_DIR = None
+_MAIN_FUND_PATTERNS = (
+    '区间主力资金流向',
+    '区间主力资金净流入',
+    '主力资金流向',
+    '主力资金净流入',
+    '主力净流入',
+)
+
+
+def _main_fund_column(df) -> str:
+    """返回真实的主力资金字段；普通行情候选池不视为主力资金数据。"""
+    if df is None or not hasattr(df, 'columns'):
+        return ''
+    for pattern in _MAIN_FUND_PATTERNS:
+        matching = [col for col in df.columns if pattern in str(col)]
+        if matching:
+            return matching[0]
+    return ''
 
 
 def _mf_cache_dir() -> str:
@@ -257,9 +275,12 @@ class MainForceStockSelector:
                 except Exception as fe:
                     print(f"  ❌ dataapi降级失败: {fe}")
             if fallback_df is not None and not fallback_df.empty:
-                self.raw_data = fallback_df
-                print(f"  ✅ 降级成功！获取到 {len(fallback_df)} 只股票（无主力资金数据）")
-                return True, fallback_df, f"降级成功（东财选股器）: {len(fallback_df)}只"
+                # push2/dataapi 只有普通行情/市值字段，不能冒充“主力资金净流入”。
+                # 过去这里返回 success，后续 get_top_stocks 又直接取前 N 条，导致综合选股
+                # 错把普通候选计为主力资金信号。保留日志用于诊断，但本策略明确降级失败。
+                print(f"  ⚠️ 通用候选兜底返回 {len(fallback_df)} 只，但缺少主力资金字段，"
+                      "本策略不采纳")
+                return False, None, "主力资金源不可用（通用候选缺少主力资金字段，已拒绝冒充）"
             error_msg = "所有查询方案+降级均失败，请检查网络或稍后重试"
             print(f"\n❌ {error_msg}")
             return False, None, error_msg
@@ -271,7 +292,8 @@ class MainForceStockSelector:
 
     def get_main_force_stocks_cached(self, days_ago=None, start_date=None,
                                      min_market_cap=None, max_market_cap=None,
-                                     use_cache: bool = True):
+                                     use_cache: bool = True,
+                                     cache_only: bool = False):
         """带当日缓存的主力选股(盘前预取/盘中读缓存)。
         - 盘前任务用 use_cache=False:强制现取并回写当日缓存。
         - 09:45 选股用 use_cache=True:命中当日缓存即返回,**不在高峰现调问财**。
@@ -286,12 +308,17 @@ class MainForceStockSelector:
         if use_cache:
             cached = _mf_cache_load(key)
             if cached is not None and hasattr(cached, 'empty') and not cached.empty:
-                self.raw_data = cached
-                print(f"  ✅ 主力选股命中当日缓存({key}): {len(cached)} 只,不现调问财")
-                return True, cached, f"命中当日缓存 {len(cached)} 只"
+                if _main_fund_column(cached):
+                    self.raw_data = cached
+                    print(f"  ✅ 主力选股命中当日缓存({key}): {len(cached)} 只,不现调问财")
+                    return True, cached, f"命中当日缓存 {len(cached)} 只"
+                print(f"  ⚠️ 主力选股缓存({key})缺少主力资金字段，忽略旧的降级缓存")
+            if cache_only:
+                return False, None, '主力资金当日缓存不可用(cache_only_miss)，未在盘中现拉'
         ok, df, msg = self.get_main_force_stocks(days_ago=days_ago,
                                                  min_market_cap=min_market_cap, max_market_cap=max_market_cap)
-        if ok and df is not None and hasattr(df, 'empty') and not df.empty:
+        if (ok and df is not None and hasattr(df, 'empty') and not df.empty
+                and _main_fund_column(df)):
             _mf_cache_save(key, df)
         return ok, df, msg
 
@@ -435,19 +462,7 @@ class MainForceStockSelector:
             return df
         
         # 查找主力资金相关列（智能匹配）
-        main_fund_col = None
-        main_fund_patterns = [
-            '区间主力资金流向',      # 实际列名
-            '区间主力资金净流入',
-            '主力资金流向',
-            '主力资金净流入',
-            '主力净流入'
-        ]
-        for pattern in main_fund_patterns:
-            matching = [col for col in df.columns if pattern in col]
-            if matching:
-                main_fund_col = matching[0]
-                break
+        main_fund_col = _main_fund_column(df)
         
         if main_fund_col:
             print(f"\n使用字段排序: {main_fund_col}")
@@ -459,9 +474,9 @@ class MainForceStockSelector:
             print(f"获取主力资金净流入前 {len(top_df)} 名")
             return top_df
         else:
-            # 如果没有主力资金列，直接返回前N条
-            print(f"未找到主力资金列，返回前{top_n}条数据")
-            return df.head(top_n)
+            # 宁可让本策略无结果，也不能把普通行情排序伪装成主力资金排名。
+            print("未找到主力资金列，本策略返回空（degraded）")
+            return df.iloc[0:0].copy()
     
     def format_stock_list_for_analysis(self, df: pd.DataFrame) -> List[Dict]:
         """
@@ -570,4 +585,3 @@ class MainForceStockSelector:
 
 # 全局实例
 main_force_selector = MainForceStockSelector()
-

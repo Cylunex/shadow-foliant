@@ -17,7 +17,7 @@ import json
 import os
 import sqlite3
 import sys
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 # 路径引导:作为库被 import 时入口已 import _bootstrap;独立运行时补根目录到 sys.path
 if not any(os.path.basename(p) == 'shadow-foliant' for p in sys.path):
@@ -25,6 +25,7 @@ if not any(os.path.basename(p) == 'shadow-foliant' for p in sys.path):
 import _bootstrap  # noqa: E402
 import embed_client  # noqa: E402
 import store  # noqa: E402
+from rag_config import is_rag_enabled  # noqa: E402
 
 
 def _pg():
@@ -37,6 +38,8 @@ def _pg():
 def _batch_embed_upsert(docs: List[Dict], batch: int = 8) -> int:
     """docs: [{source_type,ref_id,title,content,meta}] → 批量嵌入 content → upsert。返回入库数。
     小批(8)+ 长超时(60s):Ollama BGE-M3 批量较慢,避免超时触发冷却级联。"""
+    if not is_rag_enabled():
+        return 0
     total = 0
     n = len(docs)
     for i in range(0, n, batch):
@@ -57,6 +60,8 @@ def _batch_embed_upsert(docs: List[Dict], batch: int = 8) -> int:
 # ----------------------------- 摄取 -----------------------------
 def ingest_analyses(limit: int = 500) -> int:
     """PG analysis_records → 文本(名称+评级+风险+操作建议+讨论)。"""
+    if not is_rag_enabled():
+        return 0
     try:
         conn = _pg(); cur = conn.cursor()
         cur.execute("SELECT id, symbol, stock_name, final_decision, discussion_result, created_at "
@@ -81,6 +86,8 @@ def ingest_analyses(limit: int = 500) -> int:
 
 def ingest_news(limit: int = 2000) -> int:
     """本地 news_flow.db platform_news → 标题+内容。"""
+    if not is_rag_enabled():
+        return 0
     path = _bootstrap.db_path('news_flow.db')
     if not os.path.exists(path):
         print('[rag] 无本地 news_flow.db,跳过新闻摄取'); return 0
@@ -103,6 +110,8 @@ def ingest_news(limit: int = 2000) -> int:
 
 
 def ingest_recommendations() -> int:
+    if not is_rag_enabled():
+        return 0
     try:
         conn = _pg(); cur = conn.cursor()
         cur.execute("SELECT id, symbol, name, rating, reason FROM ai_recommendations WHERE reason IS NOT NULL")
@@ -117,6 +126,8 @@ def ingest_recommendations() -> int:
 
 def ingest_reports(symbols: List[str], per: int = 5) -> int:
     """实时抓个股研报 → 摄取(按需)。"""
+    if not is_rag_enabled():
+        return 0
     try:
         import datahub  # 研报走统一数据层(stock_reports 包的就是 adapter.get_reports,多套熔断/超时)
     except Exception:
@@ -140,6 +151,8 @@ def ingest_dragon_tiger(days: int = 60) -> int:
     一只个股某日上榜可能多行(每席位一行),聚合成一条:个股+上榜类型+净额+主要席位+概念。
     供"龙虎榜复盘/游资动向"语义召回。无数据/无表 → 0。
     """
+    if not is_rag_enabled():
+        return 0
     try:
         from longhubang_db import get_longhubang_db
         import datetime
@@ -169,7 +182,9 @@ def ingest_dragon_tiger(days: int = 60) -> int:
     return _batch_embed_upsert(docs)
 
 
-def ingest_all(news_limit: int = 2000) -> Dict[str, int]:
+def ingest_all(news_limit: int = 2000) -> Dict[str, Any]:
+    if not is_rag_enabled():
+        return {'disabled': True, 'analysis': 0, 'news': 0, 'reco': 0, 'longhubang': 0}
     return {'analysis': ingest_analyses(), 'news': ingest_news(news_limit),
             'reco': ingest_recommendations(), 'longhubang': ingest_dragon_tiger()}
 
@@ -178,6 +193,8 @@ def ingest_all(news_limit: int = 2000) -> Dict[str, int]:
 def semantic_search(query: str, top_k: int = 8, top_n: int = 20,
                     source_types: Optional[List[str]] = None, use_rerank: bool = True) -> List[Dict]:
     """语义检索:嵌入→pgvector 召回→(可选)rerank 精排→top_k。任一环挂返回 []。"""
+    if not is_rag_enabled():
+        return []
     qv = embed_client.embed_one(query)
     if not qv:
         return []

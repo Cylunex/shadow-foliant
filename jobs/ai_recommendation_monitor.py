@@ -42,13 +42,40 @@ _perf_cols_ready = False
 
 
 def _ensure_perf_columns():
-    """幂等补齐真实盈亏追踪列(PG)。每进程跑一次;SQLite 模式该表通常不存在,best-effort。"""
+    """幂等创建推荐表并补齐真实盈亏列，PG/SQLite 都可独立启动。"""
     global _perf_cols_ready
     if _perf_cols_ready:
         return
     try:
         conn = db_connect(_DB_PATH)
         cur = conn.cursor()
+        pk = 'BIGSERIAL PRIMARY KEY' if USE_POSTGRES else 'INTEGER PRIMARY KEY AUTOINCREMENT'
+        bool_type = 'BOOLEAN' if USE_POSTGRES else 'INTEGER'
+        ts_type = 'TIMESTAMPTZ' if USE_POSTGRES else 'TIMESTAMP'
+        true_value = 'TRUE' if USE_POSTGRES else '1'
+        false_value = 'FALSE' if USE_POSTGRES else '0'
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS ai_recommendations (
+                id {pk},
+                symbol TEXT NOT NULL,
+                name TEXT,
+                source TEXT,
+                rating TEXT,
+                confidence TEXT,
+                target_price DOUBLE PRECISION,
+                entry_low DOUBLE PRECISION,
+                entry_high DOUBLE PRECISION,
+                take_profit DOUBLE PRECISION,
+                stop_loss DOUBLE PRECISION,
+                reason TEXT,
+                is_monitored {bool_type} NOT NULL DEFAULT {false_value},
+                is_active {bool_type} NOT NULL DEFAULT {true_value},
+                hit_target_at {ts_type},
+                hit_stop_at {ts_type},
+                recommended_at {ts_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at {ts_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         for col, typ in _PERF_COLS:
             try:
                 if USE_POSTGRES:
@@ -59,9 +86,9 @@ def _ensure_perf_columns():
                 pass  # 列已存在 / 表不存在
         conn.commit()
         conn.close()
+        _perf_cols_ready = True
     except Exception as e:
         print(f'[ai_rec_monitor] 补列失败(忽略): {e}')
-    _perf_cols_ready = True
 
 
 def _current_price(symbol: str) -> Optional[float]:
@@ -138,6 +165,7 @@ def save_recommendation(symbol: str, name: str = '', source: str = '',
 
 def list_active(symbol: Optional[str] = None, only_monitored: bool = False,
                 limit: int = 100) -> List[Dict[str, Any]]:
+    _ensure_perf_columns()
     sql = '''
         SELECT id, symbol, name, source, rating, confidence,
                target_price, entry_low, entry_high, take_profit, stop_loss,
@@ -163,10 +191,43 @@ def list_active(symbol: Optional[str] = None, only_monitored: bool = False,
     return [dict(zip(keys, r)) for r in rows]
 
 
+def close_recommendation(rec_id: int, reason: str = 'manual',
+                         close_price: Optional[float] = None) -> Dict[str, Any]:
+    """手动关闭推荐并固化已实现收益。close_price 不传则 best-effort 取实时价。"""
+    _ensure_perf_columns()
+    rec = _get(rec_id)
+    if not rec:
+        return {'closed': False, 'error': 'not_found'}
+    if not bool(rec.get('is_active')):
+        return {'closed': False, 'error': 'already_closed', 'id': rec_id}
+    price = close_price if close_price is not None else _current_price(rec['symbol'])
+    ref = rec.get('ref_price')
+    pnl = _pnl_pct(ref, price)
+    conn = db_connect(_DB_PATH)
+    cur = conn.cursor()
+    now = 'NOW()' if USE_POSTGRES else 'CURRENT_TIMESTAMP'
+    cur.execute(f'''
+        UPDATE ai_recommendations
+        SET is_active = {'FALSE' if USE_POSTGRES else '0'},
+            closed_at = {now}, close_reason = ?,
+            last_price = COALESCE(?, last_price), last_price_at = {now},
+            realized_pnl_pct = COALESCE(?, realized_pnl_pct),
+            updated_at = {now}
+        WHERE id = ? AND is_active = {'TRUE' if USE_POSTGRES else '1'}
+    ''', ((reason or 'manual')[:100], price, pnl, rec_id))
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return {
+        'closed': ok, 'id': rec_id, 'symbol': rec['symbol'],
+        'close_price': price, 'realized_pnl_pct': pnl, 'reason': reason,
+    }
+
+
 def enable_monitor(rec_id: int) -> bool:
     """把推荐标 is_monitored=True，并 upsert 到 monitored_stocks 触发后台监控"""
     rec = _get(rec_id)
-    if not rec:
+    if not rec or not bool(rec.get('is_active')):
         return False
     conn = db_connect(_DB_PATH)
     cur = conn.cursor()
@@ -190,7 +251,8 @@ def _get(rec_id: int) -> Optional[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute('''
         SELECT id, symbol, name, source, rating, confidence,
-               target_price, entry_low, entry_high, take_profit, stop_loss, reason
+               target_price, entry_low, entry_high, take_profit, stop_loss, reason,
+               ref_price, is_active
         FROM ai_recommendations WHERE id = ?
     ''', (rec_id,))
     row = cur.fetchone()
@@ -198,7 +260,8 @@ def _get(rec_id: int) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     keys = ['id', 'symbol', 'name', 'source', 'rating', 'confidence',
-            'target_price', 'entry_low', 'entry_high', 'take_profit', 'stop_loss', 'reason']
+            'target_price', 'entry_low', 'entry_high', 'take_profit', 'stop_loss',
+            'reason', 'ref_price', 'is_active']
     return dict(zip(keys, row))
 
 

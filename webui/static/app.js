@@ -8,7 +8,6 @@ import Settings from './pages/settings.js'
 import Monitor from './pages/monitor.js'
 import Macro from './pages/macro.js'
 import History from './pages/history.js'
-import Rag from './pages/rag.js'
 import Miaoxiang from './pages/miaoxiang.js'
 import IndexBar from './indexbar.js'
 import Reco from './pages/reco.js'
@@ -21,9 +20,11 @@ import Genome from './pages/genome.js'
 import Convertible from './pages/convertible.js'
 import Signals from './pages/signals.js'
 import Exit from './pages/exit.js'
+import Cockpit from './pages/cockpit.js'
 
 const NAV = [
   { k:'briefing', ic:'☀️', t:'晨报', comp:Briefing },
+  { k:'cockpit', ic:'🕹️', t:'Agent驾驶舱', comp:Cockpit },
   // 个人持仓(置顶)
   { k:'port',  ic:'📊', t:'持仓总览', comp:Portfolio },
   { k:'trade', ic:'📋', t:'成交记录', comp:Trade },
@@ -45,7 +46,6 @@ const NAV = [
   { k:'monitor', ic:'👁️', t:'监测',   comp:Monitor },
   { k:'macro', ic:'🌍', t:'宏观',     comp:Macro },
   // 工具
-  { k:'rag', ic:'🔎', t:'语义搜索',   comp:Rag },
   { k:'history', ic:'🕘', t:'历史',   comp:History },
   { k:'settings', ic:'⚙️', t:'设置',  comp:Settings },
 ]

@@ -13,7 +13,7 @@
 | 类别 | 数量 | 说明 |
 |---|---|---|
 | Python 模块 | ~200 | 按功能分子目录(core/data/agents/analysis/selection/portfolio/jobs/fund/…) |
-| MCP 工具 | 80+ | `mcp_server.py` 暴露 |
+| MCP 工具 | 90+ | `mcp_server.py` 暴露 |
 | API 路由 | ~110 | `webui/api_server.py` |
 | 文档 | 30+ | README / ARCHITECTURE / 交接说明 / AGENT_SKILL / docs/* |
 
@@ -272,6 +272,20 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 
 由 `jobs_hub.register_default_jobs()` 调度,开关闸门走 `automation_config`(默认全开,生产以 DB `automation_switches` 为准)。**权威清单(名称/时间/开关/说明)见 `jobs/automation_config.py` 的 REGISTRY**;下面只给交易日主节奏(✅=调 AI):
 
+Agent/Web 的按需触发统一走 `jobs/task_control.py`：提交时写
+`manual_task_runs(status=queued)` 并立即返回 `run_id`，常驻 `jobs_hub` 从 PG/SQLite
+原子领取，再更新 `running → success/error/skipped/degraded/...`。领取过程带
+`worker_id`、尝试次数和心跳；worker 失联后，有剩余次数的任务重新入队，耗尽后标为
+`interrupted`。`requested_by + task_name + idempotency_key` 唯一约束防止 Agent
+重试重复执行。业务任务自身的调度结果仍写 `job_runs`，任务控制层会在结束时读取它，
+以识别函数内部捕获但未重新抛出的失败。Web 设置页和 MCP 读取同一状态表；Web/MCP
+进程退出不丢已提交任务，但 `jobs_hub` 不运行时任务会停留在 `queued`。
+
+盘后 `portfolio_indicator_snapshot`、`eod_outcomes`、`factor_collection` 显式等待
+当日 `kline_prefetch` 成功，不再只依赖计划时间间隔；失败或等待超时会记录
+`skipped`，避免在未预热缓存上同时冷拉数据源。等待上限由
+`KLINE_PREFETCH_WAIT_SEC` 控制。
+
 | 时间 | 任务 | 内容 | AI |
 |---|---|---|---|
 | 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
@@ -288,7 +302,11 @@ SQLite 模式（USE_POSTGRES=false）仍存完整数据。
 | 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
 | 周日 | `mx_weekend_outlook`(10:00)/`weekly_analysis`(15:00)/`portfolio_stress_ai`(16:00)/`wf_weekly_backtest`(20:00) | 周末研判/周报/🛡️压力预案/周回测 | 部分✅ |
 | 周一 | `weekly_db_cleanup`(03:00)/`ai_eval_weekly`(09:30) | DB 清理 / AI 推荐周评估 | ❌ |
-| 夜间 | `pg_backup`(02:00)/`rag_ingest`(02:30) | PG 备份 / RAG 入库 | ❌ |
+| 夜间 | `pg_backup`(02:00) | PG 备份 | ❌ |
+
+`rag_ingest` 已从默认链路停用：注册项保留用于可逆恢复，但默认开关为关闭，且还受
+`RAG_ENABLED=false` 全局门控。Web 语义搜索入口、工作流 RAG provider 和分析补充证据
+同步隐藏/跳过，既有 `doc_embeddings` 暂不删除。
 
 > 通知分类:`report`(日常报告)/`alert`(事件告警,有事才响)/`archive`(归档)。可用 env `NOTIFICATION_ROUTE_<CATEGORY>` 把不同类别分流到不同渠道。
 

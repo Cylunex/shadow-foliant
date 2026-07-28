@@ -312,8 +312,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🔎 运维：语义检索语料摄取',
         'schedule': '02:30 每日',
         'category': '运维',
-        'default': True,
-        'description': '历史分析/新闻/推荐 嵌入(BGE-M3)入 pgvector,保持语义搜索语料新鲜',
+        'default': False,
+        'description': '已停用；仅 RAG_ENABLED=true 且手动开启时才摄取历史语料',
     },
 }
 

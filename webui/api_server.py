@@ -485,13 +485,17 @@ def stock_deep_analysis(code: str):
                 res[key] = val
         disc = A.conduct_team_discussion(res, info)
         dec = A.make_final_decision(disc, info, ind)
-        # RAG 证据增强(向量召回相关历史分析/新闻/研报;服务挂了返回空,不影响分析)
+        # 可选 RAG 补充证据；默认关闭，且不参与上面的最终决策生成。
         evidence = ""
         try:
-            import sys as _sys
-            _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rag"))
-            import service as _rag
-            evidence = _rag.build_context(f"{info.get('name','')} {code} 业绩 风险 估值", top_k=5)
+            from rag_config import is_rag_enabled
+            if is_rag_enabled():
+                import sys as _sys
+                _sys.path.insert(0, os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "rag"))
+                import service as _rag
+                evidence = _rag.build_context(
+                    f"{info.get('name','')} {code} 业绩 风险 估值", top_k=5)
         except Exception:
             pass
         result = {"decision": dec, "discussion": disc[:2500], "rag_evidence": evidence}
@@ -631,6 +635,42 @@ def monitor_stocks():
     try:
         from monitor_db import monitor_db
         return _ok(monitor_db.get_monitored_stocks())
+    except Exception as e:
+        return _err(e)
+
+
+class MonitorUpsertReq(BaseModel):
+    code: str
+    name: str = ""
+    rating: str = "持有"
+    entry_low: float
+    entry_high: float
+    take_profit: Optional[float] = None
+    stop_loss: Optional[float] = None
+    check_interval: int = 60
+    notification_enabled: bool = True
+    trading_hours_only: bool = True
+    dry_run: bool = False
+
+
+@app.post("/api/monitor/stocks")
+def monitor_upsert(req: MonitorUpsertReq):
+    try:
+        from agent_operations import upsert_monitor
+        result = upsert_monitor(
+            req.code, req.name, req.rating, req.entry_low, req.entry_high,
+            req.take_profit, req.stop_loss, req.check_interval,
+            req.notification_enabled, req.trading_hours_only, req.dry_run)
+        return _ok(result)
+    except Exception as e:
+        return _err(e)
+
+
+@app.delete("/api/monitor/stocks/{code}")
+def monitor_remove(code: str, dry_run: bool = False):
+    try:
+        from agent_operations import remove_monitor
+        return _ok(remove_monitor(code, dry_run=dry_run))
     except Exception as e:
         return _err(e)
 
@@ -2076,8 +2116,11 @@ def MacroCycleDataFetcher_get():
 # ============================ 语义检索(RAG) ============================
 @app.get("/api/rag/search")
 def rag_search(q: str, top_k: int = 8, sources: str = ""):
-    """语义检索(BGE-M3→pgvector→TEI rerank)。sources 逗号分隔过滤 analysis/news/reco/report。"""
+    """可选语义检索；默认关闭。"""
     try:
+        from rag_config import is_rag_enabled
+        if not is_rag_enabled():
+            return _ok({'enabled': False, 'hits': [], 'reason': 'RAG_ENABLED=false'})
         import sys as _sys
         _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rag"))
         import service
@@ -2105,6 +2148,9 @@ def miaoxiang_query(skill: str = "ask", q: str = ""):
 @app.get("/api/rag/stats")
 def rag_stats():
     try:
+        from rag_config import is_rag_enabled
+        if not is_rag_enabled():
+            return _ok({'enabled': False, 'reason': 'RAG_ENABLED=false'})
         import sys as _sys
         _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rag"))
         import store, embed_client
@@ -2247,7 +2293,8 @@ def signals_outcome_stats(dimension: str = "action", days: int = 180):
 def jobs_list():
     try:
         from automation_config import list_all
-        return _ok(list_all())
+        from jobs.task_control import enrich_task_catalog
+        return _ok(enrich_task_catalog(list_all()))
     except Exception as e:
         return _err(e)
 
@@ -2275,40 +2322,42 @@ def jobs_runs(name: str, limit: int = 8):
         return _err(e)
 
 
-# 2026-06-12 任务整合后:部分 wf_* 已并入父任务,有独立私有函数的可手动触发该子流程
-# (函数自带开关/交易日守卫,关或非交易日会自行跳过)。
-_SUBSTEP_FNS = {
-    "wf_daily_strategy_scan": "_daily_strategy_scan",
-    "wf_daily_candidate_pool": "_daily_candidate_pool",
-    "wf_position_profit_check": "_position_profit_check",
-    "wf_position_guard_check": "_position_guard_check",
-}
-# 注册名 → 任务函数名(不等于 task_{name} 的别名)
-_JOB_FN_ALIAS = {"wf_weekly_backtest": "task_weekly_backtest", **_SUBSTEP_FNS}
-# 纯内联子步骤(无独立函数,只在父任务数据流内按本开关生效)→ 引导触发父任务
-_JOB_INLINE_PARENT = {
-    "wf_daily_pattern_alert": "portfolio_indicator_snapshot",
-    "wf_overnight_to_rec": "morning_strategy",
-    "wf_selection_to_rec": "unified_selection",
-}
-
-
 @app.post("/api/jobs/{name}/run")
 def jobs_run(name: str):
-    """手动立即触发一个定时任务(后台线程执行,HTTP 立即返回)。
-    解决"只能等定时 / 走 MCP / SSH"的痛点。"""
-    import threading
+    """异步触发任务并返回持久化 run_id，页面刷新/重连后仍可查询。"""
     try:
-        from jobs import jobs_hub
-        if name in _JOB_INLINE_PARENT:
-            p = _JOB_INLINE_PARENT[name]
-            return _err(f"「{name}」是已并入「{p}」的内联子步骤(随父任务按本开关运行),不能单独触发;请改触发父任务「{p}」")
-        fn = getattr(jobs_hub, _JOB_FN_ALIAS.get(name, "task_" + name), None)
-        if fn is None or not callable(fn):
-            return _err(f"未知或不可手动触发的任务: {name}")
-        threading.Thread(target=fn, name=f"manual-{name}", daemon=True).start()
-        note = "（子步骤自带开关/交易日守卫:开关关闭或非交易日会自行跳过）" if name in _SUBSTEP_FNS else ""
-        return _ok({"name": name, "triggered": True, "note": note})
+        from jobs.task_control import submit_task
+        return _ok(submit_task(name, requested_by='web'))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/task-runs")
+def task_runs_list(task_name: str = "", limit: int = 30):
+    """最近的手动任务运行，供 Web 观测和 Agent 外部调试。"""
+    try:
+        from jobs.task_control import list_task_runs
+        return _ok(list_task_runs(task_name=task_name, limit=limit))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/task-runs/{run_id}")
+def task_run_detail(run_id: str):
+    try:
+        from jobs.task_control import get_task_run
+        row = get_task_run(run_id)
+        return _ok(row) if row else _err(f"未找到任务运行: {run_id}")
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/agent/cockpit")
+def agent_cockpit_view(recent_limit: int = 12):
+    """Web 只读复用 Agent 总览，便于诊断任务/数据状态。"""
+    try:
+        from jobs.task_control import agent_cockpit
+        return _ok(agent_cockpit(recent_limit=recent_limit))
     except Exception as e:
         return _err(e)
 
@@ -2398,11 +2447,16 @@ def screen_strategy(name: str, top_n: int = 10):
             from main_force_selector import MainForceStockSelector
             sel = MainForceStockSelector()
             # 盘中只读自带缓存,不现拉;盘后正常现算
-            raw = sel.get_main_force_stocks_cached(use_cache=True) if _trading else sel.get_main_force_stocks()
-            df = raw if isinstance(raw, pd.DataFrame) else sel._convert_to_dataframe(raw)
-            if df is not None and len(df):
+            raw = sel.get_main_force_stocks_cached(
+                use_cache=True, cache_only=True) if _trading else sel.get_main_force_stocks()
+            if isinstance(raw, tuple) and len(raw) == 3:
+                ok, df, msg = raw
+            else:
+                df = raw if isinstance(raw, pd.DataFrame) else sel._convert_to_dataframe(raw)
+                ok, msg = (df is not None and len(df) > 0), "主力资金选股"
+            if ok and df is not None and len(df):
                 df = sel.get_top_stocks(df, top_n)
-            ok, msg = (df is not None and len(df) > 0), "主力资金选股"
+                ok = len(df) > 0
         else:
             return _err("未知策略")
         if not ok or df is None or len(df) == 0:

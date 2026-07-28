@@ -344,6 +344,31 @@ def get_latest_active(code: str) -> Optional[Dict[str, Any]]:
     return rows[0] if rows else None
 
 
+def get_signal(signal_id: int) -> Optional[Dict[str, Any]]:
+    """按主键读取单条信号，不受列表分页限制。"""
+    try:
+        _ensure_tables()
+        if not _tables_ready:
+            return None
+        conn = _connect(_DB_PATH)
+        cur = conn.cursor()
+        _lazy_expire(cur)
+        cur.execute(
+            f"SELECT {', '.join(_COLS)} FROM decision_signals WHERE id=?",
+            (int(signal_id),),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        conn.close()
+        if not row:
+            return None
+        out = dict(zip(_COLS, row))
+        out['action_cn'] = ACTION_CN.get(out.get('action'), out.get('action'))
+        return out
+    except Exception:
+        return None
+
+
 def update_status(signal_id: int, status: str) -> bool:
     """手动改状态(closed/archived 等)。active→终态可,终态不可逆回 active。"""
     if status not in (TERMINAL_STATUS + ('active',)):

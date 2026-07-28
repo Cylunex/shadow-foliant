@@ -88,8 +88,10 @@ SCHEMA: List[Dict[str, str]] = [
      'help': '缓存/分布式锁;不可达自动降级'},
     {'key': 'REDIS_PORT', 'label': 'Redis 端口', 'group': '缓存/向量', 'type': 'int', 'help': ''},
     {'key': 'REDIS_DB', 'label': 'Redis DB', 'group': '缓存/向量', 'type': 'int', 'help': ''},
+    {'key': 'RAG_ENABLED', 'label': '启用 RAG', 'group': '缓存/向量', 'type': 'bool',
+     'help': '默认关闭；开启后才启用向量摄取、检索和工作流入口'},
     {'key': 'BGE_URL', 'label': 'BGE-M3 嵌入地址', 'group': '缓存/向量', 'type': 'text',
-     'help': 'RAG 嵌入;不可达 RAG 降级,主功能不受影响'},
+     'help': '仅 RAG_ENABLED=true 时使用'},
     {'key': 'TEI_RERANK_URL', 'label': 'TEI Rerank 地址', 'group': '缓存/向量', 'type': 'text', 'help': ''},
     # —— 数据源 ——
     {'key': 'TUSHARE_TOKEN', 'label': 'Tushare Token', 'group': '数据源', 'type': 'secret', 'help': '可选'},

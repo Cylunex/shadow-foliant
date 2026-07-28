@@ -262,8 +262,8 @@ class SectorStrategyDatabase:
             _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_type, data_date, version, status, fetch_success, record_count)
-            VALUES (?, ?, ?, 'active', 1, ?)
-            ''', (data_type, data_date, version, len(data_df)))
+            VALUES (?, ?, ?, 'active', ?, ?)
+            ''', (data_type, data_date, version, True, len(data_df)))
             
             conn.commit()
             self.logger.info(f"[智策板块] 保存{data_type}数据成功 (日期: {data_date}, 版本: {version}, 记录数: {len(data_df)})")
@@ -275,8 +275,8 @@ class SectorStrategyDatabase:
             _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_type, data_date, version, status, fetch_success, error_message, record_count)
-            VALUES (?, ?, ?, 'failed', 0, ?, 0)
-            ''', (data_type, data_date, version or 1, str(e)))
+            VALUES (?, ?, ?, 'failed', ?, ?, 0)
+            ''', (data_type, data_date, version or 1, False, str(e)))
             conn.commit()
             self.logger.error(f"[智策板块] 保存{data_type}数据失败: {e}")
             raise
@@ -343,14 +343,14 @@ class SectorStrategyDatabase:
             if data_date:
                 query = '''
                 SELECT version FROM data_versions 
-                WHERE data_type = ? AND data_date = ? AND fetch_success = 1
+                WHERE data_type = ? AND data_date = ? AND fetch_success = TRUE
                 ORDER BY version DESC LIMIT 1
                 '''
                 params = [data_type, data_date]
             else:
                 query = '''
                 SELECT data_date, version FROM data_versions 
-                WHERE data_type = ? AND fetch_success = 1
+                WHERE data_type = ? AND fetch_success = TRUE
                 ORDER BY data_date DESC, version DESC LIMIT 1
                 '''
                 params = [data_type]
@@ -608,8 +608,8 @@ class SectorStrategyDatabase:
             _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_date, data_type, version, fetch_success, record_count)
-            VALUES (?, ?, ?, 1, ?)
-            ''', (data_date, data_type, version, len(data_df)))
+            VALUES (?, ?, ?, ?, ?)
+            ''', (data_date, data_type, version, True, len(data_df)))
             
             conn.commit()
             self.logger.info(f"[智策板块] {data_type}数据保存成功 (日期: {data_date}, 版本: {version}, 记录数: {len(data_df)})")
@@ -818,8 +818,8 @@ class SectorStrategyDatabase:
             _ior(cursor,'''
             INSERT OR REPLACE INTO data_versions 
             (data_date, data_type, version, fetch_success, record_count)
-            VALUES (?, ?, ?, 1, ?)
-            ''', (str(news_date), 'news', version, inserted))
+            VALUES (?, ?, ?, ?, ?)
+            ''', (str(news_date), 'news', version, True, inserted))
 
             conn.commit()
             self.logger.info(f"[智策板块] 保存新闻数据成功 (日期: {news_date}, 版本: {version}, 记录数: {inserted})")
@@ -871,12 +871,16 @@ class SectorStrategyDatabase:
             cutoff = (pd.Timestamp.now() - pd.Timedelta(hours=within_hours)).strftime('%Y-%m-%d %H:%M:%S')
             # 选取最近版本的数据（同一天可能有多版本）
             # 先查最近有效版本记录
-            version_df = pd.read_sql_query('''
+            recent_sql = '''
                 SELECT data_date, version FROM data_versions
-                WHERE data_type = ? AND fetch_success = 1 
-                AND datetime(created_at) >= datetime(?)
+                WHERE data_type = ? AND fetch_success = TRUE
+                AND created_at >= ?
                 ORDER BY data_date DESC, version DESC LIMIT 1
-            ''', conn, params=[data_type, cutoff])
+            '''
+            if not USE_POSTGRES:
+                recent_sql = recent_sql.replace(
+                    'created_at >= ?', 'datetime(created_at) >= datetime(?)')
+            version_df = pd.read_sql_query(recent_sql, conn, params=[data_type, cutoff])
 
             if version_df.empty:
                 return None

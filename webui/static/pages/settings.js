@@ -1,4 +1,4 @@
-import { reactive, ref, computed, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../lib.js'
 
 export default {
@@ -12,17 +12,41 @@ export default {
 
     <!-- 定时任务 -->
     <div v-if="tab==='jobs'">
-      <p class="sub">后台自动化任务开关(jobs_hub)。改动即时存库;任务需 jobs_hub 常驻运行才会真正触发。</p>
+      <p class="sub">后台自动化任务开关与运行观测。手动任务异步执行，刷新页面后仍可继续查看状态。</p>
       <div v-if="st.err" class="err">{{st.err}}</div>
       <div v-if="st.loading" class="loading">加载中…</div>
+      <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span class="pill">任务 {{st.jobs.length}}</span>
+        <span class="pill" style="color:var(--green)">正常 {{summary.success}}</span>
+        <span class="pill" style="color:var(--amber)">运行中 {{summary.running}}</span>
+        <span class="pill" style="color:var(--red)">异常 {{summary.failed}}</span>
+        <span v-if="summary.disabledCore" class="pill" style="color:var(--red)">
+          核心关闭 {{summary.disabledCore}}
+        </span>
+        <button class="ghost" style="margin-left:auto;padding:3px 10px" @click="loadJobs"
+                :disabled="st.loading">↻ 刷新</button>
+      </div>
       <div v-for="cat in cats" :key="cat" class="card">
         <h3>{{cat}}</h3>
-        <table><thead><tr><th>任务</th><th>计划</th><th>说明</th><th style="text-align:center">启用</th><th style="text-align:center">手动</th></tr></thead>
+        <table><thead><tr><th>任务</th><th>计划</th><th>最近状态</th><th>说明</th><th style="text-align:center">启用</th><th style="text-align:center">手动</th></tr></thead>
           <tbody>
             <tr v-for="j in byCat(cat)" :key="j.name">
               <td><b>{{j.cn}}</b><span v-if="j.core" class="pill" style="margin-left:6px;font-size:10px">核心</span>
                   <div style="color:var(--muted);font-size:11px">{{j.name}}</div></td>
               <td>{{j.schedule}}</td>
+              <td style="white-space:nowrap">
+                <span class="pill" :style="{color:statusColor(effectiveRun(j)?.status)}">
+                  {{statusText(effectiveRun(j)?.status)}}
+                </span>
+                <div style="color:var(--muted);font-size:11px;margin-top:3px">
+                  {{fmtTime(effectiveRun(j)?.finished_at || effectiveRun(j)?.started_at || effectiveRun(j)?.requested_at)}}
+                </div>
+                <div v-if="effectiveRun(j)?.error" class="err"
+                     :title="effectiveRun(j).error"
+                     style="max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px">
+                  {{effectiveRun(j).error}}
+                </div>
+              </td>
               <td style="text-align:left;color:var(--muted);max-width:420px">{{j.description}}</td>
               <td style="text-align:center">
                 <label class="sw">
@@ -32,8 +56,9 @@ export default {
               </td>
               <td style="text-align:center">
                 <button class="ghost" style="padding:2px 8px;font-size:12px"
-                        :disabled="running[j.name]" @click="runNow(j)">
-                  {{running[j.name]==='ok'?'✅':running[j.name]?'…':'▶'}}
+                        :title="j.trigger_note || ''"
+                        :disabled="isRunning(j) || !j.triggerable" @click="runNow(j)">
+                  {{!j.triggerable?'—':isRunning(j)?'运行中…':'▶ 运行'}}
                 </button>
               </td>
             </tr>
@@ -82,6 +107,34 @@ export default {
     const st = reactive({ jobs:[], err:'', loading:false })
     const cats = computed(()=> [...new Set(st.jobs.map(j=>j.category))])
     const byCat = c => st.jobs.filter(j=>j.category===c)
+    const finalOk = new Set(['success','skipped'])
+    const finalBad = new Set(['error','failed','timeout','degraded','partial','interrupted'])
+    const effectiveRun = j => {
+      const m=j.manual_run, s=j.last_run
+      if(m && ['queued','running'].includes(m.status)) return m
+      const mt=m && (m.finished_at || m.started_at || m.requested_at)
+      const st=s && (s.finished_at || s.started_at)
+      return mt && (!st || String(mt)>=String(st)) ? m : s
+    }
+    const summary = computed(()=>{
+      let success=0, runningN=0, failed=0, disabledCore=0
+      st.jobs.forEach(j=>{
+        const status=effectiveRun(j)?.status
+        if(finalOk.has(status)) success++
+        else if(['queued','running'].includes(status)) runningN++
+        else if(finalBad.has(status)) failed++
+        if(j.core && !j.enabled) disabledCore++
+      })
+      return {success,running:runningN,failed,disabledCore}
+    })
+    const statusText = s => ({
+      success:'成功', skipped:'跳过', queued:'排队中', running:'运行中',
+      error:'失败', failed:'失败', timeout:'超时', degraded:'降级', partial:'部分成功',
+      interrupted:'已中断'
+    }[s] || '暂无记录')
+    const statusColor = s => finalOk.has(s)?'var(--green)':
+      ['queued','running'].includes(s)?'var(--amber)':finalBad.has(s)?'var(--red)':'var(--muted)'
+    const fmtTime = v => v ? String(v).slice(0,19).replace('T',' ') : '—'
     async function loadJobs(){
       st.loading=true; st.err=''
       try{ st.jobs = await api('/api/jobs') }catch(e){ st.err=''+e }finally{ st.loading=false }
@@ -90,13 +143,36 @@ export default {
       try{ await api('/api/jobs/'+j.name+'/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on})}); j.enabled=on }
       catch(e){ st.err=''+e; await loadJobs() }
     }
-    // 手动立即触发(后台跑,无视开关);按钮短暂显示 … → ✅
+    // 手动异步触发；run_id 持久化，轮询结束后刷新任务状态。
     const running = reactive({})
+    const timers = new Set()
+    const isRunning = j => Boolean(running[j.name]) ||
+      ['queued','running'].includes(j.manual_run?.status)
+    function later(fn, ms){
+      const id=setTimeout(()=>{ timers.delete(id); fn() }, ms); timers.add(id)
+    }
+    async function pollRun(j, runId){
+      try{
+        const run = await api('/api/task-runs/'+runId)
+        j.manual_run = run
+        if(['queued','running'].includes(run.status)){
+          later(()=>pollRun(j,runId), 2500)
+        }else{
+          delete running[j.name]
+          await loadJobs()
+        }
+      }catch(e){
+        st.err=''+e; delete running[j.name]
+      }
+    }
     async function runNow(j){
-      running[j.name] = true
-      try{ await api('/api/jobs/'+j.name+'/run',{method:'POST'}); running[j.name]='ok'
-           setTimeout(()=>{ running[j.name]=false }, 3000) }
-      catch(e){ st.err=''+e; running[j.name]=false }
+      running[j.name] = true; st.err=''
+      try{
+        const r=await api('/api/jobs/'+j.name+'/run',{method:'POST'})
+        running[j.name]=r.run_id
+        j.manual_run={...r,requested_at:new Date().toISOString()}
+        later(()=>pollRun(j,r.run_id), Math.max(1,r.poll_after_seconds||2)*1000)
+      }catch(e){ st.err=''+e; delete running[j.name] }
     }
     // —— 环境配置 ——
     const e = reactive({ items:[], err:'', msg:'', loading:false, saving:false })
@@ -127,6 +203,8 @@ export default {
       }catch(err){ e.err=''+err }finally{ e.saving=false }
     }
     onMounted(()=>{ loadJobs(); loadEnv() })
-    return { tab, st, cats, byCat, toggle, running, runNow, e, form, groups, byGroup, save }
+    onUnmounted(()=>{ timers.forEach(clearTimeout); timers.clear() })
+    return { tab, st, cats, byCat, summary, effectiveRun, statusText, statusColor, fmtTime,
+      toggle, running, isRunning, runNow, loadJobs, e, form, groups, byGroup, save }
   }
 }

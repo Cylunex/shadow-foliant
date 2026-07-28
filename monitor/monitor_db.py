@@ -25,6 +25,29 @@ class StockMonitorDatabase:
     def init_database(self):
         """初始化数据库表结构 — PG 模式下表已通过 scripts/init_postgres.sql 建好"""
         if USE_POSTGRES:
+            # 旧版 PG DDL 与 SQLite/运行时代码字段曾有漂移；在入口幂等补齐，
+            # 避免监控 CRUD 部署后因 current_price/trading_hours_only 等列缺失失败。
+            conn = db_connect(self.db_path)
+            cursor = conn.cursor()
+            for name, ddl in (
+                ('current_price', 'DOUBLE PRECISION'),
+                ('last_checked', 'TIMESTAMPTZ'),
+                ('trading_hours_only', 'BOOLEAN NOT NULL DEFAULT TRUE'),
+                ('quant_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                ('quant_config', 'JSONB'),
+                ('last_price', 'DOUBLE PRECISION'),
+                ('last_check_at', 'TIMESTAMPTZ'),
+            ):
+                cursor.execute(
+                    f'ALTER TABLE monitored_stocks ADD COLUMN IF NOT EXISTS {name} {ddl}')
+            cursor.execute('''
+                UPDATE monitored_stocks
+                SET current_price = COALESCE(current_price, last_price),
+                    last_checked = COALESCE(last_checked, last_check_at)
+                WHERE current_price IS NULL OR last_checked IS NULL
+            ''')
+            conn.commit()
+            conn.close()
             return
         conn = db_connect(self.db_path)
         cursor = conn.cursor()
@@ -339,12 +362,13 @@ class StockMonitorDatabase:
             print(f"删除股票失败: {e}")
             return False
     
-    def update_monitored_stock(self, stock_id: int, rating: str, entry_range: Dict, 
+    def update_monitored_stock(self, stock_id: int, rating: str, entry_range: Dict,
                               take_profit: float, stop_loss: float, 
                               check_interval: int, notification_enabled: bool,
                               trading_hours_only: bool = None,
                               quant_enabled: bool = None,
-                              quant_config: Dict = None):
+                              quant_config: Dict = None,
+                              name: str = None):
         """更新监测股票"""
         try:
             from enums import normalize_rating
@@ -357,31 +381,37 @@ class StockMonitorDatabase:
         if quant_enabled is not None and quant_config is not None:
             quant_config_json = json.dumps(quant_config) if quant_config else None
             trading_hours_sql = ", trading_hours_only = ?" if trading_hours_only is not None else ""
+            name_sql = ", name = ?" if name is not None else ""
             params = [rating, json.dumps(entry_range), take_profit, stop_loss, 
                       check_interval, notification_enabled, quant_enabled, quant_config_json]
             if trading_hours_only is not None:
                 params.append(trading_hours_only)
+            if name is not None:
+                params.append(name)
             params.append(stock_id)
             
             cursor.execute(f'''
                 UPDATE monitored_stocks 
                 SET rating = ?, entry_range = ?, take_profit = ?, stop_loss = ?, 
                     check_interval = ?, notification_enabled = ?, 
-                    quant_enabled = ?, quant_config = ?{trading_hours_sql},
+                    quant_enabled = ?, quant_config = ?{trading_hours_sql}{name_sql},
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', tuple(params))
         else:
             trading_hours_sql = ", trading_hours_only = ?" if trading_hours_only is not None else ""
+            name_sql = ", name = ?" if name is not None else ""
             params = [rating, json.dumps(entry_range), take_profit, stop_loss, check_interval, notification_enabled]
             if trading_hours_only is not None:
                 params.append(trading_hours_only)
+            if name is not None:
+                params.append(name)
             params.append(stock_id)
             
             cursor.execute(f'''
                 UPDATE monitored_stocks 
-                SET rating = ?, entry_range = ?, take_profit = ?, stop_loss = ?, 
-                    check_interval = ?, notification_enabled = ?{trading_hours_sql}, 
+                    SET rating = ?, entry_range = ?, take_profit = ?, stop_loss = ?,
+                    check_interval = ?, notification_enabled = ?{trading_hours_sql}{name_sql},
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', tuple(params))
@@ -463,7 +493,10 @@ class StockMonitorDatabase:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT * FROM monitored_stocks WHERE symbol = ?
+            SELECT id, symbol, name, rating, entry_range, take_profit, stop_loss,
+                   current_price, last_checked, check_interval, notification_enabled,
+                   trading_hours_only, quant_enabled, quant_config
+            FROM monitored_stocks WHERE symbol = ?
         ''', (symbol,))
         
         row = cursor.fetchone()
@@ -472,7 +505,7 @@ class StockMonitorDatabase:
         if row:
             try:
                 entry_range = coerce_json(row[4])
-                quant_config = coerce_json(row[12])
+                quant_config = coerce_json(row[13])
             except Exception as e:
                 print(f"警告: 股票 {row[1]} 的JSON解析失败: {e}")
                 entry_range = None
@@ -489,8 +522,9 @@ class StockMonitorDatabase:
                 'current_price': row[7],
                 'last_checked': row[8],
                 'check_interval': row[9],
-                'notification_enabled': row[10],
-                'quant_enabled': row[11],
+                'notification_enabled': bool(row[10]),
+                'trading_hours_only': bool(row[11]) if row[11] is not None else True,
+                'quant_enabled': bool(row[12]),
                 'quant_config': quant_config
             }
         return None
