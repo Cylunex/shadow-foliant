@@ -7,7 +7,7 @@
 
 import logging
 from typing import Tuple, Optional
-from selection.data_source_config import screen_stocks
+from selection.data_source_config import _normalize_wencai
 import pandas as pd
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
@@ -45,22 +45,8 @@ class ProfitGrowthSelector:
         try:
             from data.pywencai_safe import pywencai_get
 
-            # 传真实净利增长门槛(≥10%,原来误传 None=零过滤,返回按ROE排的全市场前5污染推荐池)。
-            # profit_growth_min 非空 → screen_stocks 能力守卫会跳过 push2/dataapi(clist 无净利增长
-            # 字段)直接走问财;问财 query 完整编码策略条件,这里只是触发守卫的入口(2026-07-17 修)。
-            self.logger.info('尝试统一数据源筛选...')
-            unified = screen_stocks(
-                price_max=None, pe_max=None, profit_growth_min=10,
-                top_n=top_n, sort_field='f6', sort_asc=True,
-            )
-            if unified['success'] and unified['data']:
-                df_result = pd.DataFrame(unified['data'])
-                self.logger.info(f"✅ {unified['msg']}")
-                return True, df_result, f"成功获取 {len(df_result)} 只股票"
-
-            self.logger.warning(f"统一数据源失败({unified['msg']}), 回退pywencai")
-            
-            # 回退: pywencai
+            # 财务增长条件和“深圳 A 股”范围无法由 push2/dataapi 完整表达；
+            # 直接执行精确问句一次，避免统一入口退化成沪深全市场并重复请求问财。
             query = (
                 "净利润增长率(净利润同比增长率)≥10%，"
                 "非科创板，"
@@ -74,11 +60,14 @@ class ProfitGrowthSelector:
             
             # 调用pywencai
             _throttle('pywencai')
-            result = pywencai_get(query, timeout=90)
+            result = pywencai_get(query, timeout=60)
             
             if result is None or result.empty:
                 self.logger.warning("未获取到符合条件的股票")
                 return False, None, "未找到符合条件的股票"
+            normalized = _normalize_wencai(result)
+            if normalized is not None:
+                result = normalized
             
             self.logger.info(f"获取到 {len(result)} 只股票")
             

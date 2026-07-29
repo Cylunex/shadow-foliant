@@ -289,22 +289,63 @@ _WENCAI_COL_MAP = {
 
 def _normalize_wencai(df):
     """问财 DataFrame 中文列 → 统一英文契约(code/name/price/pe/pb/mcap/growth)。
-    列名常带日期后缀(如 '总市值[20241211]'),按去后缀基名匹配。缺 code/price 关键列 → None。"""
+    问财列名会随日期/复权口径变化（如 ``收盘价:不复权[20260729]``），同一次
+    返回还可能包含重名列。按位置挑选第一条可用列，避免 ``df['code']`` 因重名
+    返回 DataFrame，继而触发 ``DataFrame has no attribute str``。原始列保留，
+    另附统一字段；缺 code/price 关键列 → None。"""
     import re
     import pandas as pd
-    rename = {}
-    for c in df.columns:
-        base = re.sub(r'\[.*?\]$', '', str(c)).strip().lower()
-        if base in _WENCAI_COL_MAP and _WENCAI_COL_MAP[base] not in rename.values():
-            rename[c] = _WENCAI_COL_MAP[base]
-    out = df.rename(columns=rename)
-    if 'code' not in out.columns or 'price' not in out.columns:
+
+    def canonical(column):
+        base = re.sub(r'\[[^\]]*\]', '', str(column)).strip().lower()
+        compact = re.sub(r'\s+', '', base)
+        if compact in ('code', '股票代码', '证券代码', '代码'):
+            return 'code'
+        if compact in ('name', '股票简称', '股票名称', '证券简称', '名称'):
+            return 'name'
+        if compact in ('price', '最新价', '股价', '现价') or compact.startswith('收盘价'):
+            return 'price'
+        if compact in ('pe',) or compact.startswith('市盈率'):
+            return 'pe'
+        if compact in ('pb',) or compact.startswith('市净率'):
+            return 'pb'
+        if compact in ('mcap',) or compact.startswith('总市值'):
+            return 'mcap'
+        if compact in ('float_mcap',) or compact.startswith('流通市值'):
+            return 'float_mcap'
+        if compact in ('growth',) or (
+                '净利润' in compact and ('同比增长率' in compact or '增长率' in compact)):
+            return 'growth'
+        return _WENCAI_COL_MAP.get(compact)
+
+    # 先按位置去掉完全重名列；不能用 rename 后再 df['code']，因为 pandas 对重名
+    # label 会一次重命名多列，取值结果仍是 DataFrame。
+    keep_positions = []
+    seen_labels = set()
+    for i, label in enumerate(df.columns):
+        label_key = str(label)
+        if label_key not in seen_labels:
+            keep_positions.append(i)
+            seen_labels.add(label_key)
+    out = df.iloc[:, keep_positions].copy()
+
+    selected = {}
+    for i, column in enumerate(df.columns):
+        target = canonical(column)
+        if target and target not in selected:
+            selected[target] = df.iloc[:, i]
+    if 'code' not in selected or 'price' not in selected:
         return None
-    out['code'] = out['code'].astype(str).str.split('.').str[0]   # 600519.SH → 600519
+    for target, series in selected.items():
+        out[target] = series
+
+    code = out['code'].astype(str).str.strip().str.split('.').str[0]
+    # 数值代码经 DataFrame 推断后可能丢前导零；只对纯数字补足 6 位。
+    out['code'] = code.where(~code.str.fullmatch(r'\d+'), code.str.zfill(6))
     for k in ('name', 'pe', 'pb', 'mcap', 'growth'):
         if k not in out.columns:
             out[k] = None
-    for k in ('price', 'mcap', 'pe', 'pb'):
+    for k in ('price', 'mcap', 'pe', 'pb', 'growth'):
         out[k] = pd.to_numeric(out[k], errors='coerce')
     return out
 

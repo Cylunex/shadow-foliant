@@ -1660,6 +1660,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
     'strategy_prefetch':         1000,   # 盘前预取 5 问财+5 妙想(串行,各套 90s 逐策略硬超时);10×90+开销,给 1000s
+    'strategy_prefetch_retry':    360,    # 09:30 只补 4 条问财缓存缺口；4×75s 外层上限，09:45 前必收尾
     'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
@@ -4052,6 +4053,46 @@ def _scan_holdings_with_snapshot():
 # 🆕 整合后的新任务（原始任务函数保留不动，仅此为新的调度入口）
 # =====================================================================
 
+_WENCAI_PREFETCH_JOBS = [
+    ('低价擒牛', 'low_price_bull_selector', 'LowPriceBullSelector', 'get_low_price_stocks'),
+    ('小市值',   'small_cap_selector',      'SmallCapSelector',     'get_small_cap_stocks'),
+    ('净利增长', 'profit_growth_selector',  'ProfitGrowthSelector', 'get_profit_growth_stocks'),
+    ('低估值',   'value_stock_selector',    'ValueStockSelector',   'get_value_stocks'),
+]
+
+
+def _prefetch_wencai_strategies(*, use_cache: bool, log_job: str) -> int:
+    """预取 4 条精确问财策略，返回已有结果的策略数。
+
+    ``use_cache=False`` 用于 09:15 首次刷新；``True`` 用于 09:30 缺口补取：
+    当日已有缓存直接命中，只有失败项才会再次访问问财。每条 selector 只发一个
+    精确问句，外层 75 秒兜底，避免同一策略双请求把全局熔断打穿。
+    """
+    import strategy_cache as _sc
+    done = 0
+    for name, mod, cls, fn in _WENCAI_PREFETCH_JOBS:
+        try:
+            _m = __import__(mod)
+            sel = getattr(_m, cls)()
+            ok, df, msg = _call_with_hard_timeout(
+                name,
+                lambda s=sel, f=fn, nm=name: _sc.cached(
+                    nm, lambda: getattr(s, f)(top_n=5), use_cache=use_cache),
+                75,
+            )
+            n = len(df) if (
+                ok and df is not None and hasattr(df, 'empty') and not df.empty
+            ) else 0
+            if n:
+                done += 1
+            print(f'[{log_job}] {"✅" if n else "⚠️"} {name} {n} 只 '
+                  f'({str(msg)[:70]})', flush=True)
+        except Exception as e:
+            print(f'[{log_job}] ⚠️ {name} 异常/超时: '
+                  f'{type(e).__name__}: {str(e)[:80]}', flush=True)
+    return done
+
+
 def task_strategy_prefetch():
     """🏦 盘前预取**5 大问财策略 + 5 条妙想镜像策略**(共 10)→ 写当日缓存,09:45 unified_selection 读暖、
     不在选股高峰现调外部源(问财熔断/卡死时整层选股不再哑火;妙想是非问财独立源,双源交叉)。
@@ -4064,29 +4105,12 @@ def task_strategy_prefetch():
         return
     started = datetime.now().isoformat()
     done, total = 0, 10   # 5 问财 + 5 妙想镜像
-    # ⚠️ 每个策略各套 _call_with_hard_timeout(90s):卡死必被砍、跳下一个,不再像 2026-06-29 那样
+    # ⚠️ 每个问财策略各套 _call_with_hard_timeout(75s):卡死必被砍、跳下一个,不再像 2026-06-29 那样
     # 第一个卡满 900s 把后面全堵死。**问财·主力资金最易超时,挪到最后一个跑**——前面 9 个
     # (尤其独立源的 5 个妙想)先把候选焐出来,它超不超时都不影响候选池。
-    # ① 4 个问财策略(低价擒牛/小市值/净利增长/低估值):走 strategy_cache 当日缓存(串行)
-    import strategy_cache as _sc
-    _jobs = [
-        ('低价擒牛', 'low_price_bull_selector', 'LowPriceBullSelector', 'get_low_price_stocks'),
-        ('小市值',   'small_cap_selector',      'SmallCapSelector',     'get_small_cap_stocks'),
-        ('净利增长', 'profit_growth_selector',  'ProfitGrowthSelector', 'get_profit_growth_stocks'),
-        ('低估值',   'value_stock_selector',    'ValueStockSelector',   'get_value_stocks'),
-    ]
-    for name, mod, cls, fn in _jobs:
-        try:
-            _m = __import__(mod)
-            sel = getattr(_m, cls)()
-            ok, df, msg = _call_with_hard_timeout(name,
-                lambda s=sel, f=fn, nm=name: _sc.cached(nm, lambda: getattr(s, f)(top_n=5), use_cache=False), 90)
-            n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
-            if n:
-                done += 1
-            print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
-        except Exception as e:
-            print(f'[strategy_prefetch] ⚠️ {name} 异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
+    # ① 4 个问财策略：每条只发一次精确问句，成功写 strategy_cache。
+    done += _prefetch_wencai_strategies(
+        use_cache=False, log_job='strategy_prefetch')
     # ② 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
     try:
         import mx_strategies
@@ -4116,6 +4140,29 @@ def task_strategy_prefetch():
     _log_run(job, 'success' if done else 'error',
              error=f'prefetched {done}/{total}' if done else 'all_empty(问财不可达?09:45 现调兜底)',
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+
+
+def task_strategy_prefetch_retry():
+    """09:30 软重试：只补 09:15 未生成缓存的问财策略。
+
+    这是候选丰富度增强，不是 09:45 综合选股的硬依赖。即便问财持续不可用，
+    unified_selection 仍应使用妙想/InStock/多因子继续运行，不能按依赖失败跳过。
+    75s×4 的调用上限也保证本任务在 09:45 前终止，不与主选股抢同一外部源。
+    """
+    job = 'strategy_prefetch_retry'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    done = _prefetch_wencai_strategies(
+        use_cache=True, log_job=job)
+    _log_run(
+        job,
+        'success' if done else 'error',
+        error=f'available {done}/4' if done else 'all_empty(问财仍不可达)',
+        started_at=started,
+        finished_at=datetime.now().isoformat(),
+        notify=False,
+    )
 
 
 def task_unified_selection():
@@ -5363,6 +5410,7 @@ def register_default_jobs():
     时间表（CST，2026-06-25 大改:监控重构 + 盘后全挪 16:30 后）：
       08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
+      09:15/09:30 strategy_prefetch     — 问财+妙想首取 / 仅补问财缓存缺口
       09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
       10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
       10:30 mx_selection_review         — unified_selection 成功后过妙想诊断(D:分歧才推) + 急跌兜底
@@ -5406,7 +5454,8 @@ def register_default_jobs():
     hub.register('fund_premarket',              '08:55', task_fund_premarket)
 
     # ---- 09:45 整合选股 ----
-    hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 问财+5 妙想入缓存(逐策略 90s 硬超时,卡死不堵后面)
+    hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 问财+5 妙想入缓存(普通问财逐策略75s硬超时)
+    hub.register('strategy_prefetch_retry',     '09:30', task_strategy_prefetch_retry)  # 只补09:15失败的4条问财缓存；软增强，不阻断09:45其他源
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。

@@ -7,7 +7,7 @@
 
 import logging
 from typing import Tuple, Optional
-from selection.data_source_config import screen_stocks
+from selection.data_source_config import _normalize_wencai
 import pandas as pd
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
@@ -45,22 +45,9 @@ class SmallCapSelector:
             (是否成功, 数据DataFrame, 消息)
         """
         try:
-            # ⭐ 优先用统一数据源(可切换)
-            result_dict = screen_stocks(
-                mcap_max=50, profit_growth_min=100,
-                top_n=top_n, sort_field='f20', sort_asc=True,
-            )
-            if result_dict['success'] and result_dict['data']:
-                df_result = pd.DataFrame(result_dict['data'])
-                df_result = df_result.sort_values('mcap')
-                self.logger.info(f"✅ 统一数据源: {result_dict['msg']}")
-                result = df_result.head(top_n)
-                return True, result, f"成功获取 {len(result)} 只股票"
-            
-            self.logger.warning(f"统一数据源失败({result_dict['msg']}), 回退pywencai")
             from data.pywencai_safe import pywencai_get
             
-            # 构建查询语句（按总市值由小至大排名）
+            # push2/dataapi 不具备营收/净利增长字段；直接执行完整问句一次。
             query = (
                 "总市值≤50亿，"
                 "营收增长率≥10%，"
@@ -76,11 +63,14 @@ class SmallCapSelector:
             
             # 调用pywencai
             _throttle('pywencai')
-            result = pywencai_get(query, timeout=90)
+            result = pywencai_get(query, timeout=60)
             
             if result is None or result.empty:
                 self.logger.warning("未获取到符合条件的股票")
                 return False, None, "未找到符合条件的股票"
+            normalized = _normalize_wencai(result)
+            if normalized is not None:
+                result = normalized
             
             self.logger.info(f"获取到 {len(result)} 只股票")
             

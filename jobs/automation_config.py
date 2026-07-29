@@ -45,6 +45,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '数据', 'default': True,
         'description': '盘前串行预取 5大问财策略(主力资金/低价擒牛/小市值/净利增长/低估值)+ 5条妙想镜像策略(非问财独立源)入当日缓存,09:45 综合选股读暖、不在选股高峰现调外部源(问财熔断时妙想仍出候选,整层不哑火、双源交叉)',
     },
+    'strategy_prefetch_retry': {
+        'cn': '🔁 问财策略盘前补取',
+        'schedule': '09:30 每日(仅补 09:15 缓存缺口)',
+        'category': '数据', 'default': True,
+        'description': '仅重试09:15未写入当日缓存的4条问财策略；已成功策略直接读缓存、不重复请求。属于软增强，失败不阻断09:45妙想/InStock/多因子选股',
+    },
     'unified_selection': {
         'cn': '🎯 综合选股 TOP15',
         'schedule': '09:45 每日',

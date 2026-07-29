@@ -290,12 +290,16 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 `JOB_DEPENDENCY_WAIT_SEC` 控制，未设置时沿用 `KLINE_PREFETCH_WAIT_SEC`。
 任务函数内部仍保留 barrier，兜住 Agent 手动触发与重启竞态。
 同一机制也覆盖 `mx_selection_review → unified_selection`：综合选股超时/失败时不再
-拿上一交易日的 `_last_selection` 做“第二意见”。`strategy_prefetch →
-unified_selection` 等能够自行实时降级的关系定义为软依赖，不阻塞调度。
+拿上一交易日的 `_last_selection` 做“第二意见”。09:15 `strategy_prefetch` 后，
+09:30 `strategy_prefetch_retry` 只补当日缓存缺口；它与 `unified_selection` 是软依赖，
+问财持续失败也不能阻断妙想/InStock/多因子，因此不进入硬依赖队列。补取逐项上限保证
+09:45 前收尾。
 
 | 时间 | 任务 | 内容 | AI |
 |---|---|---|---|
 | 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
+| 09:15 | `strategy_prefetch` | 🏦 问财+妙想盘前预取 | ❌ |
+| 09:30 | `strategy_prefetch_retry` | 🔁 仅补未写入缓存的问财策略 | ❌ |
 | 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
 | 10:05 | `morning_portfolio` | 📊 早盘持仓分析 + 早盘 AI 研判(子开关 morning_portfolio_ai) | ✅ |
 | (并入9:45) | `selection_debate` | ⚔️ 红蓝对抗已并入综合选股(表内「红蓝」列);妙想第二意见(10:30)仍独立 | ✅ |

@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Tuple, Optional
 from data.pywencai_safe import pywencai_get
+from selection.data_source_config import _normalize_wencai
 import time
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
@@ -17,10 +18,6 @@ try:
 except Exception:
     def _throttle(*a, **k):
         return 0.0
-
-# ⭐ 统一数据源配置
-from selection.data_source_config import screen_stocks
-
 
 class LowPriceBullSelector:
     """低价擒牛选股类"""
@@ -49,32 +46,8 @@ class LowPriceBullSelector:
             print(f"策略: 股价<10元 + 净利润增长率≥100% + 沪深A股")
             print(f"目标: 筛选前{top_n}只股票")
             
-            # 优先用统一数据源
-            result = screen_stocks(
-                price_max=10,
-                profit_growth_min=100,
-                top_n=top_n,
-                sort_field='f37',  # 成交额升序
-                sort_asc=True,
-            )
-            
-            if result['success'] and result['data']:
-                df_result = pd.DataFrame(result['data'])
-                df_result = df_result[df_result['price'].notna() & (df_result['price'] > 0)]
-                df_result = df_result.sort_values('price')
-                
-                print(f"✅ {result['msg']}")
-                print(f"\n✅ 选中的股票:")
-                for idx, row in df_result.head(top_n).iterrows():
-                    print(f"  {idx+1}. {row['code']} {row['name']} - 股价:{row['price']} PE:{row['pe']} 净利增长:{row['growth']}%")
-                
-                self.raw_data = df_result
-                self.selected_stocks = df_result.head(top_n)
-                return True, df_result.head(top_n), f"成功筛选出{min(top_n, len(df_result))}只"
-            
-            print(f"统一数据源: {result['msg']}，回退pywencai")
-            
-            # 回退: pywencai
+            # 该策略含净利增长条件，东财 push2/dataapi 无法表达。直接执行完整问句
+            # 一次，避免统一入口失败后立刻重复打同一个问财源并触发全局熔断。
             query = (
                 "股价<10元，"
                 "净利润增长率(净利润同比增长率)≥100%，"
@@ -88,7 +61,7 @@ class LowPriceBullSelector:
             print(f"正在调用问财接口...")
             
             _throttle('pywencai')
-            pywencai_result = pywencai_get(query, timeout=90)
+            pywencai_result = pywencai_get(query, timeout=60)
             
             if pywencai_result is None:
                 return False, None, "问财接口返回None，请检查网络或稍后重试"
@@ -97,6 +70,9 @@ class LowPriceBullSelector:
             
             if df_result is None or df_result.empty:
                 return False, None, "未获取到符合条件的股票数据"
+            normalized = _normalize_wencai(df_result)
+            if normalized is not None:
+                df_result = normalized
             
             print(f"✅ pywencai成功获取 {len(df_result)} 只股票")
             self.raw_data = df_result
@@ -107,8 +83,11 @@ class LowPriceBullSelector:
             for idx, row in selected.head(top_n).iterrows():
                 code = row.get('股票代码', 'N/A')
                 name = row.get('股票简称', 'N/A')
-                price = row.get('股价', row.get('最新价', 'N/A'))
-                growth = row.get('净利润增长率', row.get('净利润同比增长率', 'N/A'))
+                price = row.get('股价', row.get('最新价', row.get('price', 'N/A')))
+                growth = row.get(
+                    '净利润增长率',
+                    row.get('净利润同比增长率', row.get('growth', 'N/A')),
+                )
                 print(f"  {idx+1}. {code} {name} - 股价:{price} 净利增长:{growth}%")
             
             return True, selected, f"成功筛选出{len(selected)}只低价高成长股票"

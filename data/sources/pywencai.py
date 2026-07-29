@@ -27,7 +27,10 @@ _POOL = _cf.ThreadPoolExecutor(max_workers=12, thread_name_prefix='pywencai-safe
 # 被拖到 1800s/1200s 硬超时切断 + 误报"⚠️任务异常"(K线明明 2 分钟已全焐完)。
 # 连续失败 _BREAK_FAILS 次后进入冷却:冷却期内直接抛 TimeoutError(0 成本), 冷却过期放行一次探活,
 # 成功即自愈。与 datahub._route 全源熔断同构。仅统计"连不通"(超时/异常), 返回空 df ≠ 失败(问财在线只是无数据)。
-_BREAK_FAILS = 2
+# 盘前有 4 条彼此独立的策略问句；阈值为 2 时，前一条策略的“统一入口+原
+# selector 重试”可直接熔断整批。selector 已改成每条只请求一次，阈值同步调到
+# 4：确保各策略至少有一次独立机会；真正全源故障最多多付出两次调用，随后仍会熔断。
+_BREAK_FAILS = 4
 _BREAK_COOLDOWN = 120.0   # 秒
 _streak_fail = 0
 _last_fail = 0.0

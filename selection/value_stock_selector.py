@@ -8,8 +8,8 @@
 import pandas as pd
 from datetime import datetime
 from typing import Tuple, Optional
-from selection.data_source_config import screen_stocks
 from data.pywencai_safe import pywencai_get
+from selection.data_source_config import _normalize_wencai
 import time
 
 
@@ -49,41 +49,29 @@ class ValueStockSelector:
             print(f"排序: 按流通市值由小到大")
             print(f"目标: 筛选前{top_n}只股票")
 
-            # need_fundamental=True → 能力守卫跳过 push2/dataapi 直接走问财:低估值的股息率≥1%/
-            # 资产负债率≤30% 是核心条件,clist 完全没有这些字段(原来只按 PE≤20 + 默认涨跌幅排序,
-            # 选出的是"涨幅榜里 PE<20"的追涨票冒充低估值污染推荐池;2026-07-17 修)。
-            unified = screen_stocks(pe_max=20, mcap_min=0, top_n=top_n,
-                                    need_fundamental=True, sort_field='f20', sort_asc=True)
-            if unified['success'] and unified['data']:
-                import pandas as _pd
-                df_result = _pd.DataFrame(unified['data'])
-                print(f"✅ {unified['msg']}")
-            else:
-                print(f"统一数据源: {unified['msg']}，回退pywencai")
+            # 股息率/负债率等条件只有问财能够完整表达，直接执行完整问句一次。
+            query = (
+                "市盈率小于等于20，"
+                "市净率小于等于1.5，"
+                "股息率大于等于1%，"
+                "资产负债率小于等于30%，"
+                "非st，"
+                "非科创板，"
+                "非创业板，"
+                "按流通市值由小到大排名"
+            )
 
-                # 回退: pywencai
-                query = (
-                    "市盈率小于等于20，"
-                    "市净率小于等于1.5，"
-                    "股息率大于等于1%，"
-                    "资产负债率小于等于30%，"
-                    "非st，"
-                    "非科创板，"
-                    "非创业板，"
-                    "按流通市值由小到大排名"
-                )
+            print(f"\n查询语句: {query}")
+            print(f"正在调用问财接口...")
 
-                print(f"\n查询语句: {query}")
-                print(f"正在调用问财接口...")
-
-                # 调用pywencai
-                result = pywencai_get(query, timeout=90)
-
-                if result is None:
-                    return False, None, "问财接口返回None，请检查网络或稍后重试"
-
-                # 转换为DataFrame
-                df_result = self._convert_to_dataframe(result)
+            result = pywencai_get(query, timeout=60)
+            if result is None:
+                return False, None, "问财接口返回None，请检查网络或稍后重试"
+            df_result = self._convert_to_dataframe(result)
+            if df_result is not None:
+                normalized = _normalize_wencai(df_result)
+                if normalized is not None:
+                    df_result = normalized
 
             if df_result is None or df_result.empty:
                 return False, None, "未获取到符合条件的股票数据"
