@@ -137,6 +137,67 @@ class WencaiCookieTests(unittest.TestCase):
         self.assertIs(actual, result)
         get.assert_called_once()
         self.assertEqual(get.call_args.kwargs["cookie"], "sensitive-cookie")
+        self.assertEqual(get.call_args.kwargs["retry"], 2)
+        self.assertEqual(get.call_args.kwargs["sleep"], 1)
+
+    def test_cookie_is_optional_and_not_forwarded_when_absent(self):
+        from data.sources import pywencai as source
+
+        source._streak_fail = 0
+        with patch.dict(
+            os.environ,
+            {"PYWENCAI_COOKIE": "", "WENCAI_COOKIE": ""},
+            clear=False,
+        ):
+            with patch.object(source.pywencai, "get", return_value=None) as get:
+                source.pywencai_get("贵州茅台最新价", timeout=2, loop=False)
+
+        self.assertNotIn("cookie", get.call_args.kwargs)
+
+
+class WencaiHttpsCompatibilityTests(unittest.TestCase):
+    def test_rewrites_only_iwencai_http_url(self):
+        from data.sources import pywencai as source
+
+        response = object()
+        with patch.object(
+            source._HTTPS_REQUESTS._requests,
+            "request",
+            return_value=response,
+        ) as request:
+            actual = source._HTTPS_REQUESTS.request(
+                method="POST",
+                url="http://www.iwencai.com/customized/chart/get-robot-data",
+            )
+
+        self.assertIs(actual, response)
+        self.assertEqual(
+            request.call_args.kwargs["url"],
+            "https://www.iwencai.com/customized/chart/get-robot-data",
+        )
+
+    def test_leaves_other_hosts_unchanged(self):
+        from data.sources import pywencai as source
+
+        with patch.object(source._HTTPS_REQUESTS._requests, "request") as request:
+            source._HTTPS_REQUESTS.request("GET", "http://example.com/data")
+
+        self.assertEqual(request.call_args.args[1], "http://example.com/data")
+
+    def test_http_rejection_is_not_treated_as_empty_business_result(self):
+        from data.sources import pywencai as source
+
+        source._streak_fail = 0
+
+        def rejected(**_kwargs):
+            source._HTTPS_REQUESTS._state.last_status = 403
+            return None
+
+        with patch.object(source.pywencai, "get", side_effect=rejected):
+            with self.assertRaises(source.PyWencaiRequestRejected) as raised:
+                source.pywencai_get("贵州茅台最新价", timeout=2, loop=False)
+
+        self.assertIn("HTTP 403", str(raised.exception))
 
 
 if __name__ == "__main__":
