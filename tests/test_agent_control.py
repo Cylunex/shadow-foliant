@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -10,6 +11,9 @@ import pandas as pd
 from selection.main_force_selector import MainForceStockSelector
 from jobs import task_control
 from jobs import ai_recommendation_monitor
+from jobs import jobs_hub
+from jobs.automation_config import REGISTRY
+from data.factor_collector import _snapshot_date
 from monitor.monitor_db import StockMonitorDatabase
 
 
@@ -99,6 +103,136 @@ class RagDisabledTests(unittest.TestCase):
             result = service.ingest_all()
             self.assertTrue(result['disabled'])
             self.assertEqual(result['analysis'], 0)
+
+
+class ScheduledDependencyTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = jobs_hub._JobsHub()
+
+    def tearDown(self):
+        self.hub._executor.shutdown(wait=False)
+        self.hub._manual_executor.shutdown(wait=False)
+
+    def test_registry_exposes_hard_dependencies(self):
+        for name in (
+                'factor_collection', 'portfolio_indicator_snapshot', 'eod_outcomes'):
+            self.assertEqual(REGISTRY[name]['depends_on'], ['kline_prefetch'])
+        self.assertEqual(
+            REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])
+
+    def test_pending_dependency_defers_without_consuming_worker(self):
+        pending = {
+            'state': 'pending',
+            'dependencies': ('parent_job',),
+            'details': [{
+                'state': 'pending', 'dependency': 'parent_job', 'reason': 'running',
+            }],
+        }
+        ready = {
+            'state': 'ready',
+            'dependencies': ('parent_job',),
+            'details': [{
+                'state': 'ready', 'dependency': 'parent_job', 'reason': 'success',
+            }],
+        }
+        runner = self.hub._wrap('test_child_job', lambda: None)
+        with mock.patch.object(self.hub._executor, 'submit') as submit:
+            with mock.patch.object(jobs_hub, '_dependency_decision',
+                                   return_value=pending):
+                runner()
+            submit.assert_not_called()
+            self.assertIn('test_child_job', self.hub._deferred)
+
+            with mock.patch.object(jobs_hub, '_dependency_decision',
+                                   return_value=ready):
+                self.hub._poll_deferred_tasks()
+            submit.assert_called_once()
+            self.assertNotIn('test_child_job', self.hub._deferred)
+
+    def test_failed_dependency_is_skipped_not_executed(self):
+        blocked = {
+            'state': 'blocked',
+            'dependencies': ('parent_job',),
+            'details': [{
+                'state': 'blocked', 'dependency': 'parent_job', 'reason': 'error',
+            }],
+        }
+        runner = self.hub._wrap('test_child_job', lambda: None)
+        with mock.patch.object(self.hub._executor, 'submit') as submit, \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_dependency_decision',
+                                  return_value=blocked):
+            runner()
+
+        submit.assert_not_called()
+        self.assertEqual(log_run.call_args.args[1], 'skipped')
+        self.assertIn('dependency_failed', log_run.call_args.kwargs['error'])
+
+    def test_restart_recovers_only_due_dependency_chain(self):
+        when = (datetime.now().astimezone() - timedelta(minutes=1)).strftime('%H:%M')
+        self.hub._registered = [{
+            'name': 'test_child_job', 'when': when, 'job': mock.Mock(),
+            'func': lambda: None, 'args': (), 'kwargs': {},
+        }]
+        pending = {
+            'state': 'pending',
+            'dependencies': ('parent_job',),
+            'details': [{
+                'state': 'pending', 'dependency': 'parent_job', 'reason': 'running',
+            }],
+        }
+        with mock.patch.object(jobs_hub, '_job_dependencies',
+                               return_value=('parent_job',)), \
+                mock.patch.object(jobs_hub, '_latest_job_run_today',
+                                  return_value=None), \
+                mock.patch.object(jobs_hub, '_dependency_decision',
+                                  return_value=pending), \
+                mock.patch.object(self.hub._executor, 'submit') as submit:
+            self.hub._recover_due_dependencies()
+
+        submit.assert_not_called()
+        self.assertIn('test_child_job', self.hub._deferred)
+
+    def test_execution_timeout_is_error_not_generic_data_source_report(self):
+        name = 'test_execution_timeout'
+        with mock.patch.dict(jobs_hub._TASK_HARD_TIMEOUTS, {name: 0.02}), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_execution_timeout') as notify, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as data_notice:
+            jobs_hub._run_with_log(name, lambda: time.sleep(0.06))
+
+        self.assertEqual(log_run.call_args.args[1], 'error')
+        self.assertIn('execution_timeout', log_run.call_args.kwargs['error'])
+        notify.assert_called_once()
+        data_notice.assert_not_called()
+
+    def test_dependency_timeout_is_skipped_and_cancels_barrier(self):
+        name = 'test_dependency_timeout'
+
+        def wait_for_parent():
+            with jobs_hub._TASK_LOCK:
+                jobs_hub._TASK_WAITING_ON[name] = 'parent_job'
+                cancel = jobs_hub._TASK_CANCEL_EVENTS[name]
+            cancel.wait(0.2)
+            jobs_hub._log_run(
+                name, 'skipped', error='dependency parent_job not ready')
+
+        with mock.patch.dict(jobs_hub._TASK_HARD_TIMEOUTS, {name: 0.02}), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_dependency_wait') as notify, \
+                mock.patch.object(jobs_hub, '_notify_execution_timeout') as execution_notice:
+            jobs_hub._run_with_log(name, wait_for_parent)
+
+        statuses = [call.args[1] for call in log_run.call_args_list]
+        self.assertIn('skipped', statuses)
+        notify.assert_called_once()
+        execution_notice.assert_not_called()
+
+
+class FactorCollectorDateTests(unittest.TestCase):
+    def test_snapshot_date_does_not_double_apply_cst_offset(self):
+        local_time = datetime(2026, 7, 29, 17, 13)
+        self.assertEqual(_snapshot_date(local_time), '2026-07-29')
 
 
 class AsyncTaskControlTests(unittest.TestCase):

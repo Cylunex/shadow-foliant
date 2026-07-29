@@ -12,7 +12,7 @@ import _bootstrap  # noqa: F401  路径引导（搬入子目录后定位项目�
 
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(_bootstrap.ROOT)
@@ -251,13 +251,18 @@ def compute_technical(closes: np.ndarray) -> Dict:
 #  主流程
 # ═══════════════════════════════════════════════════
 
+def _snapshot_date(now: datetime = None) -> str:
+    """进程已统一使用 Asia/Shanghai；不要再手工 +8h，否则 16:00 后会写到次日。"""
+    return (now or datetime.now()).strftime('%Y-%m-%d')
+
+
 def collect(do_score: bool = False):
     import datahub  # 统一数据层:行情/估值走 datahub(熔断+超时+多源兜底+缓存),不再裸调 adapter
     from portfolio_db_pg import portfolio_db
 
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    today = (datetime.now() + timedelta(hours=8)).strftime('%Y-%m-%d')
+    today = _snapshot_date()
 
     stocks = portfolio_db.get_all_stocks()
     codes = [s.get('code', '') for s in stocks if s.get('code')]

@@ -281,10 +281,17 @@ Agent/Web 的按需触发统一走 `jobs/task_control.py`：提交时写
 以识别函数内部捕获但未重新抛出的失败。Web 设置页和 MCP 读取同一状态表；Web/MCP
 进程退出不丢已提交任务，但 `jobs_hub` 不运行时任务会停留在 `queued`。
 
-盘后 `portfolio_indicator_snapshot`、`eod_outcomes`、`factor_collection` 显式等待
-当日 `kline_prefetch` 成功，不再只依赖计划时间间隔；失败或等待超时会记录
-`skipped`，避免在未预热缓存上同时冷拉数据源。等待上限由
-`KLINE_PREFETCH_WAIT_SEC` 控制。
+盘后 `portfolio_indicator_snapshot`、`eod_outcomes`、`factor_collection` 在
+`automation_config.REGISTRY` 声明 `depends_on: [kline_prefetch]`。定时时间到但上游
+仍在运行时，Jobs Hub 先将子任务放入进程内 deferred 队列；等待期间不占 6 个业务
+worker，也不开始计算子任务自身执行超时。上游成功后再异步提交三个可并行的下游；
+上游失败或等待窗口耗尽则记录 `skipped`（`dependency_failed` /
+`dependency_wait_timeout`），不伪装成子任务的数据源故障。等待上限由
+`JOB_DEPENDENCY_WAIT_SEC` 控制，未设置时沿用 `KLINE_PREFETCH_WAIT_SEC`。
+任务函数内部仍保留 barrier，兜住 Agent 手动触发与重启竞态。
+同一机制也覆盖 `mx_selection_review → unified_selection`：综合选股超时/失败时不再
+拿上一交易日的 `_last_selection` 做“第二意见”。`strategy_prefetch →
+unified_selection` 等能够自行实时降级的关系定义为软依赖，不阻塞调度。
 
 | 时间 | 任务 | 内容 | AI |
 |---|---|---|---|
@@ -292,12 +299,13 @@ Agent/Web 的按需触发统一走 `jobs/task_control.py`：提交时写
 | 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
 | 10:05 | `morning_portfolio` | 📊 早盘持仓分析 + 早盘 AI 研判(子开关 morning_portfolio_ai) | ✅ |
 | (并入9:45) | `selection_debate` | ⚔️ 红蓝对抗已并入综合选股(表内「红蓝」列);妙想第二意见(10:30)仍独立 | ✅ |
-| 10:30 | `mx_selection_review` | 🧠 选股过妙想第二意见 | ✅ |
+| 10:30 起 | `unified_selection` → `mx_selection_review` | 🧠 当日综合选股完成后再过妙想第二意见 | ✅ |
 | 12:00 | `noon_report` | 📊 午盘简报 | ❌ |
 | 每30分 | `ai_rec_check` / `stock_monitor_check` | 推荐追价(不推) / 监测触发(alert) | ❌ |
 | 14:30 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(四合一:瘦身策略+逐只动作+尾盘机会+止盈阶梯减仓,eod_review) | ✅ |
-| 15:35–16:10 | `kline_prefetch`(焐raw+qfq两套K线 + collect_factors因子/估值,盘中读暖缓存防慢源雪崩)/`portfolio_indicator_snapshot`/`daily_market_snapshot`/`factor_collection`/`dragon_tiger_archive`/**`announcement_scan`(三合一:解禁+公告+研报→一条⚠️盘后风险预警)**/`decision_signal_outcomes` | K线预热/指标快照/大盘快照/因子采集/龙虎榜归档/盘后风险预警/信号后验。`lockup_radar`/`research_digest` 已并入 announcement_scan | 部分✅ |
-| 16:30 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
+| 16:30 起 | `kline_prefetch` → `factor_collection`/`portfolio_indicator_snapshot`/`eod_outcomes` | K线预热完成后并行提交因子、指标快照和盘后后验；`daily_market_snapshot` 16:48 独立运行 | ❌ |
+| 18:30/18:35 | `dragon_tiger_archive` / `announcement_scan` | 龙虎榜归档 / 公告+研报+解禁风险预警 | 部分✅ |
+| 19:00 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
 | 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
 | 周日 | `mx_weekend_outlook`(10:00)/`weekly_analysis`(15:00)/`portfolio_stress_ai`(16:00)/`wf_weekly_backtest`(20:00) | 周末研判/周报/🛡️压力预案/周回测 | 部分✅ |

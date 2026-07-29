@@ -562,55 +562,88 @@ def _intraday_plunge_check(drop_pct: float = -5.0):
         pass
 
 
-def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool:
-    """F(盘后链依赖显式化):盘后"读暖缓存"的任务(因子采集/持仓快照/后验)开头调用,**等当日
-    kline_prefetch 焐完缓存再继续** —— 把"靠 16:30→16:40→16:45 时钟间隔保证 prefetch 先跑"的
-    隐式依赖,变成显式 barrier。根治 prefetch 跑超时(东财封)时下游在缓存没焐好就冷拉。
+def _latest_job_run_today(job_name: str, success_only: bool = False) -> Optional[Dict]:
+    """读取任务今天最近一次运行；依赖调度与任务内 barrier 共用同一判定口径。"""
+    conn = None
+    try:
+        conn = db_connect(_SNAPSHOT_DB_PATH)
+        cur = conn.cursor()
+        status_sql = " AND status='success'" if success_only else ''
+        if USE_POSTGRES:
+            cur.execute(f"""SELECT started_at, finished_at, status, error FROM job_runs
+                            WHERE job_name=? AND started_at::date = CURRENT_DATE{status_sql}
+                            ORDER BY id DESC LIMIT 1""", (job_name,))
+        else:
+            cur.execute(f"""SELECT started_at, finished_at, status, error FROM job_runs
+                            WHERE job_name=? AND DATE(started_at) = DATE('now'){status_sql}
+                            ORDER BY id DESC LIMIT 1""", (job_name,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'started_at': row[0], 'finished_at': row[1],
+            'status': str(row[2]), 'error': row[3],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
 
-    每个任务在独立 worker 线程跑(线程池 6),此处 sleep 不阻塞调度线程,只占一个 worker。
-    返回 True=缓存已暖或依赖明确关闭 / False=prefetch 失败或等待超时。
-    生产实测预热可能超过 30 分钟，默认等 45 分钟，避免下游在冷缓存上雪崩。"""
+
+def _wait_task_dependency(job: str, dependency: str,
+                          max_wait: int = None, poll: int = 10) -> bool:
+    """任务内依赖 barrier，主要兜住 Agent 手动触发和调度器重启竞态。
+
+    定时任务的正常路径在 worker 外 deferred，不会走这里长等；直接调用任务函数时，
+    barrier 会等当日上游成功。返回 True=上游今日成功或明确关闭，False=失败/超时。
+    """
     if max_wait is None:
-        try:
-            max_wait = max(60, int(os.getenv('KLINE_PREFETCH_WAIT_SEC', '2700')))
-        except Exception:
-            max_wait = 2700
+        max_wait = _dependency_wait_seconds(job)
     try:
         from automation_config import is_enabled
-        if not is_enabled('kline_prefetch'):
+        if not is_enabled(dependency):
             return True    # 明确关闭依赖时允许下游自己取数
     except Exception:
         pass
     waited = 0
-    while True:
-        try:
-            conn = db_connect(_SNAPSHOT_DB_PATH)
-            cur = conn.cursor()
-            # ⚠️ PG 里 started_at 是 timestamptz,不能 LIKE(会 operator 报错);按"当日"过滤分库:
-            #    PG 用 ::date = CURRENT_DATE、SQLite 用 DATE()(started_at 为 ISO 文本)。
-            if USE_POSTGRES:
-                cur.execute("""SELECT finished_at, status, error FROM job_runs
-                               WHERE job_name='kline_prefetch' AND started_at::date = CURRENT_DATE
-                               ORDER BY id DESC LIMIT 1""")
-            else:
-                cur.execute("""SELECT finished_at, status, error FROM job_runs
-                               WHERE job_name='kline_prefetch' AND DATE(started_at) = DATE('now')
-                               ORDER BY id DESC LIMIT 1""")
-            row = cur.fetchone()
-            conn.close()
-        except Exception:
-            return True    # 观测库不可用不误杀业务任务
-        if row and row[0]:
-            if str(row[1]) == 'success':
-                return True
-            print(f'[{job}] kline_prefetch 当日状态={row[1]}，下游跳过: {str(row[2])[:120]}',
-                  flush=True)
-            return False
-        if waited >= max_wait:      # 等够仍未完(还在跑/未起) → 下游显式跳过
-            print(f'[{job}] 等 kline_prefetch 超 {max_wait}s 仍未结束，下游跳过', flush=True)
-            return False
-        time.sleep(poll)
-        waited += poll
+    # 定时调度会在 worker 外 deferred；这里仍保留 barrier，兜住 Agent 手动触发、
+    # 单函数调用和调度器重启竞态。让超时层知道当前是在等依赖，而不是执行任务主体。
+    with _TASK_LOCK:
+        _TASK_WAITING_ON[job] = dependency
+        cancel_event = _TASK_CANCEL_EVENTS.get(job)
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                print(f'[{job}] 等 {dependency} 被任务超时层取消，下游跳过', flush=True)
+                return False
+            try:
+                # 任意一次成功已足以说明今日缓存可用；之后的手动重跑即使失败，也不应
+                # 抹掉此前成功产物、误阻塞所有下游。
+                if _latest_job_run_today(dependency, success_only=True):
+                    return True
+                row = _latest_job_run_today(dependency)
+                with _TASK_LOCK:
+                    dependency_running = dependency in _TASK_START_TS
+            except Exception:
+                return True    # 观测库不可用不误杀业务任务
+            if row and not dependency_running:
+                print(f'[{job}] {dependency} 当日状态={row["status"]}，下游跳过: '
+                      f'{str(row.get("error"))[:120]}', flush=True)
+                return False
+            if waited >= max_wait:      # 等够仍未完(还在跑/未起) → 下游显式跳过
+                print(f'[{job}] 等 {dependency} 超 {max_wait}s 仍未结束，下游跳过',
+                      flush=True)
+                return False
+            time.sleep(poll)
+            waited += poll
+    finally:
+        with _TASK_LOCK:
+            if _TASK_WAITING_ON.get(job) == dependency:
+                _TASK_WAITING_ON.pop(job, None)
+
+
+def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool:
+    """盘后读暖缓存任务的兼容入口。"""
+    return _wait_task_dependency(job, 'kline_prefetch', max_wait=max_wait, poll=poll)
 
 
 def task_daily_backtest():
@@ -1486,6 +1519,23 @@ def _notify_task_error(name: str, exc: Exception, tb: str):
         pass  # 通知失败绝不影响主流程
 
 
+def _current_unhealthy_sources() -> List[str]:
+    """返回当前明确处于超时/熔断状态的外部源；空列表不等于外部源故障。"""
+    bad_srcs = []
+    try:
+        import datahub
+        bad_srcs.extend(datahub.unhealthy_sources())
+    except Exception:
+        pass
+    try:
+        from data.sources.pywencai import breaker_open as _pw_break
+        if _pw_break():
+            bad_srcs.append('问财熔断')
+    except Exception:
+        pass
+    return list(dict.fromkeys(str(src) for src in bad_srcs if src))
+
+
 def _notify_data_unavailable(name: str, detail: str = ''):
     """全靠外部数据的任务因数据源不可用/超时而结束 → 推一条平和提示(非告警, 不带 traceback)。
     按用户要求:"外部接口失败了就提示, 然后任务结束"。同任务 2h 内限一条(复用告警限频表)。"""
@@ -1502,18 +1552,7 @@ def _notify_data_unavailable(name: str, detail: str = ''):
             pass
         # 具体到源:列出当前卡死/冷却中的外部源(datahub _route 各源 + 问财熔断),
         # 让通知不只是笼统的"数据源暂不可用"。
-        bad_srcs = []
-        try:
-            import datahub
-            bad_srcs = list(datahub.unhealthy_sources())
-        except Exception:
-            pass
-        try:
-            from data.sources.pywencai import breaker_open as _pw_break
-            if _pw_break():
-                bad_srcs.append('问财熔断')
-        except Exception:
-            pass
+        bad_srcs = _current_unhealthy_sources()
         src_line = (f"\n🔴 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
                     else "\n(未捕到具体源,可能是妙想等非 _route 慢源或整体网络抽风)")
         title_hint = f" ({bad_srcs[0].split(':')[0].split('×')[0]})" if bad_srcs else ""
@@ -1521,6 +1560,59 @@ def _notify_data_unavailable(name: str, detail: str = ''):
                 f"{('(' + detail + ')') if detail else ''}, 已自动跳过, 下个周期重试。{src_line}")
         from notification_router import send
         send('report', f"📡 数据源暂不可用: {cn}{title_hint}", body)
+    except Exception:
+        pass
+
+
+def _notify_dependency_wait(name: str, dependency: str, detail: str = ''):
+    """依赖等待超限是编排降级，不伪装成子任务执行失败或数据源故障。"""
+    try:
+        now = time.time()
+        cooldown_key = f'dependency:{dependency}'
+        if now - _ERR_NOTIFY_LAST.get(cooldown_key, 0) < _ERR_NOTIFY_COOLDOWN:
+            return
+        _ERR_NOTIFY_LAST[cooldown_key] = now
+        cn = name
+        dep_cn = dependency
+        try:
+            from automation_config import REGISTRY
+            cn = REGISTRY.get(name, {}).get('cn', name)
+            dep_cn = REGISTRY.get(dependency, {}).get('cn', dependency)
+        except Exception:
+            pass
+        body = (f"任务「{cn}」({name}) 尚未进入执行阶段；它等待的上游"
+                f"「{dep_cn}」({dependency}) 未在依赖窗口内完成。"
+                f"{(' ' + detail) if detail else ''}\n"
+                "本次按依赖未就绪记为 skipped，不算子任务异常；上游恢复后下个周期重试。")
+        from notification_router import send
+        send('report', f"⏳ 上游任务未就绪: {cn}", body)
+    except Exception:
+        pass
+
+
+def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
+    """真正进入任务主体后的超时：有明确坏源才归类数据源故障，否则按异常超时告警。"""
+    bad_srcs = _current_unhealthy_sources()
+    if bad_srcs:
+        _notify_data_unavailable(
+            name, f'执行阶段运行 {elapsed:.0f}s 超时(阈值 {timeout}s)')
+        return
+    try:
+        now = time.time()
+        if now - _ERR_NOTIFY_LAST.get(name, 0) < _ERR_NOTIFY_COOLDOWN:
+            return
+        _ERR_NOTIFY_LAST[name] = now
+        cn = name
+        try:
+            from automation_config import REGISTRY
+            cn = REGISTRY.get(name, {}).get('cn', name)
+        except Exception:
+            pass
+        body = (f"任务「{cn}」({name}) 已进入执行阶段，但运行 {elapsed:.0f}s "
+                f"超过阈值 {timeout}s。\n"
+                "未检测到明确熔断的数据源，按异常执行超时处理；应排查内部锁、未设超时的接口或死循环。")
+        from notification_router import send
+        send('alert', f"⏱️ 任务执行超时: {cn}", body)
     except Exception:
         pass
 
@@ -1537,6 +1629,8 @@ def _notify_data_unavailable(name: str, detail: str = ''):
 _TASK_START_TS: Dict[str, float] = {}                     # task name -> 开始时间戳
 _TASK_ALERTED: 'set[tuple[str, float]]' = set()           # 已告警过的 (name, ts), 防刷屏
 _TASK_LOCK = threading.Lock()
+_TASK_WAITING_ON: Dict[str, str] = {}                     # 子任务当前等待的上游
+_TASK_CANCEL_EVENTS: Dict[str, threading.Event] = {}      # 外层超时通知内部 barrier 收尾
 import os as _os
 SOFT_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_DEADLINE_SEC', '1800'))   # 默认 30min: 软告警
 HARD_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_HARD_DEADLINE_SEC',
@@ -1579,7 +1673,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
     'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 深度批量,筛选后排 ETF+Top-N 个股,
                                          # 默认 Top-20,见 PORTFOLIO_DEEP_TOP_N)。5400s 给降级日(每股~300s)足量头量(2026-06-28)
-    'eod_outcomes':              900,    # A 合并:等 prefetch(≤300) + 推荐池回填 + 信号后验
+    'eod_outcomes':              900,    # 依赖等待在 worker 外；这里只计推荐池回填 + 信号后验
     'pg_backup':                 600,
 }
 _TASK_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -1602,34 +1696,152 @@ def _run_with_log(name, func, *a, **kw):
     pool_busy = len(_TASK_START_TS) + 1
     timeout = _TASK_HARD_TIMEOUTS.get(name, _DEFAULT_TASK_TIMEOUT)
     print(f'[jobs_hub] ▶ {name} 开始 (pool={pool_busy}/6, 超时{timeout}s)', flush=True)
+    cancel_event = threading.Event()
     with _TASK_LOCK:
         _TASK_START_TS[name] = t0
+        _TASK_CANCEL_EVENTS[name] = cancel_event
+        _TASK_WAITING_ON.pop(name, None)
     fut = _TASK_TIMEOUT_POOL.submit(func, *a, **kw)
     try:
         fut.result(timeout=timeout)
         elapsed = time.time() - t0
         print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
-    except concurrent.futures.TimeoutError:
-        fut.cancel()
+    except concurrent.futures.TimeoutError as timeout_exc:
         elapsed = time.time() - t0
-        msg = f'task 超过硬超时 {timeout}s 被切断(孤儿线程留底层)'
-        print(f'[jobs_hub] ⏱️ {name} 超时切断 (耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
-        _log_run(name, 'error', error=msg, notify=False)
-        # 超时基本都是"外部数据源卡死/不可用"导致(datahub 源级已 20s 兜底, 任务级超时
-        # 通常意味数据源整体抽风)。按用户要求: 发一条平和"数据源不可用"提示, 任务正常结束,
-        # 不发吓人的"⚠️任务失败+traceback"告警(避免误以为代码崩了)。限频同 _notify_task_error。
-        _notify_data_unavailable(name, f'运行 {elapsed:.0f}s 超时(阈值 {timeout}s)')
+        if fut.done():
+            # 任务主体自己抛出的 TimeoutError 与 future 等待超时是同一个异常类型；
+            # fut.done() 可可靠区分。前者属于真实代码/接口异常，必须保留 traceback。
+            import traceback
+            tb = ''.join(traceback.format_exception(
+                type(timeout_exc), timeout_exc, timeout_exc.__traceback__))
+            print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
+                  f'TimeoutError: {str(timeout_exc)[:120]}', flush=True)
+            _log_run(name, 'error', error=f'TimeoutError: {timeout_exc}\n{tb[-900:]}',
+                     started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                     finished_at=datetime.now().astimezone().isoformat(), notify=False)
+            _notify_task_error(name, timeout_exc, tb)
+        else:
+            with _TASK_LOCK:
+                dependency = _TASK_WAITING_ON.get(name)
+            cancel_event.set()
+            fut.cancel()
+            if dependency:
+                # 正常的依赖等待降级：明确记 skipped，并给 barrier 最多 15s 响应取消，
+                # 避免留下继续等待/随后又执行主体的孤儿线程。
+                settled = False
+                try:
+                    fut.result(timeout=15)
+                    settled = True
+                except Exception:
+                    pass
+                msg = (f'dependency_wait_timeout: {dependency}; waited={elapsed:.0f}s '
+                       f'outer_limit={timeout}s')
+                print(f'[jobs_hub] ⏳ {name} 等待依赖 {dependency} 超限，'
+                      f'按 skipped 收尾 (耗时 {elapsed:.1f}s)', flush=True)
+                if not settled:
+                    _log_run(name, 'skipped', error=msg,
+                             started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                             finished_at=datetime.now().astimezone().isoformat(),
+                             notify=False)
+                _notify_dependency_wait(
+                    name, dependency, f'已等待 {elapsed:.0f}s(外层阈值 {timeout}s)。')
+            else:
+                msg = f'execution_timeout: exceeded {timeout}s (orphan may still be running)'
+                print(f'[jobs_hub] ⏱️ {name} 执行阶段超时 '
+                      f'(耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
+                _log_run(name, 'error', error=msg,
+                         started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                         finished_at=datetime.now().astimezone().isoformat(), notify=False)
+                _notify_execution_timeout(name, elapsed, timeout)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         elapsed = time.time() - t0
         print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
               f'{type(e).__name__}: {str(e)[:120]}', flush=True)
-        _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}', notify=False)
+        _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}',
+                 started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                 finished_at=datetime.now().astimezone().isoformat(), notify=False)
         _notify_task_error(name, e, tb)
     finally:
         with _TASK_LOCK:
             _TASK_START_TS.pop(name, None)
+            _TASK_WAITING_ON.pop(name, None)
+            if _TASK_CANCEL_EVENTS.get(name) is cancel_event:
+                _TASK_CANCEL_EVENTS.pop(name, None)
+
+
+def _job_dependencies(name: str) -> tuple:
+    """任务依赖声明统一来自 automation_config，供 Web/Agent 和调度器共享。"""
+    try:
+        from automation_config import REGISTRY
+        deps = REGISTRY.get(name, {}).get('depends_on') or ()
+        if isinstance(deps, str):
+            deps = (deps,)
+        return tuple(str(dep) for dep in deps if dep)
+    except Exception:
+        return ()
+
+
+def _dependency_state(dependency: str) -> Dict:
+    """判断一个上游今天是否已满足；成功产物优先于之后的失败重跑。"""
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(dependency):
+            return {'state': 'ready', 'dependency': dependency, 'reason': 'disabled'}
+    except Exception:
+        pass
+    try:
+        success = _latest_job_run_today(dependency, success_only=True)
+        if success and success.get('finished_at'):
+            return {'state': 'ready', 'dependency': dependency, 'run': success}
+        with _TASK_LOCK:
+            running = dependency in _TASK_START_TS
+        if running:
+            return {'state': 'pending', 'dependency': dependency, 'reason': 'running'}
+        latest = _latest_job_run_today(dependency)
+        if latest:
+            return {
+                'state': 'blocked', 'dependency': dependency,
+                'reason': latest.get('status'), 'run': latest,
+            }
+        return {'state': 'pending', 'dependency': dependency, 'reason': 'not_started'}
+    except Exception as exc:
+        # 依赖观测库不可用时 fail-open；任务内部 barrier 仍会做最后一道检查。
+        return {
+            'state': 'ready', 'dependency': dependency,
+            'reason': f'state_unavailable:{type(exc).__name__}',
+        }
+
+
+def _dependency_decision(name: str) -> Dict:
+    deps = _job_dependencies(name)
+    states = [_dependency_state(dep) for dep in deps]
+    blocked = [state for state in states if state['state'] == 'blocked']
+    pending = [state for state in states if state['state'] == 'pending']
+    if blocked:
+        return {'state': 'blocked', 'dependencies': deps, 'details': blocked}
+    if pending:
+        return {'state': 'pending', 'dependencies': deps, 'details': pending}
+    return {'state': 'ready', 'dependencies': deps, 'details': states}
+
+
+def _dependency_wait_seconds(name: str = '') -> int:
+    """worker 外 deferred 的最长窗口；沿用既有 KLINE_PREFETCH_WAIT_SEC 配置。"""
+    raw = None
+    if name:
+        try:
+            from automation_config import REGISTRY
+            raw = REGISTRY.get(name, {}).get('dependency_wait_sec')
+        except Exception:
+            pass
+    if raw is None:
+        raw = os.getenv('JOB_DEPENDENCY_WAIT_SEC',
+                        os.getenv('KLINE_PREFETCH_WAIT_SEC', '2700'))
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 2700
 
 
 class _JobsHub:
@@ -1650,22 +1862,28 @@ class _JobsHub:
             max_workers=manual_workers, thread_name_prefix='manual-task')
         self._manual_futures = set()
         self._manual_worker_id = f'jobs_hub:{os.getpid()}'
+        # 定时子任务等待依赖时先放这里，不提交 worker、不消耗自身执行超时。
+        self._deferred: Dict[str, Dict] = {}
 
     def register(self, name: str, when: str, func: Callable, *args, **kwargs):
         """注册定时任务
 
         when: 'HH:MM' 每日时间，或 'every:N:minutes' 间隔
         """
+        wrapped = self._wrap(name, func)
         if when.startswith('every:'):
             _, n, unit = when.split(':')
             unit_method = getattr(schedule.every(int(n)), unit, None)
             if unit_method is None:
                 raise ValueError(f'unsupported unit: {unit}')
-            job = unit_method.do(self._wrap(name, func), *args, **kwargs)
+            job = unit_method.do(wrapped, *args, **kwargs)
         else:
             # TZ=Asia/Shanghai 已设，schedule 内部用 datetime.now() 即 CST，直接传
-            job = schedule.every().day.at(when).do(self._wrap(name, func), *args, **kwargs)
-        self._registered.append({'name': name, 'when': when, 'job': job})
+            job = schedule.every().day.at(when).do(wrapped, *args, **kwargs)
+        self._registered.append({
+            'name': name, 'when': when, 'job': job,
+            'func': func, 'args': args, 'kwargs': kwargs,
+        })
 
     def _wrap(self, name: str, func: Callable):
         """包装任务函数为异步执行，不阻塞调度线程。
@@ -1679,6 +1897,32 @@ class _JobsHub:
                     return
             except Exception:
                 pass
+            decision = _dependency_decision(name)
+            if decision['state'] == 'pending':
+                if name not in self._deferred:
+                    now = time.time()
+                    self._deferred[name] = {
+                        'name': name, 'func': func, 'args': a, 'kwargs': kw,
+                        'scheduled_at': datetime.now().astimezone().isoformat(),
+                        'created_ts': now,
+                        'deadline_ts': now + _dependency_wait_seconds(name),
+                        'dependencies': decision['dependencies'],
+                    }
+                    waiting = ','.join(
+                        state['dependency'] for state in decision['details'])
+                    print(f'[jobs_hub] ⏸️ {name} 等待依赖 {waiting}，'
+                          '已 deferred(不占 worker)', flush=True)
+                return
+            if decision['state'] == 'blocked':
+                details = '; '.join(
+                    f"{state['dependency']}={state.get('reason')}"
+                    for state in decision['details'])
+                now_iso = datetime.now().astimezone().isoformat()
+                _log_run(name, 'skipped', error=f'dependency_failed: {details}',
+                         started_at=now_iso, finished_at=now_iso, notify=False)
+                print(f'[jobs_hub] ⏭️ {name} 上游未成功，按 skipped 收尾: {details}',
+                      flush=True)
+                return
             try:
                 self._executor.submit(_run_with_log, name, func, *a, **kw)
             except Exception as e:
@@ -1687,7 +1931,10 @@ class _JobsHub:
 
 
     def list_jobs(self) -> List[Dict]:
-        return [{'name': j['name'], 'when': j['when'], 'next_run': str(j['job'].next_run)}
+        return [{'name': j['name'], 'when': j['when'],
+                 'next_run': str(j['job'].next_run),
+                 'depends_on': list(_job_dependencies(j['name'])),
+                 'deferred': j['name'] in self._deferred}
                 for j in self._registered]
 
     def list_recent_runs(self, limit: int = 50) -> List[Dict]:
@@ -1727,16 +1974,90 @@ class _JobsHub:
                 requeue_claimed_task(run['run_id'], f'提交 worker 失败: {exc}')
                 raise
 
+    def _poll_deferred_tasks(self):
+        """依赖完成后再提交定时子任务；等待期间完全不占 6 个业务 worker。"""
+        for name, item in list(self._deferred.items()):
+            decision = _dependency_decision(name)
+            if decision['state'] == 'ready':
+                self._deferred.pop(name, None)
+                waited = time.time() - item['created_ts']
+                print(f'[jobs_hub] ▶ {name} 依赖已满足，deferred {waited:.0f}s 后提交',
+                      flush=True)
+                try:
+                    self._executor.submit(
+                        _run_with_log, name, item['func'],
+                        *item['args'], **item['kwargs'])
+                except Exception as exc:
+                    _log_run(name, 'error', error=f'依赖满足后提交线程池失败: {exc}')
+                continue
+            if decision['state'] == 'blocked':
+                self._deferred.pop(name, None)
+                details = '; '.join(
+                    f"{state['dependency']}={state.get('reason')}"
+                    for state in decision['details'])
+                _log_run(
+                    name, 'skipped', error=f'dependency_failed: {details}',
+                    started_at=item['scheduled_at'],
+                    finished_at=datetime.now().astimezone().isoformat(),
+                    notify=False)
+                print(f'[jobs_hub] ⏭️ {name} deferred 结束，上游未成功: {details}',
+                      flush=True)
+                continue
+            if time.time() >= item['deadline_ts']:
+                self._deferred.pop(name, None)
+                dependencies = ','.join(item['dependencies'])
+                waited = time.time() - item['created_ts']
+                _log_run(
+                    name, 'skipped',
+                    error=f'dependency_wait_timeout: {dependencies}; waited={waited:.0f}s',
+                    started_at=item['scheduled_at'],
+                    finished_at=datetime.now().astimezone().isoformat(),
+                    notify=False)
+                dependency = item['dependencies'][0] if item['dependencies'] else 'unknown'
+                _notify_dependency_wait(
+                    name, dependency, f'调度器已等待 {waited:.0f}s。')
+                print(f'[jobs_hub] ⏳ {name} deferred 等待 {dependencies} 超限，'
+                      '按 skipped 收尾', flush=True)
+
+    def _recover_due_dependencies(self):
+        """重启后只恢复仍在依赖窗口内的链，不做无边界的历史任务补跑。"""
+        now = datetime.now().astimezone()
+        for item in self._registered:
+            name = item['name']
+            if not _job_dependencies(name) or name in self._deferred:
+                continue
+            when = str(item.get('when') or '')
+            try:
+                hour, minute = (int(part) for part in when.split(':', 1))
+                scheduled = now.replace(
+                    hour=hour, minute=minute, second=0, microsecond=0)
+            except (TypeError, ValueError):
+                continue
+            if now < scheduled:
+                continue
+            if (now - scheduled).total_seconds() > _dependency_wait_seconds(name):
+                continue
+            try:
+                if _latest_job_run_today(name):
+                    continue
+            except Exception:
+                pass
+            print(f'[jobs_hub] ↻ 恢复今日依赖链: {name} '
+                  f'(计划 {when}, 重启于 {now.strftime("%H:%M:%S")})', flush=True)
+            self._wrap(name, item['func'])(*item['args'], **item['kwargs'])
+
     def start(self):
         if self._running:
             return
         self._running = True
+        self._recover_due_dependencies()
 
         def _loop():
             last_manual_poll = 0.0
             while self._running:
                 try:
                     schedule.run_pending()
+                    self._poll_deferred_tasks()
                     now = time.monotonic()
                     if now - last_manual_poll >= 2:
                         self._poll_manual_tasks()
@@ -4616,6 +4937,11 @@ def task_mx_selection_review():
     job = 'mx_selection_review'
     if _skip_if_not_trading(job):
         return
+    if not _wait_task_dependency(job, 'unified_selection'):
+        now_iso = datetime.now().astimezone().isoformat()
+        _log_run(job, 'skipped', error='dependency unified_selection not ready',
+                 started_at=now_iso, finished_at=now_iso, notify=False)
+        return
     started = datetime.now().isoformat()
     try:
         # 读缓存的选股结果(统一走 _last_selection_picks,修复原 snap.get('indicators') 死分支)
@@ -5039,17 +5365,17 @@ def register_default_jobs():
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
       10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
-      10:30 mx_selection_review         — 选股过妙想诊断(D:只在与综合选股分歧时推) + 急跌兜底
+      10:30 mx_selection_review         — unified_selection 成功后过妙想诊断(D:分歧才推) + 急跌兜底
       11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
       12:00 noon_report                 — 📊 午盘简报(大盘)
       14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
       —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
       —— 盘后(全 16:30 后;F:读暖缓存任务显式等 kline_prefetch 焐完,不靠时钟间隔)——
       16:30 kline_prefetch              — 📥 K线+因子缓存预热(链头)
-      16:40 factor_collection           — 🧬 因子采集(读暖缓存,F:等 prefetch)
-      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(MyTT/缠论/VaR;F:等 prefetch;次日早盘读它)
+      16:40 factor_collection           — 🧬 因子采集(prefetch 成功后由 deferred 队列提交)
+      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(prefetch 成功后提交;次日早盘读它)
       16:48 daily_market_snapshot       — 📷 大盘快照
-      16:55 eod_outcomes                — 🎯 盘后后验合并(A:推荐池回填 + 决策信号后验,F:等 prefetch)
+      16:55 eod_outcomes                — 🎯 盘后后验合并(prefetch 成功后提交:推荐池回填+信号后验)
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)

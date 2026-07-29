@@ -71,8 +71,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'mx_selection_review': {
         'cn': '🔍 选股过妙想第二意见',
-        'schedule': '10:30 每日',
+        'schedule': '10:30 起，综合选股完成后',
         'category': '核心', 'default': True, 'core': True,
+        'depends_on': ['unified_selection'],
+        'dependency_wait_sec': 900,
         'description': '对综合选股 TOP 逐个过东财妙想诊断',
     },
     'noon_report': {
@@ -95,8 +97,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'portfolio_indicator_snapshot': {
         'cn': '📸 持仓指标快照',
-        'schedule': '16:45 每日',
+        'schedule': '16:45 起，K线缓存预热完成后',
         'category': '核心', 'default': True, 'core': True,
+        'depends_on': ['kline_prefetch'],
         'description': '持仓+监测列表算 MyTT/缠论/VaR 快照(早盘晨报扫描全靠它);尾接风险预警/形态告警[开关]。关掉会让次日分析读不到快照',
     },
     'daily_market_snapshot': {
@@ -107,8 +110,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'factor_collection': {
         'cn': '🧬 因子采集',
-        'schedule': '16:40 每日',
+        'schedule': '16:40 起，K线缓存预热完成后',
         'category': '核心', 'default': True, 'core': True,
+        'depends_on': ['kline_prefetch'],
         'description': '收盘后采集 OHLCV+技术指标+估值打分因子快照',
     },
     'dragon_tiger_archive': {
@@ -162,9 +166,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # ===== 常驻核心(已在表内)=====
     'eod_outcomes': {
         'cn': '🎯 盘后后验合并',
-        'schedule': '16:55 每日(盘后)',
+        'schedule': '16:55 起，K线缓存预热完成后',
         'category': '核心',
         'default': True,  # A 合并:推荐池收盘价回填胜率 + 决策信号 K线后验,二者皆"盘后读K线做后验",合一个任务
+        'depends_on': ['kline_prefetch'],
         'description': '盘后①推荐池收盘价回填真实盈亏(喂周评估)②决策信号过 horizon 判 hit/miss。合 ai_rec_check+decision_signal_outcomes',
     },
     'ai_eval_weekly': {
@@ -406,6 +411,8 @@ def list_all() -> List[Dict[str, Any]]:
             'description': meta.get('description', ''),
             'default': meta.get('default', False),
             'core': meta.get('core', False),
+            'depends_on': list(meta.get('depends_on') or []),
+            'dependency_wait_sec': meta.get('dependency_wait_sec'),
             'enabled': is_enabled(name),
         })
     return out
