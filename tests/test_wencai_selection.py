@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -120,6 +121,22 @@ class WencaiRetryScheduleTests(unittest.TestCase):
         self.assertTrue(retry["default"])
         self.assertNotIn("depends_on", retry)
         self.assertNotIn("depends_on", REGISTRY["unified_selection"])
+
+
+class WencaiCookieTests(unittest.TestCase):
+    def test_environment_cookie_is_forwarded_without_logging_value(self):
+        from data.sources import pywencai as source
+
+        source._streak_fail = 0
+        result = pd.DataFrame([{"股票代码": "600519.SH"}])
+        with patch.dict(os.environ, {"PYWENCAI_COOKIE": "sensitive-cookie"}):
+            self.assertTrue(source.cookie_configured())
+            with patch.object(source.pywencai, "get", return_value=result) as get:
+                actual = source.pywencai_get("贵州茅台最新价", timeout=2, loop=False)
+
+        self.assertIs(actual, result)
+        get.assert_called_once()
+        self.assertEqual(get.call_args.kwargs["cookie"], "sensitive-cookie")
 
 
 if __name__ == "__main__":

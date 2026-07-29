@@ -14,6 +14,7 @@ pywencai.get(query, loop=True) 在网络抽风 / 同花顺反爬时可永久卡�
 """
 from __future__ import annotations
 import concurrent.futures as _cf
+import os as _os
 import time as _time
 import pywencai
 
@@ -36,6 +37,15 @@ _streak_fail = 0
 _last_fail = 0.0
 _BREAK_LOG_LAST = 0.0
 _BREAK_LOG_GAP = 60.0
+_COOKIE_LOGGED = False
+
+
+def cookie_configured() -> bool:
+    """是否已配置问财登录 Cookie；只返回布尔值，禁止日志输出 Cookie 内容。"""
+    return bool(
+        _os.getenv('PYWENCAI_COOKIE', '').strip()
+        or _os.getenv('WENCAI_COOKIE', '').strip()
+    )
 
 
 def breaker_open() -> bool:
@@ -60,7 +70,7 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
         TimeoutError: 超时, 或熔断冷却期内直接短路(上层按既有 except 路径降级)
         其它异常: 与原生 pywencai.get 一致, 上层按原路径处理
     """
-    global _streak_fail, _last_fail, _BREAK_LOG_LAST
+    global _streak_fail, _last_fail, _BREAK_LOG_LAST, _COOKIE_LOGGED
     now = _time.time()
     # 熔断:连续失败达阈值且仍在冷却期 → 不再 submit, 直接短路(避免逐只吃满 timeout)
     if _streak_fail >= _BREAK_FAILS and (now - _last_fail) < _BREAK_COOLDOWN:
@@ -69,6 +79,19 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
             print(f'[pywencai] ⚡ 问财连续失败熔断中, {_BREAK_COOLDOWN:.0f}s 内直接短路降级'
                   f'(60s 内仅提示一次)', flush=True)
         raise TimeoutError('pywencai 熔断中(连续失败), 短路降级')
+    # pywencai 0.13.1 受同花顺登录策略影响，官方文档要求传 cookie。
+    # 保留匿名调用兼容尚未强制登录的节点，但首次明确提示配置缺口；绝不打印值。
+    if 'cookie' not in kwargs:
+        cookie = (
+            _os.getenv('PYWENCAI_COOKIE', '').strip()
+            or _os.getenv('WENCAI_COOKIE', '').strip()
+        )
+        if cookie:
+            kwargs['cookie'] = cookie
+        elif not _COOKIE_LOGGED:
+            _COOKIE_LOGGED = True
+            print('[pywencai] ⚠️ 未配置 PYWENCAI_COOKIE；问财当前登录策略可能返回 None，'
+                  '将按既有降级链继续', flush=True)
     fut = _POOL.submit(pywencai.get, query=query, loop=loop, **kwargs)
     try:
         r = fut.result(timeout=timeout)

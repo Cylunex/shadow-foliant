@@ -293,7 +293,8 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 拿上一交易日的 `_last_selection` 做“第二意见”。09:15 `strategy_prefetch` 后，
 09:30 `strategy_prefetch_retry` 只补当日缓存缺口；它与 `unified_selection` 是软依赖，
 问财持续失败也不能阻断妙想/InStock/多因子，因此不进入硬依赖队列。补取逐项上限保证
-09:45 前收尾。
+09:45 前收尾。问财封装从 `PYWENCAI_COOKIE` 读取当前登录凭据并透传给 pywencai；
+该值只放生产 `.env`、不入库、不写日志，缺失时保留匿名探测并明确降级。
 
 | 时间 | 任务 | 内容 | AI |
 |---|---|---|---|
