@@ -63,6 +63,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
 
         self.assertFalse(ok)
         get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
 
     def test_selector_returns_unique_canonical_code(self):
         from selection import low_price_bull_selector as module
@@ -84,6 +85,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertTrue(result.columns.is_unique)
         self.assertEqual(result.iloc[0]["code"], "002521")
         get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
 
     def test_small_cap_selector_requests_wencai_once(self):
         from selection import small_cap_selector as module
@@ -93,6 +95,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
 
         self.assertFalse(ok)
         get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
 
     def test_profit_growth_selector_requests_wencai_once(self):
         from selection import profit_growth_selector as module
@@ -102,6 +105,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
 
         self.assertFalse(ok)
         get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
 
     def test_value_selector_requests_wencai_once(self):
         from selection import value_stock_selector as module
@@ -111,6 +115,27 @@ class WencaiSelectorRequestTests(unittest.TestCase):
 
         self.assertFalse(ok)
         get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
+
+    def test_main_force_requests_only_first_page(self):
+        from selection import main_force_selector as module
+
+        raw = pd.DataFrame([{
+            "股票代码": "600519.SH",
+            "股票简称": "贵州茅台",
+            "主力资金流向": 1000000,
+        }])
+        with patch.object(module, "_throttle"), patch.object(
+            module, "pywencai_get", return_value=raw
+        ) as get:
+            ok, result, _ = module.MainForceStockSelector().get_main_force_stocks(
+                days_ago=5
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(result), 1)
+        get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["loop"])
 
 
 class WencaiRetryScheduleTests(unittest.TestCase):
@@ -121,6 +146,59 @@ class WencaiRetryScheduleTests(unittest.TestCase):
         self.assertTrue(retry["default"])
         self.assertNotIn("depends_on", retry)
         self.assertNotIn("depends_on", REGISTRY["unified_selection"])
+        self.assertIn("主力资金", retry["description"])
+
+    def test_wencai_sources_are_explicitly_labeled(self):
+        from jobs.jobs_hub import _WENCAI_SOURCE_LABELS
+
+        self.assertEqual(_WENCAI_SOURCE_LABELS["主力资金"], "问财·主力")
+        self.assertEqual(_WENCAI_SOURCE_LABELS["小市值"], "问财·小市值")
+
+    def test_prefetch_runs_main_force_before_other_wencai_queries(self):
+        from jobs import jobs_hub as module
+        import mx_strategies
+
+        calls = []
+        with patch.object(module, "_skip_if_not_trading", return_value=False), \
+                patch.object(
+                    module,
+                    "_prefetch_main_force",
+                    side_effect=lambda **_kwargs: calls.append("main_force") or 0,
+                ), \
+                patch.object(
+                    module,
+                    "_prefetch_wencai_strategies",
+                    side_effect=lambda **_kwargs: calls.append("others") or 0,
+                ), \
+                patch.object(module, "_log_run"), \
+                patch.object(mx_strategies, "MX_STRATEGIES", []):
+            module.task_strategy_prefetch()
+
+        self.assertEqual(calls, ["main_force", "others"])
+
+    def test_retry_also_prioritizes_main_force(self):
+        from jobs import jobs_hub as module
+
+        calls = []
+        with patch.object(module, "_skip_if_not_trading", return_value=False), \
+                patch.object(
+                    module,
+                    "_prefetch_main_force",
+                    side_effect=lambda **kwargs: calls.append(
+                        ("main_force", kwargs["use_cache"])
+                    ) or 0,
+                ), \
+                patch.object(
+                    module,
+                    "_prefetch_wencai_strategies",
+                    side_effect=lambda **kwargs: calls.append(
+                        ("others", kwargs["use_cache"])
+                    ) or 0,
+                ), \
+                patch.object(module, "_log_run"):
+            module.task_strategy_prefetch_retry()
+
+        self.assertEqual(calls, [("main_force", True), ("others", True)])
 
 
 class WencaiCookieTests(unittest.TestCase):

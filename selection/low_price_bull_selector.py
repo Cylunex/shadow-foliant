@@ -61,7 +61,8 @@ class LowPriceBullSelector:
             print(f"正在调用问财接口...")
             
             _throttle('pywencai')
-            pywencai_result = pywencai_get(query, timeout=60)
+            # 问句已排序且最终只取 TOP N；单页最多 100 条足够。
+            pywencai_result = pywencai_get(query, timeout=60, loop=False)
             
             if pywencai_result is None:
                 return False, None, "问财接口返回None，请检查网络或稍后重试"

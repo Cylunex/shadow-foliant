@@ -63,7 +63,8 @@ class SmallCapSelector:
             
             # 调用pywencai
             _throttle('pywencai')
-            result = pywencai_get(query, timeout=60)
+            # 已按总市值排序且只取 TOP N，禁止无意义地拉完整结果集。
+            result = pywencai_get(query, timeout=60, loop=False)
             
             if result is None or result.empty:
                 self.logger.warning("未获取到符合条件的股票")

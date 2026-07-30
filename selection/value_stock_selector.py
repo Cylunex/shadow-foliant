@@ -12,6 +12,13 @@ from data.pywencai_safe import pywencai_get
 from selection.data_source_config import _normalize_wencai
 import time
 
+# 与其他问财 selector 共用限流器，避免紧接上一条查询触发 403。
+try:
+    from rate_limiter import throttle as _throttle
+except Exception:
+    def _throttle(*a, **k):
+        return 0.0
+
 
 class ValueStockSelector:
     """低估值选股类"""
@@ -64,7 +71,9 @@ class ValueStockSelector:
             print(f"\n查询语句: {query}")
             print(f"正在调用问财接口...")
 
-            result = pywencai_get(query, timeout=60)
+            _throttle('pywencai')
+            # 已按流通市值排序且只取 TOP N，单页足够。
+            result = pywencai_get(query, timeout=60, loop=False)
             if result is None:
                 return False, None, "问财接口返回None，请检查网络或稍后重试"
             df_result = self._convert_to_dataframe(result)

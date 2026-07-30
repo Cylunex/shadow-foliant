@@ -4060,6 +4060,39 @@ _WENCAI_PREFETCH_JOBS = [
     ('低估值',   'value_stock_selector',    'ValueStockSelector',   'get_value_stocks'),
 ]
 
+_WENCAI_SOURCE_LABELS = {
+    '主力资金': '问财·主力',
+    '低价擒牛': '问财·低价',
+    '小市值': '问财·小市值',
+    '净利增长': '问财·净利',
+    '低估值': '问财·低估值',
+}
+
+
+def _prefetch_main_force(*, use_cache: bool, log_job: str) -> int:
+    """预取问财主力资金，成功返回 1。
+
+    09:15 最先请求；09:30 命中缓存时零请求，缺失时才补一次。
+    """
+    try:
+        from main_force_selector import MainForceStockSelector
+        ok, df, msg = _call_with_hard_timeout(
+            '主力资金',
+            lambda: MainForceStockSelector().get_main_force_stocks_cached(
+                days_ago=5, use_cache=use_cache),
+            60,
+        )
+        n = len(df) if (
+            ok and df is not None and hasattr(df, 'empty') and not df.empty
+        ) else 0
+        print(f'[{log_job}] {"✅" if n else "⚠️"} 主力资金 {n} 只 '
+              f'({str(msg)[:70]})', flush=True)
+        return 1 if n else 0
+    except Exception as e:
+        print(f'[{log_job}] ⚠️ 主力资金异常/超时: '
+              f'{type(e).__name__}: {str(e)[:80]}', flush=True)
+        return 0
+
 
 def _prefetch_wencai_strategies(*, use_cache: bool, log_job: str) -> int:
     """预取 4 条精确问财策略，返回已有结果的策略数。
@@ -4097,21 +4130,23 @@ def task_strategy_prefetch():
     """🏦 盘前预取**5 大问财策略 + 5 条妙想镜像策略**(共 10)→ 写当日缓存,09:45 unified_selection 读暖、
     不在选股高峰现调外部源(问财熔断/卡死时整层选股不再哑火;妙想是非问财独立源,双源交叉)。
     **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不告警(09:45 自动 fallback 现调)。
-      ① 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)
-      ② 妙想·主力/低价/小市值/净利/低估值(妙想 selectSecurity,非问财独立源)
-      ③ 主力资金(问财,**最易超时 → 放最后一个**:前面 9 个先焐好候选,它卡死也不堵)"""
+      ① 主力资金(问财，最高优先级，避免前序请求耗尽额度)
+      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)
+      ③ 妙想·主力/低价/小市值/净利/低估值(妙想 selectSecurity,非问财独立源)"""
     job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
     done, total = 0, 10   # 5 问财 + 5 妙想镜像
-    # ⚠️ 每个问财策略各套 _call_with_hard_timeout(75s):卡死必被砍、跳下一个,不再像 2026-06-29 那样
-    # 第一个卡满 900s 把后面全堵死。**问财·主力资金最易超时,挪到最后一个跑**——前面 9 个
-    # (尤其独立源的 5 个妙想)先把候选焐出来,它超不超时都不影响候选池。
-    # ① 4 个问财策略：每条只发一次精确问句，成功写 strategy_cache。
+    # 主力资金曾放在最后，实测前三条普通策略全量分页后低估值/主力连续
+    # 403。现在主力优先，所有 TOP 查询均只拉单页。
+    # ① 主力资金最高优先级。
+    done += _prefetch_main_force(
+        use_cache=False, log_job='strategy_prefetch')
+    # ② 4 个普通问财策略：每条只发一次精确问句，成功写 strategy_cache。
     done += _prefetch_wencai_strategies(
         use_cache=False, log_job='strategy_prefetch')
-    # ② 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
+    # ③ 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
     try:
         import mx_strategies
         for name, query, st in mx_strategies.MX_STRATEGIES:
@@ -4126,39 +4161,30 @@ def task_strategy_prefetch():
                 print(f'[strategy_prefetch] ⚠️ {name} 异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
     except Exception as e:
         print(f'[strategy_prefetch] ⚠️ 妙想镜像整体跳过: {type(e).__name__}: {str(e)[:60]}', flush=True)
-    # ③ 主力资金(问财,**最易超时,故放最后一个**):前面 9 个已焐好候选,它卡死也不堵任何人
-    try:
-        from main_force_selector import MainForceStockSelector
-        ok, df, msg = _call_with_hard_timeout('主力资金',
-            lambda: MainForceStockSelector().get_main_force_stocks_cached(days_ago=5, use_cache=False), 90)
-        n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
-        if n:
-            done += 1
-        print(f'[strategy_prefetch] {"✅" if n else "⚠️"} 主力资金 {n} 只 ({msg})', flush=True)
-    except Exception as e:
-        print(f'[strategy_prefetch] ⚠️ 主力资金异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
     _log_run(job, 'success' if done else 'error',
              error=f'prefetched {done}/{total}' if done else 'all_empty(问财不可达?09:45 现调兜底)',
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
 def task_strategy_prefetch_retry():
-    """09:30 软重试：只补 09:15 未生成缓存的问财策略。
+    """09:30 软重试：优先补主力资金，再补其余问财缓存缺口。
 
     这是候选丰富度增强，不是 09:45 综合选股的硬依赖。即便问财持续不可用，
     unified_selection 仍应使用妙想/InStock/多因子继续运行，不能按依赖失败跳过。
-    75s×4 的调用上限也保证本任务在 09:45 前终止，不与主选股抢同一外部源。
+    60s+75s×4 的理论上限为 360s，不与 09:45 主选股长期重叠。
     """
     job = 'strategy_prefetch_retry'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    done = _prefetch_wencai_strategies(
+    done = _prefetch_main_force(
+        use_cache=True, log_job=job)
+    done += _prefetch_wencai_strategies(
         use_cache=True, log_job=job)
     _log_run(
         job,
         'success' if done else 'error',
-        error=f'available {done}/4' if done else 'all_empty(问财仍不可达)',
+        error=f'available {done}/5' if done else 'all_empty(问财仍不可达)',
         started_at=started,
         finished_at=datetime.now().isoformat(),
         notify=False,
@@ -4209,7 +4235,7 @@ def task_unified_selection():
                 for _, row in df.iterrows():
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
-                        _add(code, 1.0, sname)
+                        _add(code, 1.0, _WENCAI_SOURCE_LABELS.get(sname, sname))
 
         # 1b. 妙想智能选股镜像(非问财冗余源,2026-06-26):5 条妙想查询并池,与问财双源交叉——
         # 同票被问财源+妙想源都命中 → +2分、命中2 source,排序靠前(下游合并/配额/红蓝照常筛)。

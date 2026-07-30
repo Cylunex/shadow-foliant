@@ -291,8 +291,9 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 任务函数内部仍保留 barrier，兜住 Agent 手动触发与重启竞态。
 同一机制也覆盖 `mx_selection_review → unified_selection`：综合选股超时/失败时不再
 拿上一交易日的 `_last_selection` 做“第二意见”。09:15 `strategy_prefetch` 后，
-09:30 `strategy_prefetch_retry` 只补当日缓存缺口；它与 `unified_selection` 是软依赖，
+09:30 `strategy_prefetch_retry` 优先补主力资金，再补其余当日缓存缺口；它与 `unified_selection` 是软依赖，
 问财持续失败也不能阻断妙想/InStock/多因子，因此不进入硬依赖队列。补取逐项上限保证
+09:15 主力资金最高优先级，所有只需 TOP5/TOP100 的问句均禁用全量分页。
 09:45 前收尾。问财封装将上游遗留 HTTP 地址局部改写为 HTTPS，并将默认的
 10 次无间隔重试收敛为 2 次、间隔 1 秒，避免一次拒绝放大成反爬封禁；
 `PYWENCAI_COOKIE` 仅为可选稳定性增强，配置后安全透传、不入库、不写日志。

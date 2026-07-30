@@ -205,7 +205,8 @@ class MainForceStockSelector:
                 
                 try:
                     _throttle('pywencai')
-                    result = pywencai_get(query, timeout=90)
+                    # 查询目标就是前 100 名，问财单页上限正好 100。
+                    result = pywencai_get(query, timeout=90, loop=False)
 
                     if result is None:
                         print(f"  ⚠️ 方案{i}返回None，尝试下一个方案")
