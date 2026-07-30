@@ -136,6 +136,25 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.args[0], "主力资金净流入排名")
+
+    def test_main_force_filters_st_and_star_market_locally(self):
+        from selection import main_force_selector as module
+
+        raw = pd.DataFrame([
+            {"股票代码": "600519.SH", "股票简称": "贵州茅台", "主力资金流向": 3},
+            {"股票代码": "688001.SH", "股票简称": "华兴源创", "主力资金流向": 2},
+            {"股票代码": "600001.SH", "股票简称": "ST测试", "主力资金流向": 1},
+        ])
+        with patch.object(module, "_throttle"), patch.object(
+            module, "pywencai_get", return_value=raw
+        ):
+            ok, result, _ = module.MainForceStockSelector().get_main_force_stocks(
+                days_ago=5
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(result["股票代码"].tolist(), ["600519.SH"])
 
 
 class WencaiRetryScheduleTests(unittest.TestCase):

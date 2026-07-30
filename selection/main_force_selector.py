@@ -182,20 +182,12 @@ class MainForceStockSelector:
             print(f"开始日期: {start_date}")
             print(f"目标: 获取主力资金净流入排名前100名股票")
             
-            # 构建查询语句 - 使用多个备选方案，所有方案都要求计算区间涨跌幅。
-            # ⚠️ 2026-06-30 删原方案1(8个能力评分字段太长,问财每次返 None 白费 5s)。
-            # 当前方案1=原方案2(简化查询,实测稳定);方案2=原方案3;方案3=原方案4。
+            # 当前问财会对“区间涨跌幅+市值+行业+多项财务字段”的复合问句直接
+            # 返回 403，但最小主力问句能稳定返回真实净流入/排名/买卖额字段。
+            # 主方案因此只表达核心语义；失败时再尝试带日期的区间口径。
             queries = [
-                # 方案1: 简化查询(原方案2,实测稳定一次过)
-                f"{start_date}以来主力资金净流入，并计算区间涨跌幅，市值{min_market_cap}-{max_market_cap}亿，非科创非st，"
-                f"所属同花顺行业，总市值，净利润，营收，市盈率，市净率",
-
-                # 方案2: 基础查询(原方案3)
-                f"{start_date}以来主力资金净流入排名，并计算区间涨跌幅，市值{min_market_cap}-{max_market_cap}亿，非科创非st，"
-                f"所属行业，总市值",
-
-                # 方案3: 最简查询(原方案4)
-                f"{start_date}以来主力资金净流入前100名，并计算区间涨跌幅，市值{min_market_cap}-{max_market_cap}亿，非st非科创板，所属行业，总市值",
+                "主力资金净流入排名",
+                f"{start_date}以来主力资金净流入排名",
             ]
             
             # 尝试不同的查询方案（最多试2个pywencai查询，失败就直接降级）
@@ -218,6 +210,31 @@ class MainForceStockSelector:
                     if df_result is None or df_result.empty:
                         print(f"  ⚠️ 方案{i}数据为空，尝试下一个方案")
                         continue
+
+                    # 最小问句不再依赖服务端复合过滤；本地保留原策略最重要的
+                    # 非 ST / 非科创约束。市值字段若响应未提供则不伪造。
+                    code_col = next(
+                        (c for c in df_result.columns if '股票代码' in str(c)),
+                        None,
+                    )
+                    name_col = next(
+                        (c for c in df_result.columns if '股票简称' in str(c)),
+                        None,
+                    )
+                    if code_col:
+                        codes = df_result[code_col].astype(str).str.extract(
+                            r'(\d{6})', expand=False
+                        ).fillna('')
+                        df_result = df_result[
+                            ~codes.str.startswith(('688', '689'))
+                        ]
+                    if name_col:
+                        df_result = df_result[
+                            ~df_result[name_col].astype(str).str.upper().str.contains(
+                                'ST', na=False
+                            )
+                        ]
+                    df_result = df_result.reset_index(drop=True)
                     
                     # 成功获取数据
                     print(f"  ✅ 方案{i}成功！获取到 {len(df_result)} 只股票")
