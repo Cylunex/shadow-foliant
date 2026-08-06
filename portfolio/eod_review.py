@@ -7,8 +7,9 @@ import _bootstrap  # noqa: F401  路径引导
 这三者都在回答同一问题"持仓尾盘该怎么处理",此前各推一条 → 同一只票在三条里出现三次、三套口径
 (规则风险分 / AI体检动作 / 清仓紧迫分),又碎又互相打架。本模块**融合**:
   - 一次取数(_scan_holdings_with_snapshot)、一次规则打分(复用 exit_advisor 的紧迫分/归类/死钱)、
-  - **一次 LLM 调用**同时产出"整体瘦身策略 + 每只最终动作",每只票**只出现一次、一个融合结论**,
-  - 一条报告:总策略 → 按紧迫度的处理清单(去重) → 尾盘强势机会;一组决策信号(source_type='eod_review')。
+  - **一次 LLM 调用**只判断重点持仓的最终动作，每只票只有一个融合结论；
+  - 一条极简报告：一句总览 + 最重要的 5 个动作；完整 items 留给 Agent 查询；
+    同时保存一组决策信号(source_type='eod_review')。
 比原来 3 任务 / 2 次 LLM / 3 条推送 更省、更不矛盾、更好看。
 
 接口:run_eod_review(target_positions=20, record_signals=True) -> dict
@@ -19,7 +20,6 @@ from typing import Any, Dict, List, Optional
 
 _ACT_MAP = {'清仓': 'sell', '卖出': 'sell', '减仓': 'reduce', '减持': 'reduce',
             '持有': 'hold', '观望': 'watch', '加仓': 'add', '增持': 'add'}
-_ACT_TAG = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'add': '🔴加仓', 'hold': '⚪持有', 'watch': '⚪观望'}
 _ACT_ORDER = {'sell': 0, 'reduce': 1, 'add': 2, 'hold': 3, 'watch': 4}
 
 
@@ -66,7 +66,7 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
 
     # 2) 一次 LLM:整体瘦身策略 + 逐只最终动作(只让 AI 决策紧迫分高/有风险的子集,控 token)
     decide = [r for r in rows if r['exit_score'] >= 15 or (r['sell_score'] or 0) >= 1][:18]
-    ai_strategy, ai_verdict = _ai_fuse(decide, n, target_positions, over)
+    _, ai_verdict = _ai_fuse(decide, n, target_positions, over)
 
     # 3) 融合:AI 给了动作用 AI 的,否则用规则;紧迫分继续做排序与紧迫度
     items = []
@@ -99,25 +99,23 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
     out['ok'] = True
     out['items'] = items
     out['summary'] = f'持仓{n}只(目标{target_positions}),清仓{n_sell}/减仓{n_reduce}' + ('·过度分散' if over else '')
-    out['text'] = _format(items, scans, n, target_positions, over, ai_strategy)
+    out['text'] = _format(items, n, target_positions, over)
     return out
 
 
 def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
-    """一次 LLM:整体瘦身策略 + 逐只最终动作。返回 (strategy_text, {code:{action,reason}})。"""
+    """一次 LLM 只定重点持仓的最终动作；返回 ('', {code:{action,reason}})。"""
     if not decide:
         return ('', {})
     lines = [f"{r['code']} {r['name']} 紧迫{r['exit_score']}|{r['category']}|"
              f"浮盈亏{(r['pnl'] if r['pnl'] is not None else 0):+.0f}%|持有{r.get('holding_days','?')}天|"
              f"风险分{r['sell_score']}({'/'.join(r['sell_reasons'][:3]) or '无'})" for r in decide]
-    prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'(明显过多,健康零售组合通常 5-10 只)' if over else ''}。
+    prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'，持仓偏多' if over else ''}。
 下面是按"清仓紧迫分"排序、需要决断的持仓(已融合 割肉止损/止盈锁定/破位/死钱 多维信号):
 
 {chr(10).join(lines)}
 
-请输出两部分:
-①【总策略】≤150字:{'持仓过多,建议收敛到约 ' + str(target) + ' 只——先清掉哪几只(点名)、为什么。' if over else '重点处理紧迫分高的几只。'}一句纪律提醒(别舍不得割/死扛)。
-②【逐只】对**上面每一只**给最终动作(清仓/减仓/持有/加仓 之一)+ 一句话理由,严格格式一行一只:
+只逐只给最终动作(清仓/减仓/持有/加仓 之一)+ 一句通俗理由，严格一行一只，不要总策略和开场白:
 代码 | 动作:X | 理由:≤25字
 
 要求:同一只只给一个结论,综合所有信号(深亏破位→清仓;大浮盈动能弱→减仓锁利;久横盘死钱→清仓换仓;趋势未坏→持有)。"""
@@ -125,49 +123,66 @@ def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
         from deepseek_client import DeepSeekClient
         ans = DeepSeekClient().call_api(
             [{'role': 'system', 'content': '你是冷静的持仓瘦身顾问,敢让用户割肉与收敛持仓,逐只给唯一可执行结论。'},
-             {'role': 'user', 'content': prompt}], max_tokens=1400, call_type='eod_review') or ''
+             {'role': 'user', 'content': prompt}], max_tokens=800, call_type='eod_review') or ''
     except Exception as e:
         print(f'[eod_review] LLM 失败: {type(e).__name__}: {str(e)[:50]}')
         return ('', {})
-    # 拆策略(【总策略】到【逐只】之间)与逐只
-    strategy = ''
-    m = re.search(r'【总策略】\s*(.+?)(?:【逐只】|代码\s*\||$)', ans, re.S)
-    if m:
-        # 去掉 AI 可能留在末尾的 ①②/逐只 等分节标记
-        strategy = re.sub(r'\s*[①②③]?\s*【?逐只?】?\s*$', '', m.group(1).strip()).rstrip('②①③ \n　')[:300]
     verdict = {}
     for line in ans.splitlines():
         mm = re.search(r'(\d{6})\D.*?动作[:：]\s*([清减持加][仓有])', line)
         if mm:
             reason = (re.search(r'理由[:：]\s*(.+)$', line) or [None, ''])[1].strip()[:30]
             verdict[mm.group(1)] = {'action': _ACT_MAP.get(mm.group(2), 'hold'), 'reason': reason}
-    return (strategy, verdict)
+    return ('', verdict)
 
 
-def _format(items, scans, n, target, over, strategy) -> str:
-    """2026-07-02 通俗化改版(memory: 通知要通俗/直接/结论先行):
-    ① 标题一句话给动作汇总(清仓X只·减仓X只),不用读到中间才知道结论;
-    ② 去掉"紧迫72"内部黑话,只留人话分类(割肉止损/止盈锁定/死钱调出/破位减仓);
-    ③ 盈亏写"赚/亏X%"而非"浮盈亏+X%";
-    ④ 修计数 bug:建议处理超过展示上限时,被截断的不再被算成"暂持有";
-    ⑤ 尾盘强势用 🔴(红涨绿跌约定,涨=红)。"""
+def _plain_reason(item: Dict[str, Any]) -> str:
+    """把指标/流派术语压成人话，通知里只保留一个最主要的理由。"""
+    reason = str(item.get('reason') or '').strip()
+    reason = re.sub(r'风险信号[:：]?', '', reason)
+    reason = re.sub(r'破MA(20|60)(?:\([^)]*\))?', r'跌破\1日均线', reason)
+    reason = re.sub(r'缠论[一二三]卖', '走势转弱', reason)
+    reason = re.sub(r'VaR95\s*[\d.]+%', '短期波动较大', reason, flags=re.I)
+    reason = re.sub(r'年回撤-?[\d.]+%', '历史回撤较大', reason)
+    reason = re.sub(r'浮亏-?([\d.]+)%', r'已亏约\1%', reason)
+    reason = reason.replace('死钱占仓', '长期横盘').replace('清仓换仓', '腾出仓位')
+    parts = []
+    for part in re.split(r'[/；;，,]+', reason):
+        part = part.strip(' 。')
+        if part and part not in parts:
+            parts.append(part)
+    if parts:
+        return '，'.join(parts[:2])[:42]
+    return {
+        '割肉止损': '亏损较大，走势也在转弱',
+        '止盈锁定': '已有较多盈利，先落袋一部分',
+        '死钱调出': '长期横盘，资金利用率较低',
+        '破位减仓': '走势转弱，先降低风险',
+    }.get(str(item.get('category') or ''), '风险变大，先少拿一点')
+
+
+def _format(items, n, target, over) -> str:
+    """极简尾盘通知：一句总览 + 最多五个动作，完整明细留给 Agent 查询。"""
     n_sell = sum(1 for it in items if it['action'] == 'sell')
     n_reduce = sum(1 for it in items if it['action'] == 'reduce')
     n_add = sum(1 for it in items if it['action'] == 'add')
-    verdict = '·'.join(s for s in (
-        f'清仓{n_sell}只' if n_sell else '',
-        f'减仓{n_reduce}只' if n_reduce else '',
-        f'加仓{n_add}只' if n_add else '') if s) or '全部持有,无需动作'
-    lines = [f"🧹 尾盘持仓总结 — 持仓 {n} 只 | 今日建议:{verdict}"]
+    action_n = n_sell + n_reduce + n_add
+    if action_n:
+        verdict = '，'.join(s for s in (
+            f'卖掉 {n_sell} 只' if n_sell else '',
+            f'减一点 {n_reduce} 只' if n_reduce else '',
+            f'可加一点 {n_add} 只' if n_add else '') if s)
+        lines = [f"🧹 尾盘只看这几件事", f"持仓 {n} 只：{verdict}，其余先不动。"]
+    else:
+        lines = ["🧹 尾盘持仓", f"持仓 {n} 只，今天没有必须处理的，先不动。"]
     if over:
-        lines.append(f"(持仓偏多,建议逐步收敛到约 {target} 只)")
-    if strategy:
-        lines.append('\n🧠 瘦身策略\n' + strategy + '\n')
+        lines.append(f"仓位比较分散，后面慢慢收敛到约 {target} 只，不用一天卖完。")
     act = sorted([it for it in items if it['action'] in ('sell', 'reduce', 'add')],
-                 key=lambda x: (_ACT_ORDER.get(x['action'], 9), -x['exit_score']))[:10]
+                 key=lambda x: (_ACT_ORDER.get(x['action'], 9), -x['exit_score']))[:5]
     if act:
-        lines.append('━━ 建议处理(按紧迫度)━━')
-        for it in act:
+        lines.append('')
+        action_text = {'sell': '卖掉', 'reduce': '减一点', 'add': '可加一点'}
+        for idx, it in enumerate(act, 1):
             pnl = it.get('pnl')
             if pnl is None:
                 pnl_txt = '盈亏不明'
@@ -177,30 +192,13 @@ def _format(items, scans, n, target, over, strategy) -> str:
                 pnl_txt = f'亏{abs(pnl):.0f}%'
             else:
                 pnl_txt = '持平'
-            hd = it.get('holding_days')
-            hd_txt = f'·持有{hd}天' if isinstance(hd, (int, float)) else ''
-            lines.append(f"  {_ACT_TAG.get(it['action'])} {it['name']} {it['code']} — {pnl_txt}{hd_txt} [{it['category']}]")
-            if it.get('reason'):
-                lines.append(f"      {it['reason']}")
-        n_actionable = n_sell + n_reduce + n_add
-        hidden = n_actionable - len(act)
-        hold_n = n - n_actionable
-        tail = []
+            lines.append(
+                f"{idx}. {action_text.get(it['action'], '先不动')} {it['name']}（{it['code']}）："
+                f"{pnl_txt}，{_plain_reason(it)}"
+            )
+        hidden = action_n - len(act)
         if hidden > 0:
-            tail.append(f'另有 {hidden} 只建议处理(未展示,见App清仓助手)')
-        if hold_n > 0:
-            tail.append(f'其余 {hold_n} 只持有')
-        if tail:
-            lines.append('  (' + ';'.join(tail) + ')')
-    else:
-        lines.append('当前无紧迫清仓/减仓信号,持仓相对健康。')
-    # 尾盘强势机会(复用 scan 的当日涨幅;红涨绿跌 → 涨用 🔴)
-    buys = sorted([s for s in scans.values() if (s.get('change') or 0) > 3],
-                  key=lambda x: -(x.get('change') or 0))[:5]
-    if buys:
-        lines.append('\n🔴 尾盘强势(持仓内,今日涨超3%)')
-        for s in buys:
-            lines.append(f"  • {s.get('name')} {s.get('code')} 现价{s.get('price', '?')}元 今日{s.get('change'):+.1f}%")
+            lines.append(f"另外 {hidden} 只暂不展开，需要时让 Agent 查完整明细。")
     return '\n'.join(lines)
 
 

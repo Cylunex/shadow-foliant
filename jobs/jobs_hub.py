@@ -1085,7 +1085,7 @@ def task_ai_eval_weekly():
 
 def task_eod_outcomes():
     """🎯 盘后后验合并(16:55)—— 合 ai_rec_check + decision_signal_outcomes 为一个任务:
-    收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly)
+    收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
     ②决策信号过 horizon 判 hit/miss(run_outcomes)。二者都是"盘后读K线/行情做后验",合一个少一环
     盘后链。两段各自 try 包裹:一段失败不拖另一段。开关 eod_outcomes(默认开)。非交易日跳过。"""
     job = 'eod_outcomes'
@@ -4724,11 +4724,10 @@ def task_morning_portfolio():
 
 
 def task_afternoon_portfolio():
-    """🧹 尾盘持仓总结(14:30)—— 尾盘**四合一**:eod_review(原 尾盘持仓分析 + 持仓AI体检 + 清仓助手)
-    + 止盈阶梯/破位减仓信号,合并为**一条**推送(2026-06-27:减仓信号原独立 alert,现并入降噪)。
-    一次取数 + 一次 LLM → 整体瘦身策略 + 逐只**融合**动作(每只一个结论)+ 尾盘机会 + 止盈/减仓信号;
+    """🧹 尾盘持仓总结(14:30)—— 合并持仓分析、AI 体检和清仓助手。
+    一次取数 + 一次 LLM → 逐只融合动作；通知只展示总览和最重要的 5 只，完整结果留给 Agent 查询；
     清仓/减仓写 decision_signal(source_type='eod_review')。详见 `portfolio/eod_review.py`。
-    (减仓信号开关 wf_position_profit_check 仍有效:关则该段不出现;webui 手动仍可单推 alert。)"""
+    止盈阶梯/破位减仓不再重复拼进消息，webui 手动入口仍保留。"""
     job = 'afternoon_portfolio'
     if _skip_if_not_trading(job):
         return
@@ -4738,18 +4737,8 @@ def task_afternoon_portfolio():
         target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
         from eod_review import run_eod_review
         res = run_eod_review(target_positions=target, record_signals=True)
-        parts = []
         if res.get('ok') and res.get('text'):
-            parts.append(res['text'])
-        # ── 止盈阶梯/破位减仓信号:并入尾盘总结一条推送(2026-06-27,原独立 💰 alert)──
-        try:
-            _rt, _crit, _warn, _n = _position_profit_text()
-            if _rt:
-                parts.append('━━━━━━━━━━\n💰 **止盈/减仓信号**\n' + _rt)
-        except Exception as e:
-            print(f'[afternoon_portfolio] 减仓信号子段失败: {e}')
-        if parts:
-            _push_daily('🧹 尾盘持仓总结', '\n\n'.join(parts))
+            _push_daily('🧹 尾盘持仓总结', res['text'])
         _log_run(job, 'success', error=res.get('summary'),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:

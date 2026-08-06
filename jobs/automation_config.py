@@ -93,7 +93,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🧹 尾盘持仓总结',
         'schedule': '14:30 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '尾盘持仓四合一(原 持仓分析+AI体检+清仓助手 + 止盈阶梯/破位减仓信号):一次AI出 瘦身策略+逐只融合动作+尾盘机会+减仓信号,合并一条推送',
+        'description': '持仓分析+AI体检+清仓助手合并计算；推送只保留一句总览和最重要的5个动作，完整明细供Agent查询',
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',
@@ -176,7 +176,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心',
         'default': True,  # A 合并:推荐池收盘价回填胜率 + 决策信号 K线后验,二者皆"盘后读K线做后验",合一个任务
         'depends_on': ['kline_prefetch'],
-        'description': '盘后①推荐池收盘价回填真实盈亏(喂周评估)②决策信号过 horizon 判 hit/miss。合 ai_rec_check+decision_signal_outcomes',
+        'description': '盘后①推荐池收盘价回填真实盈亏(只记账不推持仓止盈止损)②决策信号过 horizon 判 hit/miss',
     },
     'ai_eval_weekly': {
         'cn': 'AI 推荐周度评估推送',

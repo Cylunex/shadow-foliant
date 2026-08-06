@@ -338,9 +338,10 @@ def _pnl_pct(ref: Optional[float], price: Optional[float]) -> Optional[float]:
 
 
 def check_all_active(notify_fn=None) -> Dict[str, int]:
-    """后台任务用：拉所有 active 推荐的实时价，对比触发条件，回填真实盈亏 + 推送。
+    """盘后任务用：拉所有 active 推荐的收盘价，回填纸面推荐的真实盈亏。
 
     每轮:更新 last_price;命中止盈/止损或超期(PENDING_EXPIRE_DAYS) → 了结并写 realized_pnl_pct。
+    本函数不推真实持仓止盈止损；真实持仓由 monitor_service 在交易时段实时提醒。
     """
     import time as _time
     _t_total = _time.time()
@@ -458,31 +459,6 @@ def check_all_active(notify_fn=None) -> Dict[str, int]:
             conn3.close()
     except Exception as e:
         print(f'[ai_rec_monitor] candidate 刷价失败: {e}')
-
-    # 额外检查 monitored_stocks 表（老系统：带止盈止损价的持仓监控）
-    try:
-        if USE_POSTGRES:
-            conn2 = db_connect(_DB_PATH)
-            cur2 = conn2.cursor()
-            cur2.execute('''
-                SELECT id, symbol, name, current_price, take_profit, stop_loss
-                FROM monitored_stocks
-                WHERE (take_profit IS NOT NULL OR stop_loss IS NOT NULL)
-                  AND current_price IS NOT NULL
-            ''')
-            for row in cur2.fetchall():
-                mid, msym, mname, mprice, mtp, msl = row
-                if mtp and mprice and mprice >= float(mtp):
-                    msg = f"🎯 持仓止盈 {msym} {mname}：目标价 {mtp}，现价 {mprice}"
-                    _notify(notify_fn, msym, mname, msg)
-                    stats['hit_target'] += 1
-                elif msl and mprice and mprice <= float(msl):
-                    msg = f"⛔ 持仓止损 {msym} {mname}：止损价 {msl}，现价 {mprice}"
-                    _notify(notify_fn, msym, mname, msg)
-                    stats['hit_stop'] += 1
-            conn2.close()
-    except Exception:
-        pass
 
     print(f'[ai_rec_check] 完成 耗时 {_time.time()-_t_total:.1f}s | '
           f'checked={stats["checked"]} target={stats["hit_target"]} '
