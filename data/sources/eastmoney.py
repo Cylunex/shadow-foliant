@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -23,6 +24,10 @@ import pandas as pd
 import requests
 
 from . import _common as C
+
+
+_ULIST_LOG_LAST = 0.0
+_ULIST_LOG_GAP = 60.0
 
 
 # ── 全球财经快讯 ─────────────────────────────────────────────────────────────
@@ -172,7 +177,14 @@ def ulist_quote(codes: List[str]) -> dict:
         d = C.http_get_json(url, headers={'User-Agent': _DC_UA}, timeout=6)
         diff = (d.get('data') or {}).get('diff') or []
     except Exception as e:
-        print(f'[sources.eastmoney] ulist 批量行情失败: {type(e).__name__}')
+        # 腾讯主源缺少少数代码时也会调用这里；机房出口被东财断连期间，一次持仓扫描可触发十几次。
+        # 源路由已有腾讯/新浪兜底，日志按分钟限频即可，避免把真正任务错误淹没。
+        global _ULIST_LOG_LAST
+        now = time.monotonic()
+        if now - _ULIST_LOG_LAST >= _ULIST_LOG_GAP:
+            _ULIST_LOG_LAST = now
+            print(f'[sources.eastmoney] ulist 批量行情失败: {type(e).__name__}'
+                  ' (60s内同类仅提示一次)')
         return {}
 
     def _f(v):

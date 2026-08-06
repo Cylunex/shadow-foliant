@@ -96,8 +96,6 @@ class LowPriceBullSelector:
         except Exception as e:
             error_msg = f"获取数据失败: {str(e)}"
             print(f"❌ {error_msg}")
-            import traceback
-            traceback.print_exc()
             return False, None, error_msg
     
     def _convert_to_dataframe(self, result) -> Optional[pd.DataFrame]:

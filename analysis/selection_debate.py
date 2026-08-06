@@ -16,6 +16,7 @@ import _bootstrap  # noqa: F401  路径引导
 """
 
 import re
+import os
 from typing import Any, Dict, List, Optional
 
 # 否决→sell(期望跌):让"证伪闸门"的否决可被方向后验(否对了=该股随后跌),从而量化闸门增量价值;
@@ -28,6 +29,25 @@ def _f(v) -> Optional[float]:
         return float(v) if v not in (None, '', '?', 'N/A') else None
     except (TypeError, ValueError):
         return None
+
+
+def _parse_verdict(answer: str) -> Optional[Dict[str, str]]:
+    """解析并校验裁判行；买入结论与明显风险主因冲突时保守降级。"""
+    m = re.search(r'结论[:：]\s*(买入|谨慎|否决)', answer or '')
+    if not m:
+        return None
+    verdict = m.group(1)
+    conf = (re.search(r'置信[:：]\s*([高中低])', answer or '') or [None, '中'])[1]
+    last_line = (answer or '').strip().splitlines()[-1] if (answer or '').strip() else ''
+    why = (re.search(r'主因[:：]\s*(.+)$', last_line) or [None, ''])[1]
+    why = why.strip().strip('"\'').replace('" But "', '').strip()[:60]
+    if len(why) < 4:
+        return None
+    bearish = re.search(r'亏损|风险|利空|减值|不构成|缺乏|无新增|退潮|透支|松动|下滑|恶化|高估', why)
+    if verdict == '买入' and bearish:
+        verdict, conf = '谨慎', '低'
+        why = f'结论与风险主因冲突，自动降级：{why}'[:60]
+    return {'verdict': verdict, 'confidence': conf, 'reason': why}
 
 
 def _context(code: str) -> Dict[str, Any]:
@@ -66,13 +86,7 @@ def _debate_one(code: str, ctx: Dict[str, Any]) -> Optional[Dict[str, str]]:
     except Exception as e:
         print(f'[selection_debate] {code} LLM 失败: {type(e).__name__}: {str(e)[:50]}')
         return None
-    m = re.search(r'结论[:：]\s*(买入|谨慎|否决)', ans or '')
-    if not m:
-        return None
-    verdict = m.group(1)
-    conf = (re.search(r'置信[:：]\s*([高中低])', ans) or [None, '中'])[1]
-    why = (re.search(r'主因[:：]\s*(.+)$', (ans or '').strip().splitlines()[-1]) or [None, ''])[1].strip()[:40]
-    return {'verdict': verdict, 'confidence': conf, 'reason': why}
+    return _parse_verdict(ans)
 
 
 def _debate_with_ctx(code: str) -> Optional[Dict[str, Any]]:
@@ -95,10 +109,35 @@ def run_selection_debate(codes: List[str], max_stocks: int = 10,
         out['summary'] = '无候选'
         return out
 
+    # 先一次批量取上下文；旧实现每只单独 datahub.quote，会把 10 只放大成 10 轮行情源请求。
+    contexts = {}
+    try:
+        import datahub
+        quotes = datahub.quotes(codes) or {}
+        names = datahub.stock_names(codes) or {}
+        for code in codes:
+            q = quotes.get(code) or {}
+            contexts[code] = {
+                'name': q.get('name') or names.get(code) or '',
+                'price': _f(q.get('price')),
+                'change': _f(q.get('change_pct') or q.get('change')),
+                'pe': _f(q.get('pe') or q.get('pe_ttm')),
+                'mcap': q.get('mcap_yi'),
+            }
+    except Exception:
+        contexts = {code: _context(code) for code in codes}
+
+    def _run(code):
+        ctx = contexts.get(code) or _context(code)
+        v = _debate_one(code, ctx)
+        return {'code': code, 'ctx': ctx, 'v': v} if v else None
+
     import concurrent.futures as _cf
     items, n_pass, n_reject = [], 0, 0
-    with _cf.ThreadPoolExecutor(max_workers=5, thread_name_prefix='selection-debate') as pool:
-        results = list(pool.map(_debate_with_ctx, codes))
+    # 生产实测 5 并发会持续触发 DeepSeek EmptyResponse；默认降到 2，仍可在 6 分钟护栏内完成。
+    workers = max(1, min(int(os.getenv('SELECTION_DEBATE_WORKERS', '2')), 3))
+    with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='selection-debate') as pool:
+        results = list(pool.map(_run, codes))
 
     for r in results:
         if not r:

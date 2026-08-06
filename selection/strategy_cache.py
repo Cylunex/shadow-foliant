@@ -59,13 +59,17 @@ def save(name: str, df) -> bool:
         return False
 
 
-def cached(name: str, fetch_fn, use_cache: bool = True):
+def cached(name: str, fetch_fn, use_cache: bool = True, cache_only: bool = False):
     """返回 (ok, df, msg)。
-    use_cache=True 且当日缓存命中 → 直接返回缓存;否则调 fetch_fn() 现取并(成功则)回写当日缓存。"""
+    use_cache=True 且当日缓存命中 → 直接返回缓存；否则默认调 fetch_fn() 现取并回写。
+    cache_only=True 用于 09:45 主选股：盘前 09:15/09:30 已尝试两轮，缓存冷时不在高峰第三次
+    请求问财，避免重复 403、熔断和误告警。"""
     if use_cache:
         df = load(name)
         if df is not None and hasattr(df, 'empty') and not df.empty:
             return True, df, f'{name} 当日缓存命中({len(df)}只)'
+    if cache_only:
+        return False, None, f'{name} 当日缓存缺失(09:45不重复请求外部源)'
     ok, df, msg = fetch_fn()
     if ok:
         save(name, df)

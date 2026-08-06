@@ -87,8 +87,6 @@ class ProfitGrowthSelector:
         except Exception as e:
             error_msg = f"选股失败: {str(e)}"
             self.logger.error(error_msg)
-            import traceback
-            traceback.print_exc()
             return False, None, error_msg
     
     def format_stock_info(self, df: pd.DataFrame) -> str:

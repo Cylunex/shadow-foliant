@@ -233,8 +233,6 @@ class FundFlowAkshareDataFetcher:
             
         except Exception as e:
             print(f"   获取资金流向数据异常: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
     def format_fund_flow_for_ai(self, data):
@@ -359,4 +357,3 @@ if __name__ == "__main__":
             print(f"\n获取失败: {data.get('error', '未知错误')}")
         
         print("\n")
-

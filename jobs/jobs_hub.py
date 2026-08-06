@@ -2227,63 +2227,55 @@ def _call_with_hard_timeout(label: str, fn: Callable, timeout: int = 120):
 
 
 def _run_strategy_scans() -> dict:
-    """执行5大策略扫描，返回汇总结果。单个策略失败不影响其他，并推送告警。
+    """执行5大策略扫描，返回汇总结果。单个问财策略失败只记降级，不单独推告警。
     每个策略调用都套 120s 硬超时(外层兜底, 防底层卡死绕过内部超时)。"""
     results = {}
-    # 09:45 选股优先读盘前 strategy_prefetch 写的当日缓存(避开问财高峰/熔断);未命中才现调(120s 兜底)。
+    # 09:45 只读盘前 strategy_prefetch 写的当日缓存；未命中不再第三次现调问财。
     import strategy_cache as _sc
     try:
         from low_price_bull_selector import LowPriceBullSelector
         ok, df, msg = _call_with_hard_timeout(
             '低价擒牛',
             lambda: _sc.cached('低价擒牛',
-                               lambda: LowPriceBullSelector().get_low_price_stocks(top_n=5)),
+                               lambda: LowPriceBullSelector().get_low_price_stocks(top_n=5),
+                               cache_only=True),
             timeout=120)
         results['低价擒牛'] = (ok, df, msg)
-        if not ok:
-            _push_error('策略扫描失败-低价擒牛', msg)
     except Exception as e:
         results['低价擒牛'] = (False, None, str(e))
-        _push_error('策略扫描失败-低价擒牛', str(e))
     try:
         from small_cap_selector import SmallCapSelector
         ok, df, msg = _call_with_hard_timeout(
             '小市值',
             lambda: _sc.cached('小市值',
-                               lambda: SmallCapSelector().get_small_cap_stocks(top_n=5)),
+                               lambda: SmallCapSelector().get_small_cap_stocks(top_n=5),
+                               cache_only=True),
             timeout=120)
         results['小市值'] = (ok, df, msg)
-        if not ok:
-            _push_error('策略扫描失败-小市值', msg)
     except Exception as e:
         results['小市值'] = (False, None, str(e))
-        _push_error('策略扫描失败-小市值', str(e))
     try:
         from profit_growth_selector import ProfitGrowthSelector
         ok, df, msg = _call_with_hard_timeout(
             '净利增长',
             lambda: _sc.cached('净利增长',
-                               lambda: ProfitGrowthSelector().get_profit_growth_stocks(top_n=5)),
+                               lambda: ProfitGrowthSelector().get_profit_growth_stocks(top_n=5),
+                               cache_only=True),
             timeout=120)
         results['净利增长'] = (ok, df, msg)
-        if not ok:
-            _push_error('策略扫描失败-净利增长', msg)
     except Exception as e:
         results['净利增长'] = (False, None, str(e))
-        _push_error('策略扫描失败-净利增长', str(e))
     try:
         from value_stock_selector import ValueStockSelector
         ok, df, msg = _call_with_hard_timeout(
             '低估值',
             lambda: _sc.cached('低估值',
-                               lambda: ValueStockSelector().get_value_stocks(top_n=5)),
+                               lambda: ValueStockSelector().get_value_stocks(top_n=5),
+                               cache_only=True),
             timeout=120)
         results['低估值'] = (ok, df, msg)
-        if not ok:
-            _push_error('策略扫描失败-低估值', msg)
     except Exception as e:
         results['低估值'] = (False, None, str(e))
-        _push_error('策略扫描失败-低估值', str(e))
     try:
         from main_force_selector import MainForceStockSelector
         def _do_main_force():
@@ -2297,13 +2289,15 @@ def _run_strategy_scans() -> dict:
             return r_ok, r_df, r_msg
         ok, df, msg = _call_with_hard_timeout('主力资金', _do_main_force, timeout=120)
         results['主力资金'] = (ok, df, msg)
-        if not ok:
-            _push_error('策略扫描失败-主力资金', msg)
     except Exception as e:
         results['主力资金'] = (False, None, str(e))
-        _push_error('策略扫描失败-主力资金', str(e))
 
     total = sum(len(df) for _, df, _ in results.values() if df is not None and len(df) > 0)
+    degraded = [name for name, (ok, df, _msg) in results.items()
+                if not ok or df is None or len(df) == 0]
+    if degraded:
+        print(f'[unified_selection] 问财层局部降级: {"、".join(degraded)}；继续使用妙想/InStock/多因子',
+              flush=True)
     return {'results': results, 'total': total}
 
 
@@ -4187,9 +4181,8 @@ def task_strategy_prefetch_retry():
     done += _prefetch_wencai_strategies(
         use_cache=True, log_job=job)
     _log_run(
-        job,
-        'success' if done else 'error',
-        error=f'available {done}/5' if done else 'all_empty(问财仍不可达)',
+        job, 'success',
+        error=f'available {done}/5' if done else 'degraded 0/5(问财仍不可达,非核心源)',
         started_at=started,
         finished_at=datetime.now().isoformat(),
         notify=False,
@@ -4606,6 +4599,18 @@ def task_morning_portfolio():
                  if (sell_list or buy_list or movers) else '今日:持仓无预警,整体平稳')
         lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', _hsum, '']
 
+        # 组合级加仓窗口：规则化而非 LLM。小跌忽略；连续大跌不接飞刀；只有非连续的全市场急跌才提示。
+        try:
+            from analysis.market_add_signal import build as _build_add_signal, format_text as _fmt_add_signal
+            _add_signal = _build_add_signal()
+        except Exception as _ae:
+            _add_signal = {'must_add': False, 'level': 'unknown',
+                           'headline': '⚠️【加仓判断不可用】',
+                           'reason': f'{type(_ae).__name__}；默认不加仓。'}
+        lines.append(_fmt_add_signal(_add_signal) if '_fmt_add_signal' in locals()
+                     else f"{_add_signal['headline']}\n结论：否。{_add_signal['reason']}")
+        lines.append('')
+
         # 大盘速览(轻量,新浪源)
         mkt_line = ''
         try:
@@ -4682,7 +4687,8 @@ def task_morning_portfolio():
             lines.append('')
             lines.append(f'⚠️ {nosnap_n}/{len(scans)} 只无盘后指标快照(等 15:45 快照任务跑过后完整)')
 
-        _push_daily('☀️ 早盘持仓分析', '\n'.join(lines))
+        _title = '🚨 今天出现必须加仓窗口' if _add_signal.get('must_add') else '☀️ 早盘持仓分析'
+        _push_daily(_title, '\n'.join(lines))
 
         # 🎯 挑「今日重点盯盘候选」(持仓多→聚焦):风险分>0 / 有买点 / 盘中异动±3%。
         # 存快照供 11:20 午间盯盘只看这批(不再全持仓逐只),与"持仓瘦身"理念一致。
@@ -4708,7 +4714,8 @@ def task_morning_portfolio():
             print(f'[morning_portfolio] 候选挑选失败: {_e}', flush=True)
 
         _log_run(job, 'success',
-                 error=f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} movers={len(movers)}',
+                 error=(f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} '
+                        f'movers={len(movers)} add={_add_signal.get("level")}'),
                  started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:
