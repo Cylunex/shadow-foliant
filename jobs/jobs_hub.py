@@ -1269,8 +1269,13 @@ def task_daily_pnl_snapshot():
                 emoji = '🔴' if tp > 0 else ('🟢' if tp < 0 else '⚪')
                 s = get_summary(60) or {}
                 _fund_note = ' ⚠️基金数据缺失未计入' if r.get('fund_pending') else ''
+                _stock_note = ''
+                if r.get('stock_fallback_count'):
+                    _stock_note = f" ⚠️{r['stock_fallback_count']}只股票未采用实时价"
+                    if r.get('stock_anomaly_count'):
+                        _stock_note += f"（含{r['stock_anomaly_count']}只异常报价）"
                 lines = [
-                    f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}",
+                    f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}{_stock_note}",
                     f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · 基金 {r.get('fund_daily_pnl', 0):+,.0f}({r.get('fund_count', 0)}只)",
                 ]
                 if s.get('mtd_pnl') is not None:

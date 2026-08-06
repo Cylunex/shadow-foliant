@@ -160,9 +160,7 @@ def ulist_quote(codes: List[str]) -> dict:
     与 adapter._eastmoney_ulist_quote 逐字段一致。空/异常 → {}。"""
     secids = []
     for c in codes:
-        cc = C.norm_code(c)
-        mk = '1' if C.a_prefix(cc) == 'sh' else '0'
-        secids.append(f'{mk}.{cc}')
+        secids.append(C.em_secid(c))
     # f7=振幅 f51=涨停价 f52=跌停价 f114=静态市盈率(2026-07-17 补齐:与腾讯/新浪源逐键同构,
     # 否则 _batch_quote 用腾讯主源+东财补缺失代码时,同一次返回里两种键集混存,
     # 下游按 q['limit_up']/amplitude_pct 取值对东财补的票 KeyError 或静默丢字段)

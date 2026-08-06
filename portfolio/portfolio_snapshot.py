@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
 from typing import List, Dict, Optional
 
 if not any(os.path.basename(p) == 'shadow-foliant' for p in sys.path):
@@ -31,15 +32,24 @@ def init_db():
     cur = conn.cursor()
     cur.execute(f"""CREATE TABLE IF NOT EXISTS stock_portfolio_snapshots (
         snap_date DATE PRIMARY KEY, total_mv {num}, total_cost {num},
-        pnl_pct {num}, n_stocks INTEGER, holdings_json TEXT, daily_mv_change {num} DEFAULT 0, created_at {ts})""")
-    # 兼容旧表：加 daily_mv_change 列（已有则忽略）
-    try:
-        if is_postgres():
-            cur.execute("ALTER TABLE stock_portfolio_snapshots ADD COLUMN IF NOT EXISTS daily_mv_change DOUBLE PRECISION DEFAULT 0")
-        else:
-            cur.execute("ALTER TABLE stock_portfolio_snapshots ADD COLUMN daily_mv_change REAL DEFAULT 0")
-    except Exception:
-        pass
+        pnl_pct {num}, n_stocks INTEGER, holdings_json TEXT, daily_mv_change {num} DEFAULT 0,
+        quote_count INTEGER DEFAULT 0, fallback_count INTEGER DEFAULT 0,
+        anomaly_count INTEGER DEFAULT 0, created_at {ts})""")
+    # 兼容旧表：逐列迁移（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
+    migrations = [
+        ('daily_mv_change', f'daily_mv_change {num} DEFAULT 0'),
+        ('quote_count', 'quote_count INTEGER DEFAULT 0'),
+        ('fallback_count', 'fallback_count INTEGER DEFAULT 0'),
+        ('anomaly_count', 'anomaly_count INTEGER DEFAULT 0'),
+    ]
+    for name, ddl in migrations:
+        try:
+            if is_postgres():
+                cur.execute(f"ALTER TABLE stock_portfolio_snapshots ADD COLUMN IF NOT EXISTS {ddl}")
+            else:
+                cur.execute(f"ALTER TABLE stock_portfolio_snapshots ADD COLUMN {ddl}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -61,6 +71,29 @@ def _net_trade_flow(after_date: str, upto_date: str) -> float:
         return 0.0
 
 
+def _resolve_price(quote_price, previous_price: float, cost_price: float):
+    """返回 (采用价格, 来源, 是否异常)。
+
+    相邻快照间单价跨越 3 倍基本不可能由正常涨跌造成；遇到这类值沿用上次有效价。
+    这个保护专门防止代码映射错误、字段错位等“有值但不是这只证券”的静默污染。
+    """
+    try:
+        current = float(quote_price)
+    except (TypeError, ValueError):
+        current = 0.0
+    current_ok = math.isfinite(current) and current > 0
+    previous_ok = math.isfinite(previous_price) and previous_price > 0
+    if current_ok and previous_ok:
+        ratio = current / previous_price
+        if ratio > 3.0 or ratio < (1.0 / 3.0):
+            return previous_price, 'previous_anomaly', True
+    if current_ok:
+        return current, 'quote', False
+    if previous_ok:
+        return previous_price, 'previous_missing', False
+    return cost_price, 'cost_missing', False
+
+
 def save_snapshot(snap_date: str) -> Optional[Dict]:
     """按当前股票持仓 + 实时价算组合市值,落一行(幂等 upsert)。无持仓返回 None。"""
     try:
@@ -71,6 +104,22 @@ def save_snapshot(snap_date: str) -> Optional[Dict]:
         return None
     if not stocks:
         return None
+    init_db()
+
+    # 先取上一次逐证券市值。旧快照没有 price/qty 时，在持仓数量未变的常见场景下仍可由 mv/qty 反推。
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""SELECT snap_date, holdings_json FROM stock_portfolio_snapshots
+                   WHERE snap_date < ? ORDER BY snap_date DESC LIMIT 1""", (snap_date,))
+    prev_row = cur.fetchone()
+    conn.close()
+    previous = {}
+    if prev_row and prev_row[1]:
+        try:
+            previous = {str(x.get('code')): x for x in json.loads(prev_row[1]) if x.get('code')}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            previous = {}
+
     codes = [str(s.get('code')) for s in stocks if s.get('code')]
     quotes = {}
     try:
@@ -80,19 +129,33 @@ def save_snapshot(snap_date: str) -> Optional[Dict]:
         quotes = {}
 
     total_mv = total_cost = 0.0
+    quote_count = fallback_count = anomaly_count = 0
     rows = []
     for s in stocks:
         code = str(s.get('code'))
         qty = float(s.get('quantity') or s.get('shares') or 0)
         cost_price = float(s.get('cost_price') or s.get('cost') or 0)
-        price = (quotes.get(code) or {}).get('price') or cost_price
+        prev_item = previous.get(code) or {}
+        prev_price = float(prev_item.get('price') or 0)
+        if prev_price <= 0 and qty > 0:
+            prev_price = float(prev_item.get('mv') or 0) / qty
+        quote = quotes.get(code) or {}
+        price, price_source, anomalous = _resolve_price(quote.get('price'), prev_price, cost_price)
+        if price_source == 'quote':
+            quote_count += 1
+        else:
+            fallback_count += 1
+        if anomalous:
+            anomaly_count += 1
+            print(f"[portfolio_snapshot] 异常报价已隔离: {code} quote={quote.get('price')} "
+                  f"prev={prev_price:.4f} name={quote.get('name') or '-'}")
         mv = qty * float(price)
         total_mv += mv
         total_cost += qty * cost_price
-        rows.append({'code': code, 'mv': round(mv, 2)})
+        rows.append({'code': code, 'qty': qty, 'price': round(float(price), 6),
+                     'mv': round(mv, 2), 'price_source': price_source})
     pnl_pct = (total_mv - total_cost) / total_cost if total_cost else None
 
-    init_db()
     conn = _conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM stock_portfolio_snapshots WHERE snap_date=?", (snap_date,))
@@ -111,17 +174,19 @@ def save_snapshot(snap_date: str) -> Optional[Dict]:
         daily_mv_change = round(total_mv - float(prev[0]) - flow, 2)
 
     cur.execute("""INSERT INTO stock_portfolio_snapshots
-        (snap_date, total_mv, total_cost, pnl_pct, n_stocks, holdings_json, daily_mv_change)
-        VALUES (?,?,?,?,?,?,?)""",
+        (snap_date, total_mv, total_cost, pnl_pct, n_stocks, holdings_json, daily_mv_change,
+         quote_count, fallback_count, anomaly_count)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (snap_date, round(total_mv, 2), round(total_cost, 2),
          round(pnl_pct, 4) if pnl_pct is not None else None,
          len(stocks), json.dumps(rows, ensure_ascii=False),
-         daily_mv_change))
+         daily_mv_change, quote_count, fallback_count, anomaly_count))
     conn.commit()
     conn.close()
     return {'snap_date': snap_date, 'total_mv': round(total_mv, 2),
             'pnl_pct': round(pnl_pct, 4) if pnl_pct is not None else None,
-            'daily_mv_change': daily_mv_change}
+            'daily_mv_change': daily_mv_change, 'quote_count': quote_count,
+            'fallback_count': fallback_count, 'anomaly_count': anomaly_count}
 
 
 def get_snapshots(limit: int = 365) -> List[Dict]:

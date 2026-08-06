@@ -46,16 +46,21 @@ def init_db():
 
 def merge_save(snap_date: str) -> Optional[Dict]:
     """22:30 调用：读股票快照(含 daily_mv_change) + 已有基金数据 → 合并写入 daily_pnl_snapshots。"""
+    # 保证旧库先补齐股票行情质量列，再建立本函数的查询连接。
+    from portfolio.portfolio_snapshot import init_db as _init_stock_snapshot_db
+    _init_stock_snapshot_db()
     init_db()
     conn = _conn()
     cur = conn.cursor()
 
     # ─── 股票：从本轮 snapshot 取 daily_mv_change ───
     stock_count = stock_mv = stock_daily_pnl = stock_daily_pct = 0
+    stock_fallback_count = stock_anomaly_count = 0
 
     def _read_today_snapshot():
         cur.execute(
-            """SELECT snap_date, total_mv, n_stocks, daily_mv_change, total_cost
+            """SELECT snap_date, total_mv, n_stocks, daily_mv_change, total_cost,
+                      quote_count, fallback_count, anomaly_count
                FROM stock_portfolio_snapshots WHERE snap_date=? ORDER BY snap_date DESC LIMIT 1""",
             (snap_date,),
         )
@@ -78,6 +83,8 @@ def merge_save(snap_date: str) -> Optional[Dict]:
             stock_mv = float(row[1])
             stock_count = int(row[2] or 0)
             stock_daily_pnl = float(row[3])
+            stock_fallback_count = int(row[6] or 0)
+            stock_anomaly_count = int(row[7] or 0)
             prev_mv = stock_mv - stock_daily_pnl
             stock_daily_pct = (stock_daily_pnl / prev_mv * 100) if prev_mv > 0 else 0
     except Exception:
@@ -151,6 +158,8 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         "total_daily_pnl": round(total_daily_pnl, 2),
         "total_daily_pct": round(total_daily_pct, 4),
         "fund_pending": fund_pending,   # True=基金数据缺失,推送/展示应标注而非当真 0
+        "stock_fallback_count": stock_fallback_count,
+        "stock_anomaly_count": stock_anomaly_count,
     }
 
 

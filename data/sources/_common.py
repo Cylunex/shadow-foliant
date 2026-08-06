@@ -46,14 +46,16 @@ def sina_code(code: str) -> str:
 
 
 def a_prefix(code: str) -> str:
-    """6 位代码 → 市场前缀,与 adapter._get_prefix **同口径**(6/9→sh、8→bj、其余→sz)。
-    ⚠️ 刻意保留原口径(含 920→sh 的历史行为)以保证 quotes 等批量行情逐字段对齐;
-    更细的归一见 sina_code/tencent_code/em_secid。"""
+    """6 位代码 → A 股/场内基金市场前缀。
+
+    5 开头是沪市 ETF/LOF；若误归到深圳，563xxx 会撞到深市地方债并返回面值 100。
+    920/4/8 开头按北交所处理，900xxx 仍是沪 B 股。
+    """
     c = norm_code(code)
-    if c.startswith(("6", "9")):
-        return "sh"
-    if c.startswith("8"):
+    if c[:3] == "920" or c.startswith(("4", "8")):
         return "bj"
+    if c.startswith(("5", "6")) or c[:3] == "900":
+        return "sh"
     return "sz"
 
 
@@ -64,10 +66,10 @@ def tencent_code(code: str) -> str:
     if _re.match(r'^(sh|sz|bj)\d+$', c):
         return c
     c6 = norm_code(code)
-    if c6.startswith(('6', '9')):
-        return 'sh' + c6
-    if c6.startswith('8') or c6[:3] == '920':
+    if c6[:3] == '920' or c6.startswith(('4', '8')):
         return 'bj' + c6
+    if c6.startswith(('5', '6')) or c6[:3] == '900':
+        return 'sh' + c6
     return 'sz' + c6
 
 
@@ -217,11 +219,15 @@ if __name__ == '__main__':
     assert em_secid('000001') == '0.000001'
     assert em_secid('900901') == '1.900901'   # 沪 B
     assert em_secid('920819') == '0.920819'    # 北交所
+    assert a_prefix('563800') == 'sh'
+    assert a_prefix('920819') == 'bj'
     assert sina_code('600519') == 'sh600519'
     assert sina_code('000001') == 'sz000001'
     assert bs_code('688981') == 'sh.688981'
     assert bs_code('300750') == 'sz.300750'
     assert tencent_code('600519') == 'sh600519'
+    assert tencent_code('563800') == 'sh563800'
+    assert tencent_code('920819') == 'bj920819'
     df = pd.DataFrame({'日期': ['2026-01-02', '2026-01-03'], '开盘': [10, 11],
                        '最高': [12, 12], '最低': [9, 10], '收盘': [11, 11], '成交量': [100, 200]})
     o = to_ohlcv(df, date_col='日期', vol_mult=100)

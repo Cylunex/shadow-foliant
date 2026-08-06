@@ -25,8 +25,7 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
         if re.match(r'^(sh|sz|bj)\d+$', str(c).lower()):
             prefixed.append(str(c).lower())
         else:
-            cc = C.norm_code(c)
-            prefixed.append(f"{C.a_prefix(cc)}{cc}")
+            prefixed.append(C.tencent_code(c))
     try:
         C.throttle('tencent')
         data = C.http_get_text("https://qt.gtimg.cn/q=" + ",".join(prefixed),

@@ -56,12 +56,11 @@ except Exception:
 
 def _get_prefix(code: str) -> str:
     """6位代码 → 市场前缀"""
-    if code.startswith(("6", "9")):
-        return "sh"
-    elif code.startswith("8"):
+    if code.startswith("920") or code.startswith(("4", "8")):
         return "bj"
-    else:
-        return "sz"
+    if code.startswith(("5", "6")) or code.startswith("900"):
+        return "sh"
+    return "sz"
 
 
 def _normalize_code(code: str) -> str:

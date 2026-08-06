@@ -35,8 +35,7 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
         if re.match(r'^(sh|sz|bj)\d+$', str(c).lower()):
             prefixed.append(str(c).lower())
         else:
-            cc = C.norm_code(c)
-            prefixed.append(f"{C.a_prefix(cc)}{cc}")
+            prefixed.append(C.sina_code(c))
     try:
         C.throttle('sina')
         raw = C.http_get_text("https://hq.sinajs.cn/list=" + ",".join(prefixed),
