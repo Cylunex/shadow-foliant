@@ -915,11 +915,11 @@ def latest_selection() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def agent_cockpit(recent_limit: int = 12) -> Dict[str, Any]:
+def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]:
     """Agent 主入口总览：任务异常/核心开关、综合选股产物、持仓数、活跃推荐/
     决策信号和数据源健康度。只读已有数据库与运行遥测，不触发重分析。"""
     from jobs.task_control import agent_cockpit as _cockpit
-    return _cockpit(recent_limit=recent_limit)
+    return _cockpit(recent_limit=recent_limit, compact=compact)
 
 
 # =========================== 市场上下文 + 观测 ===========================

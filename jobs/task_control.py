@@ -600,8 +600,18 @@ def latest_selection_artifact() -> Dict[str, Any]:
     data = dict(payload) if isinstance(payload, dict) else {}
     data['picks'] = [str(code) for code in picks if code]
     snapshot_date = str(row[0])
-    today = datetime.now().astimezone().date().isoformat()
-    warnings = [] if snapshot_date == today else [f'最近快照来自 {snapshot_date}，不是今天']
+    today_date = datetime.now().astimezone().date()
+    today = today_date.isoformat()
+    expected_weekend_snapshot = False
+    try:
+        snapshot_day = datetime.strptime(snapshot_date[:10], '%Y-%m-%d').date()
+        expected_weekend_snapshot = (today_date.weekday() >= 5
+                                     and snapshot_day.weekday() == 4
+                                     and 1 <= (today_date - snapshot_day).days <= 2)
+    except Exception:
+        pass
+    warnings = [] if snapshot_date == today or expected_weekend_snapshot else [
+        f'最近快照来自 {snapshot_date}，不是今天']
     return envelope(
         data,
         status='success' if not warnings else 'stale',
@@ -613,7 +623,7 @@ def latest_selection_artifact() -> Dict[str, Any]:
     )
 
 
-def agent_cockpit(recent_limit: int = 12) -> Dict[str, Any]:
+def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]:
     """Agent 的只读总览：任务健康、选股产物、持仓/推荐/信号数量和数据源状态。"""
     from agent_contract import envelope
     warnings: List[str] = []
@@ -651,6 +661,13 @@ def agent_cockpit(recent_limit: int = 12) -> Dict[str, Any]:
         warnings.append(f'任务状态读取失败: {exc}')
 
     selection = latest_selection_artifact()
+    if compact and isinstance(selection.get('data'), dict):
+        selection = dict(selection)
+        selection['data'] = dict(selection['data'])
+        for key, value in list(selection['data'].items()):
+            if isinstance(value, list) and len(value) > 8:
+                selection['data'][key] = value[:8]
+                selection['data'][f'{key}_total'] = len(value)
     data['selection'] = selection
     warnings.extend(selection.get('meta', {}).get('warnings') or [])
 
@@ -690,6 +707,22 @@ def agent_cockpit(recent_limit: int = 12) -> Dict[str, Any]:
     except Exception as exc:
         data['datahub'] = None
         warnings.append(f'数据层健康度读取失败: {exc}')
+
+    try:
+        from portfolio_policy import status as portfolio_policy_status
+        data['portfolio_policy'] = portfolio_policy_status()
+        if data['portfolio_policy'].get('fail_closed'):
+            warnings.append('高仓位模式下尚无今日加仓判断，自动买入已按保守规则关闭')
+    except Exception as exc:
+        data['portfolio_policy'] = None
+        warnings.append(f'仓位策略读取失败: {exc}')
+
+    try:
+        from llm_usage import summary as llm_usage_summary
+        data['llm_telemetry'] = llm_usage_summary(days=7).get('totals')
+    except Exception as exc:
+        data['llm_telemetry'] = None
+        warnings.append(f'LLM 遥测读取失败: {exc}')
 
     return envelope(
         data,

@@ -845,6 +845,33 @@ def _tushare_available() -> bool:
         return False
 
 
+def _tag_kline(df: pd.DataFrame, source: str, *, stale: bool = False,
+               cache_age_days: float = 0.0) -> pd.DataFrame:
+    """把来源/新鲜度附在 DataFrame.attrs，不改变既有列和索引契约。"""
+    if isinstance(df, pd.DataFrame):
+        df.attrs.update({
+            'datahub_source': source,
+            'datahub_stale': bool(stale),
+            'datahub_cache_age_days': round(float(cache_age_days or 0), 2),
+        })
+    return df
+
+
+def kline_quality(df: pd.DataFrame, max_stale_days: float = 3.0) -> dict:
+    """返回可供决策/回测使用的新鲜度结论；未知旧对象保持兼容，不误判为陈旧。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {'usable': False, 'actionable': False, 'reason': 'empty'}
+    stale = bool(df.attrs.get('datahub_stale', False))
+    try:
+        age = float(df.attrs.get('datahub_cache_age_days', 0) or 0)
+    except (TypeError, ValueError):
+        age = 0.0
+    actionable = not (stale and age > max_stale_days)
+    return {'usable': True, 'actionable': actionable, 'stale': stale,
+            'cache_age_days': age, 'source': df.attrs.get('datahub_source', 'unknown'),
+            'reason': '' if actionable else f'stale_cache_{age:.1f}d'}
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
           adjust: str = "raw") -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
@@ -864,7 +891,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
             if _os.path.isfile(cache_f) and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl():
                 df = pd.read_pickle(cache_f)
                 if isinstance(df, pd.DataFrame) and not df.empty:
-                    return df
+                    age = (_time.time() - _os.path.getmtime(cache_f)) / 86400
+                    return _tag_kline(df, 'fresh_cache', cache_age_days=age)
         except Exception:
             pass
 
@@ -895,7 +923,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                     _bl.to_pickle(cache_f)
                 except Exception:
                     pass
-            return _bl
+            return _tag_kline(_bl, 'live')
 
     if adjust == 'raw':
         # 摊平 8 源链(2026-06-28 阶段3⑤):直连原子源,**无 fetcher 嵌套**——根治旧 east/mootdx
@@ -949,7 +977,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                 df.to_pickle(cache_f)
             except Exception:
                 pass
-        return df
+        return _tag_kline(df, 'live')
     # —— 取数失败(空 DF)——
     # ① 历史缓存兜底(即使已过 TTL):缓存不主动过期删除,源全挂时永远有历史 K线可用(2026-06-26)。
     #    回测/因子/技术分析宁可用几天前的历史序列,也好过空 DF 直接断流。
@@ -961,7 +989,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                     _age_d = int((_time.time() - _os.path.getmtime(cache_f)) / 86400)
                     print(f'[datahub.kline] {_norm_code(code)} {period}{suffix} 取数失败,'
                           f'回退历史缓存(age {_age_d}d)', flush=True)
-                    return stale
+                    return _tag_kline(stale, 'stale_cache', stale=True,
+                                      cache_age_days=_age_d)
         except Exception:
             pass
     # ② qfq 且无历史缓存可兜 → 退回 raw(技术分析有数据胜过无;raw 自身也走①历史兜底)。绝不写 qfq 缓存防污染。

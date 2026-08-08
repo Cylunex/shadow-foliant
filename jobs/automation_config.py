@@ -131,7 +131,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '💰 当日盈亏快照',
         'schedule': '22:30 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '合并股票日涨跌+基金日收益落 daily_pnl_snapshots(晨报昨日收益的数据源)',
+        'description': '合并股票日涨跌+基金日收益落库，并在22:30把妙想/轮动/策略等非紧急盘后报告合成一条；风险告警仍即时发',
     },
     'weekend_portfolio': {
         'cn': '📊 周末持仓深度合并(周报+压力情景)',
@@ -155,13 +155,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🌙 妙想收盘复盘',
         'schedule': '17:00 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '收盘后东财妙想一站式复盘(收数据→调妙想→格式化)推送',
+        'description': '收盘后东财妙想一站式复盘，结果进入22:30盘后汇总（不影响盘前/盘中通知）',
     },
     'sector_rotation': {
         'cn': '📈 题材轮动雷达',
         'schedule': '17:30 每日(盘后)',
         'category': '核心', 'default': True,
-        'description': '盘后智策板块引擎:看多/看空板块+轮动潜力+热度榜+关键机会,一条推送看清今日资金在哪些题材间轮动、明日关注谁(原 sector agents 已有未进每日节奏)',
+        'description': '盘后智策板块引擎:看多/看空板块+轮动潜力+热度榜+关键机会，结果进入22:30盘后汇总',
     },
     'mx_weekend_outlook': {
         'cn': '🔮 周末妙想研判',
@@ -203,10 +203,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # 不再单独定时;模块仍供 MCP(exit_advice/portfolio_health_check)与前端"🧹清仓助手"页按需调用。
     'daily_backtest': {
         'cn': '📐 盘后策略回测',
-        'schedule': '19:00 每日',
+        'schedule': '19:00 每日（默认一/三/五完整，其余交易日轻扫描）',
         'category': '核心',
         'default': True,
-        'description': '盘后对持仓TOP10跑5套核心策略回测，推送胜率/收益',
+        'description': '默认一/三/五跑全池策略进化，二/四只做当日策略扫描以降低NAS发热；报告进入22:30盘后汇总',
     },
 
     # 新增工作流（默认全关）

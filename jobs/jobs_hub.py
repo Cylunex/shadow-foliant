@@ -669,6 +669,24 @@ def task_daily_backtest():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    # NAS 最重的“全池 × 全变体”进化无需每天重复。默认一/三/五跑完整进化，
+    # 二/四仍执行当日策略命中扫描，交易决策不断档，CPU/发热显著下降。
+    try:
+        full_days = {
+            int(x) for x in os.getenv('DAILY_BACKTEST_FULL_WEEKDAYS', '1,3,5').split(',')
+            if x.strip()
+        }
+    except Exception:
+        full_days = {1, 3, 5}
+    if datetime.now().isoweekday() not in full_days:
+        try:
+            _daily_strategy_scan()
+            _log_run(job, 'success', error='light_mode=strategy_scan_only',
+                     started_at=started, finished_at=datetime.now().isoformat())
+        except Exception as e:
+            _log_run(job, 'error', error=f'light_mode scan failed: {e}',
+                     started_at=started, finished_at=datetime.now().isoformat())
+        return
     _t0 = time.time()   # 全任务起点:末尾预热步骤按剩余预算决定跑不跑(见第 9/10 步)
     try:
         from portfolio_db import portfolio_db
@@ -734,13 +752,22 @@ def task_daily_backtest():
 
         # ── 2. 获取数据，筛出有数据的股票 ──
         valid_stocks = []  # [(code, name, df)]
+        stale_skipped = 0
         for code, name in pool.items():
             try:
                 df = fetcher.get_stock_data(code, "2y", adjust='qfq')  # 策略形态扫描用前复权
                 if df is not None and not isinstance(df, dict) and hasattr(df, '__len__') and len(df) > 60:
+                    quality = datahub.kline_quality(df, max_stale_days=3)
+                    if not quality.get('actionable', True):
+                        stale_skipped += 1
+                        continue
                     valid_stocks.append((code, name, df))
             except Exception:
                 continue
+
+        if stale_skipped:
+            print(f'[daily_backtest] 跳过 {stale_skipped} 只超过 3 天的陈旧 K 线，'
+                  '不参与适应度和交易信号', flush=True)
 
         n_pool = len(valid_stocks)
         if n_pool == 0:
@@ -973,12 +1000,13 @@ def task_daily_backtest():
 
         # ── 7. 推送进化日报 ──
         report = build_evolution_report()
-        from notification_router import send
-        send('report', '🧬 策略进化日报', report)
+        from postmarket_digest import add_section
+        add_section('strategy_evolution', '🧬 策略进化', report, max_chars=900)
 
         _log_run(job, 'success',
                 error=(f'pool={n_pool} backtests={total_backtests} '
-                       f'variants={len(all_variants)} new_variants={new_variant_count}'),
+                       f'variants={len(all_variants)} new_variants={new_variant_count} '
+                       f'stale_skipped={stale_skipped}'),
                 started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
@@ -1280,10 +1308,24 @@ def task_daily_pnl_snapshot():
                 ]
                 if s.get('mtd_pnl') is not None:
                     lines.append(f"  本月累计 {s['mtd_pnl']:+,.0f} · 近{s.get('period_days', 0)}日 {s.get('period_pnl', 0):+,.0f}(胜率{s.get('win_rate', 0)}%)")
-                from notification_router import send
-                send('report', f"💰 今日盈亏 {tp:+,.0f}", '\n'.join(lines))
+                from postmarket_digest import add_section, format_digest
+                add_section('pnl', '💰 今日盈亏', '\n'.join(lines), max_chars=600)
+                body = format_digest(snap_date)
+                if body:
+                    from notification_router import send
+                    send('report', f"🌙 盘后汇总｜今日盈亏 {tp:+,.0f}", body)
             except Exception as pe:
                 print(f'[daily_pnl_snapshot] 推送失败: {pe}')
+        else:
+            # 收益源偶发缺失时，仍把已完成的普通盘后报告送出，不让整晚内容被吞掉。
+            try:
+                from postmarket_digest import format_digest
+                body = format_digest(snap_date)
+                if body:
+                    from notification_router import send
+                    send('report', '🌙 盘后汇总｜收益数据待补', body)
+            except Exception as pe:
+                print(f'[daily_pnl_snapshot] 盘后汇总推送失败: {pe}')
         _log_run(job, status, error=err, started_at=started,
                  finished_at=datetime.now().isoformat())
     except Exception as e:
@@ -2060,6 +2102,8 @@ class _JobsHub:
 
         def _loop():
             last_manual_poll = 0.0
+            consecutive_errors = 0
+            last_error_log = 0.0
             while self._running:
                 try:
                     schedule.run_pending()
@@ -2069,9 +2113,18 @@ class _JobsHub:
                         self._poll_manual_tasks()
                         last_manual_poll = now
                 except Exception as e:
-                    print(f'[jobs_hub] 调度线程异常: {e}')
-                    import traceback
-                    traceback.print_exc()
+                    consecutive_errors += 1
+                    now_wall = time.time()
+                    if consecutive_errors == 1 or now_wall - last_error_log >= 60:
+                        print(f'[jobs_hub] 调度依赖暂不可用，{min(30, 2 ** min(consecutive_errors - 1, 5))}s 后重试: '
+                              f'{type(e).__name__}: {str(e)[:180]}', flush=True)
+                        last_error_log = now_wall
+                    time.sleep(min(30, 2 ** min(consecutive_errors - 1, 5)))
+                    continue
+                if consecutive_errors:
+                    print(f'[jobs_hub] ✅ 调度依赖已恢复（连续失败 {consecutive_errors} 次）',
+                          flush=True)
+                    consecutive_errors = 0
                 time.sleep(1)
 
         self._thread = threading.Thread(target=_loop, daemon=True)
@@ -3191,8 +3244,8 @@ def _daily_strategy_scan():
                     lines.append(f"{i}. {r['symbol']} {r['name']} — 命中 {r['matched_count']} 策略: {', '.join(matched_cn)}")
             if ai_inserted > 0:
                 lines.extend(['', f'✅ {ai_inserted} 只入选AI推荐池（已启用监控）'])
-            from notification_router import send
-            send('report', '🔍 盘后策略扫描', '\n'.join(lines))
+            from postmarket_digest import add_section
+            add_section('strategy_scan', '🔍 策略扫描', '\n'.join(lines), max_chars=900)
         except Exception as ne:
             print(f'[wf_daily_strategy_scan] 推送失败: {ne}')
 
@@ -4607,6 +4660,13 @@ def task_morning_portfolio():
             _add_signal = {'must_add': False, 'level': 'unknown',
                            'headline': '⚠️【加仓判断不可用】',
                            'reason': f'{type(_ae).__name__}；默认不加仓。'}
+        try:
+            save_indicator_snapshot('_market_add_signal', {
+                **_add_signal, 'date': datetime.now().strftime('%Y-%m-%d'),
+                'updated_at': datetime.now().astimezone().isoformat(),
+            })
+        except Exception as _se:
+            print(f'[morning_portfolio] 加仓判断快照保存失败: {_se}')
         lines.append(_fmt_add_signal(_add_signal) if '_fmt_add_signal' in locals()
                      else f"{_add_signal['headline']}\n结论：否。{_add_signal['reason']}")
         lines.append('')
@@ -4963,7 +5023,9 @@ def task_announcement_scan():
                     body += '\n\n——以下中性参考——\n\n' + '\n\n'.join(info_parts)
                 send('alert', '⚠️ 盘后风险预警', body)
             elif info_parts:
-                send('report', '📑 盘后盘点(公告/研报)', '\n\n'.join(info_parts))
+                from postmarket_digest import add_section
+                add_section('eod_info', '📑 公告 / 研报', '\n\n'.join(info_parts),
+                            max_chars=1000)
         except Exception as ne:
             print(f'[eod_risk] 推送失败: {ne}')
         _log_run(job, 'success', error='|'.join(summ) or 'no_risk', started_at=started,
@@ -5090,8 +5152,8 @@ def task_mx_daily_analysis():
                      finished_at=datetime.now().isoformat())
             return
 
-        from notification_router import send
-        send('report', '🌙 妙想收盘复盘', report)
+        from postmarket_digest import add_section
+        add_section('mx_close', '🌙 妙想收盘复盘', report, max_chars=1200)
         _log_run(job, 'success', error='ok',
                  started_at=started, finished_at=datetime.now().isoformat())
 
@@ -5415,8 +5477,8 @@ def task_sector_rotation():
         body = _format_sector_rotation(result.get('final_predictions', {}))
         if body:
             try:
-                from notification_router import send
-                send('report', '📈 题材轮动雷达', body)
+                from postmarket_digest import add_section
+                add_section('sector_rotation', '📈 题材轮动', body, max_chars=900)
             except Exception as ne:
                 print(f'[sector_rotation] 推送失败: {ne}')
         _log_run(job, 'success', error=(None if body else '无有效轮动结论'),

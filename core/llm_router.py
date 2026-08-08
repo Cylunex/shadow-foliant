@@ -279,6 +279,13 @@ class LLMRouter:
                 err_label = type(e).__name__
                 err_detail = str(e)[:120]
 
+            # 失败也进入旁路遥测。只记录 provider/model 与失败次数，不落提示词和异常正文。
+            try:
+                import llm_usage
+                llm_usage.record(call_type, f'{p.name}:{model}', thinking=thinking, ok=False)
+            except Exception:
+                pass
+
             # 统一打降级日志:看是否有下家。无下家 → 明确告知"未配置降级 provider"。
             next_p = chain[idx + 1].name if idx + 1 < len(chain) else None
             if next_p:

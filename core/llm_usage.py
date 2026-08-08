@@ -184,7 +184,9 @@ def summary(days: int = 30) -> Dict[str, Any]:
     """近 N 天用量汇总。返回 totals / by_model / by_call_type / by_day / recent。"""
     out: Dict[str, Any] = {
         'days': days, 'enabled': True,
-        'totals': {'calls': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,
+        'totals': {'calls': 0, 'success_calls': 0, 'failure_calls': 0,
+                   'success_ratio': None,
+                   'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,
                    'cache_hit_tokens': 0, 'cache_miss_tokens': 0, 'cache_hit_ratio': None},
         'by_model': [], 'by_call_type': [], 'by_day': [], 'recent': [],
     }
@@ -221,6 +223,10 @@ def summary(days: int = 30) -> Dict[str, Any]:
         pt, ct, tt = _as_int(r[4]), _as_int(r[5]), _as_int(r[6])
         ch, cm = _as_int(r[9]), _as_int(r[10])
         t['calls'] += 1
+        if bool(r[8]):
+            t['success_calls'] += 1
+        else:
+            t['failure_calls'] += 1
         t['prompt_tokens'] += pt
         t['completion_tokens'] += ct
         t['total_tokens'] += tt
@@ -236,6 +242,7 @@ def summary(days: int = 30) -> Dict[str, Any]:
             b['cache_miss_tokens'] += cm
 
     t['cache_hit_ratio'] = _ratio(t['cache_hit_tokens'], t['cache_miss_tokens'])
+    t['success_ratio'] = round(t['success_calls'] / t['calls'], 4) if t['calls'] else None
 
     def _finish(b: Dict[str, int]) -> Dict[str, Any]:
         b['cache_hit_ratio'] = _ratio(b['cache_hit_tokens'], b['cache_miss_tokens'])

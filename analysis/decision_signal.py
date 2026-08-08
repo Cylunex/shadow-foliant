@@ -196,6 +196,17 @@ def create_signal(code: str, name: str = '', action: str = 'hold',
     反向作废:新 active 的方向与某 active 信号相反(买↔卖)→ 把旧的置 invalidated。
     """
     action = action if action in ACTIONS else 'hold'
+    try:
+        from portfolio_policy import guard as _portfolio_guard
+        _guarded = _portfolio_guard(action, source_type=source_type, reason=reason)
+        action = _guarded['action']
+        reason = _guarded['reason']
+        if _guarded.get('blocked'):
+            rating = '观察'
+            confidence = '低'
+            score = min(int(score), 45) if score is not None else 40
+    except Exception:
+        pass
     if action not in ACTIONS:
         action = 'hold'
     if horizon_days is None:
