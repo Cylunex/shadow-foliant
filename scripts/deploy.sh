@@ -12,10 +12,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PROJECT_DIR="$(pwd)"
+OLD_HEAD="$(git rev-parse HEAD)"
 
 echo "▶ git pull --ff-only"
 PULL_OUT=$(git pull --ff-only)
 echo "$PULL_OUT"
+NEW_HEAD="$(git rev-parse HEAD)"
+
+# 脚本自身随 pull 更新时，当前 Bash 进程可能仍执行已读入的旧内容；自动用新文件重进一次。
+if [[ "$OLD_HEAD" != "$NEW_HEAD" && "${DEPLOY_REEXEC:-0}" != "1" ]] \
+   && git diff --name-only "$OLD_HEAD" "$NEW_HEAD" -- scripts/deploy.sh | grep -q .; then
+  echo "↻ deploy.sh 已更新，切换到新版脚本继续"
+  exec env DEPLOY_REEXEC=1 FORCE=1 bash scripts/deploy.sh
+fi
 
 echo
 echo "▶ 配置 Supervisor 日志轮转并归档旧日志"

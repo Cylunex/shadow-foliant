@@ -711,7 +711,8 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     try:
         from portfolio_policy import status as portfolio_policy_status
         data['portfolio_policy'] = portfolio_policy_status()
-        if data['portfolio_policy'].get('fail_closed'):
+        if (data['portfolio_policy'].get('fail_closed')
+                and datetime.now().astimezone().weekday() < 5):
             warnings.append('高仓位模式下尚无今日加仓判断，自动买入已按保守规则关闭')
     except Exception as exc:
         data['portfolio_policy'] = None

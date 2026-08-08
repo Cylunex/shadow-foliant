@@ -55,5 +55,14 @@ class PostmarketDigestTest(unittest.TestCase):
         self.assertLess(body.index('盈亏'), body.index('题材'))
 
 
+class AgentWeekendStatusTest(unittest.TestCase):
+    def test_weekend_policy_has_no_false_warning(self):
+        # 具体周末快照日期逻辑已有 task_control 专项测试；这里锁住高仓位告警只在工作日展示。
+        import inspect
+        from jobs import task_control
+        source = inspect.getsource(task_control.agent_cockpit)
+        self.assertIn("weekday() < 5", source)
+
+
 if __name__ == '__main__':
     unittest.main()

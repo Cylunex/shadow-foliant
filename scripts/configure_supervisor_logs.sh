@@ -34,11 +34,17 @@ def flush(name, rows):
             'stdout_logfile_backups=', 'stderr_logfile=',
             'stderr_logfile_maxbytes=', 'stderr_logfile_backups=')
     cleaned = [line for line in rows if not line.strip().startswith(drop)]
-    cleaned.extend([
+    settings = [
         'redirect_stderr=true\n',
         'stdout_logfile_maxbytes=10MB\n',
         'stdout_logfile_backups=10\n',
-    ])
+    ]
+    insert_at = next(
+        (i + 1 for i, line in enumerate(cleaned)
+         if line.strip().startswith('stdout_logfile=')),
+        len(cleaned),
+    )
+    cleaned[insert_at:insert_at] = settings
     return cleaned
 
 for line in lines:
