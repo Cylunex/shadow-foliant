@@ -32,7 +32,19 @@ export default {
       </div>
 
       <div class="card">
-        <h3>🎯 最近综合选股 · {{d.selection?.meta?.snapshot_date||'暂无日期'}}</h3>
+        <h3>🏆 最终优选 · {{d.selection?.meta?.snapshot_date||'暂无日期'}}</h3>
+        <table v-if="d.selection?.data?.final_rows?.length">
+          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>优选分</th><th>红蓝</th><th>优选依据</th></tr></thead>
+          <tbody><tr v-for="(r,i) in d.selection.data.final_rows" :key="r.code">
+            <td>{{i+1}}</td><td>{{r.code}}</td><td>{{r.name}}</td><td>{{r.final_score}}</td>
+            <td>{{r.debate_verdict||'待AI'}}</td><td style="text-align:left">{{r.final_reason}}</td>
+          </tr></tbody>
+        </table>
+        <div v-else class="loading">暂无最终优选；下一次综合选股后生成。</div>
+      </div>
+
+      <div class="card">
+        <h3>🎯 综合选股 TOP15</h3>
         <table v-if="d.selection?.data?.rows?.length">
           <thead><tr><th>#</th><th>代码</th><th>名称</th><th>评分</th><th>现价</th><th>涨跌%</th><th>红蓝</th><th>来源</th></tr></thead>
           <tbody><tr v-for="r in d.selection.data.rows" :key="r.code">

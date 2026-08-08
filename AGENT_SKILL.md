@@ -233,7 +233,7 @@ MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(st
   - `list_tasks()`：任务计划、启用状态、最近调度与手动运行。
   - `trigger_task(task_name,idempotency_key)` → `run_id`：异步提交，不阻塞 MCP。
   - `task_run_status(run_id)` / `task_runs(task_name,limit)`：跨连接读取任务状态；worker 失联时先按次数自动重入队，耗尽后才标为 `interrupted`。
-  - `latest_selection()`：读取最近综合选股产物（代码、评分、来源、行情、持仓标记、红蓝结论）并明确标记过期。
+  - `latest_selection()`：读取最近综合选股产物；`picks/rows` 是保留完整推送的 TOP15，`final_picks/final_rows` 是按规则强度、多源共振、红蓝结论和追高风险二次优选的最终 TOP5，并明确标记快照是否过期。
   - `research_stock(code,depth,view)`：面向 Agent 的低轮次个股研究入口，统一返回 `data/status/meta`。
   - `list_monitors` / `upsert_monitor` / `remove_monitor`：盯盘读取与管理。
   - `active_recommendations` / `enable_recommendation_monitor` / `close_recommendation`：推荐生命周期管理。

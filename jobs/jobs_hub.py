@@ -4251,7 +4251,7 @@ def task_strategy_prefetch_retry():
 
 
 def task_unified_selection():
-    """🆕 整合选股：4大策略 + InStock10 + 多因子 + 个人过滤 →  TOP 15"""
+    """整合选股：多源并池产出 TOP15，并从中二次优选最终 TOP5。"""
     job = 'unified_selection'
     if _skip_if_not_trading(job):
         return
@@ -4499,10 +4499,11 @@ def task_unified_selection():
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
 
-        # 持久化 Agent 可直接读取的选股产物。保留 picks 兼容历史消费者，同时补齐评分/
-        # 来源/行情/红蓝结论，避免 Agent 触发任务后只能拿到代码、还要重复调用十几次工具。
+        # 持久化 Agent 可直接读取的选股产物。picks/rows 仍保留原 TOP15 语义，避免影响
+        # 妙想复核、午间盯盘等消费者；final_picks/final_rows 是二次优选结果。
+        artifact_rows = []
+        final_rows = []
         try:
-            artifact_rows = []
             for rank, code in enumerate(top_list, 1):
                 cinfo = candidates.get(code) or {}
                 q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
@@ -4518,17 +4519,23 @@ def task_unified_selection():
                     'change_pct': _safe_float(q.get('change_pct')),
                     'pe_ttm': _safe_float(q.get('pe_ttm')),
                     'debate_verdict': debate.get('verdict'),
+                    'debate_confidence': debate.get('confidence'),
                     'debate_reason': debate.get('reason') or debate.get('summary'),
                 })
+            from analysis.selection_finalizer import finalize_selection
+            final_rows = finalize_selection(artifact_rows, limit=5)
             save_indicator_snapshot('_last_selection', {
                 'picks': top_list,
                 'rows': artifact_rows,
+                'final_picks': [row['code'] for row in final_rows],
+                'final_rows': final_rows,
                 'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                 'vetoed': _vetoed,
                 'source_breakdown': source_count,
             })
-        except Exception:
-            pass
+        except Exception as _fe:
+            print(f'[unified_selection] 最终TOP5生成/保存失败(不影响TOP15): '
+                  f'{type(_fe).__name__}: {str(_fe)[:80]}')
 
         # ── 选股战绩闭环(2026-06-12):TOP10 入推荐池记录(不启监控,零成本) ──
         # ai_eval_weekly 每周按 source 算真实胜率 → _source_feedback 反哺门槛。
@@ -4563,6 +4570,31 @@ def task_unified_selection():
                         continue
                 if rec_n:
                     print(f'[unified_selection] {rec_n} 只入推荐池追踪(source=unified_selection)')
+                # 最终 TOP5 使用独立 source 记录纸面战绩，之后可与原 TOP10/15 做同周期对照。
+                # 只追踪非持仓，不开启 monitor，不产生额外交易或价格提醒。
+                final_rec_n = 0
+                for row in final_rows:
+                    code = row.get('code')
+                    if not code or code in held_codes:
+                        continue
+                    try:
+                        rid = save_recommendation(
+                            symbol=str(code), name=row.get('name') or '',
+                            source='unified_selection_final', rating='candidate',
+                            confidence=row.get('debate_confidence') or '中',
+                            ref_price=_safe_float(row.get('price')),
+                            reason=('最终优选 分' + str(round(row.get('final_score', 0), 1))
+                                    + ' ' + str(row.get('final_reason') or '')[:160]),
+                        )
+                        if rid:
+                            final_rec_n += 1
+                    except Exception as _fre:
+                        rec_fail += 1
+                        if _rec_err is None:
+                            _rec_err = _fre
+                if final_rec_n:
+                    print(f'[unified_selection] {final_rec_n} 只最终优选入独立战绩追踪'
+                          '(source=unified_selection_final)')
                 # 全部写失败(PG 抖动等)不能无声无息:胜率闭环头部断供会静默失真数周(同已修的
                 # eod_outcomes)。打日志 + 让 job_runs 备注带 rec_fail 标记(2026-07-17 修)。
                 if rec_fail:
@@ -4582,8 +4614,23 @@ def task_unified_selection():
             pass
 
         _push_daily('🎯 综合选股 TOP 15', body)
+        if final_rows:
+            try:
+                from analysis.selection_finalizer import format_final_selection
+                _final_body = format_final_selection(final_rows)
+                try:
+                    _fb_final = _source_feedback('unified_selection_final')
+                    if (_fb_final.get('text')
+                            and '无历史战绩' not in _fb_final['text']):
+                        _final_body += f'\n\n📈 最终优选{_fb_final["text"]}'
+                except Exception:
+                    pass
+                _push_daily('🏆 综合选股最终 TOP 5', _final_body)
+            except Exception as _fpe:
+                print(f'[unified_selection] 最终TOP5推送失败(不影响TOP15): '
+                      f'{type(_fpe).__name__}: {str(_fpe)[:80]}')
         _rf = globals().pop('_UNIFIED_REC_FAIL', 0)
-        _note = f'picks={len(top_list)}' + (f' rec_fail={_rf}' if _rf else '')
+        _note = f'picks={len(top_list)} final={len(final_rows)}' + (f' rec_fail={_rf}' if _rf else '')
         _log_run(job, 'success', error=_note,
                  started_at=started, finished_at=datetime.now().isoformat())
 

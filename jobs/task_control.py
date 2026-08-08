@@ -572,7 +572,7 @@ def effective_task_run(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def latest_selection_artifact() -> Dict[str, Any]:
-    """读取综合选股最近一次持久化产物，不触发选股或外部请求。"""
+    """读取综合选股最近产物；含原 picks/rows 与二次优选 final_picks/final_rows。"""
     from agent_contract import envelope
     _init_db()
     try:

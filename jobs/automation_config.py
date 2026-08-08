@@ -52,10 +52,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '优先补取09:15缺失的问财主力资金，再补其余4条策略；已成功策略直接读缓存、不重复请求。属于软增强，失败不阻断09:45妙想/InStock/多因子选股',
     },
     'unified_selection': {
-        'cn': '🎯 综合选股 TOP15',
+        'cn': '🎯 综合选股 TOP15 + 最终TOP5',
         'schedule': '09:45 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '5策略+InStock13(进化参数)+组合新策略+多因子 并池打分,带来源标签/持仓标记',
+        'description': '保留5策略+InStock进化策略+多因子并池的TOP15完整推送；再按规则分、多源共振、红蓝复核和追高风险独立推送最终TOP5，并单独跟踪两层真实战绩',
     },
     'morning_portfolio': {
         'cn': '☀️ 早盘持仓分析',

@@ -304,7 +304,7 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 | 09:00 | `morning_strategy` | ☀️ 晨间市场报告(龙虎榜/美股隔夜/新闻/北向/热点/板块/宏观/持仓) | ✅ |
 | 09:15 | `strategy_prefetch` | 🏦 问财+妙想盘前预取 | ❌ |
 | 09:30 | `strategy_prefetch_retry` | 🔁 仅补未写入缓存的问财策略 | ❌ |
-| 09:45 | `unified_selection` | 🎯 综合选股 TOP15(多因子+5策略+InStock13) | ✅ |
+| 09:45 | `unified_selection` | 🎯 保留综合选股 TOP15 完整推送，再按规则分、多源共振、红蓝复核和追高风险独立推送最终 TOP5；两层用独立 source 跟踪纸面战绩 | ✅ |
 | 10:05 | `morning_portfolio` | 📊 早盘持仓分析 + 早盘 AI 研判(子开关 morning_portfolio_ai) | ✅ |
 | (并入9:45) | `selection_debate` | ⚔️ 红蓝对抗已并入综合选股(表内「红蓝」列);妙想第二意见(10:30)仍独立 | ✅ |
 | 10:30 起 | `unified_selection` → `mx_selection_review` | 🧠 当日综合选股完成后再过妙想第二意见 | ✅ |

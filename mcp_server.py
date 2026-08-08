@@ -825,7 +825,7 @@ _TASKS = {
     'morning_strategy':         ('📊 晨间市场报告(AI研判+昨日收益)', '09:00'),
     'fund_dca_reminder':        ('📌 定投提醒', '08:55'),
     'fund_valuation_signal':    ('📈 基金估值信号', '09:05'),
-    'unified_selection':        ('🎯 综合选股 TOP15(进化参数+来源标签)', '09:45'),
+    'unified_selection':        ('🎯 综合选股 TOP15 + 最终TOP5', '09:45'),
     'morning_portfolio':        ('☀️ 早盘持仓分析(买卖提示+浮盈+异动)', '09:50'),
     'mx_selection_review':      ('🔍 妙想第二意见', '10:30'),
     'noon_report':              ('☀️ 午间报告', '12:00'),
@@ -909,7 +909,7 @@ def task_runs(task_name: str = '', limit: int = 30) -> Dict[str, Any]:
 
 @mcp.tool()
 def latest_selection() -> Dict[str, Any]:
-    """读取最近一次综合选股持久化产物，不现算、不拉外部数据；会标明快照是否过期。"""
+    """读取最近一次综合选股 TOP15 及二次优选 final_picks/final_rows；不现算、不拉源。"""
     from jobs.task_control import latest_selection_artifact
     return latest_selection_artifact()
 
