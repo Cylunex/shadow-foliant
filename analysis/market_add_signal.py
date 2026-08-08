@@ -1,7 +1,7 @@
-"""开盘后组合级“是否必须加仓”判断。
+"""开盘后组合级五档买卖动作判断。
 
-只判断市场窗口，不推荐具体标的。规则刻意保守：小跌忽略；连续下杀不接飞刀；只有核心指数
-同步明显急跌、且前几日并非连续大跌、长期趋势尚未严重破坏时，才给出醒目的必须加仓提示。
+只判断总仓位动作，不推荐具体标的。五档为 strong_buy / buy / hold / reduce / sell；
+保留 must_add 字段兼容旧消费者，但新代码统一读取 action。
 """
 
 from __future__ import annotations
@@ -14,6 +14,23 @@ from typing import Dict, Iterable, List, Optional
 
 
 CORE_INDICES = frozenset({'上证指数', '深证成指', '创业板指', '科创50', '沪深300'})
+
+ACTION_META = {
+    'strong_buy': ('🚨【今日组合动作：强力买入】', '强力买入', 2, '+10%~15%'),
+    'buy': ('🟢【今日组合动作：适度买入】', '适度买入', 1, '+5%左右'),
+    'hold': ('⚪【今日组合动作：持有】', '持有', 0, '不变'),
+    'reduce': ('🟡【今日组合动作：适度卖出】', '适度卖出', -1, '-5%左右'),
+    'sell': ('🔴【今日组合动作：优先卖出】', '优先卖出', -2, '-10%~15%'),
+    'unknown': ('⚠️【今日组合动作：数据不足】', '数据不足·默认持有', 0, '不变'),
+}
+
+
+def _result(action: str, reason: str, **base) -> Dict:
+    headline, action_cn, rank, delta = ACTION_META[action]
+    return dict(base, action=action, action_cn=action_cn, action_rank=rank,
+                suggested_position_delta=delta, headline=headline,
+                must_add=(action == 'strong_buy'),
+                allow_buy=(action in {'strong_buy', 'buy'}), reason=reason)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -40,19 +57,20 @@ def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
             names.append(str(row.get('name')))
 
     if len(changes) < 3:
-        return {
-            'level': 'unknown', 'must_add': False,
-            'headline': '⚠️【加仓判断不可用】',
-            'reason': f'核心指数行情仅 {len(changes)}/5 个，数据不足时不触发加仓。',
-        }
+        return _result('unknown', f'核心指数行情仅 {len(changes)}/5 个，数据不足时保持仓位。',
+                       level='unknown')
 
     sharp_pct = abs(_env_float('MARKET_ADD_SHARP_DROP_PCT', 1.8))
     broad_pct = abs(_env_float('MARKET_ADD_BROAD_DROP_PCT', 1.5))
     previous_pct = abs(_env_float('MARKET_ADD_PREVIOUS_DROP_PCT', 1.5))
     min_trend = _env_float('MARKET_ADD_MIN_MA20_RATIO', 0.95)
+    buy_pct = abs(_env_float('MARKET_ACTION_BUY_DIP_PCT', 0.8))
+    trim_pct = abs(_env_float('MARKET_ACTION_TRIM_RALLY_PCT', 1.8))
 
     median = statistics.median(changes)
     broad_count = sum(1 for v in changes if v <= -broad_pct)
+    moderate_down = sum(1 for v in changes if v <= -buy_pct)
+    broad_up = sum(1 for v in changes if v >= trim_pct)
     broad_need = max(3, math.ceil(len(changes) * 0.6))
     prev = [float(v) for v in (previous_returns or []) if v is not None and math.isfinite(float(v))]
     last_prev = prev[-1] if prev else None
@@ -69,24 +87,42 @@ def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
         'trend_ratio': round(trend_ratio, 4) if trend_ratio is not None else None,
     }
     if broad_sharp and not cascade and not trend_broken:
-        return dict(base, level='must_add', must_add=True,
-                    headline='🚨🚨【今天出现必须加仓窗口】',
-                    reason=(f'核心指数中位跌幅 {median:.2f}%，{broad_count}/{len(changes)} 个跌超 '
-                            f'{broad_pct:.1f}%；属于非连续的全市场急跌。只提高总仓位，不指定标的。'))
+        return _result('strong_buy',
+                       (f'核心指数中位跌幅 {median:.2f}%，{broad_count}/{len(changes)} 个跌超 '
+                        f'{broad_pct:.1f}%；属于非连续的全市场急跌，可明显提高总仓位。'),
+                       **base, level='strong_buy')
+    if broad_sharp and cascade and trend_broken:
+        return _result('sell',
+                       (f'核心指数中位跌幅 {median:.2f}%，近期连续下杀且沪深300明显跌破20日趋势；'
+                        '系统性风险优先，先降低总仓位，不接飞刀。'),
+                       **base, level='sell')
     if broad_sharp and (cascade or trend_broken):
         blocks = []
         if cascade:
             blocks.append('近期已有连续下杀')
         if trend_broken:
             blocks.append('沪深300已明显跌破20日趋势')
-        return dict(base, level='hold_fire', must_add=False,
-                    headline='🛑【今天不要急着加仓】',
-                    reason=(f'虽然核心指数中位跌幅 {median:.2f}%，但' + '、'.join(blocks)
-                            + '，先防接飞刀，等待止跌。'))
-    return dict(base, level='no_add', must_add=False,
-                headline='🧱【今天无需加仓】',
-                reason=(f'核心指数中位涨跌 {median:+.2f}%，未达到“非连续全市场急跌”门槛；'
-                        '普通小跌按原计划忽略。'))
+        return _result('reduce',
+                       (f'核心指数中位跌幅 {median:.2f}%，且' + '、'.join(blocks)
+                        + '；先适度降低风险仓位，等待止跌。'),
+                       **base, level='reduce')
+    if trend_broken:
+        return _result('reduce', '沪深300明显低于20日趋势，高仓位下先小幅降风险。',
+                       **base, level='reduce')
+    if median >= trim_pct and broad_up >= broad_need:
+        return _result('reduce',
+                       (f'核心指数中位上涨 {median:.2f}%，{broad_up}/{len(changes)} 个涨超 '
+                        f'{trim_pct:.1f}%；高仓位下借普涨适度兑现。'),
+                       **base, level='reduce')
+    if median <= -buy_pct and moderate_down >= broad_need and not cascade:
+        return _result('buy',
+                       (f'核心指数中位跌幅 {median:.2f}%，属于普遍回调但未形成连续下杀；'
+                        '可小幅提高仓位，不需要一次打满。'),
+                       **base, level='buy')
+    return _result('hold',
+                   (f'核心指数中位涨跌 {median:+.2f}%，没有达到明确买入或卖出门槛；'
+                    '维持仓位，普通小波动不操作。'),
+                   **base, level='hold')
 
 
 def build() -> Dict:
@@ -111,12 +147,12 @@ def build() -> Dict:
                 trend_ratio = float(closes.iloc[-1]) / ma20 if ma20 > 0 else None
         return evaluate(indices, previous_returns, trend_ratio)
     except Exception as e:
-        return {
-            'level': 'unknown', 'must_add': False,
-            'headline': '⚠️【加仓判断不可用】',
-            'reason': f'{type(e).__name__}；数据异常时默认不加仓。',
-        }
+        return _result('unknown', f'{type(e).__name__}；数据异常时默认保持仓位。',
+                       level='unknown')
 
 
 def format_text(signal: Dict) -> str:
-    return f"{signal.get('headline', '⚠️【加仓判断不可用】')}\n结论：{'是' if signal.get('must_add') else '否'}。{signal.get('reason', '')}"
+    return (f"{signal.get('headline', ACTION_META['unknown'][0])}\n"
+            f"动作：{signal.get('action_cn', '数据不足·默认持有')}；"
+            f"总仓位参考：{signal.get('suggested_position_delta', '不变')}。"
+            f"{signal.get('reason', '')}")

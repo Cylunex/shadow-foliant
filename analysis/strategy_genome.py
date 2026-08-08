@@ -456,12 +456,14 @@ def update_variant_fitness(variant_id: int, win_rate: float, avg_ret: float,
                            max_dd: float, trigger_count: int,
                            sample_stocks: int = 1,
                            holdout_win_rate: float = None, holdout_avg_ret: float = None,
-                           holdout_trigger: int = None):
+                           holdout_trigger: int = None,
+                           confidence_n: int = None):
     """更新变体适应度。win_rate/avg_ret = 训练集(driving 进化);holdout_* = 样本外(部署门用)。
     holdout 传 None 时不覆盖既有值(COALESCE)。"""
     score = compute_strategy_score(win_rate, avg_ret, trigger_count,
                                    max_trigger=sample_stocks,
-                                   sample_stocks=sample_stocks, max_dd=max_dd)
+                                   sample_stocks=sample_stocks, max_dd=max_dd,
+                                   confidence_n=confidence_n)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -792,15 +794,44 @@ def evolve_composed(mutants: int = 8, randoms: int = 4,
     return new_ids
 
 
+def deployment_quality_score(train_score: float, holdout_win_rate: float,
+                             holdout_avg_ret: float, holdout_trigger: int) -> float:
+    """部署排序分：训练分只占六成，样本外胜率/收益/样本量共同决定真正上线顺序。"""
+    score = max(0.0, min(100.0, float(train_score or 0)))
+    wr = max(0.0, min(100.0, float(holdout_win_rate or 0)))
+    ret_score = max(0.0, min(100.0, 50.0 + float(holdout_avg_ret or 0) * 10.0))
+    sample_score = max(0.0, min(100.0, float(holdout_trigger or 0) / 12.0 * 100.0))
+    return round(score * 0.60 + wr * 0.20 + ret_score * 0.10 + sample_score * 0.10, 2)
+
+
+def composed_signature(genes: List[Dict[str, Any]]) -> Tuple[str, ...]:
+    """组合策略的结构签名；参数不同但积木相同视为同一策略族。"""
+    return tuple(sorted(str(g.get('b')) for g in (genes or []) if isinstance(g, dict) and g.get('b')))
+
+
+def _default_live_set(reason: str = 'default_fallback') -> Dict[str, Any]:
+    base = _all_default_base()
+    return {
+        'base': base,
+        'base_meta': {sid: {'generation': 0, 'deploy_reason': reason,
+                            'deployment_score': 0.0, 'score': None}
+                      for sid in base},
+        'composed': [],
+    }
+
+
 def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 45,
                           require_holdout: bool = True,
-                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 3,
-                          auto_revert: bool = True) -> Dict[str, Any]:
+                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 5,
+                          holdout_min_win_rate: float = 40.0,
+                          max_eval_age_days: int = 21,
+                          auto_revert: bool = True,
+                          base_min_score: float = 45.0) -> Dict[str, Any]:
     """给实盘选股用的"当前最优策略集":
-      base: {策略id: 最优变体参数}(已评估的活跃变体里分数最高者,含默认种子)
+      base: {策略id: 最优变体参数}; base_meta 给出实际部署的变体、部署分和回退原因。
       composed: [{'vid','cn','genes','score'}](达标的组合策略 TopN)
-    样本外部署门(require_holdout=True):**进化出的变体须 holdout(样本外)触发≥N 且平均收益≥下限才上线**,
-      否则该策略回退 generation=0 默认参数(默认种子永远可部署=安全基线)→ 杜绝部署过拟合变体。
+    样本外部署门(require_holdout=True):进化变体须满足训练分、样本外触发数/胜率/收益和评估时效；
+      否则该策略回退 generation=0 默认参数。组合策略还会按积木结构去重，避免克隆策略挤满部署位。
     自动回退(auto_revert=True):若近 N 次组合级 A/B(evolution_ab)进化集持续跑输全默认集,
       整体回退全默认参数(安全网)。A/B 测量自身须传 auto_revert=False 取真实进化集,避免自指。
     失败返回空集,调用方回退默认参数。"""
@@ -808,55 +839,93 @@ def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 45,
         try:
             if evolution_recently_underperforming():
                 print('[genome] 进化近期 A/B 跑输默认集 → get_live_strategy_set 自动回退全默认参数')
-                return {'base': _all_default_base(), 'composed': []}
+                return _default_live_set('ab_auto_revert')
         except Exception:
             pass
-    out = {'base': {}, 'composed': []}
+    out = _default_live_set()
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    if require_holdout:
-        # 优先选 holdout 验证通过的高分变体;无则回退 generation=0 默认(保证每策略总有可部署参数)
-        cur.execute("""
-            SELECT DISTINCT ON (base_strategy) base_strategy, params, score
-            FROM strategy_variants
-            WHERE status = 'active' AND score IS NOT NULL AND base_strategy != %s
-              AND (generation = 0
-                   OR (holdout_trigger >= %s AND holdout_avg_ret_pct >= %s))
-            ORDER BY base_strategy,
-                     (CASE WHEN holdout_trigger >= %s AND holdout_avg_ret_pct >= %s
-                           THEN 1 ELSE 0 END) DESC,
-                     score DESC
-        """, (COMPOSED_BASE, holdout_min_trigger, holdout_min_ret,
-              holdout_min_trigger, holdout_min_ret))
-    else:
-        cur.execute("""
-            SELECT DISTINCT ON (base_strategy) base_strategy, params, score
-            FROM strategy_variants
-            WHERE status = 'active' AND score IS NOT NULL AND base_strategy != %s
-            ORDER BY base_strategy, score DESC
-        """, (COMPOSED_BASE,))
-    for r in cur.fetchall():
-        params = r['params'] if isinstance(r['params'], dict) else json.loads(r['params'])
-        out['base'][r['base_strategy']] = coerce_params(r['base_strategy'], params)
-
-    # 组合策略:require_holdout 时,排除"已评估且 holdout 不达标"的(未评估的 NULL 给探索宽限)。
-    # 2026-07-16 补最低样本量门(与基础策略的 holdout_trigger>=N 对齐):原来只查收益不查触发数,
-    # 1 笔幸运样本外交易(如 +6%)即可过门上实盘,且 COALESCE 让该状态长期存续 —— 结构风险
-    # 更高的组合策略反而没有样本量门,是小样本幻觉在部署口的漏网。
+    cutoff = datetime.now() - timedelta(days=max(1, max_eval_age_days))
     cur.execute("""
-        SELECT id, strategy_cn, params, score
+        SELECT id, base_strategy, generation, params, score,
+               holdout_win_rate_pct, holdout_avg_ret_pct, holdout_trigger, evaluated_at
         FROM strategy_variants
-        WHERE status = 'active' AND base_strategy = %s
+        WHERE status IN ('active', 'promoted') AND score IS NOT NULL AND base_strategy != %s
+        ORDER BY base_strategy, score DESC
+    """, (COMPOSED_BASE,))
+    eligible: Dict[str, List[Dict[str, Any]]] = {}
+    for raw in cur.fetchall():
+        r = dict(raw)
+        if r.get('generation', 0) <= 0:
+            continue
+        fresh = r.get('evaluated_at') is not None and r['evaluated_at'] >= cutoff
+        passed = (not require_holdout or (
+            fresh and (r.get('score') or 0) >= base_min_score
+            and (r.get('holdout_trigger') or 0) >= holdout_min_trigger
+            and (r.get('holdout_win_rate_pct') or 0) >= holdout_min_win_rate
+            and (r.get('holdout_avg_ret_pct') or 0) >= holdout_min_ret))
+        if not passed:
+            continue
+        r['deployment_score'] = (deployment_quality_score(
+            r.get('score'), r.get('holdout_win_rate_pct'),
+            r.get('holdout_avg_ret_pct'), r.get('holdout_trigger'))
+            if require_holdout else float(r.get('score') or 0))
+        eligible.setdefault(r['base_strategy'], []).append(r)
+    for sid, rows in eligible.items():
+        best = max(rows, key=lambda r: (r['deployment_score'], r.get('score') or 0))
+        params = best['params'] if isinstance(best['params'], dict) else json.loads(best['params'])
+        out['base'][sid] = coerce_params(sid, params)
+        out['base_meta'][sid] = {
+            'variant_id': best['id'], 'generation': best['generation'],
+            'score': best['score'], 'deployment_score': best['deployment_score'],
+            'holdout_win_rate': best.get('holdout_win_rate_pct'),
+            'holdout_avg_ret': best.get('holdout_avg_ret_pct'),
+            'holdout_trigger': best.get('holdout_trigger'),
+            'evaluated_at': str(best.get('evaluated_at') or ''),
+            'deploy_reason': 'holdout_passed' if require_holdout else 'train_best',
+        }
+
+    # 组合策略不再给“样本外为空”探索宽限；探索只留在回测池，不能直接进入交易扫描。
+    # 同一组积木只部署参数最优的一套，避免 5 个名额全被“MA走升+RSI超卖”克隆占满。
+    cur.execute("""
+        SELECT id, strategy_cn, params, score, holdout_win_rate_pct,
+               holdout_avg_ret_pct, holdout_trigger, evaluated_at
+        FROM strategy_variants
+        WHERE status IN ('active', 'promoted') AND base_strategy = %s
           AND score IS NOT NULL AND score >= %s
-          AND (NOT %s OR holdout_avg_ret_pct IS NULL
-               OR (holdout_trigger >= %s AND holdout_avg_ret_pct >= %s))
-        ORDER BY score DESC LIMIT %s
-    """, (COMPOSED_BASE, composed_min_score, require_holdout,
-          holdout_min_trigger, holdout_min_ret, max_composed))
-    for r in cur.fetchall():
+        ORDER BY score DESC LIMIT 100
+    """, (COMPOSED_BASE, composed_min_score))
+    composed_rows = []
+    for raw in cur.fetchall():
+        r = dict(raw)
+        fresh = r.get('evaluated_at') is not None and r['evaluated_at'] >= cutoff
+        if require_holdout and not (
+                fresh and (r.get('holdout_trigger') or 0) >= holdout_min_trigger
+                and (r.get('holdout_win_rate_pct') or 0) >= holdout_min_win_rate
+                and (r.get('holdout_avg_ret_pct') or 0) >= holdout_min_ret):
+            continue
+        r['deployment_score'] = (deployment_quality_score(
+            r.get('score'), r.get('holdout_win_rate_pct'),
+            r.get('holdout_avg_ret_pct'), r.get('holdout_trigger'))
+            if require_holdout else float(r.get('score') or 0))
+        composed_rows.append(r)
+    composed_rows.sort(key=lambda r: (-r['deployment_score'], -(r.get('score') or 0)))
+    seen_signatures = set()
+    for r in composed_rows:
         params = r['params'] if isinstance(r['params'], dict) else json.loads(r['params'])
+        genes = params.get('genes') or []
+        signature = composed_signature(genes)
+        if not signature or signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
         out['composed'].append({'vid': r['id'], 'cn': r['strategy_cn'],
-                                'genes': params.get('genes') or [], 'score': r['score']})
+                                'genes': genes, 'score': r['score'],
+                                'deployment_score': r['deployment_score'],
+                                'holdout_win_rate': r.get('holdout_win_rate_pct'),
+                                'holdout_avg_ret': r.get('holdout_avg_ret_pct'),
+                                'holdout_trigger': r.get('holdout_trigger')})
+        if len(out['composed']) >= max_composed:
+            break
     cur.close()
     conn.close()
     return out

@@ -725,10 +725,27 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
         data['llm_telemetry'] = None
         warnings.append(f'LLM 遥测读取失败: {exc}')
 
+    try:
+        from analysis.strategy_genome import get_live_strategy_set
+        live = get_live_strategy_set() or {}
+        meta = live.get('base_meta') or {}
+        data['strategy_deployment'] = {
+            'base_total': len(live.get('base') or {}),
+            'evolved_base': sum(1 for row in meta.values()
+                                if (row.get('generation') or 0) > 0),
+            'default_fallback': [sid for sid, row in meta.items()
+                                 if (row.get('generation') or 0) == 0],
+            'composed': live.get('composed') or [],
+        }
+    except Exception as exc:
+        data['strategy_deployment'] = None
+        warnings.append(f'策略部署集读取失败: {exc}')
+
     return envelope(
         data,
         status='degraded' if warnings else 'success',
         warnings=warnings,
         sources=['job_runs', 'manual_task_runs', 'indicator_snapshots',
-                 'portfolio', 'ai_recommendations', 'decision_signals', 'datahub'],
+                 'portfolio', 'ai_recommendations', 'decision_signals', 'datahub',
+                 'strategy_variants'],
     )

@@ -228,7 +228,8 @@ MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(st
 客户端配 `{ "command":"python", "args":["<项目根>/mcp_server.py"] }`,env 传 `DEEPSEEK_API_KEY`/`EM_API_KEY`/`USE_POSTGRES` 等。
 已封装:A–E 的数据/计算/选股/组合函数 + F(`deep_analysis` 重工具)+ G(妙想 `mx_*` 外部服务)+ H(基金 `fund_*`/`asset_*` 14 工具)+ I(决策信号 + AI 赋能 ~15 工具)。共 **90+ 工具**。
 - Agent 控制面:
-  - `agent_cockpit(recent_limit)`：任务健康、核心开关、选股快照、持仓/推荐/信号数量、数据源状态。
+  - `agent_cockpit(recent_limit)`：任务健康、核心开关、选股快照、持仓/推荐/信号数量、五档组合动作、当前策略部署集和数据源状态。
+  - `strategy_deployment()`：读取真正应用于选股/扫描的基础变体与样本外元数据，以及按结构去重后的组合策略；不触发回测。
   - `list_tasks()`：任务计划、启用状态、最近调度与手动运行。
   - `trigger_task(task_name,idempotency_key)` → `run_id`：异步提交，不阻塞 MCP。
   - `task_run_status(run_id)` / `task_runs(task_name,limit)`：跨连接读取任务状态；worker 失联时先按次数自动重入队，耗尽后才标为 `interrupted`。

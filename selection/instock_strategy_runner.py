@@ -91,6 +91,11 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 _GENOME_LIVE = {'ts': 0.0, 'live': None}
 
 
+def invalidate_live_cache() -> None:
+    """进化完成后立即失效，保证紧随其后的扫描应用本轮新 live 集。"""
+    _GENOME_LIVE.update(ts=0.0, live=None)
+
+
 def _live_genome_set() -> Dict[str, Any]:
     import time as _time
     if _GENOME_LIVE['live'] is not None and _time.time() - _GENOME_LIVE['ts'] < 3600:
@@ -155,7 +160,14 @@ def run_one(symbol: str, df: pd.DataFrame, name: str = '',
                 kw = {k: v for k, v in best.items() if k in accepted}
             ok = meta['func'](code_name, norm, date=date, **kw)
             if ok:
-                matched.append({'id': sid, 'cn': meta['cn'], 'category': meta['category']})
+                deploy = (live.get('base_meta') or {}).get(sid) or {}
+                dscore = float(deploy.get('deployment_score') or 50.0)
+                matched.append({'id': sid, 'cn': meta['cn'], 'category': meta['category'],
+                                'score': deploy.get('score'),
+                                'deployment_score': round(dscore, 2),
+                                'weight': round(max(0.25, min(1.0, dscore / 100.0)), 3),
+                                'variant_id': deploy.get('variant_id'),
+                                'generation': deploy.get('generation', 0)})
         except Exception as e:
             errors.append(f"{sid}: {e}")
 
@@ -168,9 +180,14 @@ def run_one(symbol: str, df: pd.DataFrame, name: str = '',
                 n_composed += 1
                 try:
                     if check_composed(code_name, norm, date=date, genes=c.get('genes') or []):
+                        dscore = float(c.get('deployment_score') or c.get('score') or 50.0)
                         matched.append({'id': f"composed:{c['vid']}",
                                         'cn': c.get('cn') or '组合策略',
-                                        'category': '🧪进化新策略'})
+                                        'category': '🧪进化新策略',
+                                        'score': c.get('score'),
+                                        'deployment_score': round(dscore, 2),
+                                        'weight': round(max(0.25, min(1.0, dscore / 100.0)), 3),
+                                        'variant_id': c.get('vid'), 'generation': None})
                 except Exception:
                     continue
         except Exception:
@@ -181,6 +198,7 @@ def run_one(symbol: str, df: pd.DataFrame, name: str = '',
         'total_strategies': len(target) + n_composed,
         'matched': matched,
         'matched_count': len(matched),
+        'match_score': round(sum(float(m.get('weight') or 0.5) for m in matched), 3),
         'errors': errors,
     }
 

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+import _bootstrap  # noqa: F401  让独立运行本文件时也注册功能子目录
 import datahub
 import portfolio_policy
 import postmarket_digest
@@ -20,11 +21,17 @@ class PortfolioPolicyTest(unittest.TestCase):
         self.assertIn('高仓位总闸', guarded['reason'])
 
     @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
-    @patch('portfolio_policy.latest_market_add_signal', return_value={'must_add': True})
+    @patch('portfolio_policy.latest_market_add_signal', return_value={'action': 'strong_buy'})
     def test_high_position_allows_buy_only_in_must_add_window(self, _signal):
         guarded = portfolio_policy.guard('add', source_type='analysis')
         self.assertFalse(guarded['blocked'])
         self.assertEqual(guarded['action'], 'add')
+
+    @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
+    @patch('portfolio_policy.latest_market_add_signal', return_value={'action': 'buy'})
+    def test_high_position_still_blocks_only_moderate_buy(self, _signal):
+        guarded = portfolio_policy.guard('buy', source_type='selection')
+        self.assertTrue(guarded['blocked'])
 
     @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
     def test_manual_action_is_not_rewritten(self):
@@ -62,6 +69,44 @@ class AgentWeekendStatusTest(unittest.TestCase):
         from jobs import task_control
         source = inspect.getsource(task_control.agent_cockpit)
         self.assertIn("weekday() < 5", source)
+
+
+class StrategyDeploymentQualityTest(unittest.TestCase):
+    def test_holdout_quality_changes_deployment_order(self):
+        from analysis.strategy_genome import deployment_quality_score
+        overfit = deployment_quality_score(90, 20, -2, 5)
+        robust = deployment_quality_score(75, 60, 2, 12)
+        self.assertGreater(robust, overfit)
+
+    def test_composed_signature_deduplicates_parameter_clones(self):
+        from analysis.strategy_genome import composed_signature
+        a = [{'b': 'ma_rising', 'p': {'period': 20}}, {'b': 'rsi_below', 'p': {'x': 24}}]
+        b = [{'b': 'rsi_below', 'p': {'x': 30}}, {'b': 'ma_rising', 'p': {'period': 45}}]
+        self.assertEqual(composed_signature(a), composed_signature(b))
+
+    def test_runner_uses_deployment_quality_as_match_score(self):
+        from selection import instock_strategy_runner as runner
+
+        def always_match(code_name, frame, date=None):
+            return True
+
+        frame = pd.DataFrame({
+            'Date': pd.date_range('2026-01-01', periods=3),
+            'Open': [10, 10.1, 10.2], 'High': [10.2, 10.3, 10.4],
+            'Low': [9.9, 10.0, 10.1], 'Close': [10.1, 10.2, 10.3],
+            'Volume': [100, 110, 120],
+        })
+        strategies = {'dummy': {'cn': '测试策略', 'category': '测试',
+                                'min_days': 1, 'func': always_match}}
+        live = {'base': {'dummy': {}},
+                'base_meta': {'dummy': {'deployment_score': 80, 'generation': 2}},
+                'composed': []}
+        with patch.object(runner, 'STRATEGIES', strategies), \
+                patch.object(runner, '_live_genome_set', return_value=live):
+            result = runner.run_one('600000', frame, evolved=True)
+        self.assertEqual(result['matched_count'], 1)
+        self.assertEqual(result['match_score'], 0.8)
+        self.assertEqual(result['matched'][0]['generation'], 2)
 
 
 if __name__ == '__main__':

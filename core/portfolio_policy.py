@@ -38,7 +38,7 @@ def latest_market_add_signal() -> Optional[Dict]:
 
 
 def guard(action: str, source_type: str = 'analysis', reason: str = '') -> Dict:
-    """高仓位时，自动买入/加仓必须有当天“必须加仓”信号，否则降为观察。
+    """高仓位时，自动买入/加仓必须有当天“强力买入”信号，否则降为观察。
 
     manual 明确代表用户操作，不做拦截；数据/判断缺失一律 fail-closed。
     """
@@ -48,13 +48,14 @@ def guard(action: str, source_type: str = 'analysis', reason: str = '') -> Dict:
     if result['mode'] != 'high' or action not in BUY_ACTIONS or source_type == 'manual':
         return result
     add_signal = latest_market_add_signal()
-    if add_signal and add_signal.get('must_add') is True:
+    signal_action = (add_signal or {}).get('action')
+    if add_signal and (signal_action == 'strong_buy' or add_signal.get('must_add') is True):
         result['market_add_signal'] = add_signal
         return result
     result.update({
         'action': 'watch', 'blocked': True,
         'market_add_signal': add_signal,
-        'reason': ('[高仓位总闸] 原建议为%s；今天不是“必须加仓”窗口，自动降为观察。%s'
+        'reason': ('[高仓位总闸] 原建议为%s；今日组合动作不是“强力买入”，自动降为观察。%s'
                    % ('买入' if action == 'buy' else '增持', (' ' + reason) if reason else '')),
     })
     return result
@@ -64,7 +65,7 @@ def status() -> Dict:
     signal = latest_market_add_signal()
     return {
         'position_mode': mode(),
-        'buy_gate': 'must_add_only' if mode() == 'high' else 'normal',
+        'buy_gate': 'strong_buy_only' if mode() == 'high' else 'normal',
         'market_add_signal': signal,
         'fail_closed': mode() == 'high' and not signal,
     }

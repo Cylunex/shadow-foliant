@@ -922,6 +922,15 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     return _cockpit(recent_limit=recent_limit, compact=compact)
 
 
+@mcp.tool()
+def strategy_deployment() -> Dict[str, Any]:
+    """读取当前真正用于选股/扫描的策略部署集：基础策略参数与变体元数据、样本外门槛、
+    去重后的组合策略。只读生产库，不触发回测或进化。"""
+    from analysis.strategy_genome import get_live_strategy_set
+    live = get_live_strategy_set() or {}
+    return {'base_count': len(live.get('base') or {}), **live}
+
+
 # =========================== 市场上下文 + 观测 ===========================
 @mcp.tool()
 def market_indices() -> Any:

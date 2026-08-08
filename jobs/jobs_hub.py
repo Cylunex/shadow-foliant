@@ -916,16 +916,17 @@ def task_daily_backtest():
             ho_avg_ar = round(sum(ho_ar_all) / len(ho_ar_all), 2) if ho_ar_all else None
 
             # 更新变体适应度(零触发也更新:trigger_count=0 让它有低分,可被淘汰,而非永远 NULL 待评估)
+            _total_trades = sum(r['trigger_count'] for r in results)
             update_variant_fitness(
                 sr['variant_id'], avg_wr, avg_ar, avg_dd,
                 trigger_count=n_triggered, sample_stocks=len(results),
                 holdout_win_rate=ho_avg_wr, holdout_avg_ret=ho_avg_ar, holdout_trigger=ho_trig,
+                confidence_n=_total_trades,
             )
             if n_triggered == 0:
                 continue
 
             # confidence_n=总交易笔数(置信收缩按笔数立论;trigger_count 仍传触发股票数供触发率项)
-            _total_trades = sum(r['trigger_count'] for r in results)
             v_score = compute_strategy_score(avg_wr, avg_ar, n_triggered,
                                              max_trigger=n_pool, sample_stocks=len(results),
                                              max_dd=avg_dd, confidence_n=_total_trades)
@@ -997,6 +998,12 @@ def task_daily_backtest():
                 continue
         if culled:
             print(f'[daily_backtest] 淘汰兜底退役 {culled} 个变体(超额已评分/score<=0/老未评估)')
+
+        try:
+            from instock_strategy_runner import invalidate_live_cache
+            invalidate_live_cache()
+        except Exception:
+            pass
 
         # ── 7. 推送进化日报 ──
         report = build_evolution_report()
@@ -3139,7 +3146,7 @@ def _daily_strategy_scan():
             print(f'[wf_daily_strategy_scan] 扫描取数失败 {scan_fail}/{min(len(scan_pool),100)} 只'
                   + ('(失败过半,疑数据源异常)' if scan_fail > min(len(scan_pool), 100) / 2 else ''))
 
-        scan_results.sort(key=lambda x: x['matched_count'], reverse=True)
+        scan_results.sort(key=lambda x: (x.get('match_score', 0), x['matched_count']), reverse=True)
         top_n = scan_results[:5]  # 仅 TOP 5 跑 AI
 
         # 3. AI 深度分析（plan_execute）—— 闭合反馈环:注入本策略历史真实战绩 + 决策信号后验
@@ -3241,7 +3248,8 @@ def _daily_strategy_scan():
                 lines.append('━━━ 命中策略 TOP 5 ━━━')
                 for i, r in enumerate(scan_results[:5], 1):
                     matched_cn = [m["cn"] for m in r.get("matched", [])]
-                    lines.append(f"{i}. {r['symbol']} {r['name']} — 命中 {r['matched_count']} 策略: {', '.join(matched_cn)}")
+                    lines.append(f"{i}. {r['symbol']} {r['name']} — 质量分 {r.get('match_score', 0):.2f}，"
+                                 f"命中 {r['matched_count']} 策略: {', '.join(matched_cn)}")
             if ai_inserted > 0:
                 lines.extend(['', f'✅ {ai_inserted} 只入选AI推荐池（已启用监控）'])
             from postmarket_digest import add_section
@@ -4338,7 +4346,10 @@ def task_unified_selection():
                             continue
                         mid = m.get('id', '')
                         base_id = mid.split(':')[0] if mid.startswith('composed:') else mid
-                        _add(sym, strategy_weights.get(base_id, 1.0), m.get('cn', mid))
+                        _weight = m.get('weight')
+                        if _weight is None:
+                            _weight = strategy_weights.get(base_id, 0.5)
+                        _add(sym, float(_weight), m.get('cn', mid))
         except Exception:
             pass
 
@@ -4657,18 +4668,19 @@ def task_morning_portfolio():
             from analysis.market_add_signal import build as _build_add_signal, format_text as _fmt_add_signal
             _add_signal = _build_add_signal()
         except Exception as _ae:
-            _add_signal = {'must_add': False, 'level': 'unknown',
-                           'headline': '⚠️【加仓判断不可用】',
-                           'reason': f'{type(_ae).__name__}；默认不加仓。'}
+            _add_signal = {'must_add': False, 'level': 'unknown', 'action': 'unknown',
+                           'action_cn': '数据不足·默认持有', 'suggested_position_delta': '不变',
+                           'headline': '⚠️【今日组合动作：数据不足】',
+                           'reason': f'{type(_ae).__name__}；默认保持仓位。'}
         try:
             save_indicator_snapshot('_market_add_signal', {
                 **_add_signal, 'date': datetime.now().strftime('%Y-%m-%d'),
                 'updated_at': datetime.now().astimezone().isoformat(),
             })
         except Exception as _se:
-            print(f'[morning_portfolio] 加仓判断快照保存失败: {_se}')
+            print(f'[morning_portfolio] 组合动作快照保存失败: {_se}')
         lines.append(_fmt_add_signal(_add_signal) if '_fmt_add_signal' in locals()
-                     else f"{_add_signal['headline']}\n结论：否。{_add_signal['reason']}")
+                     else f"{_add_signal['headline']}\n动作：数据不足·默认持有。{_add_signal['reason']}")
         lines.append('')
 
         # 大盘速览(轻量,新浪源)
@@ -4747,7 +4759,7 @@ def task_morning_portfolio():
             lines.append('')
             lines.append(f'⚠️ {nosnap_n}/{len(scans)} 只无盘后指标快照(等 15:45 快照任务跑过后完整)')
 
-        _title = '🚨 今天出现必须加仓窗口' if _add_signal.get('must_add') else '☀️ 早盘持仓分析'
+        _title = f"{_add_signal.get('headline', '☀️ 早盘持仓分析')}｜早盘持仓"
         _push_daily(_title, '\n'.join(lines))
 
         # 🎯 挑「今日重点盯盘候选」(持仓多→聚焦):风险分>0 / 有买点 / 盘中异动±3%。

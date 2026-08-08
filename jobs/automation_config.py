@@ -61,7 +61,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '☀️ 早盘持仓分析',
         'schedule': '10:05 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '持仓逐只风险分+浮盈+买点+盘中异动；含组合级“是否必须加仓”醒目提示（小跌忽略、连续大跌不接飞刀、非连续全市场急跌才触发）；并挑今日 top15 重点候选及早盘 AI 研判',
+        'description': '持仓逐只风险分+浮盈+买点+盘中异动；含组合级强力买入/适度买入/持有/适度卖出/优先卖出五档动作；并挑今日 top15 重点候选及早盘 AI 研判',
     },
     'morning_portfolio_ai': {
         'cn': '☀️ 早盘 AI 研判(morning_portfolio 内)',

@@ -313,7 +313,7 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 | 14:30 | `afternoon_portfolio` | 🧹 **尾盘持仓总结**(四合一:瘦身策略+逐只动作+尾盘机会+止盈阶梯减仓,eod_review) | ✅ |
 | 16:30 起 | `kline_prefetch` → `factor_collection`/`portfolio_indicator_snapshot`/`eod_outcomes` | K线预热完成后并行提交因子、指标快照和盘后后验；`daily_market_snapshot` 16:48 独立运行 | ❌ |
 | 18:30/18:35 | `dragon_tiger_archive` / `announcement_scan` | 龙虎榜归档 / 公告+研报+解禁风险预警 | 部分✅ |
-| 19:00 | `daily_backtest` | 🧬 策略进化(进程池) + 🔍 盘后策略扫描 | ✅ |
+| 19:00 | `daily_backtest` | 🧬 周一/三/五完整策略进化(进程池)，其余交易日轻扫描；样本外部署门 + 组合结构去重 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
 | 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
 | 周日 | `mx_weekend_outlook`(10:00)/`weekly_analysis`(15:00)/`portfolio_stress_ai`(16:00)/`wf_weekly_backtest`(20:00) | 周末研判/周报/🛡️压力预案/周回测 | 部分✅ |
