@@ -165,22 +165,52 @@ def research_stock(code: str, depth: str = 'quick',
         signal = None
         warnings.append(f'decision_signal: {exc}')
     try:
+        from decision_signal import list_transitions
+        transitions = list_transitions(code=code, material_only=True, days=90, limit=5)
+    except Exception as exc:
+        transitions = []
+        warnings.append(f'decision_signal_transitions: {exc}')
+    try:
         from ai_recommendation_monitor import list_active
         recommendations = list_active(symbol=code, limit=20)
     except Exception as exc:
         recommendations = []
         warnings.append(f'ai_recommendations: {exc}')
+    try:
+        from analysis.market_add_signal import build as build_market_action
+        market_action = build_market_action()
+    except Exception as exc:
+        market_action = {'action': 'unknown', 'action_cn': '数据不足·默认持有'}
+        warnings.append(f'market_action: {exc}')
+    try:
+        base = context.get('base') if isinstance(context, dict) else {}
+        info = base.get('info') if isinstance(base, dict) else {}
+        from analysis.trade_plan import build_for_code
+        trade_plan = build_for_code(
+            code,
+            name=str((info or {}).get('name') or ''),
+            market_signal=market_action,
+            latest_signal=signal,
+        )
+    except Exception as exc:
+        trade_plan = {'available': False, 'action': 'watch', 'action_cn': '观望',
+                      'blockers': [f'交易计划生成失败: {type(exc).__name__}']}
+        warnings.append(f'trade_plan: {exc}')
     return envelope(
         {
             'code': code,
             'depth': depth,
             'context': context,
             'latest_decision_signal': signal,
+            'recent_signal_transitions': transitions,
             'active_recommendations': recommendations,
+            'market_action': market_action,
+            'trade_plan': trade_plan,
         },
         status='partial' if warnings else 'success',
         warnings=warnings,
-        sources=groups + ['decision_signals', 'ai_recommendations'],
+        sources=groups + ['decision_signals', 'decision_signal_events', 'ai_recommendations',
+                          'market_action', 'trade_plan'],
         view=view,
     )
 
@@ -1076,6 +1106,15 @@ def decision_signal_latest(code: str) -> Any:
     """某股最新活跃决策信号(看 AI 当前对该股的操作主张:动作/进出场/止损/信心/理由)。"""
     from decision_signal import get_latest_active
     return get_latest_active(code) or {'note': f'{code} 无活跃决策信号'}
+
+
+@mcp.tool()
+def decision_signal_transitions(code: str = '', source_type: str = '', days: int = 30,
+                                material_only: bool = True, limit: int = 100) -> Any:
+    """信号状态变化；默认只返回买入/中性/卖出风险状态之间的实质变化。"""
+    from decision_signal import list_transitions
+    return list_transitions(code=code or None, source_type=source_type or None,
+                            material_only=material_only, days=days, limit=limit)
 
 
 @mcp.tool()

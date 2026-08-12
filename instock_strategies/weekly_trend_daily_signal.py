@@ -16,17 +16,14 @@
   本策略要求周线趋势多头 + 日线触发 → 双重过滤降假信号。
 """
 
-import numpy as np
 from instock_strategies._talib_compat import tl
-from collections import deque
+from analysis.multi_timeframe import resample_calendar_week
 
 
-def _resample_weekly(closes):
-    """从日线收盘价近似计算周线：取每5个交易日的收盘价"""
-    weekly = []
-    for i in range(4, len(closes), 5):
-        weekly.append(float(closes[i]))
-    return np.array(weekly, dtype=float)
+def _resample_weekly(data):
+    """按周五结束的自然交易周聚合，兼容节假日与停牌。"""
+    weekly = resample_calendar_week(data)
+    return weekly['Close'].to_numpy(dtype=float) if not weekly.empty else []
 
 
 def check(code_name, data, date=None, threshold=120,
@@ -52,7 +49,7 @@ def check(code_name, data, date=None, threshold=120,
     closes = data['close'].values
 
     # ── 周线层 ──
-    weekly_closes = _resample_weekly(closes)
+    weekly_closes = _resample_weekly(data)
     if len(weekly_closes) < weekly_ma_period + 26:  # MACD 需要26周
         return False
 

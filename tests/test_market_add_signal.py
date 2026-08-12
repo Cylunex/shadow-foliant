@@ -48,6 +48,21 @@ class MarketAddSignalTests(unittest.TestCase):
         r = evaluate(_indices(2.0, 2.2, 1.9, 2.5, 1.8), [0.1, -0.1, 0.2], 1.03)
         self.assertEqual(r['action'], 'reduce')
 
+    def test_available_breadth_confirms_broad_dip(self):
+        breadth = {'available': True, 'covered': 480, 'up_count': 100,
+                   'up_ratio': 100 / 480, 'down_ratio': 380 / 480}
+        r = evaluate(_indices(-0.9, -1.1, -1.0, -0.7, -0.8),
+                     [0.2, -0.1, 0.1], 1.0, breadth=breadth)
+        self.assertEqual(r['action'], 'buy')
+        self.assertTrue(r['breadth']['available'])
+
+    def test_breadth_disagreement_prevents_false_broad_dip(self):
+        breadth = {'available': True, 'covered': 480, 'up_count': 380,
+                   'up_ratio': 380 / 480, 'down_ratio': 100 / 480}
+        r = evaluate(_indices(-0.9, -1.1, -1.0, -0.7, -0.8),
+                     [0.2, -0.1, 0.1], 1.0, breadth=breadth)
+        self.assertEqual(r['action'], 'hold')
+
 
 if __name__ == '__main__':
     unittest.main()

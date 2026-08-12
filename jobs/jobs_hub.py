@@ -4504,10 +4504,25 @@ def task_unified_selection():
         artifact_rows = []
         final_rows = []
         try:
+            _selection_dfs = {}
             for rank, code in enumerate(top_list, 1):
                 cinfo = candidates.get(code) or {}
                 q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
                 debate = debate_map.get(code) or {}
+                _timeframe = {'available': False, 'weekly_regime': 'unknown',
+                              'resonance': 'unknown', 'reason': '周线数据不可用'}
+                try:
+                    from analysis.multi_timeframe import evaluate as _eval_timeframe
+                    _df = datahub.kline(code, '1y', adjust='qfq')
+                    _quality = datahub.kline_quality(_df)
+                    if (_df is not None and not getattr(_df, 'empty', True)
+                            and _quality.get('actionable')):
+                        _selection_dfs[code] = _df
+                        _timeframe = _eval_timeframe(_df)
+                    elif _quality.get('reason'):
+                        _timeframe['reason'] = f"K线不可用于决策:{_quality['reason']}"
+                except Exception as _te:
+                    _timeframe['reason'] = f'{type(_te).__name__}: {str(_te)[:50]}'
                 artifact_rows.append({
                     'rank': rank,
                     'code': code,
@@ -4521,9 +4536,22 @@ def task_unified_selection():
                     'debate_verdict': debate.get('verdict'),
                     'debate_confidence': debate.get('confidence'),
                     'debate_reason': debate.get('reason') or debate.get('summary'),
+                    'multi_timeframe': _timeframe,
                 })
             from analysis.selection_finalizer import finalize_selection
             final_rows = finalize_selection(artifact_rows, limit=5)
+            # 最终 5 只补确定性交易计划。只复用上面已读的缓存 K，不新增 LLM/外部源调用。
+            try:
+                from analysis.trade_plan import build_trade_plan
+                for _row in final_rows:
+                    _code = _row.get('code')
+                    _df = _selection_dfs.get(_code)
+                    if _df is not None:
+                        _row['trade_plan'] = build_trade_plan(
+                            _code, _df, name=_row.get('name') or '')
+            except Exception as _tpe:
+                print(f'[unified_selection] 交易计划生成失败(不影响最终TOP5): '
+                      f'{type(_tpe).__name__}: {str(_tpe)[:80]}')
             save_indicator_snapshot('_last_selection', {
                 'picks': top_list,
                 'rows': artifact_rows,

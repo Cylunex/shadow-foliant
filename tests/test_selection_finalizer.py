@@ -56,6 +56,20 @@ class SelectionFinalizerTests(unittest.TestCase):
         self.assertIn('10:05', text)
         self.assertEqual(text.count('优选分'), 5)
 
+    def test_calendar_week_resonance_affects_final_ranking(self):
+        rows = [
+            {'rank': 1, 'code': '000001', 'score': 3, 'sources': ['A', 'B'],
+             'multi_timeframe': {'available': True, 'resonance': 'blocked',
+                                 'resonance_cn': '周日同弱'}},
+            {'rank': 2, 'code': '000002', 'score': 3, 'sources': ['A', 'B'],
+             'multi_timeframe': {'available': True, 'resonance': 'confirmed',
+                                 'resonance_cn': '周日共振'}},
+        ]
+        final = finalize_selection(rows, limit=2)
+        self.assertEqual(final[0]['code'], '000002')
+        self.assertGreater(final[0]['resonance_bonus'], 0)
+        self.assertLess(final[1]['resonance_bonus'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

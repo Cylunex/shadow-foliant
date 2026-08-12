@@ -41,7 +41,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
-             trend_ratio: Optional[float] = None) -> Dict:
+             trend_ratio: Optional[float] = None,
+             breadth: Optional[Dict] = None) -> Dict:
     """纯规则判断，便于测试。previous_returns 为沪深300最近若干完整交易日涨跌幅。"""
     changes: List[float] = []
     names: List[str] = []
@@ -79,12 +80,20 @@ def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
     cascade = prior_large or sum(1 for v in recent if v <= -1.0) >= 2
     trend_broken = trend_ratio is not None and trend_ratio < min_trend
     broad_sharp = median <= -sharp_pct and broad_count >= broad_need
+    breadth = breadth if isinstance(breadth, dict) else {}
+    breadth_available = bool(breadth.get('available'))
+    up_ratio = breadth.get('up_ratio') if breadth_available else None
+    breadth_weak = bool(up_ratio is not None and float(up_ratio) <= 0.35)
+    breadth_strong = bool(up_ratio is not None and float(up_ratio) >= 0.70)
+    # 有横截面时，它用于确认“普跌/普涨”；不可用时完整保持原有指数规则。
+    broad_sharp = broad_sharp and (breadth_weak if breadth_available else True)
 
     base = {
         'median_change': round(median, 2), 'broad_down': broad_count,
         'available': len(changes), 'index_names': names,
         'previous_change': round(last_prev, 2) if last_prev is not None else None,
         'trend_ratio': round(trend_ratio, 4) if trend_ratio is not None else None,
+        'breadth': breadth,
     }
     if broad_sharp and not cascade and not trend_broken:
         return _result('strong_buy',
@@ -109,18 +118,23 @@ def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
     if trend_broken:
         return _result('reduce', '沪深300明显低于20日趋势，高仓位下先小幅降风险。',
                        **base, level='reduce')
-    if median >= trim_pct and broad_up >= broad_need:
+    if median >= trim_pct and broad_up >= broad_need and (breadth_strong if breadth_available else True):
         return _result('reduce',
                        (f'核心指数中位上涨 {median:.2f}%，{broad_up}/{len(changes)} 个涨超 '
                         f'{trim_pct:.1f}%；高仓位下借普涨适度兑现。'),
                        **base, level='reduce')
-    if median <= -buy_pct and moderate_down >= broad_need and not cascade:
+    if (median <= -buy_pct and moderate_down >= broad_need and not cascade
+            and (breadth_weak if breadth_available else True)):
         return _result('buy',
                        (f'核心指数中位跌幅 {median:.2f}%，属于普遍回调但未形成连续下杀；'
                         '可小幅提高仓位，不需要一次打满。'),
                        **base, level='buy')
+    breadth_text = ''
+    if breadth_available:
+        breadth_text = (f"；A500 上涨 {int(breadth.get('up_count') or 0)}/"
+                        f"{int(breadth.get('covered') or 0)} 只")
     return _result('hold',
-                   (f'核心指数中位涨跌 {median:+.2f}%，没有达到明确买入或卖出门槛；'
+                   (f'核心指数中位涨跌 {median:+.2f}%{breadth_text}，没有达到明确买入或卖出门槛；'
                     '维持仓位，普通小波动不操作。'),
                    **base, level='hold')
 
@@ -145,7 +159,12 @@ def build() -> Dict:
             if len(closes) >= 20:
                 ma20 = float(closes.tail(20).mean())
                 trend_ratio = float(closes.iloc[-1]) / ma20 if ma20 > 0 else None
-        return evaluate(indices, previous_returns, trend_ratio)
+        try:
+            from analysis.market_breadth import build as _build_breadth
+            breadth = _build_breadth()
+        except Exception as exc:
+            breadth = {'available': False, 'reason': f'{type(exc).__name__}'}
+        return evaluate(indices, previous_returns, trend_ratio, breadth=breadth)
     except Exception as e:
         return _result('unknown', f'{type(e).__name__}；数据异常时默认保持仓位。',
                        level='unknown')

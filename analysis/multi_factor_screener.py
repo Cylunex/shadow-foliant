@@ -152,17 +152,29 @@ def get_index_universe(index_code: str = DEFAULT_INDEX) -> List[str]:
     中证官网接口(index_stock_cons_csindex)覆盖全部中证系列,A500 可直接取。
     失败返回空列表（调用方应降级）。
     """
+    cache_get = cache_set = None
+    cache_key = f"index_universe:{index_code}"
+    try:
+        from cache import cache_get, cache_set
+        cached = cache_get(cache_key)
+        if isinstance(cached, list) and cached:
+            return [str(x).zfill(6) for x in cached]
+    except Exception:
+        cache_get = cache_set = None
     try:
         import akshare as ak
         from akshare_safe import call as ak_call   # 硬超时,防 csindex/新浪慢响应卡死
         try:
             df = ak_call(ak.index_stock_cons_csindex, symbol=index_code, timeout=20)
             col = '成分券代码' if '成分券代码' in df.columns else df.columns[4]
-            return [str(x).zfill(6) for x in df[col].tolist()]
+            result = [str(x).zfill(6) for x in df[col].tolist()]
         except Exception:
             df = ak_call(ak.index_stock_cons, symbol=index_code, timeout=20)
             col = '品种代码' if '品种代码' in df.columns else df.columns[0]
-            return [str(x).zfill(6) for x in df[col].tolist()]
+            result = [str(x).zfill(6) for x in df[col].tolist()]
+        if cache_set and result:
+            cache_set(cache_key, result, 7 * 86400)
+        return result
     except Exception:
         return []
 

@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 _VERDICT_BONUS = {'买入': 18.0, '谨慎': -6.0, None: 0.0, '': 0.0}
 _CONFIDENCE_BONUS = {'高': 4.0, '中': 2.0, '低': 0.0, None: 0.0, '': 0.0}
+_RESONANCE_BONUS = {'confirmed': 12.0, 'waiting': 0.0, 'blocked': -16.0,
+                    'unknown': 0.0, None: 0.0, '': 0.0}
 
 
 def _number(value: Any) -> Optional[float]:
@@ -31,7 +33,7 @@ def _chase_penalty(change_pct: Any) -> float:
 def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
     """从综合候选中选最终 TOP N，返回带 final_score/final_reason 的新字典。
 
-    评分刻意透明：规则分×10 + 来源数×4 + 红蓝结论/置信度 - 追高扣分。
+    评分刻意透明：规则分×10 + 来源数×4 + 红蓝结论/置信度 + 周日共振 - 追高扣分。
     原始 rank 作为最后的稳定排序键，保证同分结果可复现。
     """
     ranked: List[Dict[str, Any]] = []
@@ -45,9 +47,13 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
         sources = list(dict.fromkeys(str(s) for s in (row.get('sources') or []) if s))
         confidence = row.get('debate_confidence')
         chase_penalty = _chase_penalty(row.get('change_pct'))
+        timeframe = row.get('multi_timeframe') if isinstance(row.get('multi_timeframe'), dict) else {}
+        resonance = timeframe.get('resonance') or row.get('resonance')
+        resonance_bonus = _RESONANCE_BONUS.get(resonance, 0.0)
         final_score = (rule_score * 10.0 + min(len(sources), 4) * 4.0
                        + _VERDICT_BONUS.get(verdict, 0.0)
                        + (_CONFIDENCE_BONUS.get(confidence, 0.0) if verdict == '买入' else 0.0)
+                       + resonance_bonus
                        - chase_penalty)
 
         reasons = []
@@ -59,6 +65,12 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
             reasons.append('规则优选·待AI')
         reasons.append(f'{len(sources)}源共振' if len(sources) > 1 else '单源命中')
         reasons.append(f'规则分{rule_score:g}')
+        if resonance == 'confirmed':
+            reasons.append('周日共振+12')
+        elif resonance == 'blocked':
+            reasons.append('周日同弱-16')
+        elif timeframe.get('available'):
+            reasons.append(str(timeframe.get('resonance_cn') or '等待日线确认'))
         if chase_penalty:
             reasons.append(f'已涨{_number(row.get("change_pct")):.1f}%扣追高分')
 
@@ -67,6 +79,7 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
             'final_score': round(final_score, 2),
             'final_reason': '；'.join(reasons),
             'chase_penalty': chase_penalty,
+            'resonance_bonus': resonance_bonus,
         })
         ranked.append(row)
 
@@ -84,7 +97,7 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
     rows = list(rows or [])
     lines = [
-        '从综合 TOP15 再筛一层：规则强度 + 多源共振 + 红蓝复核 + 追高风险。',
+        '从综合 TOP15 再筛一层：规则强度 + 多源共振 + 红蓝复核 + 自然周/日线共振 + 追高风险。',
         '是否提高总仓位仍以 10:05 的组合动作分级为准。',
         '',
     ]
@@ -102,4 +115,16 @@ def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
         debate_reason = str(row.get('debate_reason') or '').strip()
         if debate_reason:
             lines.append(f'   关键判断：{debate_reason[:80]}')
+        plan = row.get('trade_plan') if isinstance(row.get('trade_plan'), dict) else {}
+        if plan.get('available'):
+            rr = plan.get('risk_reward_ratio')
+            rr_text = f'｜盈亏比 {rr:g}' if rr is not None else '｜盈亏比待确认'
+            lines.append(
+                f"   计划：{plan.get('action_cn', '观望')}｜入场 "
+                f"{plan.get('entry_low', '-')}~{plan.get('entry_high', '-')}｜"
+                f"止损 {plan.get('stop_loss', '-')}｜目标 {plan.get('target_price') or '-'}{rr_text}"
+            )
+            blockers = plan.get('blockers') or []
+            if blockers:
+                lines.append(f"   阻断：{'；'.join(str(x) for x in blockers[:2])}")
     return '\n'.join(lines).rstrip()

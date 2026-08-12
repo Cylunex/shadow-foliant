@@ -60,7 +60,16 @@ def _market_context() -> str:
         q = datahub.quotes(['sh000001'])
         idx = q.get('000001') or {}
         if idx:
-            return f"上证指数 {idx.get('price','?')}({idx.get('change_pct','?')}%)。"
+            text = f"上证指数 {idx.get('price','?')}({idx.get('change_pct','?')}%)。"
+            try:
+                from analysis.market_breadth import build as build_breadth
+                breadth = build_breadth()
+                if breadth.get('available'):
+                    text += (f" A500 上涨{breadth['up_count']}/{breadth['covered']}只，"
+                             f"中位涨跌{breadth['median_change']:+.2f}%。")
+            except Exception:
+                pass
+            return text
     except Exception:
         pass
     return "(市场环境数据暂缺,请基于候选池自身研判。)"

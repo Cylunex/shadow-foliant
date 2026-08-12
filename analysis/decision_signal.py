@@ -43,6 +43,11 @@ ACTION_CN = {'buy': '买入', 'add': '增持', 'hold': '持有', 'reduce': '减�
 _ACTION_DIR = {'buy': 1, 'add': 1, 'sell': -1, 'reduce': -1,
                'hold': 0, 'watch': 0, 'avoid': 0, 'alert': 0}
 TERMINAL_STATUS = ('expired', 'invalidated', 'closed', 'archived')
+_ACTION_STATE = {
+    'buy': 'risk_on', 'add': 'risk_on',
+    'hold': 'neutral', 'watch': 'neutral',
+    'reduce': 'risk_off', 'sell': 'risk_off', 'avoid': 'risk_off', 'alert': 'risk_off',
+}
 
 # 持有周期文本 → 后验天数(交易日近似)
 _HORIZON_DAYS = {'intraday': 1, 'short': 3, 'swing': 10, 'long': 20}
@@ -76,9 +81,15 @@ def _ensure_tables():
             direction_expected INTEGER, outcome TEXT,
             engine_version TEXT, created_at TEXT,
             UNIQUE(signal_id, horizon_days))''')
+        cur.execute(f'''CREATE TABLE IF NOT EXISTS decision_signal_events (
+            id {pk},
+            signal_id INTEGER, code TEXT, source_type TEXT, horizon TEXT,
+            from_action TEXT, to_action TEXT, material INTEGER,
+            reason TEXT, created_at TEXT)''')
         for idx in (
             'CREATE INDEX IF NOT EXISTS idx_ds_code_status ON decision_signals(code, status)',
             'CREATE INDEX IF NOT EXISTS idx_ds_created ON decision_signals(created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_dse_code_created ON decision_signal_events(code, created_at)',
         ):
             try:
                 cur.execute(idx)
@@ -171,6 +182,13 @@ def _now() -> str:
     return datetime.now().isoformat()
 
 
+def is_material_transition(from_action: str, to_action: str) -> bool:
+    """只有风险状态跨组变化才值得提醒；持有↔观望不制造噪声。"""
+    if not from_action or not to_action or from_action == to_action:
+        return False
+    return _ACTION_STATE.get(from_action) != _ACTION_STATE.get(to_action)
+
+
 def _lazy_expire(cur):
     """把超 expires_at 的 active 信号置 expired(惰性,在查询/创建前调)。"""
     try:
@@ -232,6 +250,16 @@ def create_signal(code: str, name: str = '', action: str = 'hold',
             conn.commit()
             conn.close()
             return (int(dup[0]), False)
+        # 同来源、同周期是一条状态流。动作变化时关闭旧状态，避免多种动作同时活跃。
+        cur.execute('''SELECT id, action FROM decision_signals
+                       WHERE code=? AND source_type=? AND horizon=? AND status='active'
+                       ORDER BY id DESC''', (code, source_type, horizon))
+        previous_rows = cur.fetchall()
+        previous_action = previous_rows[0][1] if previous_rows else None
+        for previous_id, previous_value in previous_rows:
+            if previous_value != action:
+                cur.execute("UPDATE decision_signals SET status='invalidated', updated_at=? WHERE id=?",
+                            (_now(), previous_id))
         # 反向作废:方向相反的活跃信号置 invalidated
         new_dir = _ACTION_DIR.get(action, 0)
         if new_dir != 0:
@@ -251,6 +279,14 @@ def create_signal(code: str, name: str = '', action: str = 'hold',
              horizon, horizon_days, ref_price, entry_low, entry_high, stop_loss, target_price,
              (reason or '')[:1000], (risk or '')[:500], 'active', trace_id, now, expires_at, now))
         new_id = cur.lastrowid
+        if previous_action and previous_action != action:
+            cur.execute('''INSERT INTO decision_signal_events
+                (signal_id, code, source_type, horizon, from_action, to_action,
+                 material, reason, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)''',
+                (new_id, code, source_type, horizon, previous_action, action,
+                 int(is_material_transition(previous_action, action)),
+                 (reason or '')[:500], now))
         conn.commit()
         conn.close()
         return (int(new_id) if new_id else None, True)
@@ -353,6 +389,45 @@ def list_signals(code: Optional[str] = None, status: Optional[str] = 'active',
 def get_latest_active(code: str) -> Optional[Dict[str, Any]]:
     rows = list_signals(code=code, status='active', limit=1)
     return rows[0] if rows else None
+
+
+_EVENT_COLS = ['id', 'signal_id', 'code', 'source_type', 'horizon', 'from_action',
+               'to_action', 'material', 'reason', 'created_at']
+
+
+def list_transitions(code: Optional[str] = None, source_type: Optional[str] = None,
+                     material_only: bool = True, days: int = 30,
+                     limit: int = 100) -> List[Dict[str, Any]]:
+    """查询服务端持久化的动作变化；默认只返回跨风险状态的实质变化。"""
+    try:
+        _ensure_tables()
+        if not _tables_ready:
+            return []
+        conn = _connect(_DB_PATH)
+        cur = conn.cursor()
+        sql = f"SELECT {', '.join(_EVENT_COLS)} FROM decision_signal_events WHERE 1=1"
+        params: List[Any] = []
+        if code:
+            sql += ' AND code=?'; params.append(str(code).strip())
+        if source_type:
+            sql += ' AND source_type=?'; params.append(str(source_type))
+        if material_only:
+            sql += ' AND material=1'
+        if days:
+            sql += ' AND created_at>=?'
+            params.append((datetime.now() - timedelta(days=int(days))).isoformat())
+        sql += ' ORDER BY id DESC LIMIT ?'; params.append(max(1, min(int(limit), 500)))
+        cur.execute(sql, tuple(params))
+        rows = [dict(zip(_EVENT_COLS, row)) for row in cur.fetchall()]
+        conn.close()
+        for row in rows:
+            row['from_action_cn'] = ACTION_CN.get(row.get('from_action'), row.get('from_action'))
+            row['to_action_cn'] = ACTION_CN.get(row.get('to_action'), row.get('to_action'))
+            row['material'] = bool(row.get('material'))
+        return rows
+    except Exception as exc:
+        print(f'[decision_signal] transitions 查询失败: {type(exc).__name__}: {str(exc)[:80]}')
+        return []
 
 
 def get_signal(signal_id: int) -> Optional[Dict[str, Any]]:
