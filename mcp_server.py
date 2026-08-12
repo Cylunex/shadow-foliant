@@ -135,7 +135,7 @@ def research_stock(code: str, depth: str = 'quick',
     depth:quick=基础/技术/资金/风险，deep=再加基本面/缠论/筹码/情绪；
     view:summary 会移除 K线明细和截断新闻，full 保留完整 context。"""
     import copy
-    from agent_contract import envelope, context_warnings
+    from agent_contract import envelope, context_quality, context_warnings
     from agent_tool_groups import collect
     code = ''.join(ch for ch in str(code or '') if ch.isdigit())[-6:]
     if len(code) != 6:
@@ -147,6 +147,15 @@ def research_stock(code: str, depth: str = 'quick',
         return envelope(None, status='failed', warnings=['depth 仅支持 quick/deep'])
     context = collect(groups, code)
     warnings = context_warnings(context)
+    quality = context_quality(context)
+    if quality.get('core_degraded'):
+        warnings.append(quality['guardrails']['reason'])
+    try:
+        from analysis.market_structure import build_market_structure
+        market_structure = build_market_structure(context, code)
+    except Exception as exc:
+        market_structure = {'status': 'missing', 'limitations': [
+            f'市场结构生成失败:{type(exc).__name__}']}
     if view == 'summary':
         context = copy.deepcopy(context)
         technical = context.get('kline_technical')
@@ -205,12 +214,17 @@ def research_stock(code: str, depth: str = 'quick',
             'recent_signal_transitions': transitions,
             'active_recommendations': recommendations,
             'market_action': market_action,
+            'market_structure': market_structure,
             'trade_plan': trade_plan,
         },
-        status='partial' if warnings else 'success',
+        status=('degraded' if quality.get('level') == 'low'
+                else 'partial' if warnings else 'success'),
         warnings=warnings,
         sources=groups + ['decision_signals', 'decision_signal_events', 'ai_recommendations',
-                          'market_action', 'trade_plan'],
+                          'market_action', 'market_structure', 'trade_plan'],
+        data_quality=quality,
+        stages=quality.get('stages') or [],
+        decision_guardrails=quality.get('guardrails') or {},
         view=view,
     )
 

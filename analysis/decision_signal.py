@@ -26,6 +26,7 @@ import _bootstrap  # noqa: F401  路径引导
   outcome_stats(dimension, days) -> dict       # 按 action/source/horizon 分桶胜率
 """
 
+import math
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +36,10 @@ from db_compat import connect as _connect, USE_POSTGRES
 _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 _tables_ready = False
 ENGINE_VERSION = 'decision-signal-v1'
+MIN_FEEDBACK_SAMPLES = 30
+_BETA_PRIOR_HITS = 15.0
+_BETA_PRIOR_MISSES = 15.0
+_MAX_PERFORMANCE_FACTOR = 1.2
 
 # 动作分类与方向
 ACTIONS = ('buy', 'add', 'hold', 'reduce', 'sell', 'watch', 'avoid', 'alert')
@@ -605,30 +610,73 @@ def outcome_stats(dimension: str = 'action', days: int = 180) -> Dict[str, Any]:
     buckets = []
     for k, v in agg.items():
         directional = v['hit'] + v['miss']
-        buckets.append({
+        bucket = {
             'bucket': k, 'bucket_cn': ACTION_CN.get(k, k) if dimension == 'action' else k,
             'n': v['n'], 'hit': v['hit'], 'miss': v['miss'], 'neutral': v['neutral'],
             'win_rate_pct': round(v['hit'] / directional * 100, 1) if directional else None,
             'avg_ret_pct': round(v['ret_sum'] / v['ret_n'], 2) if v['ret_n'] else None,
-        })
+        }
+        bucket.update(calibrate_outcome_bucket(bucket))
+        buckets.append(bucket)
     out['buckets'] = sorted(buckets, key=lambda x: -x['n'])
     return out
 
 
-def feedback_text(days: int = 120, min_n: int = 3) -> str:
-    """给 AI prompt 注入的一行决策信号后验战绩:各动作历史方向命中率。
+def calibrate_outcome_bucket(bucket: Dict[str, Any],
+                             min_n: int = MIN_FEEDBACK_SAMPLES) -> Dict[str, Any]:
+    """用对称 Beta 先验收缩方向命中率，低样本仅观察、不产生权重。
+
+    当前 DecisionSignal 没有 unable 终态，因此这里只消费 hit/miss；后续若扩展
+    outcome 状态，可在不改变调用面的前提下加入 unable 惩罚。
+    """
+    hit = max(0, int(bucket.get('hit') or 0))
+    miss = max(0, int(bucket.get('miss') or 0))
+    directional = hit + miss
+    required = max(MIN_FEEDBACK_SAMPLES, int(min_n or 0))
+    result = {
+        'directional_n': directional,
+        'minimum_feedback_samples': required,
+        'sample_status': 'evaluated' if directional >= required else 'observational',
+        'posterior_hit_rate_pct': None,
+        'performance_factor': 1.0,
+    }
+    if directional < required:
+        return result
+    posterior = ((hit + _BETA_PRIOR_HITS)
+                 / (directional + _BETA_PRIOR_HITS + _BETA_PRIOR_MISSES))
+    direction_score = max(-1.0, min(1.0, 2 * posterior - 1))
+    factor = math.exp(math.log(_MAX_PERFORMANCE_FACTOR) * direction_score)
+    factor = max(1 / _MAX_PERFORMANCE_FACTOR, min(_MAX_PERFORMANCE_FACTOR, factor))
+    result['posterior_hit_rate_pct'] = round(posterior * 100, 1)
+    result['performance_factor'] = round(factor, 4)
+    return result
+
+
+def feedback_text(days: int = 120, min_n: int = MIN_FEEDBACK_SAMPLES) -> str:
+    """给 AI prompt 注入经样本门槛与 Beta 收缩后的决策后验。
+
     让 decision_signal 从"测量环"变"反馈环"——选股/决策环节读回它,对历史 miss 率高的动作更审慎。
-    无足够样本返回空串(不打扰)。"""
+    低于 30 个方向样本只能展示为观察值，绝不写回 Prompt。
+    """
     try:
         st = outcome_stats('action', days=days)
-        rows = [b for b in st.get('buckets', [])
-                if (b.get('hit', 0) + b.get('miss', 0)) >= min_n and b.get('win_rate_pct') is not None]
+        required = max(MIN_FEEDBACK_SAMPLES, int(min_n or 0))
+        rows = []
+        for raw in st.get('buckets', []):
+            bucket = dict(raw)
+            calibrated = calibrate_outcome_bucket(bucket, min_n=required)
+            bucket.update(calibrated)
+            if (bucket.get('sample_status') == 'evaluated'
+                    and bucket.get('posterior_hit_rate_pct') is not None):
+                rows.append(bucket)
         if not rows:
             return ''
-        rows.sort(key=lambda x: -(x.get('hit', 0) + x.get('miss', 0)))
-        parts = [f"{b.get('bucket_cn', b['bucket'])}方向命中{b['win_rate_pct']}%(n={b['hit'] + b['miss']})"
+        rows.sort(key=lambda x: -x.get('directional_n', 0))
+        parts = [f"{b.get('bucket_cn', b['bucket'])}校准命中{b['posterior_hit_rate_pct']}%"
+                 f"(n={b['directional_n']},权重x{b['performance_factor']:.2f})"
                  for b in rows[:4]]
-        return '【决策信号历史后验】各动作真实方向命中率:' + '、'.join(parts) + ';命中率低的动作请更审慎。'
+        return ('【决策信号历史后验】仅纳入≥30样本动作，Beta先验收缩:'
+                + '、'.join(parts) + ';低样本动作保持中性。')
     except Exception:
         return ''
 

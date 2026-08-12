@@ -1,6 +1,7 @@
 import unittest
 import os
 import tempfile
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -120,6 +121,27 @@ class SignalTransitionTests(unittest.TestCase):
             finally:
                 decision_signal._DB_PATH = old_path
                 decision_signal._tables_ready = old_ready
+
+    def test_low_sample_outcome_never_enters_prompt_feedback(self):
+        bucket = {'hit': 3, 'miss': 0}
+        calibrated = decision_signal.calibrate_outcome_bucket(bucket)
+        self.assertEqual(calibrated['sample_status'], 'observational')
+        self.assertIsNone(calibrated['posterior_hit_rate_pct'])
+        self.assertEqual(calibrated['performance_factor'], 1.0)
+
+    def test_sufficient_outcome_uses_beta_shrinkage_and_bounded_weight(self):
+        calibrated = decision_signal.calibrate_outcome_bucket({'hit': 30, 'miss': 0})
+        self.assertEqual(calibrated['sample_status'], 'evaluated')
+        self.assertEqual(calibrated['posterior_hit_rate_pct'], 75.0)
+        self.assertGreater(calibrated['performance_factor'], 1.0)
+        self.assertLessEqual(calibrated['performance_factor'], 1.2)
+
+    def test_feedback_text_enforces_thirty_samples_even_if_caller_asks_for_less(self):
+        fake = {'buckets': [{
+            'bucket': 'buy', 'bucket_cn': '买入', 'hit': 3, 'miss': 0,
+        }]}
+        with mock.patch.object(decision_signal, 'outcome_stats', return_value=fake):
+            self.assertEqual(decision_signal.feedback_text(min_n=1), '')
 
 
 if __name__ == "__main__":

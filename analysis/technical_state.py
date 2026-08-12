@@ -201,11 +201,72 @@ def analyze_trend_quality(data: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def analyze_risk_quality(data: pd.DataFrame) -> Dict[str, Any]:
+    """20 日低波质量、回撤和整理结构；全部为尺度归一化指标。"""
+    df = _frame(data)
+    if len(df) < 21:
+        return {"available": False, "reason": "至少需要21根日K"}
+    recent = df.tail(20)
+    previous = df.iloc[-21:-1]
+    close = recent["close"]
+    returns = close.pct_change().dropna()
+    volatility = float(returns.std() * math.sqrt(252) * 100) if len(returns) >= 2 else None
+    running_high = close.cummax()
+    drawdown = close / running_high - 1.0
+    max_drawdown = float(min(drawdown.min() * 100, 0.0))
+    last_close = float(close.iloc[-1])
+    atr_value = _finite(_atr(df, 20).iloc[-1])
+    atr_pct = atr_value / last_close * 100 if atr_value is not None and last_close > 0 else None
+
+    open_price = _finite(df["open"].iloc[-1]) if "open" in df.columns else None
+    body_pct = ((last_close / open_price - 1.0) * 100
+                if open_price is not None and open_price > 0 else None)
+    ma20 = float(df["close"].tail(20).mean())
+    pullback_pct = (last_close / ma20 - 1.0) * 100 if ma20 > 0 else None
+    low_min = float(recent["low"].min())
+    range_pct = ((float(recent["high"].max()) / low_min - 1.0) * 100
+                 if low_min > 0 else None)
+
+    consolidation_days = 0
+    for days in range(min(len(previous), 20), 1, -1):
+        window = previous.tail(days)
+        low = float(window["low"].min())
+        span = ((float(window["high"].max()) / low - 1.0) * 100
+                if low > 0 else None)
+        if span is not None and span <= 12.0:
+            consolidation_days = days
+            break
+
+    low_vol_quality = bool(
+        volatility is not None and volatility <= 32.0
+        and max_drawdown >= -8.0
+        and atr_pct is not None and atr_pct <= 4.5
+    )
+    high_risk = bool(
+        (volatility is not None and volatility > 45.0)
+        or max_drawdown < -15.0
+        or (atr_pct is not None and atr_pct > 7.0)
+    )
+    return {
+        "available": True,
+        "volatility_20d_pct": round(volatility, 2) if volatility is not None else None,
+        "max_drawdown_20d_pct": round(max_drawdown, 2),
+        "atr_20_pct": round(atr_pct, 2) if atr_pct is not None else None,
+        "range_20d_pct": round(range_pct, 2) if range_pct is not None else None,
+        "body_pct": round(body_pct, 2) if body_pct is not None else None,
+        "pullback_to_ma20_pct": round(pullback_pct, 2) if pullback_pct is not None else None,
+        "consolidation_days_20d": consolidation_days,
+        "low_vol_quality": low_vol_quality,
+        "high_risk": high_risk,
+    }
+
+
 def analyze_technical_state(data: pd.DataFrame) -> Dict[str, Any]:
     """汇总互补技术证据并生成封顶在 [-8, 8] 的透明软评分。"""
     volume_price = analyze_volume_price(data)
     donchian = analyze_donchian(data)
     trend = analyze_trend_quality(data)
+    risk_quality = analyze_risk_quality(data)
     try:
         from analysis.pattern_recognition import PatternDetector
         patterns = PatternDetector().detect_all(data, lookback=5)
@@ -262,6 +323,23 @@ def analyze_technical_state(data: pd.DataFrame) -> Dict[str, Any]:
             score += 1
             positives.append("20日上涨路径平稳")
 
+    if risk_quality.get("available"):
+        if risk_quality.get("low_vol_quality"):
+            score += 2
+            positives.append("低波动且20日回撤可控")
+        elif risk_quality.get("high_risk"):
+            score -= 3
+            risks.append(
+                f"波动/回撤偏高(波动{risk_quality.get('volatility_20d_pct')}%、"
+                f"回撤{risk_quality.get('max_drawdown_20d_pct')}%)"
+            )
+        if (donchian.get("status") in {"breakout_20", "breakout_55"}
+                and risk_quality.get("consolidation_days_20d", 0) >= 8
+                and (risk_quality.get("body_pct") or 0) >= 0.5
+                and (volume_price.get("volume_ratio20") or 0) >= 1.3):
+            score += 2
+            positives.append("整理后放量实体突破")
+
     confirmed_patterns = []
     if isinstance(patterns, dict) and "error" not in patterns:
         # 经典蜡烛线仍保留给 Agent 展示，但只让更完整、带突破/失效位的复合结构计分。
@@ -279,7 +357,7 @@ def analyze_technical_state(data: pd.DataFrame) -> Dict[str, Any]:
 
     score = round(max(-8.0, min(8.0, score)), 2)
     return {
-        "available": any(x.get("available") for x in (volume_price, donchian, trend)),
+        "available": any(x.get("available") for x in (volume_price, donchian, trend, risk_quality)),
         "score": score,
         "grade": "positive" if score >= 3 else ("caution" if score <= -3 else "neutral"),
         "positives": list(dict.fromkeys(x for x in positives if x)),
@@ -287,7 +365,8 @@ def analyze_technical_state(data: pd.DataFrame) -> Dict[str, Any]:
         "volume_price": volume_price,
         "donchian": donchian,
         "trend_quality": trend,
+        "risk_quality": risk_quality,
         "patterns": patterns,
         "confirmed_patterns": confirmed_patterns,
-        "method": "price-volume+OBV+Donchian(ex-current)+ADX+normalized-slope+confirmed-patterns",
+        "method": "price-volume+OBV+Donchian(ex-current)+ADX+normalized-slope+low-vol-risk+confirmed-patterns",
     }

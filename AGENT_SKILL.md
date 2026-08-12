@@ -217,10 +217,10 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - **成本**:`run_multi_agent_analysis` 单次多次 LLM 调用、几十秒、耗 token —— 仅在"深度研判"时用;日常用 B/C/E 的纯计算函数。
 - **数据时效**:行情可能延迟;盘后数据(龙虎榜/北向)收盘后才全。
 - **先看总览**:新会话优先调用 `agent_cockpit`，只读已有快照/运行遥测，不会触发重分析。
-- **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号/变化、推荐、组合动作及统一 `trade_plan`；计划使用自然周共振、量价/OBV、唐奇安（通道排除当天）、ADX/DMI、趋势斜率/R²、确认形态、结构/ATR 止损、目标位、VaR 仓位和 R:R≥2 门控。形态测算价只是第二目标，不参与首目标盈亏比。只有需要更细证据时再调用底层工具。
+- **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号/变化、推荐、组合动作及统一 `trade_plan`；`meta.data_quality` 按工具组给出质量分、状态、耗时与核心数据护栏，核心行情/K线降级时禁止把方向结论解释为高置信。`data.market_structure` 只用已取上下文判断热点题材和前排/跟随角色，缺历史题材序列时保持 `theme_phase=unknown`。计划使用自然周共振、量价/OBV、唐奇安（通道排除当天）、ADX/DMI、趋势斜率/R²、低波质量、确认形态、结构/ATR 止损、目标位、VaR 仓位和 R:R≥2 门控。形态测算价只是第二目标，不参与首目标盈亏比。只有需要更细证据时再调用底层工具。
 - **重任务异步**:`trigger_task(task_name,idempotency_key)` 只返回 `run_id`；后续轮询 `task_run_status`。同一意图重试必须复用幂等键。
 - **写操作先预演**:监控、推荐关闭、信号归档等工具默认 `dry_run=true`；核对 `before/after` 后再显式传 `false`。
-- **结果可信度**:`latest_selection`/`agent_cockpit` 返回 `status` 和 `meta.warnings`；`stale/degraded/partial` 不能按完整成功解释。主力资金源缺少真实资金字段时宁可无结果，不用普通候选替代。
+- **结果可信度**:`latest_selection`/`agent_cockpit` 返回 `status` 和 `meta.warnings`；`research_stock` 还返回 `meta.data_quality`、`meta.stages`、`meta.decision_guardrails`。`stale/degraded/partial` 不能按完整成功解释。主力资金源缺少真实资金字段时宁可无结果，不用普通候选替代。
 
 ---
 

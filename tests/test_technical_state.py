@@ -6,6 +6,7 @@ import pandas as pd
 from analysis.pattern_recognition import PatternDetector
 from analysis.technical_state import (
     analyze_donchian,
+    analyze_risk_quality,
     analyze_technical_state,
     analyze_trend_quality,
     analyze_volume_price,
@@ -87,6 +88,22 @@ class TechnicalStateTests(unittest.TestCase):
         self.assertEqual(result["trend_quality"]["regime"], "sideways")
         self.assertIn(result["donchian"]["status"], {"breakout_20", "breakout_55"})
         self.assertTrue(any("ADX偏低" in item for item in result["risks"]))
+
+    def test_low_volatility_quality_exposes_bounded_risk_features(self):
+        close = np.linspace(10.0, 10.8, 60)
+        result = analyze_risk_quality(_frame(close))
+        self.assertTrue(result['available'])
+        self.assertTrue(result['low_vol_quality'])
+        self.assertGreaterEqual(result['max_drawdown_20d_pct'], -8.0)
+        self.assertLessEqual(result['atr_20_pct'], 4.5)
+        self.assertIn('consolidation_days_20d', result)
+
+    def test_volatile_drawdown_is_flagged_as_high_risk(self):
+        close = np.r_[np.linspace(10.0, 14.0, 50),
+                      [13.0, 11.0, 12.5, 9.5, 11.5, 8.5, 10.5, 8.0, 9.0, 7.5]]
+        result = analyze_technical_state(_frame(close))
+        self.assertTrue(result['risk_quality']['high_risk'])
+        self.assertTrue(any('波动/回撤偏高' in item for item in result['risks']))
 
 
 if __name__ == "__main__":

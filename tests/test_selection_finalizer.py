@@ -82,6 +82,33 @@ class SelectionFinalizerTests(unittest.TestCase):
         self.assertEqual(final[1]['technical_bonus'], -8)
         self.assertIn('技术共振+4', final[0]['final_reason'])
 
+    def test_existing_position_is_softly_penalized(self):
+        rows = [
+            {'rank': 1, 'code': '000001', 'score': 3.0, 'sources': ['A', 'B']},
+            {'rank': 2, 'code': '000002', 'score': 2.8, 'sources': ['A', 'B']},
+        ]
+        final = finalize_selection(rows, limit=2, portfolio=[{'code': '000001'}])
+        self.assertEqual(final[0]['code'], '000002')
+        held = next(row for row in final if row['code'] == '000001')
+        self.assertEqual(held['portfolio_penalty'], 3.0)
+        self.assertIn('已持有软扣3', held['final_reason'])
+
+    def test_repeated_sector_makes_room_for_close_alternative(self):
+        rows = [
+            {'rank': 1, 'code': '000001', 'score': 3.0, 'sources': ['A'],
+             'industry': '银行'},
+            {'rank': 2, 'code': '000002', 'score': 2.9, 'sources': ['A'],
+             'industry': '证券'},
+            {'rank': 3, 'code': '000003', 'score': 2.7, 'sources': ['A'],
+             'industry': '医药'},
+        ]
+        final = finalize_selection(rows, limit=2)
+        self.assertEqual([row['code'] for row in final], ['000001', '000003'])
+        repeated = next(row for row in finalize_selection(rows, limit=3)
+                        if row['code'] == '000002')
+        self.assertEqual(repeated['portfolio_bucket'], '金融')
+        self.assertGreaterEqual(repeated['portfolio_penalty'], 4.0)
+
 
 if __name__ == '__main__':
     unittest.main()

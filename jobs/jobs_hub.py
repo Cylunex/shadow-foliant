@@ -4267,7 +4267,31 @@ def task_unified_selection():
         except Exception:
             _exclude_kcb = True
 
-        def _add(code, pts, src):
+        def _candidate_meta(row):
+            """复用选股源已经返回的行业/题材字段，不在盘中补发外部请求。"""
+            if row is None:
+                return {}
+            try:
+                keys = row.index if hasattr(row, 'index') else row.keys()
+            except Exception:
+                return {}
+            out = {}
+            for target, aliases in {
+                    'industry': ('industry', 'sector', '所属行业', '行业', '细分行业'),
+                    'primary_theme': ('theme', 'concept', '题材', '概念', '题材归因'),
+            }.items():
+                for key in aliases:
+                    try:
+                        value = row.get(key) if key in keys else None
+                    except Exception:
+                        value = None
+                    text = str(value).strip() if value is not None else ''
+                    if text and text.lower() not in ('nan', 'none', 'n/a', '未知'):
+                        out[target] = text[:80]
+                        break
+            return out
+
+        def _add(code, pts, src, meta=None):
             # ⭐ 代码归一成 6 位(2026-07-06 修):问财/妙想返回的代码常带 '.SZ/.SH' 后缀
             # ('603719.SH'),不归一的话:①同票 '600711' 与 '600711.SH' 被当两只,双源交叉
             # +2分从未生效;②带后缀进 top_list → quotes/stock_names 全取不到 → 推送里
@@ -4286,6 +4310,9 @@ def task_unified_selection():
             c['score'] += pts
             if src and src not in c['src']:
                 c['src'].append(src)
+            for key, value in (meta or {}).items():
+                if value and not c.get(key):
+                    c[key] = value
 
         # 1. 5大策略扫描(问财/dataapi) → 初选池
         strategy_scan = _run_strategy_scans()
@@ -4294,7 +4321,8 @@ def task_unified_selection():
                 for _, row in df.iterrows():
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
-                        _add(code, 1.0, _WENCAI_SOURCE_LABELS.get(sname, sname))
+                        _add(code, 1.0, _WENCAI_SOURCE_LABELS.get(sname, sname),
+                             _candidate_meta(row))
 
         # 1b. 妙想智能选股镜像(非问财冗余源,2026-06-26):5 条妙想查询并池,与问财双源交叉——
         # 同票被问财源+妙想源都命中 → +2分、命中2 source,排序靠前(下游合并/配额/红蓝照常筛)。
@@ -4310,7 +4338,8 @@ def task_unified_selection():
                             code = next((row[c] for c in ['代码', '股票代码', 'code', 'symbol']
                                          if c in row.index), None)
                             if code:
-                                _add(str(code).split('.')[0].zfill(6)[-6:], 1.0, sname)
+                                _add(str(code).split('.')[0].zfill(6)[-6:], 1.0, sname,
+                                     _candidate_meta(row))
                                 _mx_hit += 1
                 if _mx_hit:
                     print(f'[unified_selection] 妙想镜像 5 策略并池 {_mx_hit} 条命中', flush=True)
@@ -4349,7 +4378,7 @@ def task_unified_selection():
                         _weight = m.get('weight')
                         if _weight is None:
                             _weight = strategy_weights.get(base_id, 0.5)
-                        _add(sym, float(_weight), m.get('cn', mid))
+                        _add(sym, float(_weight), m.get('cn', mid), _candidate_meta(r))
         except Exception:
             pass
 
@@ -4366,7 +4395,7 @@ def task_unified_selection():
             for item in mf_result.get('top', []):
                 sym = item.get('symbol', '')
                 if sym:
-                    _add(sym, 1.0, '多因子')
+                    _add(sym, 1.0, '多因子', _candidate_meta(item))
         except Exception:
             pass
 
@@ -4543,6 +4572,10 @@ def task_unified_selection():
                     'price': _safe_float(q.get('price')),
                     'change_pct': _safe_float(q.get('change_pct')),
                     'pe_ttm': _safe_float(q.get('pe_ttm')),
+                    'industry': (q.get('industry') or q.get('sector')
+                                 or cinfo.get('industry')),
+                    'primary_theme': (q.get('primary_theme') or q.get('theme')
+                                      or cinfo.get('primary_theme')),
                     'debate_verdict': debate.get('verdict'),
                     'debate_confidence': debate.get('confidence'),
                     'debate_reason': debate.get('reason') or debate.get('summary'),
@@ -4550,7 +4583,11 @@ def task_unified_selection():
                     'technical_state': _technical,
                 })
             from analysis.selection_finalizer import finalize_selection
-            final_rows = finalize_selection(artifact_rows, limit=5)
+            final_rows = finalize_selection(
+                artifact_rows,
+                limit=5,
+                portfolio=[{'code': code} for code in held_codes],
+            )
             # 最终 5 只补确定性交易计划。只复用上面已读的缓存 K，不新增 LLM/外部源调用。
             try:
                 from analysis.trade_plan import build_trade_plan

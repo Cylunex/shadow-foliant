@@ -12,6 +12,7 @@ Agent 工具分组 — 借鉴 go-stock tool_groups.go 设计
   - collect(symbol, **kwargs): 数据采集主入口
 """
 
+import time
 from typing import Dict, Any, List
 
 
@@ -94,6 +95,11 @@ def collect_kline_technical_context(symbol: str, period: str = '1y',
             return ctx
         ctx['indicators'] = fetcher.get_latest_indicators(df_ind)
         ctx['df_tail'] = df_ind.tail(30).to_dict(orient='records') if hasattr(df_ind, 'tail') else None
+        try:
+            import datahub
+            ctx['data_quality'] = datahub.kline_quality(df)
+        except Exception:
+            pass
     except Exception as e:
         ctx['errors'].append(f'kline_technical: {e}')
 
@@ -321,6 +327,12 @@ def collect_sentiment_context(symbol: str = None, lookback_days: int = 30) -> Di
     if symbol:
         try:
             import datahub
+            ctx['concept_blocks'] = datahub.concept_blocks(symbol)
+        except Exception as e:
+            ctx['errors'].append(f'concept_blocks: {e}')
+
+        try:
+            import datahub
             ctx['margin'] = datahub.margin(symbol)
         except Exception as e:
             ctx['errors'].append(f'margin: {e}')
@@ -440,14 +452,18 @@ def collect(groups, symbol: str, **kwargs) -> Dict[str, Any]:
         groups = [groups]
     result = {}
     for g in groups:
+        started = time.monotonic()
         fn = GROUP_COLLECTORS.get(g)
         if fn is None:
-            result[g] = {'error': f'unknown group: {g}'}
+            result[g] = {'error': f'unknown group: {g}', '_meta': {'duration_ms': 0}}
             continue
         try:
             result[g] = fn(symbol, **kwargs) if g != 'sentiment' else fn(symbol=symbol)
         except Exception as e:
             result[g] = {'error': str(e)}
+        if isinstance(result[g], dict):
+            result[g].setdefault('_meta', {})['duration_ms'] = round(
+                (time.monotonic() - started) * 1000)
     return result
 
 
