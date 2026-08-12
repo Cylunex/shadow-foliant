@@ -123,8 +123,9 @@ export default {
 
     <!-- 因子 IC 评估 -->
     <div class="card" style="margin-top:16px">
-      <h3>🔬 因子效能(IC评估) <span style="font-weight:400;color:var(--muted);font-size:12px">（RankIC/IC-IR/置换检验p值+FDR,科学衡量价量因子预测力）</span></h3>
-      <div v-if="!s.factors" class="loading">加载中…(首次较慢,需拉股池K线;周任务会预热)</div>
+      <div class="section-head"><div><h3>🔬 因子效能(IC评估)</h3><p>RankIC / IC-IR / 置换检验；可能拉取股池 K 线，仅在需要时运行</p></div><button v-if="s.factors===null" class="ghost" :disabled="s.factorsLoading" @click="loadFactors">{{s.factorsLoading?'计算中…':'按需加载'}}</button></div>
+      <div v-if="s.factorsLoading" class="loading">正在评估因子，首次运行可能较慢…</div>
+      <div v-else-if="s.factors===null" class="empty-state">默认不触发外部行情请求；周任务预热后或手动加载时显示。</div>
       <div v-else-if="s.factorsErr" class="sub">{{s.factorsErr}}</div>
       <table v-else-if="s.factors.length" style="width:100%">
         <tr style="color:var(--muted);font-size:12px">
@@ -148,8 +149,9 @@ export default {
 
     <!-- 价量因子 IC 加权选股(闭环:用上面评出的 IC 给因子加权选股) -->
     <div class="card" style="margin-top:16px">
-      <h3>🎯 价量因子选股(IC加权) <span style="font-weight:400;color:var(--muted);font-size:12px">（用上面的因子IC给价量因子加权 → TopN;❌噪声因子权重置0。与基本面选股互补）</span></h3>
-      <div v-if="!s.pv" class="loading">加载中…(首次较慢,需拉股池K线;周任务会预热)</div>
+      <div class="section-head"><div><h3>🎯 价量因子选股(IC加权)</h3><p>按有效 IC 加权生成 TopN；可能拉取股池 K 线，仅在需要时运行</p></div><button v-if="s.pv===null" class="ghost" :disabled="s.pvLoading" @click="loadPV">{{s.pvLoading?'计算中…':'按需加载'}}</button></div>
+      <div v-if="s.pvLoading" class="loading">正在计算价量候选，首次运行可能较慢…</div>
+      <div v-else-if="s.pv===null" class="empty-state">默认不触发外部行情请求；用于专项研究时再加载。</div>
       <div v-else-if="s.pvErr" class="sub">{{s.pvErr}}</div>
       <template v-else-if="s.pv.top && s.pv.top.length">
         <div class="sub" style="margin-bottom:8px;font-size:12px">
@@ -206,17 +208,20 @@ export default {
       scores: [], variants: [], affinity: null,
       loading: false, varLoading: false,
       err: '', searchCode: '',
-      factors: null, factorsErr: '',
-      ab: null, pv: null, pvErr: '',
+      factors: null, factorsErr: '', factorsLoading: false,
+      ab: null, pv: null, pvErr: '', pvLoading: false,
       deployment: null, deployErr: '',
     })
 
     async function loadFactors() {
+      if (s.factorsLoading) return
+      s.factorsLoading = true; s.factorsErr = ''
       try {
         const r = await api('factors/eval')
         if (r && r.error && (!r.factors || !r.factors.length)) s.factorsErr = r.error
         s.factors = (r && r.factors) || []
       } catch(e) { s.factors = []; s.factorsErr = String(e) }
+      finally { s.factorsLoading = false }
     }
 
     async function loadAB() {
@@ -227,11 +232,14 @@ export default {
     }
 
     async function loadPV() {
+      if (s.pvLoading) return
+      s.pvLoading = true; s.pvErr = ''
       try {
         const r = await api('factors/pv-screen?n=15')
         if (r && r.error && (!r.top || !r.top.length)) s.pvErr = r.error
         s.pv = r || { top: [] }
       } catch(e) { s.pv = { top: [] }; s.pvErr = String(e) }
+      finally { s.pvLoading = false }
     }
 
     // null 安全数字格式化(A/B 任一指标可能缺)
@@ -295,10 +303,10 @@ export default {
       } catch(e) { s.affinity = [{ strategy_id: 'error', score: 0 }] }
     }
 
-    onMounted(() => { loadDeployment(); loadScores(); loadVariants(); loadFactors(); loadAB(); loadPV() })
+    onMounted(() => { loadDeployment(); loadScores(); loadVariants(); loadAB() })
 
     // cls 必须 return 给模板(模板里多处 :class="cls(...)";漏 return → 运行时 cls is not a function)
     return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform, topWeightFactors,
-      deployRows, evolvedCount, defaultCount }
+      deployRows, evolvedCount, defaultCount, loadFactors, loadPV }
   }
 }

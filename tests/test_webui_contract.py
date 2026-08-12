@@ -42,6 +42,8 @@ def test_latest_selection_and_live_strategy_are_first_class_web_capabilities():
     assert "最终优选 TOP5" in screen
     assert "完整候选 TOP15" in screen
     assert "当前生产部署集" in genome
+    assert "onMounted(() => { loadDeployment(); loadScores(); loadVariants(); loadAB() })" in genome
+    assert "按需加载" in genome
 
 
 def test_static_assets_are_present_and_versioned():
