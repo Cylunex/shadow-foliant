@@ -2568,7 +2568,8 @@ def strategy_genome_scores_history(strategy_id: str, days: int = 30):
 
 @app.get("/api/health")
 def health():
-    return _ok({"service": "shadow-foliant webui", "ok": True})
+    from runtime_health import snapshot
+    return _ok(snapshot())
 
 
 # 静态 SPA(放最后,catch-all 不影响上面的 /api 路由)

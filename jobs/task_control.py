@@ -51,6 +51,114 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 
+def _today_bounds() -> Tuple[str, str]:
+    """返回本地时区今天的半开区间，避免 SQLite DATE('now') 按 UTC 错日。"""
+    now = datetime.now().astimezone()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+
+
+def _task_dependencies(task_name: str) -> Tuple[str, ...]:
+    try:
+        from automation_config import REGISTRY
+        raw = REGISTRY.get(task_name, {}).get('depends_on') or ()
+        if isinstance(raw, str):
+            raw = (raw,)
+        return tuple(str(name) for name in raw if name)
+    except Exception:
+        return ()
+
+
+def _dependency_enabled(task_name: str) -> bool:
+    try:
+        from automation_config import is_enabled
+        return bool(is_enabled(task_name))
+    except Exception:
+        # 配置层不可用时保持原有 fail-open 语义。
+        return True
+
+
+def _dependency_succeeded_today(task_name: str) -> bool:
+    start, end = _today_bounds()
+    conn = None
+    try:
+        conn = db_connect(_DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT 1 FROM job_runs
+            WHERE job_name = ? AND status = 'success'
+              AND started_at >= ? AND started_at < ?
+            LIMIT 1
+        ''', (task_name, start, end))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _dependency_active(task_name: str) -> Optional[Dict[str, Any]]:
+    """已有手动/定时上游在排队或运行时复用它，避免重复执行重任务。"""
+    if _scheduled_task_running(task_name):
+        return {'task_name': task_name, 'status': 'running', 'kind': 'scheduled'}
+    conn = None
+    try:
+        conn = db_connect(_DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT run_id, status FROM manual_task_runs
+            WHERE task_name = ? AND status IN ('queued', 'running')
+            ORDER BY requested_at DESC LIMIT 1
+        ''', (task_name,))
+        row = cur.fetchone()
+        if row:
+            return {
+                'task_name': task_name, 'run_id': row[0],
+                'status': str(row[1]), 'kind': 'manual',
+            }
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+    return None
+
+
+def _auto_submit_dependencies(task_name: str, max_attempts: int,
+                              seen: set) -> List[Dict[str, Any]]:
+    """为 Agent/Web 手动任务补齐未完成上游，保证单 worker 也不会依赖死锁。"""
+    results: List[Dict[str, Any]] = []
+    for dependency in _task_dependencies(task_name):
+        if dependency in seen:
+            chain = ' -> '.join(list(seen) + [dependency])
+            raise ValueError(f'任务依赖存在循环: {chain}')
+        if not _dependency_enabled(dependency):
+            results.append({'task_name': dependency, 'status': 'disabled'})
+            continue
+        if _dependency_succeeded_today(dependency):
+            results.append({'task_name': dependency, 'status': 'satisfied'})
+            continue
+        active = _dependency_active(dependency)
+        if active:
+            results.append(active)
+            continue
+        run = _submit_task(
+            dependency,
+            requested_by='dependency',
+            idempotency_key=f'auto:{datetime.now().astimezone().date().isoformat()}:{dependency}',
+            max_attempts=max_attempts,
+            seen=seen | {task_name},
+        )
+        results.append({
+            'task_name': dependency,
+            'status': run.get('status'),
+            'run_id': run.get('run_id'),
+            'duplicate': bool(run.get('duplicate')),
+        })
+    return results
+
+
 def _init_db() -> None:
     global _INITIALIZED
     if _INITIALIZED:
@@ -289,9 +397,8 @@ def _existing_idempotent_run(requested_by: str, task_name: str,
     return get_task_run(row[0]) if row else None
 
 
-def submit_task(task_name: str, requested_by: str = 'agent',
-                idempotency_key: str = '', max_attempts: int = 2) -> Dict[str, Any]:
-    """提交后台任务并立即返回。相同来源+任务+幂等键只执行一次。"""
+def _submit_task(task_name: str, requested_by: str, idempotency_key: str,
+                 max_attempts: int, seen: set) -> Dict[str, Any]:
     _resolve_task(task_name)  # 提交前先校验，避免产生永远 queued 的脏记录
     _init_db()
     requested_by = (requested_by or 'agent').strip()[:40]
@@ -301,6 +408,8 @@ def submit_task(task_name: str, requested_by: str = 'agent',
     existing = _existing_idempotent_run(requested_by, task_name, idempotency_key)
     if existing:
         return {'accepted': True, 'duplicate': True, **existing}
+
+    dependencies = _auto_submit_dependencies(task_name, max_attempts, seen)
 
     run_id = uuid.uuid4().hex
     conn = db_connect(_DB_PATH)
@@ -330,7 +439,17 @@ def submit_task(task_name: str, requested_by: str = 'agent',
         'task_name': task_name,
         'status': 'queued',
         'poll_after_seconds': 2,
+        'dependencies': dependencies,
     }
+
+
+def submit_task(task_name: str, requested_by: str = 'agent',
+                idempotency_key: str = '', max_attempts: int = 2) -> Dict[str, Any]:
+    """提交后台任务并立即返回。
+
+    相同来源+任务+幂等键只执行一次；有上游依赖时自动补齐，并由领取器保证上游先跑。
+    """
+    return _submit_task(task_name, requested_by, idempotency_key, max_attempts, seen=set())
 
 
 def _update_run(run_id: str, *, status: str, started_at: str = None,
@@ -372,7 +491,10 @@ def _latest_job_outcome(task_name: str, started_at: str) -> Tuple[str, Optional[
 
 
 def claim_next_task(worker_id: str) -> Optional[Dict[str, Any]]:
-    """原子领取一条 queued 任务。多 jobs_hub 实例并发时同一任务只会被一个领取。"""
+    """原子领取一条依赖已满足的 queued 任务。
+
+    等上游的任务不占 worker；上游明确失败后，下游按 skipped 收尾。
+    """
     _init_db()
     recover_stale_runs()
     worker_id = (worker_id or 'jobs_hub').strip()[:120]
@@ -382,24 +504,41 @@ def claim_next_task(worker_id: str) -> Optional[Dict[str, Any]]:
     try:
         if USE_POSTGRES:
             cur.execute('''
-                SELECT run_id FROM manual_task_runs
+                SELECT run_id, task_name FROM manual_task_runs
                 WHERE status = 'queued' AND attempts < max_attempts
                 ORDER BY requested_at
-                FOR UPDATE SKIP LOCKED LIMIT 1
+                FOR UPDATE SKIP LOCKED LIMIT 50
             ''')
         else:
             cur.execute('BEGIN IMMEDIATE')
             cur.execute('''
-                SELECT run_id FROM manual_task_runs
+                SELECT run_id, task_name FROM manual_task_runs
                 WHERE status = 'queued' AND attempts < max_attempts
-                ORDER BY requested_at LIMIT 1
+                ORDER BY requested_at LIMIT 50
             ''')
-        row = cur.fetchone()
-        if not row:
+        rows = cur.fetchall()
+        selected = None
+        for run_id, task_name in rows:
+            decision = _queue_dependency_decision(task_name, cur)
+            if decision['state'] == 'blocked':
+                details = '; '.join(
+                    f"{item['dependency']}={item.get('reason')}"
+                    for item in decision['details'])
+                cur.execute('''
+                    UPDATE manual_task_runs
+                    SET status = 'skipped', finished_at = ?,
+                        error = ?, worker_id = NULL, heartbeat_at = NULL
+                    WHERE run_id = ? AND status = 'queued'
+                ''', (_now(), f'dependency_failed: {details}'[:1000], run_id))
+                continue
+            if decision['state'] == 'ready':
+                selected = run_id
+                break
+        if not selected:
             conn.commit()
             conn.close()
             return None
-        run_id = row[0]
+        run_id = selected
         cur.execute('''
             UPDATE manual_task_runs
             SET status = 'running', started_at = ?, heartbeat_at = ?,
@@ -417,6 +556,57 @@ def claim_next_task(worker_id: str) -> Optional[Dict[str, Any]]:
         conn.rollback()
         conn.close()
         raise
+
+
+def _scheduled_task_running(task_name: str) -> bool:
+    """读取同进程 jobs_hub 的运行表；不可用时由数据库状态继续判断。"""
+    for module_name in ('jobs.jobs_hub', 'jobs_hub'):
+        module = sys.modules.get(module_name)
+        if module is not None and task_name in getattr(module, '_TASK_START_TS', {}):
+            return True
+    return False
+
+
+def _queue_dependency_decision(task_name: str, cur) -> Dict[str, Any]:
+    dependencies = _task_dependencies(task_name)
+    states = []
+    start, end = _today_bounds()
+    for dependency in dependencies:
+        if not _dependency_enabled(dependency):
+            states.append({'state': 'ready', 'dependency': dependency, 'reason': 'disabled'})
+            continue
+        cur.execute('''
+            SELECT status, finished_at, error FROM job_runs
+            WHERE job_name = ? AND started_at >= ? AND started_at < ?
+            ORDER BY id DESC
+        ''', (dependency, start, end))
+        scheduled = cur.fetchall()
+        if any(str(row[0]) == 'success' for row in scheduled):
+            states.append({'state': 'ready', 'dependency': dependency, 'reason': 'success'})
+            continue
+        cur.execute('''
+            SELECT status FROM manual_task_runs
+            WHERE task_name = ? AND status IN ('queued', 'running')
+            ORDER BY requested_at DESC LIMIT 1
+        ''', (dependency,))
+        active = cur.fetchone()
+        if active or _scheduled_task_running(dependency):
+            states.append({'state': 'pending', 'dependency': dependency, 'reason': 'active'})
+            continue
+        if scheduled:
+            states.append({
+                'state': 'blocked', 'dependency': dependency,
+                'reason': str(scheduled[0][0]), 'error': scheduled[0][2],
+            })
+        else:
+            states.append({'state': 'pending', 'dependency': dependency,
+                           'reason': 'not_started'})
+    blocked = [item for item in states if item['state'] == 'blocked']
+    pending = [item for item in states if item['state'] == 'pending']
+    return {
+        'state': 'blocked' if blocked else 'pending' if pending else 'ready',
+        'details': blocked or pending or states,
+    }
 
 
 def _heartbeat_loop(run_id: str, stop: threading.Event, interval: int = 30) -> None:

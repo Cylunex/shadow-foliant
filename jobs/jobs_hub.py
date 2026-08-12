@@ -30,7 +30,7 @@ import concurrent.futures
 
 # DB 路由（USE_POSTGRES=true 时走 PG，否则用 SQLite）
 from db_compat import connect as db_connect, USE_POSTGRES
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Callable, Dict, List, Optional
 
 import schedule
@@ -566,17 +566,16 @@ def _latest_job_run_today(job_name: str, success_only: bool = False) -> Optional
     """读取任务今天最近一次运行；依赖调度与任务内 barrier 共用同一判定口径。"""
     conn = None
     try:
+        local_now = datetime.now().astimezone()
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
         conn = db_connect(_SNAPSHOT_DB_PATH)
         cur = conn.cursor()
         status_sql = " AND status='success'" if success_only else ''
-        if USE_POSTGRES:
-            cur.execute(f"""SELECT started_at, finished_at, status, error FROM job_runs
-                            WHERE job_name=? AND started_at::date = CURRENT_DATE{status_sql}
-                            ORDER BY id DESC LIMIT 1""", (job_name,))
-        else:
-            cur.execute(f"""SELECT started_at, finished_at, status, error FROM job_runs
-                            WHERE job_name=? AND DATE(started_at) = DATE('now'){status_sql}
-                            ORDER BY id DESC LIMIT 1""", (job_name,))
+        cur.execute(f"""SELECT started_at, finished_at, status, error FROM job_runs
+                        WHERE job_name=? AND started_at >= ? AND started_at < ?{status_sql}
+                        ORDER BY id DESC LIMIT 1""",
+                    (job_name, day_start.isoformat(), day_end.isoformat()))
         row = cur.fetchone()
         if not row:
             return None
