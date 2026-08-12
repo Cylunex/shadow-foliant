@@ -217,7 +217,7 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - **成本**:`run_multi_agent_analysis` 单次多次 LLM 调用、几十秒、耗 token —— 仅在"深度研判"时用;日常用 B/C/E 的纯计算函数。
 - **数据时效**:行情可能延迟;盘后数据(龙虎榜/北向)收盘后才全。
 - **先看总览**:新会话优先调用 `agent_cockpit`，只读已有快照/运行遥测，不会触发重分析。
-- **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号/变化、推荐、组合动作及统一 `trade_plan`；计划使用自然周共振、结构/ATR 止损、目标位、VaR 仓位和 R:R≥2 门控。只有需要更细证据时再调用底层工具。
+- **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号/变化、推荐、组合动作及统一 `trade_plan`；计划使用自然周共振、量价/OBV、唐奇安（通道排除当天）、ADX/DMI、趋势斜率/R²、确认形态、结构/ATR 止损、目标位、VaR 仓位和 R:R≥2 门控。形态测算价只是第二目标，不参与首目标盈亏比。只有需要更细证据时再调用底层工具。
 - **重任务异步**:`trigger_task(task_name,idempotency_key)` 只返回 `run_id`；后续轮询 `task_run_status`。同一意图重试必须复用幂等键。
 - **写操作先预演**:监控、推荐关闭、信号归档等工具默认 `dry_run=true`；核对 `before/after` 后再显式传 `false`。
 - **结果可信度**:`latest_selection`/`agent_cockpit` 返回 `status` 和 `meta.warnings`；`stale/degraded/partial` 不能按完整成功解释。主力资金源缺少真实资金字段时宁可无结果，不用普通候选替代。
@@ -234,7 +234,7 @@ MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(st
   - `list_tasks()`：任务计划、启用状态、最近调度与手动运行。
   - `trigger_task(task_name,idempotency_key)` → `run_id`：异步提交，不阻塞 MCP。
   - `task_run_status(run_id)` / `task_runs(task_name,limit)`：跨连接读取任务状态；worker 失联时先按次数自动重入队，耗尽后才标为 `interrupted`。
-  - `latest_selection()`：读取最近综合选股产物；`picks/rows` 是保留完整推送的 TOP15，`final_picks/final_rows` 是按规则强度、多源共振、红蓝结论、自然周/日线共振和追高风险二次优选的最终 TOP5（含 `trade_plan`），并明确标记快照是否过期。
+  - `latest_selection()`：读取最近综合选股产物；`picks/rows` 是保留完整推送的 TOP15，`final_picks/final_rows` 是按规则强度、多源共振、红蓝结论、自然周/日线共振、封顶±8的技术共振和追高风险二次优选的最终 TOP5（含 `technical_state` / `trade_plan`），并明确标记快照是否过期。
   - `research_stock(code,depth,view)`：面向 Agent 的低轮次个股研究入口，统一返回 `data/status/meta`，`data.trade_plan` 是首选行动合同。
   - `list_monitors` / `upsert_monitor` / `remove_monitor`：盯盘读取与管理。
   - `active_recommendations` / `enable_recommendation_monitor` / `close_recommendation`：推荐生命周期管理。

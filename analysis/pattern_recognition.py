@@ -1,5 +1,5 @@
 """
-K线形态识别引擎 — 基于 TA-Lib 的 61 种经典形态识别
+K线形态识别引擎 — 纯计算复合形态 + 可选 TA-Lib 经典蜡烛形态
 
 整合自 InStock(myhhub/stock) 和 FinceptTerminal 的模式检测方法
 
@@ -7,7 +7,7 @@ K线形态识别引擎 — 基于 TA-Lib 的 61 种经典形态识别
   - 反转形态: 锤子线, 倒锤子, 晨星, 黄昏星, 吞没, 十字星, 孕线等
   - 持续形态: 三白兵, 三乌鸦, 上升三法, 下降三法等
   - 特殊形态: 射击之星, 吊颈线, 前进受阻等
-  - 复合形态: 双顶/双底, 头肩顶/底等 (基于局部极值检测)
+  - 复合形态: 双顶/双底, 头肩顶/底, 箱体, 旗形, 杯柄 (不依赖 TA-Lib)
 
 用法:
     from pattern_recognition import PatternDetector
@@ -117,43 +117,184 @@ def _find_local_extrema(prices, window=5):
     return peaks, troughs
 
 
-def detect_double_top_bottom(data: pd.DataFrame, window=5, tolerance=0.03) -> list:
-    """双顶/双底检测"""
+def _pattern(name, direction, start_idx, end_idx, data, *, status="forming",
+             breakout=None, invalidation=None, measured_target=None, strength="中"):
+    """统一复合形态合同；只有 confirmed 才设置 found=True 供策略消费。"""
+    type_text = "🟢看涨" if direction == "bullish" else "🔴看跌"
+    date_value = data['date'].iloc[min(end_idx, len(data) - 1)]
+    return {
+        "name": name, "type": type_text, "direction": direction,
+        "status": status, "found": status == "confirmed",
+        "start_idx": int(start_idx), "end_idx": int(end_idx),
+        "date": str(date_value)[:10], "strength": strength,
+        "breakout_level": round(float(breakout), 2) if breakout is not None else None,
+        "invalidation_level": round(float(invalidation), 2) if invalidation is not None else None,
+        "measured_target": round(max(0.01, float(measured_target)), 2)
+        if measured_target is not None else None,
+    }
+
+
+def detect_double_top_bottom(data: pd.DataFrame, window=3, tolerance=0.035) -> list:
+    """双顶/双底检测，返回形成中/确认/失效状态以及颈线和测算目标。"""
     close = data['close'].values
     peaks, troughs = _find_local_extrema(close, window)
     patterns = []
 
-    # 双顶
-    for i in range(len(peaks) - 1):
-        for j in range(i + 1, len(peaks)):
-            diff = abs(close[peaks[i]] - close[peaks[j]]) / close[peaks[i]]
-            if diff < tolerance and peaks[j] - peaks[i] >= window:
-                valley_between = close[peaks[i]:peaks[j] + 1].min()
-                if valley_between < min(close[peaks[i]], close[peaks[j]]) * 0.95:
-                    patterns.append({
-                        "name": "双顶",
-                        "type": "🔴看跌",
-                        "start_idx": peaks[i],
-                        "end_idx": peaks[j],
-                        "date": str(data['date'].iloc[peaks[j]])[:10],
-                    })
-
-    # 双底
-    for i in range(len(troughs) - 1):
-        for j in range(i + 1, len(troughs)):
-            diff = abs(close[troughs[i]] - close[troughs[j]]) / close[troughs[i]]
-            if diff < tolerance and troughs[j] - troughs[i] >= window:
-                peak_between = close[troughs[i]:troughs[j] + 1].max()
-                if peak_between > max(close[troughs[i]], close[troughs[j]]) * 1.05:
-                    patterns.append({
-                        "name": "双底",
-                        "type": "🟢看涨",
-                        "start_idx": troughs[i],
-                        "end_idx": troughs[j],
-                        "date": str(data['date'].iloc[troughs[j]])[:10],
-                    })
+    # 只取近期、最近的一组，避免同一段历史组合出大量重复形态。
+    for points, name, direction in ((peaks, "双顶", "bearish"),
+                                    (troughs, "双底", "bullish")):
+        candidate = None
+        for first, second in zip(points[:-1], points[1:]):
+            if second < len(close) - 45 or second - first < window * 2:
+                continue
+            p1, p2 = float(close[first]), float(close[second])
+            if p1 <= 0 or abs(p1 - p2) / p1 > tolerance:
+                continue
+            between = close[first:second + 1]
+            pivot = float(between.min() if direction == "bearish" else between.max())
+            depth = ((min(p1, p2) / pivot - 1) if direction == "bearish"
+                     else (pivot / max(p1, p2) - 1))
+            if depth < 0.05:
+                continue
+            current = float(close[-1])
+            average = (p1 + p2) / 2
+            if direction == "bearish":
+                status = "confirmed" if current < pivot * 0.997 else (
+                    "failed" if current > average * 1.035 else "forming")
+                target, invalidation = pivot - (average - pivot), average * 1.02
+            else:
+                status = "confirmed" if current > pivot * 1.003 else (
+                    "failed" if current < average * 0.965 else "forming")
+                target, invalidation = pivot + (pivot - average), average * 0.98
+            candidate = _pattern(name, direction, first, second, data, status=status,
+                                 breakout=pivot, invalidation=invalidation,
+                                 measured_target=target)
+        if candidate:
+            patterns.append(candidate)
 
     return patterns
+
+
+def detect_box(data: pd.DataFrame, period=20, max_width=0.12) -> list:
+    """箱体形成/突破；箱体边界严格取当前 K 线之前的 period 日。"""
+    if len(data) < period + 1:
+        return []
+    close = data['close'].to_numpy(dtype=float)
+    base = close[-period - 1:-1]
+    bottom, top, current = float(base.min()), float(base.max()), float(close[-1])
+    if bottom <= 0 or top / bottom - 1 > max_width:
+        return []
+    slope = float(np.polyfit(np.arange(period, dtype=float), base, 1)[0])
+    drift = abs(slope * (period - 1)) / float(base.mean()) if float(base.mean()) else 1
+    if drift > max_width * 0.5:  # 明显单边趋势不是箱体，交给趋势/旗形模块处理。
+        return []
+    direction, status = "bullish", "forming"
+    if current > top * 1.005:
+        direction, status = "bullish", "confirmed"
+    elif current < bottom * 0.995:
+        direction, status = "bearish", "confirmed"
+    target = top + (top - bottom) if direction == "bullish" else bottom - (top - bottom)
+    invalidation = bottom if direction == "bullish" else top
+    return [_pattern("箱体突破" if status == "confirmed" else "箱体整理",
+                     direction, len(data) - period - 1, len(data) - 1, data,
+                     status=status, breakout=top if direction == "bullish" else bottom,
+                     invalidation=invalidation, measured_target=target,
+                     strength="强" if status == "confirmed" else "中")]
+
+
+def detect_head_shoulders(data: pd.DataFrame, window=3) -> list:
+    """检测最近三组局部极值构成的头肩/倒头肩结构。"""
+    close = data['close'].to_numpy(dtype=float)
+    peaks, troughs = _find_local_extrema(close, window)
+    output = []
+    for points, name, direction in ((peaks, "头肩顶", "bearish"),
+                                    (troughs, "头肩底", "bullish")):
+        if len(points) < 3:
+            continue
+        a, b, c = points[-3:]
+        if a < len(close) - 70 or c < len(close) - 30 or c - a < window * 4:
+            continue
+        left, head, right = float(close[a]), float(close[b]), float(close[c])
+        shoulders_close = abs(left - right) / max(abs(left), 1e-9) <= 0.06
+        head_clear = (head > max(left, right) * 1.04 if direction == "bearish"
+                      else head < min(left, right) * 0.96)
+        if not shoulders_close or not head_clear:
+            continue
+        between1, between2 = close[a:b + 1], close[b:c + 1]
+        neckline = float((between1.min() + between2.min()) / 2 if direction == "bearish"
+                         else (between1.max() + between2.max()) / 2)
+        current = float(close[-1])
+        confirmed = current < neckline * 0.997 if direction == "bearish" else current > neckline * 1.003
+        failed = current > head * 1.02 if direction == "bearish" else current < head * 0.98
+        status = "confirmed" if confirmed else ("failed" if failed else "forming")
+        height = abs(head - neckline)
+        target = neckline - height if direction == "bearish" else neckline + height
+        invalidation = max(left, right) * 1.02 if direction == "bearish" else min(left, right) * 0.98
+        output.append(_pattern(name, direction, a, c, data, status=status,
+                               breakout=neckline, invalidation=invalidation,
+                               measured_target=target))
+    return output
+
+
+def detect_flag(data: pd.DataFrame) -> list:
+    """简化旗形：显著旗杆后窄幅整理，当前突破整理区才确认。"""
+    if len(data) < 31:
+        return []
+    close = data['close'].to_numpy(dtype=float)
+    segment = close[-31:]
+    pole_return = segment[10] / segment[0] - 1 if segment[0] else 0
+    consolidation = segment[10:-1]
+    width = consolidation.max() / consolidation.min() - 1 if consolidation.min() > 0 else 1
+    if abs(pole_return) < 0.12 or width > 0.10:
+        return []
+    bullish = pole_return > 0
+    boundary = float(consolidation.max() if bullish else consolidation.min())
+    current = float(segment[-1])
+    confirmed = current > boundary * 1.003 if bullish else current < boundary * 0.997
+    failed = (current < float(consolidation.min()) * 0.997 if bullish
+              else current > float(consolidation.max()) * 1.003)
+    direction = "bullish" if bullish else "bearish"
+    pole_height = abs(float(segment[10] - segment[0]))
+    target = boundary + pole_height if bullish else boundary - pole_height
+    invalidation = float(consolidation.min() if bullish else consolidation.max())
+    return [_pattern("上升旗形" if bullish else "下降旗形", direction,
+                     len(data) - 31, len(data) - 1, data,
+                     status="confirmed" if confirmed else ("failed" if failed else "forming"),
+                     breakout=boundary, invalidation=invalidation,
+                     measured_target=target)]
+
+
+def detect_cup_handle(data: pd.DataFrame) -> list:
+    """保守杯柄检测：左右杯沿接近、杯底位于中段、末段回撤较浅。"""
+    if len(data) < 61:
+        return []
+    close = data['close'].to_numpy(dtype=float)
+    segment = close[-81:] if len(close) >= 81 else close[-61:]
+    n = len(segment)
+    left_end, right_start = max(8, int(n * 0.25)), int(n * 0.70)
+    left_idx = int(np.argmax(segment[:left_end]))
+    right_rel = int(np.argmax(segment[right_start:-1]))
+    right_idx = right_start + right_rel
+    if right_idx <= left_idx:
+        return []
+    left, right = float(segment[left_idx]), float(segment[right_idx])
+    rim = (left + right) / 2
+    bottom_idx = left_idx + int(np.argmin(segment[left_idx:right_idx + 1]))
+    bottom = float(segment[bottom_idx])
+    depth = 1 - bottom / rim if rim > 0 else 0
+    handle = segment[right_idx:-1]
+    handle_drawdown = 1 - float(handle.min()) / right if len(handle) and right > 0 else 0
+    if abs(left - right) / max(left, 1e-9) > 0.08 or not 0.12 <= depth <= 0.40:
+        return []
+    if bottom_idx < int(n * 0.20) or bottom_idx > int(n * 0.75) or handle_drawdown > 0.12:
+        return []
+    current = float(segment[-1])
+    confirmed = current > rim * 1.003
+    failed = bool(len(handle) and current < float(handle.min()) * 0.997)
+    return [_pattern("杯柄", "bullish", len(data) - n + left_idx, len(data) - 1, data,
+                     status="confirmed" if confirmed else ("failed" if failed else "forming"), breakout=rim,
+                     invalidation=float(handle.min()) if len(handle) else bottom,
+                     measured_target=rim + (rim - bottom))]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -164,9 +305,9 @@ class PatternDetector:
     """K线形态检测器"""
 
     def __init__(self):
-        self.available = TALIB_AVAILABLE
-        if not self.available:
-            print("[形态检测] ⚠️ talib 未安装，形态检测不可用。pip install TA-Lib")
+        # 复合形态是纯 pandas/numpy 实现，TA-Lib 只决定是否额外检测蜡烛形态。
+        self.available = True
+        self.talib_available = TALIB_AVAILABLE
 
     def detect_all(self, data: pd.DataFrame, date=None,
                    lookback: int = 5) -> dict:
@@ -176,10 +317,7 @@ class PatternDetector:
         返回:
             {pattern_id: {name, type, found, date, strength}}
         """
-        if not self.available:
-            return {"error": "talib_not_available"}
-
-        if len(data) < 120:
+        if data is None or getattr(data, 'empty', True) or len(data) < 31:
             return {"error": "insufficient_data"}
 
         # 列名兼容：yfinance/akshare 风格大写 OHLC + 标准小写 + 中文
@@ -190,68 +328,71 @@ class PatternDetector:
             '最高': 'high', '最低': 'low', '成交量': 'volume',
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-        # date 列若是 index 则下沉
-        if 'date' not in df.columns and df.index.name in ('Date', 'date', '日期'):
-            df = df.reset_index().rename(columns={df.index.name: 'date'})
+        # date 列若不存在则使用 index（即使 index 没有显式命名）。
+        if 'date' not in df.columns:
+            df['date'] = df.index
         # 截取到指定日期
         if date is not None and 'date' in df.columns:
             end_date = date.strftime("%Y-%m-%d")
             df = df.loc[df['date'].astype(str) <= end_date].copy()
 
-        if len(df) < 120:
+        if len(df) < 31:
             return {"error": "insufficient_data"}
 
-        for col in ('open', 'high', 'low', 'close'):
+        for col in ('close',):
             if col not in df.columns:
                 return {"error": f"missing_column: {col}"}
 
-        open_p = df['open'].values.astype('float64')
-        high = df['high'].values.astype('float64')
-        low = df['low'].values.astype('float64')
+        for col in ('open', 'high', 'low', 'close', 'volume'):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['close'])
         close = df['close'].values.astype('float64')
 
         # 检测最近 lookback 天内的所有形态触发（取每个形态最近一次触发）
         results = {}
         lookback = min(lookback, len(df))
-        for pid, (name_cn, ptype, func) in TALIB_PATTERNS.items():
-            try:
-                result = func(open_p, high, low, close)
-                recent = result[-lookback:]
-                last_idx = None
-                for i in range(len(recent) - 1, -1, -1):
-                    if recent[i] != 0:
-                        last_idx = i
-                        break
-                if last_idx is None:
-                    continue
-                actual_offset = -(lookback - last_idx)
-                strength = self._calc_strength(df, actual_offset, recent[last_idx])
-                date_str = str(df['date'].iloc[actual_offset])[:10]
+        if self.talib_available and all(col in df.columns for col in ('open', 'high', 'low')):
+            open_p = df['open'].values.astype('float64')
+            high = df['high'].values.astype('float64')
+            low = df['low'].values.astype('float64')
+            for pid, (name_cn, ptype, func) in TALIB_PATTERNS.items():
+                try:
+                    result = func(open_p, high, low, close)
+                    recent = result[-lookback:]
+                    last_idx = next((i for i in range(len(recent) - 1, -1, -1)
+                                     if recent[i] != 0), None)
+                    if last_idx is None:
+                        continue
+                    value = int(recent[last_idx])
+                    # 同一个 TA-Lib 函数可能正负双向触发，避免“看涨吞没”收进负信号。
+                    if ('🟢' in ptype and value < 0) or ('🔴' in ptype and value > 0):
+                        continue
+                    actual_offset = -(lookback - last_idx)
+                    direction = ('bullish' if '🟢' in ptype else
+                                 ('bearish' if '🔴' in ptype else 'neutral'))
+                    results[pid] = {
+                        "name": name_cn, "type": ptype, "direction": direction,
+                        "status": "confirmed", "found": True,
+                        "date": str(df['date'].iloc[actual_offset])[:10],
+                        "value": value,
+                        "strength": self._calc_strength(df, actual_offset, value),
+                        "days_ago": lookback - 1 - last_idx,
+                        "source": "talib",
+                    }
+                except Exception:
+                    pass
 
-                results[pid] = {
-                    "name": name_cn,
-                    "type": ptype,
-                    "found": True,
-                    "date": date_str,
-                    "value": int(recent[last_idx]),
-                    "strength": strength,
-                    "days_ago": lookback - 1 - last_idx,
-                }
+        # 纯计算复合形态不依赖 TA-Lib；保留 forming 供 Agent 观察，只有 confirmed 才 found。
+        detectors = (detect_double_top_bottom, detect_box, detect_head_shoulders,
+                     detect_flag, detect_cup_handle)
+        for detector in detectors:
+            try:
+                for index, pattern in enumerate(detector(df)):
+                    pattern['source'] = 'composite'
+                    results[f"composite_{detector.__name__}_{index}"] = pattern
             except Exception:
                 pass
-
-        # 复合形态
-        double_patterns = detect_double_top_bottom(df)
-        for i, dp in enumerate(double_patterns):
-            if dp['date'] == (str(df['date'].iloc[-1])[:10] if len(df) > 0 else ''):
-                results[f"double_{i}"] = {
-                    "name": dp['name'],
-                    "type": dp['type'],
-                    "found": True,
-                    "date": dp['date'],
-                    "value": 100,
-                    "strength": "中",
-                }
 
         # 加上支撑/阻力位
         try:

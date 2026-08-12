@@ -70,6 +70,18 @@ class SelectionFinalizerTests(unittest.TestCase):
         self.assertGreater(final[0]['resonance_bonus'], 0)
         self.assertLess(final[1]['resonance_bonus'], 0)
 
+    def test_bounded_technical_confluence_affects_close_candidates(self):
+        rows = [
+            {'rank': 1, 'code': '000001', 'score': 3, 'sources': ['A', 'B'],
+             'technical_state': {'score': -99, 'grade': 'caution'}},
+            {'rank': 2, 'code': '000002', 'score': 3, 'sources': ['A', 'B'],
+             'technical_state': {'score': 4, 'grade': 'positive'}},
+        ]
+        final = finalize_selection(rows, limit=2)
+        self.assertEqual(final[0]['code'], '000002')
+        self.assertEqual(final[1]['technical_bonus'], -8)
+        self.assertIn('技术共振+4', final[0]['final_reason'])
+
 
 if __name__ == '__main__':
     unittest.main()

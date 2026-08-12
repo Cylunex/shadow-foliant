@@ -15,6 +15,7 @@ from analysis.multi_timeframe import evaluate as evaluate_multi_timeframe
 from analysis.position_sizer import suggest_new_buy_pct
 from analysis.price_levels import analyze_levels
 from analysis.stress_testing import analyze_risk
+from analysis.technical_state import analyze_technical_state
 
 
 ACTION_CN = {
@@ -69,7 +70,8 @@ def _nearby(levels: Dict[str, Iterable[dict]], close: float, side: str) -> list[
 
 def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
                      market_signal: Optional[Dict[str, Any]] = None,
-                     latest_signal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                     latest_signal: Optional[Dict[str, Any]] = None,
+                     technical_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """从本地行情和既有结构化结论生成统一交易计划。"""
     closes = _close_series(df)
     if closes.empty:
@@ -82,6 +84,8 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
     close = float(closes.iloc[-1])
     atr = _atr(df) or close * 0.025
     timeframe = evaluate_multi_timeframe(df)
+    technical = (technical_state if isinstance(technical_state, dict)
+                 else analyze_technical_state(df))
     level_result = analyze_levels(df, str(code))
     levels = level_result.get("levels") or {}
     supports = _nearby(levels, close, "support")
@@ -110,6 +114,19 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         historical_high = float(closes.tail(60).max())
         if historical_high >= close + atr * 0.8:
             target_price = historical_high
+
+    # 形态测算目标只作为第二目标展示，绝不替代附近结构压力或参与首目标盈亏比。
+    bullish_pattern_targets = [
+        _finite(item.get("measured_target"))
+        for item in (technical.get("confirmed_patterns") or [])
+        if item.get("direction") == "bullish"
+    ]
+    bullish_pattern_targets = [value for value in bullish_pattern_targets
+                               if value is not None and value > close]
+    measured_pattern_target = min(bullish_pattern_targets) if bullish_pattern_targets else None
+    target_price_2 = (measured_pattern_target if target_price is not None
+                      and measured_pattern_target is not None
+                      and measured_pattern_target > target_price else None)
 
     risk_amount = entry_mid - stop_loss
     reward_amount = (target_price - entry_mid) if target_price is not None else None
@@ -145,10 +162,13 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         evidence.append(f"组合环境允许{market.get('action_cn') or '买入'}")
     elif market_action in {"reduce", "sell"}:
         blockers.append(f"组合环境要求{market.get('action_cn') or '降低仓位'}")
+    evidence.extend(str(x) for x in (technical.get("positives") or [])[:4])
+    blockers.extend(str(x) for x in (technical.get("risks") or [])[:4])
 
     action = "watch"
     if (timeframe.get("resonance") == "confirmed" and rr is not None and rr >= 2.0
-            and market_action not in {"reduce", "sell"}):
+            and market_action not in {"reduce", "sell"}
+            and technical.get("grade") != "caution"):
         action = "buy"
     if timeframe.get("resonance") == "blocked":
         action = "avoid"
@@ -169,6 +189,9 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         "entry_high": round(entry_high, 2),
         "stop_loss": round(stop_loss, 2),
         "target_price": round(target_price, 2) if target_price is not None else None,
+        "target_price_2": round(target_price_2, 2) if target_price_2 is not None else None,
+        "measured_pattern_target": (round(measured_pattern_target, 2)
+                                    if measured_pattern_target is not None else None),
         "risk_reward_ratio": round(rr, 2) if rr is not None else None,
         "suggested_position_pct": position_pct if action == "buy" else 0.0,
         "horizon": "swing",
@@ -177,11 +200,16 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         "atr14": round(atr, 3),
         "var95_pct": round(var95 * 100, 2) if var95 is not None else None,
         "multi_timeframe": timeframe,
+        "technical_state": technical,
+        "technical_score": technical.get("score"),
+        "donchian_exit10": (technical.get("donchian") or {}).get("exit10"),
+        "donchian_exit20": (technical.get("donchian") or {}).get("exit20"),
+        "donchian_stop_2n": (technical.get("donchian") or {}).get("stop_2n"),
         "market_action": market_action,
         "evidence": list(dict.fromkeys(evidence)),
         "blockers": list(dict.fromkeys(blockers)),
         "levels_summary": level_result.get("summary"),
-        "method": "calendar-week+structure-level+ATR+VaR+RR2.0",
+        "method": "calendar-week+structure-level+ATR+VaR+RR2.0+technical-confluence",
     }
 
 

@@ -4504,6 +4504,7 @@ def task_unified_selection():
         artifact_rows = []
         final_rows = []
         try:
+            from analysis.technical_state import analyze_technical_state as _analyze_technical_state
             _selection_dfs = {}
             for rank, code in enumerate(top_list, 1):
                 cinfo = candidates.get(code) or {}
@@ -4511,6 +4512,8 @@ def task_unified_selection():
                 debate = debate_map.get(code) or {}
                 _timeframe = {'available': False, 'weekly_regime': 'unknown',
                               'resonance': 'unknown', 'reason': '周线数据不可用'}
+                _technical = {'available': False, 'score': 0.0,
+                              'grade': 'neutral', 'reason': '日K数据不可用'}
                 try:
                     from analysis.multi_timeframe import evaluate as _eval_timeframe
                     _df = datahub.kline(code, '1y', adjust='qfq')
@@ -4518,7 +4521,14 @@ def task_unified_selection():
                     if (_df is not None and not getattr(_df, 'empty', True)
                             and _quality.get('actionable')):
                         _selection_dfs[code] = _df
-                        _timeframe = _eval_timeframe(_df)
+                        try:
+                            _timeframe = _eval_timeframe(_df)
+                        except Exception as _mte:
+                            _timeframe['reason'] = f'{type(_mte).__name__}: {str(_mte)[:50]}'
+                        try:
+                            _technical = _analyze_technical_state(_df)
+                        except Exception as _tse:
+                            _technical['reason'] = f'{type(_tse).__name__}: {str(_tse)[:50]}'
                     elif _quality.get('reason'):
                         _timeframe['reason'] = f"K线不可用于决策:{_quality['reason']}"
                 except Exception as _te:
@@ -4537,6 +4547,7 @@ def task_unified_selection():
                     'debate_confidence': debate.get('confidence'),
                     'debate_reason': debate.get('reason') or debate.get('summary'),
                     'multi_timeframe': _timeframe,
+                    'technical_state': _technical,
                 })
             from analysis.selection_finalizer import finalize_selection
             final_rows = finalize_selection(artifact_rows, limit=5)
@@ -4548,7 +4559,8 @@ def task_unified_selection():
                     _df = _selection_dfs.get(_code)
                     if _df is not None:
                         _row['trade_plan'] = build_trade_plan(
-                            _code, _df, name=_row.get('name') or '')
+                            _code, _df, name=_row.get('name') or '',
+                            technical_state=_row.get('technical_state'))
             except Exception as _tpe:
                 print(f'[unified_selection] 交易计划生成失败(不影响最终TOP5): '
                       f'{type(_tpe).__name__}: {str(_tpe)[:80]}')

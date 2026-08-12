@@ -178,12 +178,14 @@ def _eval_pattern(df: pd.DataFrame) -> Dict[str, bool]:
     try:
         from pattern_recognition import PatternDetector
         det = PatternDetector()
-        if not getattr(det, 'available', False) or len(df) < 120:
+        if len(df) < 31:
             return {}
         raw = det.detect_all(df, lookback=5)
         out = {}
         for pid, r in raw.items():
-            if isinstance(r, dict) and r.get('found') and r.get('name'):
+            # 形成中的复合结构可供 Agent 观察，但不当成选股命中。
+            if (isinstance(r, dict) and r.get('found')
+                    and r.get('status', 'confirmed') == 'confirmed' and r.get('name')):
                 out[r['name']] = True
         return out
     except Exception:

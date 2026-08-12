@@ -33,7 +33,8 @@ def _chase_penalty(change_pct: Any) -> float:
 def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
     """从综合候选中选最终 TOP N，返回带 final_score/final_reason 的新字典。
 
-    评分刻意透明：规则分×10 + 来源数×4 + 红蓝结论/置信度 + 周日共振 - 追高扣分。
+    评分刻意透明：规则分×10 + 来源数×4 + 红蓝结论/置信度 + 周日共振
+    + 技术共振软评分（封顶±8）- 追高扣分。
     原始 rank 作为最后的稳定排序键，保证同分结果可复现。
     """
     ranked: List[Dict[str, Any]] = []
@@ -50,10 +51,14 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
         timeframe = row.get('multi_timeframe') if isinstance(row.get('multi_timeframe'), dict) else {}
         resonance = timeframe.get('resonance') or row.get('resonance')
         resonance_bonus = _RESONANCE_BONUS.get(resonance, 0.0)
+        technical = (row.get('technical_state')
+                     if isinstance(row.get('technical_state'), dict) else {})
+        technical_bonus = max(-8.0, min(8.0, _number(technical.get('score')) or 0.0))
         final_score = (rule_score * 10.0 + min(len(sources), 4) * 4.0
                        + _VERDICT_BONUS.get(verdict, 0.0)
                        + (_CONFIDENCE_BONUS.get(confidence, 0.0) if verdict == '买入' else 0.0)
                        + resonance_bonus
+                       + technical_bonus
                        - chase_penalty)
 
         reasons = []
@@ -71,6 +76,9 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
             reasons.append('周日同弱-16')
         elif timeframe.get('available'):
             reasons.append(str(timeframe.get('resonance_cn') or '等待日线确认'))
+        if technical_bonus:
+            label = '技术共振' if technical_bonus > 0 else '技术风险'
+            reasons.append(f'{label}{technical_bonus:+g}')
         if chase_penalty:
             reasons.append(f'已涨{_number(row.get("change_pct")):.1f}%扣追高分')
 
@@ -80,6 +88,7 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
             'final_reason': '；'.join(reasons),
             'chase_penalty': chase_penalty,
             'resonance_bonus': resonance_bonus,
+            'technical_bonus': technical_bonus,
         })
         ranked.append(row)
 
@@ -97,7 +106,7 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[D
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
     rows = list(rows or [])
     lines = [
-        '从综合 TOP15 再筛一层：规则强度 + 多源共振 + 红蓝复核 + 自然周/日线共振 + 追高风险。',
+        '从综合 TOP15 再筛一层：规则强度 + 多源共振 + 红蓝复核 + 周日共振 + 量价/突破趋势 + 追高风险。',
         '是否提高总仓位仍以 10:05 的组合动作分级为准。',
         '',
     ]
@@ -124,6 +133,12 @@ def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
                 f"{plan.get('entry_low', '-')}~{plan.get('entry_high', '-')}｜"
                 f"止损 {plan.get('stop_loss', '-')}｜目标 {plan.get('target_price') or '-'}{rr_text}"
             )
+            if plan.get('target_price_2') is not None:
+                lines.append(f"   形态第二目标：{plan['target_price_2']}（不参与首目标盈亏比）")
+            technical = plan.get('technical_state') or {}
+            positives = technical.get('positives') or []
+            if positives:
+                lines.append(f"   技术确认：{'；'.join(str(x) for x in positives[:3])}")
             blockers = plan.get('blockers') or []
             if blockers:
                 lines.append(f"   阻断：{'；'.join(str(x) for x in blockers[:2])}")

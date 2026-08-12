@@ -59,6 +59,22 @@ class TradePlanTests(unittest.TestCase):
         if plan["action"] == "buy":
             self.assertGreaterEqual(plan["risk_reward_ratio"], 2.0)
 
+    def test_pattern_target_never_replaces_first_target_or_rr(self):
+        technical = {
+            "available": True, "score": 2, "grade": "neutral",
+            "positives": ["确认看涨形态:箱体突破"], "risks": [],
+            "donchian": {},
+            "confirmed_patterns": [{
+                "name": "箱体突破", "direction": "bullish",
+                "status": "confirmed", "measured_target": 100.0,
+            }],
+        }
+        plan = build_trade_plan("600001", _trend_frame(), technical_state=technical)
+        self.assertEqual(plan["measured_pattern_target"], 100.0)
+        self.assertNotEqual(plan.get("target_price"), 100.0)
+        if plan.get("target_price_2") is not None:
+            self.assertGreater(plan["target_price_2"], plan["target_price"])
+
 
 class MarketBreadthTests(unittest.TestCase):
     def test_breadth_requires_coverage_and_calculates_cross_section(self):
