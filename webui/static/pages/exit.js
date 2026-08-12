@@ -1,7 +1,7 @@
 import { reactive, ref, onMounted } from 'vue'
 import { api } from '../lib.js'
 
-const TAG = { sell: '🔴清仓', reduce: '🟠减仓', hold: '⚪持有' }
+const TAG = { sell: '🟢清仓', reduce: '🟠减仓', hold: '⚪持有' }
 const CATCLS = { '割肉止损': 'green', '止盈锁定': 'red', '破位减仓': 'green', '死钱调出': 'green', '健康保留': '' }
 
 export default {
@@ -14,7 +14,7 @@ export default {
       <div class="row" style="gap:12px;align-items:flex-end">
         <div><label>目标持仓数</label><input type="number" v-model.number="s.target" style="width:80px"/></div>
         <button :disabled="s.loading" @click="load">{{s.loading?'分析中…(尾盘数据+AI策略,稍候)':'分析持仓'}}</button>
-        <span class="sub" v-if="s.d">持仓 {{s.d.n_holdings}} 只 · 目标 {{s.d.target}} <b v-if="s.d.over_diversified" class="red">· 过度分散</b></span>
+        <span class="sub" v-if="s.d">持仓 {{s.d.n_holdings}} 只 · 目标 {{s.d.target}} <b v-if="s.d.over_diversified" class="amber">· 过度分散</b></span>
       </div>
     </div>
     <div v-if="s.err" class="err">{{s.err}}</div>

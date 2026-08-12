@@ -14,7 +14,20 @@ const CN_MAP = {
 export default {
   template: `<div>
     <h1 class="h1">🧬 策略基因组</h1>
-    <p class="sub">策略自动进化追踪 · 每日 16:30 更新</p>
+    <p class="sub">先看真正进入生产扫描的部署集，再看评分、A/B、变体和因子研究；候选变体不等于已上线。</p>
+
+    <section class="card">
+      <div class="section-head"><div><h2>当前生产部署集</h2><p>只展示通过样本外门槛、当前真正用于选股和扫描的策略</p></div><span class="badge success">{{deployRows.length}} 个基础策略</span></div>
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="stat-card"><div class="stat-label">部署基础策略</div><div class="stat-value">{{deployRows.length}}</div><div class="stat-note">去重后的在线集合</div></div>
+        <div class="stat-card"><div class="stat-label">进化版本</div><div class="stat-value">{{evolvedCount}}</div><div class="stat-note">generation &gt; 0</div></div>
+        <div class="stat-card"><div class="stat-label">默认回退</div><div class="stat-value">{{defaultCount}}</div><div class="stat-note">样本外不稳时保守使用</div></div>
+        <div class="stat-card"><div class="stat-label">组合策略</div><div class="stat-value">{{s.deployment?.composed?.length||0}}</div><div class="stat-note">通过相关性去重</div></div>
+      </div>
+      <div v-if="deployRows.length" class="table-wrap"><table><thead><tr><th>策略</th><th>上线版本</th><th>代数</th><th>状态</th><th>核心参数</th></tr></thead><tbody>
+        <tr v-for="r in deployRows" :key="r.id"><td><b>{{CN_MAP[r.id]||r.id}}</b><div class="pick-code">{{r.id}}</div></td><td>{{r.variant_id||'默认参数'}}</td><td>{{r.generation||0}}</td><td><span class="badge" :class="r.generation>0?'info':'warning'">{{r.generation>0?'进化上线':'默认回退'}}</span></td><td style="text-align:left;color:var(--muted)">{{formatParams(r.params)}}</td></tr>
+      </tbody></table></div><div v-else-if="s.deployErr" class="err">{{s.deployErr}}</div><div v-else class="loading">正在读取生产部署集…</div>
+    </section>
 
     <!-- 策略评分面板 -->
     <div class="card">
@@ -195,6 +208,7 @@ export default {
       err: '', searchCode: '',
       factors: null, factorsErr: '',
       ab: null, pv: null, pvErr: '',
+      deployment: null, deployErr: '',
     })
 
     async function loadFactors() {
@@ -241,8 +255,17 @@ export default {
 
     const formatParams = (p) => {
       if (!p) return ''
-      const d = typeof p === 'string' ? JSON.parse(p) : p
-      return Object.entries(d).map(([k,v])=>`${k}=${v}`).join(', ')
+      try{const d = typeof p === 'string' ? JSON.parse(p) : p;return Object.entries(d).slice(0,6).map(([k,v])=>`${k}=${v}`).join(', ')}catch(e){return String(p)}
+    }
+
+    const deployRows = computed(()=>{
+      const base=(s.deployment&&s.deployment.base)||{}, meta=(s.deployment&&s.deployment.base_meta)||{}
+      return Object.entries(base).map(([id,params])=>({id,params,...(meta[id]||{})}))
+    })
+    const evolvedCount=computed(()=>deployRows.value.filter(r=>(r.generation||0)>0).length)
+    const defaultCount=computed(()=>Math.max(0,deployRows.value.length-evolvedCount.value))
+    async function loadDeployment(){
+      try{s.deployment=await api('strategy-genome/deployment')}catch(e){s.deployErr=String(e)}
     }
 
     async function loadScores() {
@@ -272,9 +295,10 @@ export default {
       } catch(e) { s.affinity = [{ strategy_id: 'error', score: 0 }] }
     }
 
-    onMounted(() => { loadScores(); loadVariants(); loadFactors(); loadAB(); loadPV() })
+    onMounted(() => { loadDeployment(); loadScores(); loadVariants(); loadFactors(); loadAB(); loadPV() })
 
     // cls 必须 return 给模板(模板里多处 :class="cls(...)";漏 return → 运行时 cls is not a function)
-    return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform, topWeightFactors }
+    return { s, CN_MAP, formatParams, searchAffinity, cls, fmt, abUnderperform, topWeightFactors,
+      deployRows, evolvedCount, defaultCount }
   }
 }

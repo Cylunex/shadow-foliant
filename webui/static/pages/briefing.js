@@ -27,7 +27,7 @@ export default {
         <h3>📊 大盘速览</h3>
         <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center">
           <div v-for="x in b.data.market.indices" :key="x.name"><span style="color:var(--muted);font-size:12px">{{x.name}}</span>
-            <b :class="x.v&&x.v.includes('-')?'green':'red'" style="margin-left:5px">{{x.v}}</b></div>
+            <b :class="marketCls(x.v)" style="margin-left:5px">{{x.v}}</b></div>
         </div>
         <div style="margin-top:10px;font-size:13px">
           <span style="color:var(--muted)">强势板块:</span>
@@ -40,7 +40,7 @@ export default {
 
       <!-- 买入推荐 -->
       <div class="card">
-        <h3>🟢 今日买入候选 <span style="color:var(--muted);font-weight:400;font-size:12px">沪深300多因子 Top</span></h3>
+        <h3>🔴 今日买入候选 <span style="color:var(--muted);font-weight:400;font-size:12px">沪深300多因子 Top</span></h3>
         <table v-if="b.data.buy&&b.data.buy.length"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>综合分</th></tr></thead>
           <tbody><tr v-for="x in b.data.buy" :key="x.code"><td>{{x.code}}</td><td>{{x.name||'—'}}</td><td>{{x.price?fmt(x.price):'—'}}</td><td>{{x.composite}}</td></tr></tbody></table>
         <div v-else class="loading">暂无(多因子数据未就绪)。</div>
@@ -49,7 +49,7 @@ export default {
 
       <!-- 持仓卖出提示 -->
       <div class="card" style="border-left:3px solid var(--green)">
-        <h3>🔴 持仓建议关注卖出 <span style="color:var(--muted);font-weight:400;font-size:12px">扫了 {{b.data.scanned}} 只持仓,按风险信号排序</span></h3>
+        <h3>🟢 持仓建议关注卖出 <span style="color:var(--muted);font-weight:400;font-size:12px">扫了 {{b.data.scanned}} 只持仓,按风险信号排序</span></h3>
         <div v-if="b.data.sell&&b.data.sell.length">
           <div v-for="s in b.data.sell" :key="s.code" style="padding:9px 0;border-bottom:1px solid var(--line)">
             <b>{{s.name}} <span style="color:var(--muted);font-weight:400">{{s.code}}</span></b>
@@ -84,7 +84,8 @@ export default {
       try{ const r = await api('/api/briefing/ai-summary',{method:'POST'}); ai.text = r.error||r.analysis }
       catch(e){ ai.text='AI总结失败: '+e }finally{ ai.loading=false }
     }
+    const marketCls=v=>cls(Number.parseFloat(String(v||'').replace('%','')))
     onMounted(()=> load(false))
-    return { b, ai, load, aiSummary, md:mdLite, cls, fmt }
+    return { b, ai, load, aiSummary, marketCls, md:mdLite, cls, fmt }
   }
 }

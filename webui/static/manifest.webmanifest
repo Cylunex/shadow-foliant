@@ -1,13 +1,13 @@
 {
-  "name": "shadow-foliant 智能投研",
-  "short_name": "投研",
-  "description": "A股多智能体分析 · 选股 · 持仓盯盘 · 回测 · 基金定投",
+  "name": "shadow-foliant A股智能投研",
+  "short_name": "shadow 投研",
+  "description": "Agent-first A股投研工作台 · 综合选股 · 持仓 · 策略 · 后验",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#0f1320",
-  "theme_color": "#0f1320",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
   "lang": "zh-CN",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

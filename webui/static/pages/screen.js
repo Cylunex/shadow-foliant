@@ -1,5 +1,5 @@
-import { reactive, ref, computed } from 'vue'
-import { api, fmt, zh, useSort } from '../lib.js'
+import { reactive, ref, computed, onMounted } from 'vue'
+import { api, fmt, zh, cls, useSort } from '../lib.js'
 
 const INDEXES = [
   {code:'000300', name:'沪深300'}, {code:'000905', name:'中证500'},
@@ -21,11 +21,39 @@ export default {
   template: `
   <div>
     <div class="h1">🎯 选股</div>
-    <p class="sub">多因子横截面打分,或问财策略选股(主力/低价擒牛/小市值/净利增长/低估值)。</p>
+    <p class="sub">先看每日综合 TOP15 与最终 TOP5；需要专项研究时再运行多因子、问财或配方选股。</p>
     <div class="tabs">
+      <div class="tab" :class="{active:tab==='latest'}" @click="tab='latest';loadLatest()">今日综合优选</div>
       <div class="tab" :class="{active:tab==='mf'}" @click="tab='mf'">多因子选股</div>
       <div class="tab" :class="{active:tab==='wc'}" @click="tab='wc'">问财策略</div>
       <div class="tab" :class="{active:tab==='rp'}" @click="tab='rp'">配方选股</div>
+    </div>
+
+    <!-- 每日综合选股产物 -->
+    <div v-if="tab==='latest'">
+      <section class="command-hero" style="margin-bottom:16px">
+        <div><span class="badge info">UNIFIED SELECTION</span><h1 style="margin-top:10px">综合选股</h1><p>TOP15 保留完整候选，最终 TOP5 再经过技术结构、红蓝证伪、追高和组合集中度复核。</p></div>
+        <div class="hero-status"><div><strong>{{latest.meta?.snapshot_date||'暂无快照'}}</strong><small>{{latest.status==='success'?'今日产物可用':statusCn(latest.status)}}</small></div><button class="ghost" :disabled="latest.loading" @click="loadLatest">{{latest.loading?'读取中…':'刷新'}}</button></div>
+      </section>
+      <div v-if="latest.err" class="err">{{latest.err}}</div>
+      <section class="card">
+        <div class="section-head"><div><h2>最终优选 TOP5</h2><p>这是需要优先研究的短名单，不等于直接买入指令</p></div><span class="badge warning">买入前核对盘面与价格</span></div>
+        <div v-if="latestFinal.length" class="pick-grid">
+          <article v-for="(r,i) in latestFinal" :key="r.code" class="pick-card" style="cursor:pointer" @click="openStock(r.code)">
+            <span class="pick-rank">{{i+1}}</span><div class="pick-code">{{r.code}}</div><div class="pick-name">{{r.name||'未命名'}}</div>
+            <div class="pick-score">{{fmt(r.final_score)}}<small>优选分</small></div>
+            <div class="pick-tags"><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'规则优选'}}</span><span v-if="r.source_count" class="pill">{{r.source_count}} 源</span></div>
+            <div class="pick-reason">{{r.final_reason||'等待优选依据'}}</div>
+          </article>
+        </div>
+        <div v-else class="empty-state"><div><b>尚无最终 TOP5</b><br>综合选股完成后会在这里显示。</div></div>
+      </section>
+      <section class="card">
+        <div class="section-head"><div><h2>完整候选 TOP15</h2><p>点击任意标的进入股票研究</p></div><span class="pill">{{latestRows.length}} 只</span></div>
+        <div v-if="latestRows.length" class="table-wrap"><table><thead><tr><th>#</th><th>代码 / 名称</th><th>综合分</th><th>现价</th><th>涨跌</th><th>红蓝结论</th><th>来源</th></tr></thead>
+          <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.score)}}</td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td><td><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'—'}}</span></td><td style="text-align:left">{{(r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
+        </table></div><div v-else class="empty-state">尚无综合选股快照。</div>
+      </section>
     </div>
 
     <!-- 多因子 -->
@@ -104,7 +132,19 @@ export default {
     </div>
   </div>`,
   setup(){
-    const tab = ref('mf')
+    const tab = ref('latest')
+    const latest = reactive({ status:'missing', data:null, meta:null, loading:false, err:'' })
+    const latestFinal = computed(()=>latest.data?.final_rows||[])
+    const latestRows = computed(()=>latest.data?.rows||[])
+    async function loadLatest(){
+      latest.loading=true;latest.err=''
+      try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{}}
+      catch(e){latest.err=''+e}finally{latest.loading=false}
+    }
+    const statusCn=v=>({success:'今日可用',stale:'快照已过期',missing:'尚无快照',failed:'读取失败'}[v]||v||'未知')
+    const debateClass=v=>String(v||'').includes('否决')?'danger':String(v||'').includes('谨慎')?'warning':'success'
+    const signed=v=>v==null?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`
+    function openStock(code){if(code){try{sessionStorage.setItem('sf-stock-code',code)}catch(e){};location.hash='stock'}}
     const s = reactive({ index:'000300', n:15, style:'balanced', res:null, err:'', loading:false })
     const mcols = reactive([])
     const w = reactive({ strat:'', rows:null, msg:'', err:'', loading:false })
@@ -142,9 +182,11 @@ export default {
       try{ const r = await api('/api/screen/strategy/'+k+'?top_n=10'); w.rows=r.rows; w.msg=r.msg }
       catch(e){ w.err=''+e }finally{ w.loading=false }
     }
-    return { tab, s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,
+    onMounted(loadLatest)
+    return { tab, latest, latestFinal, latestRows, loadLatest, statusCn, debateClass, signed, openStock,
+             s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,
              idx:INDEXES, styles:STYLES, strats:STRATS, runMf, setStyle, runWc,
              rp, recipes:RECIPES, rpCount, runRecipe, rpHoldings, rpHs300,
-             fmt, zh, disp }
+             fmt, zh, cls, disp }
   }
 }

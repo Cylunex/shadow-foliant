@@ -65,7 +65,7 @@ export const fmt4 = v => (v==null)?'—':(+v).toFixed(4)
 export const pct  = v => (v==null)?'—':((v>=0?'+':'')+(v*100).toFixed(2)+'%')
 export const money= v => (v==null)?'—':(+v).toLocaleString('zh',{minimumFractionDigits:3,maximumFractionDigits:3})
 // A股惯例:红涨绿跌 —— 正(涨)→红,负(跌)→绿(与欧美相反)
-export const cls  = v => v==null?'':(v>=0?'red':'green')
+export const cls  = v => v==null||Number(v)===0?'':(Number(v)>0?'red':'green')
 
 // 字段名 → 中文表头(通用表格用;查不到回退原名)
 const ZH = {

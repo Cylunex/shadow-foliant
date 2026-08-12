@@ -2353,11 +2353,21 @@ def task_run_detail(run_id: str):
 
 
 @app.get("/api/agent/cockpit")
-def agent_cockpit_view(recent_limit: int = 12):
+def agent_cockpit_view(recent_limit: int = 12, compact: bool = False):
     """Web 只读复用 Agent 总览，便于诊断任务/数据状态。"""
     try:
         from jobs.task_control import agent_cockpit
-        return _ok(agent_cockpit(recent_limit=recent_limit))
+        return _ok(agent_cockpit(recent_limit=recent_limit, compact=compact))
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/screen/latest")
+def latest_unified_selection():
+    """最近一次综合 TOP15 与最终 TOP5，只读快照，不触发外部数据请求。"""
+    try:
+        from jobs.task_control import latest_selection_artifact
+        return _ok(latest_selection_artifact())
     except Exception as e:
         return _err(e)
 
@@ -2487,6 +2497,22 @@ def strategy_genome_scores(days: int = 30):
         cur.close()
         conn.close()
         return _ok({"rows": rows})
+    except Exception as e:
+        return _err(e)
+
+
+@app.get("/api/strategy-genome/deployment")
+def strategy_genome_deployment():
+    """当前真正进入生产扫描的策略集，而不是数据库里的全部候选变体。"""
+    try:
+        from analysis.strategy_genome import get_live_strategy_set
+        live = get_live_strategy_set() or {}
+        return _ok({
+            "base": live.get("base") or {},
+            "base_meta": live.get("base_meta") or {},
+            "composed": live.get("composed") or [],
+            "base_count": len(live.get("base") or {}),
+        })
     except Exception as e:
         return _err(e)
 

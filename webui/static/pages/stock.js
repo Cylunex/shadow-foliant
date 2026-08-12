@@ -169,7 +169,9 @@ export default {
     </div>
   </div>`,
   setup(){
-    const s = reactive({ code:'600519', info:null, err:'', loading:false })
+    let initialCode='600519'
+    try{initialCode=sessionStorage.getItem('sf-stock-code')||initialCode}catch(e){}
+    const s = reactive({ code:initialCode, info:null, err:'', loading:false })
     const ai = reactive({ res:null, err:'', loading:false })
     const chart = ref()
     // 个股研究

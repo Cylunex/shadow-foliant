@@ -73,7 +73,7 @@ export default {
 
     <!-- 环境配置(.env) -->
     <div v-if="tab==='env'">
-      <p class="sub">编辑 .env 环境变量(API key / 数据库 / 数据源 / 通知)。密钥仅显示尾 4 位,留空表示不修改。</p>
+      <p class="sub">编辑 .env 环境变量(API key / 数据库 / 数据源 / 通知)。密钥只显示是否已设置，不回显内容；留空表示不修改。</p>
       <div v-if="e.err" class="err">{{e.err}}</div>
       <div v-if="e.msg" class="ok-msg">{{e.msg}}</div>
       <div v-if="e.loading" class="loading">加载中…</div>

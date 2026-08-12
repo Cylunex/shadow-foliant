@@ -64,7 +64,7 @@ export default {
       </tr></thead>
       <tbody><tr v-for="x in sorted" :key="x.id">
         <td>{{(x.trade_time||'').slice(0,16)}}</td>
-        <td :class="x.trade_type==='买入'?'green':'red'">{{x.trade_type}}</td>
+        <td :class="x.trade_type==='买入'?'red':'green'">{{x.trade_type}}</td>
         <td>{{x.stock_code}}</td><td>{{x.stock_name}}</td>
         <td>{{fmt(x.price)}}</td><td>{{x.quantity}}</td>
         <td>{{money(x.amount)}}</td><td>{{fmt(x.commission)}}</td>

@@ -1,6 +1,6 @@
 /* shadow-foliant Service Worker —— 只缓存静态外壳,API 永不缓存(行情/净值/持仓必须实时)。
    策略:静态资源 network-first(在线永远拿最新,顺带写缓存;离线回退缓存) → 既不卡 stale JS,又能离线开 UI。*/
-const CACHE = 'sf-shell-v1';
+const CACHE = 'sf-shell-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 
