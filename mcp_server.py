@@ -343,8 +343,10 @@ def chip_distribution(code: str) -> Dict[str, Any]:
 @mcp.tool()
 def stock_signals(code: str) -> Dict[str, Any]:
     """稳健买点/风险信号 + 行情阶段(防接飞刀):
-    regime(trending_up/down/sideways/volatile)、缩量回踩、底部放量、情绪顶预警。"""
-    from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
+    regime(trending_up/down/sideways/volatile)、缩量回踩、底部放量、情绪顶预警、
+    连涨转弱(10日≥7涨且累计≥15%后的 0~3 级回落)。"""
+    from strategy_signals import (shrink_pullback, bottom_volume, emotion_top_warning,
+                                  rise_rollover_setup, rise_rollover_warning, detect_regime)
     df = _fetch_df(code, '1y')
     if isinstance(df, dict):
         return df
@@ -353,6 +355,8 @@ def stock_signals(code: str) -> Dict[str, Any]:
         'shrink_pullback': shrink_pullback(df),
         'bottom_volume': bottom_volume(df),
         'emotion_top_warning': emotion_top_warning(df),
+        'rise_rollover_setup': rise_rollover_setup(df),
+        'rise_rollover_warning': rise_rollover_warning(df),
     }
 
 

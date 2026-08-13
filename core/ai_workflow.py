@@ -55,12 +55,15 @@ def _p_chip(ctx):
 
 
 def _p_signals(ctx):
-    from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
+    from strategy_signals import (shrink_pullback, bottom_volume, emotion_top_warning,
+                                  rise_rollover_setup, rise_rollover_warning, detect_regime)
     df = _stock_df(ctx["code"])
     if isinstance(df, dict):
         return {"error": "无行情"}
     return {"regime": detect_regime(df), "shrink_pullback": shrink_pullback(df),
-            "bottom_volume": bottom_volume(df), "emotion_top_warning": emotion_top_warning(df)}
+            "bottom_volume": bottom_volume(df), "emotion_top_warning": emotion_top_warning(df),
+            "rise_rollover_setup": rise_rollover_setup(df),
+            "rise_rollover_warning": rise_rollover_warning(df)}
 
 
 def _p_flow(ctx):

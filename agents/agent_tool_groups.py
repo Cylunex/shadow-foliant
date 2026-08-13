@@ -131,15 +131,18 @@ def collect_kline_technical_context(symbol: str, period: str = '1y',
     except Exception as e:
         ctx['errors'].append(f'pattern_detect: {e}')
 
-    # 行情阶段 regime + 策略信号(缩量回踩/底部放量/情绪顶)— 供 AI 随行情判断、防接飞刀
+    # 行情阶段 + 策略信号(缩量回踩/底部放量/情绪顶/连涨转弱)— 供 AI 判断、防接飞刀与高位误卖
     try:
         if df is not None and hasattr(df, '__len__') and len(df) >= 25:
-            from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
+            from strategy_signals import (shrink_pullback, bottom_volume, emotion_top_warning,
+                                          rise_rollover_setup, rise_rollover_warning, detect_regime)
             ctx['regime'] = detect_regime(df)
             ctx['signals'] = {
                 'shrink_pullback': shrink_pullback(df),
                 'bottom_volume': bottom_volume(df),
                 'emotion_top_warning': emotion_top_warning(df),
+                'rise_rollover_setup': rise_rollover_setup(df),
+                'rise_rollover_warning': rise_rollover_warning(df),
             }
     except Exception as e:
         ctx['errors'].append(f'strategy_signals: {e}')

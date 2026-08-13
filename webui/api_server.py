@@ -252,9 +252,12 @@ def stock_insights(code: str):
             return _cyq(df)
 
         def signals():
-            from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
+            from strategy_signals import (shrink_pullback, bottom_volume, emotion_top_warning,
+                                          rise_rollover_setup, rise_rollover_warning, detect_regime)
             return {"regime": detect_regime(df), "shrink_pullback": shrink_pullback(df),
-                    "bottom_volume": bottom_volume(df), "emotion_top_warning": emotion_top_warning(df)}
+                    "bottom_volume": bottom_volume(df), "emotion_top_warning": emotion_top_warning(df),
+                    "rise_rollover_setup": rise_rollover_setup(df),
+                    "rise_rollover_warning": rise_rollover_warning(df)}
 
         def forensics():
             from fundamental_scoring import collect_factors

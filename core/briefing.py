@@ -32,10 +32,11 @@ def _market():
 
 
 def _scan_holding(h):
-    """单只持仓信号:regime + 情绪顶 + 企稳/底部放量 → 卖出分 & 买点。"""
+    """单只持仓信号:regime + 情绪顶/连涨转弱 + 企稳/底部放量 → 卖出分 & 买点。"""
     try:
         import datahub
-        from strategy_signals import shrink_pullback, bottom_volume, emotion_top_warning, detect_regime
+        from strategy_signals import (shrink_pullback, bottom_volume, emotion_top_warning,
+                                      rise_rollover_warning, detect_regime)
         code = str(h.get("code"))
         # 走 datahub.kline(磁盘缓存);6mo≈120交易日,够算 regime/信号。前复权 qfq:技术信号防除权跳空
         df = datahub.kline(code, "6mo", adjust='qfq')
@@ -45,11 +46,15 @@ def _scan_holding(h):
         emo = emotion_top_warning(df) or {}
         bot = bottom_volume(df) or {}
         shr = shrink_pullback(df) or {}
+        rollover = rise_rollover_warning(df) or {}
         score, reasons = 0, []
         if regime == "trending_down":
             score += 2; reasons.append("下降趋势")
         if emo.get("signal"):
             score += 2; reasons.append("情绪顶预警:" + str(emo.get("reason", "")))
+        if int(rollover.get('risk_score') or 0) > 0:
+            score += int(rollover['risk_score'])
+            reasons.append('连涨转弱:' + str(rollover.get('reason', '')))
         if regime == "volatile":
             score += 1; reasons.append("高波动")
         buy_sig, buy_reason = False, ""
@@ -59,7 +64,8 @@ def _scan_holding(h):
             buy_sig, buy_reason = True, "缩量回踩企稳:" + str(shr.get("reason", ""))
         return {"code": code, "name": h.get("name"), "regime": regime,
                 "sell_score": score, "sell_reasons": reasons,
-                "buy_signal": buy_sig, "buy_reason": buy_reason}
+                "buy_signal": buy_sig, "buy_reason": buy_reason,
+                "rise_rollover": rollover}
     except Exception:
         return None
 

@@ -427,6 +427,20 @@ def task_portfolio_indicator_snapshot():
                             risk_rows.append((name or sym, sym, latest['var95'], latest['max_drawdown']))
                 except Exception:
                     pass
+                # 阶段连涨后的转弱基准：盘后保存“10日7涨且累计15%”上涨段，
+                # 次日早/尾盘只用实时价评估，不增加逐只 K 线请求。
+                try:
+                    from strategy_signals import rise_rollover_setup, rise_rollover_warning
+                    latest['rise_rollover_setup'] = rise_rollover_setup(df)
+                    latest['rise_rollover'] = rise_rollover_warning(df)
+                    # 用 K 线最后日期而不是任务运行日期：盘中手动补跑时 K 线可能只到昨日。
+                    _last_bar = df.index[-1]
+                    latest['rise_rollover_as_of'] = (
+                        _last_bar.strftime('%Y-%m-%d') if hasattr(_last_bar, 'strftime')
+                        else str(_last_bar)[:10]
+                    )
+                except Exception:
+                    pass
                 # 反转形态扫描（原 wf_daily_pattern_alert,复用同一 df,零额外取数）
                 if _pat_det is not None and sym in holding_syms:
                     try:
@@ -4030,9 +4044,9 @@ def _scan_holdings_with_snapshot():
 
     晨报AI(09:00)/早盘持仓(10:05)/尾盘持仓(14:30)共用。
     返回 [{'code','name','price','change','pnl','sell_score','sell_reasons',
-           'buy_signal','buy_reason'}],失败返回 []。
+           'buy_signal','buy_reason','rollover_level','rollover_reason'}],失败返回 []。
     卖出风险分: 破MA60(+2)/破MA20(+1)/VaR95>5%(+1)/年回撤>40%(+1)/浮亏>10%(+1)/
-               缠论卖点(+1)/盘中大跌>5%(+1)
+               缠论卖点(+1)/盘中大跌>5%(+1)/连涨转弱确认(+1~2)
     买点: 缠论 一买/二买/三买/底背驰
     """
     try:
@@ -4091,6 +4105,25 @@ def _scan_holdings_with_snapshot():
                 score += 1; reasons.append(f'缠论{chan}')
             if change <= -5:
                 score += 1; reasons.append(f'盘中大跌{change:.1f}%')
+            rollover = {'level': 0, 'reason': ''}
+            try:
+                from strategy_signals import evaluate_rise_rollover
+                # 当日盘后快照已经把“今日”作为触发日算过，直接读结果；
+                # 盘前/盘中读昨日快照时，才用今日实时价评估，避免同一根 K 线既进上涨段又当触发日。
+                if (snap.get('rise_rollover_as_of') == datetime.now().strftime('%Y-%m-%d')
+                        and isinstance(snap.get('rise_rollover'), dict)):
+                    rollover = snap['rise_rollover']
+                else:
+                    rollover = evaluate_rise_rollover(
+                        snap.get('rise_rollover_setup') or {}, price, change,
+                        float(q.get('vol_ratio') or 0),
+                    )
+                rr_score = int(rollover.get('risk_score') or 0)
+                if rr_score:
+                    score += rr_score
+                    reasons.append(f"连涨后{rollover.get('level_name', '转弱')}")
+            except Exception:
+                rollover = {'level': 0, 'reason': ''}
             buy_sig = any(k in chan for k in ('一买', '二买', '三买', '底背驰'))
             qty = 0.0
             try:
@@ -4102,7 +4135,11 @@ def _scan_holdings_with_snapshot():
                           'mv': round(price * qty, 0) if (price > 0 and qty > 0) else None,
                           'var95': var95, 'nosnap': nosnap,
                           'sell_score': score, 'sell_reasons': reasons,
-                          'buy_signal': buy_sig, 'buy_reason': f'缠论{chan}' if buy_sig else ''})
+                          'buy_signal': buy_sig, 'buy_reason': f'缠论{chan}' if buy_sig else '',
+                          'rollover_level': int(rollover.get('level') or 0),
+                          'rollover_action': rollover.get('action') or 'hold',
+                          'rollover_reason': rollover.get('reason') or '',
+                          'rise_rollover': rollover})
         except Exception:
             continue
     return scans
@@ -4721,10 +4758,11 @@ def task_unified_selection():
         print(f'[unified_selection] 候选池子任务失败: {e}')
 
 
-def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '') -> str:
+def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '', rollover_watch=None) -> str:
     """早盘持仓 AI 研判:**一次** LLM,只喂"风险/买点/异动"子集(控 token、不逐只、不雪崩)→
     整体基调 + 重点处理 1-2 只 + 一句早盘纪律。失败/无关注子集 → 返回 ''(不阻塞规则报告)。"""
-    if not (sell_list or buy_list or movers):
+    rollover_watch = rollover_watch or []
+    if not (sell_list or buy_list or movers or rollover_watch):
         return ''
 
     def _row(s):
@@ -4739,6 +4777,9 @@ def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '') 
         parts.append('【出现买点】\n' + '\n'.join(_row(s) for s in buy_list[:6]))
     if movers:
         parts.append('【盘中异动±3%】\n' + '\n'.join(_row(s) for s in movers))
+    if rollover_watch:
+        parts.append('【连涨后首次转弱·暂不急卖】\n' + '\n'.join(
+            f"{s['code']} {s['name']} {s.get('rollover_reason', '')}" for s in rollover_watch[:4]))
     prompt = (f"你是早盘持仓顾问。账户共持有 {n} 只。现在是开盘后约 35 分钟(10:05),"
               f"下面是需要关注的子集(规则已算好风险分/买点/异动):\n"
               + chr(10).join(parts)
@@ -4780,10 +4821,12 @@ def task_morning_portfolio():
         # 盘中异动(开盘40分钟):涨>3% 或 跌>3%
         movers = sorted([s for s in scans if abs(s.get('change') or 0) >= 3],
                         key=lambda x: x['change'], reverse=True)[:6]
+        rollover_watch = [s for s in scans if int(s.get('rollover_level') or 0) == 1][:5]
 
         # 结论先行(2026-07-02):标题下第一行给动作汇总
-        _hsum = (f'今日:需减/清 {len(sell_list)} 只 · 买点 {len(buy_list)} 只 · 异动 {len(movers)} 只'
-                 if (sell_list or buy_list or movers) else '今日:持仓无预警,整体平稳')
+        _hsum = (f'今日:需减/清 {len(sell_list)} 只 · 转弱观察 {len(rollover_watch)} 只 · '
+                 f'买点 {len(buy_list)} 只 · 异动 {len(movers)} 只'
+                 if (sell_list or rollover_watch or buy_list or movers) else '今日:持仓无预警,整体平稳')
         lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', _hsum, '']
 
         # 组合级加仓窗口：规则化而非 LLM。小跌忽略；连续大跌不接飞刀；只有非连续的全市场急跌才提示。
@@ -4827,7 +4870,7 @@ def task_morning_portfolio():
         except Exception:
             _do_ai = True
         if _do_ai:
-            _ai = _morning_ai_review(len(scans), sell_list, buy_list, movers, mkt_line)
+            _ai = _morning_ai_review(len(scans), sell_list, buy_list, movers, mkt_line, rollover_watch)
             if _ai:
                 lines.append('### 🧠 早盘研判(AI)')
                 lines.append(_ai)
@@ -4841,7 +4884,10 @@ def task_morning_portfolio():
             for s in sell_list:
                 sc = s['sell_score']
                 # 风险分 → 动作+减仓比例(破MA60=+2,故 ≥4 多为破位+多重风险)
-                act = '🟢 清仓/大幅减' if sc >= 4 else ('🟢 减一半' if sc >= 2 else '⚪ 先关注')
+                if int(s.get('rollover_level') or 0) == 2 and sc == 1:
+                    act = '⚪ 锁利评估'
+                else:
+                    act = '🟢 清仓/大幅减' if sc >= 4 else ('🟢 减一半' if sc >= 2 else '⚪ 先关注')
                 pnl_s = f"，浮盈{s['pnl']}%" if s['pnl'] is not None else ''
                 price_s = f"¥{s['price']}" if s['price'] else ''
                 why = '、'.join(next((h for k, h in _RTERM if r.startswith(k)), r)
@@ -4850,6 +4896,12 @@ def task_morning_portfolio():
                 lines.append(f"      为什么:{why}")
         else:
             lines.append('  （暂无预警）')
+
+        if rollover_watch:
+            lines.append('')
+            lines.append('### ⚪ 连涨后首次转弱（先观察）')
+            for s in rollover_watch:
+                lines.append(f"  • {s['name']} {s['code']} — {s.get('rollover_reason', '')}")
 
         lines.append('')
         lines.append('### 🔴 持仓出现买点')
@@ -4890,16 +4942,22 @@ def task_morning_portfolio():
         try:
             cands = []
             for s in scans:
-                hot = s['sell_score'] > 0 or s['buy_signal'] or abs(s.get('change') or 0) >= 3
+                hot = (s['sell_score'] > 0 or s['buy_signal']
+                       or int(s.get('rollover_level') or 0) > 0
+                       or abs(s.get('change') or 0) >= 3)
                 if not hot:
                     continue
                 if s['sell_score'] > 0:
                     tag = '⚠️ ' + '、'.join(s['sell_reasons'][:2])
+                elif int(s.get('rollover_level') or 0) > 0:
+                    tag = '⚪ ' + (s.get('rollover_reason') or '连涨后首次转弱')
                 elif s['buy_signal']:
                     tag = '🔴 ' + (s.get('buy_reason') or '买点')
                 else:
                     tag = f"⚡ 异动{s.get('change'):+.1f}%"
-                pri = s['sell_score'] * 2 + (1 if s['buy_signal'] else 0) + (1 if abs(s.get('change') or 0) >= 3 else 0)
+                pri = (s['sell_score'] * 2 + int(s.get('rollover_level') or 0)
+                       + (1 if s['buy_signal'] else 0)
+                       + (1 if abs(s.get('change') or 0) >= 3 else 0))
                 cands.append({'code': s['code'], 'name': s['name'], 'pri': pri, 'tag': tag,
                               'sell_score': s['sell_score'], 'mprice': s.get('price') or 0})
             cands.sort(key=lambda x: x['pri'], reverse=True)
@@ -4910,7 +4968,8 @@ def task_morning_portfolio():
 
         _log_run(job, 'success',
                  error=(f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} '
-                        f'movers={len(movers)} add={_add_signal.get("level")}'),
+                        f'movers={len(movers)} rollover_watch={len(rollover_watch)} '
+                        f'add={_add_signal.get("level")}'),
                  started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:

@@ -194,6 +194,7 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - `decision_signal_winrate(dimension,days)` — 按 action/source_type/horizon 分桶真实胜率
 
 **持仓 / 卖出侧 AI**(回答"该卖什么、何时清"):
+- `stock_signals(code)` — 含连涨转弱指标：10 日至少 7 日上涨且累计至少 15% 后，按首次转弱/转弱确认/趋势破位分 1~3 级；一级只观察，不把普通小跌直接当卖点
 - `exit_advice(target_positions)` — 清仓决策助手:全持仓清仓紧迫分(割肉/止盈/破位/死钱)+ 过度分散瘦身 + AI 策略
 - `portfolio_health_check(max_stocks)` — 持仓 AI 体检:单股 持有/减仓/清仓 + 理由
 - `lockup_radar(codes,forward_days)` — 持仓解禁雷达:未来解禁 → 解禁前减仓研判
