@@ -1,9 +1,9 @@
 """持仓 4 象限自动分级
 
 设计目标：30+ 只持仓你看不过来 → 系统自动把每只股归到 4 类：
-  🟢 健康   基本面 ≥ B 级 且 趋势向上 且 未破位
+  ✅ 健康   基本面 ≥ B 级 且 趋势向上 且 未破位
   🟡 观察   基本面 C 级 或 持仓跌幅 [10%, 25%]
-  🔴 警报   基本面 D/E 或 持仓跌幅 > 25% 或 出现高位看跌反转形态
+  ⛔ 警报   基本面 D/E 或 持仓跌幅 > 25% 或 出现高位看跌反转形态
   ⚪ N/A    数据不足 / 持仓 0 股
 
 接口：
@@ -187,7 +187,7 @@ def classify_all(max_workers: int = 8, limit: int = 0,
 
 def format_report(by_class: Dict[str, List[Dict[str, Any]]]) -> str:
     lines = []
-    labels = {'healthy': '🟢 健康', 'watch': '🟡 观察', 'alert': '🔴 警报', 'na': '⚪ 数据不足'}
+    labels = {'healthy': '✅ 健康', 'watch': '⚠️ 观察', 'alert': '⛔ 警报', 'na': '⚪ 数据不足'}
     for k in ('alert', 'watch', 'healthy', 'na'):
         items = by_class.get(k, [])
         if not items:

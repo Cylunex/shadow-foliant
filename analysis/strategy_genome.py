@@ -1145,7 +1145,7 @@ def format_intelligence_for_ai(intel: Dict[str, Any]) -> str:
         head += f',当前环境:{regime}）：' if regime else '）：'
         lines.append(head)
         for i, m in enumerate(market[:8]):
-            tag = '🟢' if (m.get('score') or 0) >= 60 else ('🟡' if (m.get('score') or 0) >= 40 else '🔴')
+            tag = '✅' if (m.get('score') or 0) >= 60 else ('⚠️' if (m.get('score') or 0) >= 40 else '❌')
             trig = m.get('triggered_n', 0) or 0
             pool = m.get('stock_pool_n', 1) or 1
             lines.append(
@@ -1161,7 +1161,7 @@ def format_intelligence_for_ai(intel: Dict[str, Any]) -> str:
     if stock:
         lines.append(f'\n🎯 **该股历史策略适配度**：')
         for s in stock[:5]:
-            tag = '🟢' if (s.get('score') or 0) >= 60 else ('🔴' if (s.get('score') or 0) < 40 else '🟡')
+            tag = '✅' if (s.get('score') or 0) >= 60 else ('❌' if (s.get('score') or 0) < 40 else '⚠️')
             lines.append(
                 f"  {tag} {s['strategy_id']}"
                 f" | 评分{s.get('score', 0):.0f}"
@@ -1221,7 +1221,7 @@ def build_evolution_report() -> str:
     if top_today:
         lines.append('\n📊 今日全市场策略效能：')
         for t in top_today:
-            tag = '🟢' if (t.get('score') or 0) >= 60 else ('🟡' if (t.get('score') or 0) >= 40 else '🔴')
+            tag = '✅' if (t.get('score') or 0) >= 60 else ('⚠️' if (t.get('score') or 0) >= 40 else '❌')
             trig = t.get('triggered_n', 0) or 0
             pool = t.get('stock_pool_n', 1) or 1
             lines.append(

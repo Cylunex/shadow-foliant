@@ -513,7 +513,7 @@ def portfolio_action_signals(limit: int = 40) -> Dict[str, Any]:
 
 @mcp.tool()
 def portfolio_classify(limit: int = 30, with_fundamental: bool = False) -> Dict[str, Any]:
-    """持仓自动分级:健康🟢/观察🟡/警报🔴/数据不足⚪,基于 持仓盈亏+趋势(MA)+看跌反转形态。
+    """持仓自动分级:健康✅/观察⚠️/警报⛔/数据不足⚪,基于 持仓盈亏+趋势(MA)+看跌反转形态。
     limit 只扫市值最大前 N 只(默认30,已并发)。with_fundamental=True 才加基本面评分
     (每只2-4s且依赖pywencai/F10,弱网/未配置返回N/A纯耗时,默认关→快)。锁定该重点关注/可能止损的持仓。"""
     import portfolio_classifier as pc

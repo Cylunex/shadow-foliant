@@ -250,7 +250,8 @@ def format_text(report: dict) -> str:
     if not report.get("n"):
         return "组合体检:当前无股票持仓"
     L = [f"🩺 组合体检 {report['score']} 分 — {report['summary']}", ""]
-    icon = {"alert": "🔴", "warn": "🟡", "info": "🟢"}
+    # 风控严重度不用行情红绿，避免和 A 股涨跌/买卖方向混淆。
+    icon = {"alert": "⛔", "warn": "⚠️", "info": "✅"}
     for cat, rules in report["by_category"].items():
         L.append(f"【{report['category_names'].get(cat, cat)}】")
         for r in rules:

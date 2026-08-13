@@ -225,7 +225,7 @@ def dragon_tiger_report():
                 sell = (row.get("BILLBOARD_SELL_AMT") or 0) / 10000
                 reason = row.get("EXPLANATION", "")[:20]
                 chg = round(float(row.get("CHANGE_RATE") or 0), 2)
-                emoji = "🟢" if net > 5000 else ("🔴" if net < -5000 else "⚪")
+                emoji = "🔴" if net > 5000 else ("🟢" if net < -5000 else "⚪")
                 lines.append(
                     f"  {i}. {code} {name} {emoji}净买{net:.0f}万 "
                     f"买{buy:.0f}万卖{sell:.0f}万 涨{chg}%"
@@ -241,7 +241,7 @@ def dragon_tiger_report():
                 name = row.get("SECURITY_NAME_ABBR", "")
                 net = (row.get("BILLBOARD_NET_AMT") or 0) / 10000
                 lines.append(
-                    f"  {i}. {code} {name} 🔴净买{net:.0f}万"
+                    f"  {i}. {code} {name} 🟢净卖{abs(net):.0f}万"
                 )
 
             # 龙虎榜个股机构情况
@@ -260,7 +260,7 @@ def dragon_tiger_report():
                             inst_net = inst["net_amt"]
                             inst_count += 1
                             if inst_count <= 10:
-                                sig = "🟢" if inst_net > 0 else "🔴"
+                                sig = "🔴" if inst_net > 0 else "🟢"
                                 lines.append(
                                     f"  {code} {name} 机构净买{sig}{inst_net}万 "
                                     f"(买{inst.get('buy_amt',0)}万 卖{inst.get('sell_amt',0)}万)"
@@ -372,7 +372,7 @@ def smart_stock_picks(session_name="早盘", top_n=10):
 
         margin_data.sort(key=lambda x: abs(x[1]), reverse=True)
         for code, chg, bal in margin_data[:5]:
-            s = "🟢" if chg > 0 else "🔴"
+            s = "🔴" if chg > 0 else "🟢"
             lines.append(
                 f"  {code} 融资余额{bal/1e8:.1f}亿 {s}{chg:+.1f}%"
             )
@@ -705,7 +705,7 @@ def portfolio_analysis(session_name="持仓"):
             # 涨幅榜简要
             if up_stocks:
                 up_stocks.sort(key=lambda x: x[3], reverse=True)
-                lines.append("\n🟢 **涨幅TOP5**")
+                lines.append("\n🔴 **涨幅TOP5**")
                 for code, name, price, chg, sm in up_stocks[:5]:
                     pd = portfolio_data.get(code, {})
                     qty = pd.get('qty', 0)
@@ -722,7 +722,7 @@ def portfolio_analysis(session_name="持仓"):
             # 跌幅榜简要
             if down_stocks:
                 down_stocks.sort(key=lambda x: x[3])
-                lines.append("\n🔴 **跌幅TOP5**")
+                lines.append("\n🟢 **跌幅TOP5**")
                 for code, name, price, chg, sm in down_stocks[:5]:
                     pd = portfolio_data.get(code, {})
                     qty = pd.get('qty', 0)
@@ -758,11 +758,11 @@ def portfolio_analysis(session_name="持仓"):
             # 涨跌比信号
             ratio = up_count / max(down_count, 1)
             if ratio > 2:
-                lines.append(f"🟢 涨跌比 {ratio:.1f}:1 — 市场强势")
+                lines.append(f"🔴 涨跌比 {ratio:.1f}:1 — 市场强势")
             elif ratio > 1:
                 lines.append(f"🟡 涨跌比 {ratio:.1f}:1 — 中性偏强")
             else:
-                lines.append(f"🔴 涨跌比 1:{1/ratio:.1f} — 弱势")
+                lines.append(f"🟢 涨跌比 1:{1/ratio:.1f} — 弱势")
 
     except Exception as e:
         lines.append(f"⚠️ 行情获取失败: {e}")
@@ -784,7 +784,7 @@ def portfolio_analysis(session_name="持仓"):
 
         flow_anomalies.sort(key=lambda x: abs(x[1]), reverse=True)
         for code, net in flow_anomalies[:8]:
-            s = "🟢" if net > 0 else "🔴"
+            s = "🔴" if net > 0 else "🟢"
             name = quotes.get(code, {}).get('name', code)
             lines.append(
                 f"  {code} {name} 近5日主力{s}{net/1e4:.0f}万"

@@ -141,7 +141,7 @@ def _format(items: List[Dict[str, Any]]) -> str:
         return ''
     rows = sorted(items, key=lambda x: x['days'])
     lines = ['⏳ 持仓解禁雷达']
-    tag = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'watch': '⚪观察'}
+    tag = {'sell': '🟢清仓', 'reduce': '🟢减仓', 'watch': '⚪观察'}
     for it in rows:
         pnl = f" 浮盈亏{it['pnl']:+.0f}%" if it.get('pnl') is not None else ''
         lines.append(f"  {tag.get(it['action'])} {it['name']} {it['code']} — {it['days']}天后解禁 {it['ratio']}%{pnl}\n      {it['reason']}")

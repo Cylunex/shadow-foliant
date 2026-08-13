@@ -374,7 +374,7 @@ class NewsFlowAlertSystem:
             lines.append("")
             
             if danger_alerts:
-                lines.append("🔴 【危险预警】")
+                lines.append("⛔ 【危险预警】")
                 for alert in danger_alerts:
                     lines.append(f"  • {alert['title']}")
                 lines.append("")

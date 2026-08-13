@@ -698,9 +698,10 @@ _此消息由AI股票分析系统自动发送_"""
                     .stock {{ border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
                     .success {{ color: green; }}
                     .failed {{ color: red; }}
-                    .rating-buy {{ color: #28a745; font-weight: bold; }}
+                    /* A 股语义：买入/看涨用红，卖出/看跌用绿。系统成功失败仍按通用状态色。 */
+                    .rating-buy {{ color: #df3448; font-weight: bold; }}
                     .rating-hold {{ color: #ffc107; font-weight: bold; }}
-                    .rating-sell {{ color: #dc3545; font-weight: bold; }}
+                    .rating-sell {{ color: #10a36a; font-weight: bold; }}
                 </style>
             </head>
             <body>
@@ -919,7 +920,6 @@ _此消息由AI股票分析系统自动发送_"""
 
 # 全局通知服务实例
 notification_service = NotificationService()
-
 
 
 

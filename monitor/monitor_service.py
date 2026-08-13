@@ -100,7 +100,7 @@ class StockMonitorService:
                 }
             return {
                 'state': 'running',
-                'label': '🟢 运行中',
+                'label': '✅ 运行中',
                 'color': 'green',
                 'detail': f'监测 {stock_count} 只股票，每 5 分钟检查一次',
             }
@@ -147,7 +147,7 @@ class StockMonitorService:
         # 4. 用户手动停的（或其他未知）
         return {
             'state': 'stopped',
-            'label': '🔴 已停止',
+            'label': '⏹️ 已停止',
             'color': 'red',
             'detail': f'监测列表有 {stock_count} 只股票，但服务未运行',
         }

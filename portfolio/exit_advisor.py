@@ -90,7 +90,7 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
     return score, cat, act, reasons
 
 
-_ACT_TAG = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'hold': '⚪持有'}
+_ACT_TAG = {'sell': '🟢清仓', 'reduce': '🟢减仓', 'hold': '⚪持有'}
 
 
 def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:

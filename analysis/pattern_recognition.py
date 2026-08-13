@@ -39,46 +39,46 @@ except ImportError:
 
 TALIB_PATTERNS = {
     # === 看涨反转 ===
-    "hammer":               ("䭔子线",       "🟢看涨", tl.CDLHAMMER),
-    "inverted_hammer":      ("倒锤子线",      "🟢看涨", tl.CDLINVERTEDHAMMER),
-    "morning_star":         ("晨星",          "🟢看涨", tl.CDLMORNINGSTAR),
-    "morning_doji_star":    ("晨星十字",      "🟢看涨", tl.CDLMORNINGDOJISTAR),
-    "engulfing_bull":       ("看涨吞没",      "🟢看涨", tl.CDLENGULFING),
-    "piercing":             ("刺透形态",      "🟢看涨", tl.CDLPIERCING),
-    "harami_bull":          ("看涨孕线",      "🟢看涨", tl.CDLHARAMI),
-    "harami_cross_bull":    ("看涨十字孕线",   "🟢看涨", tl.CDLHARAMICROSS),
-    "three_white_soldiers": ("三白兵",        "🟢看涨", tl.CDL3WHITESOLDIERS),
-    "three_inside_up":      ("三内升",        "🟢看涨", tl.CDL3INSIDE),
-    "three_outside_up":     ("三外升",        "🟢看涨", tl.CDL3OUTSIDE),
-    "dragonfly_doji":       ("蜻蜓十字",      "🟢看涨", tl.CDLDRAGONFLYDOJI),
-    "abandoned_baby_bull":  ("看涨弃婴",      "🟢看涨", tl.CDLABANDONEDBABY),
-    "tasukigap_bull":       ("向上跳空并列阳", "🟢看涨", tl.CDLTASUKIGAP),
-    "breakaway_bull":       ("看涨脱离",      "🟢看涨", tl.CDLBREAKAWAY),
-    "sticksandwich_bull":   ("看涨条形三明治", "🟢看涨", tl.CDLSTICKSANDWICH),
-    "homing_pigeon":        ("家鸽",          "🟢看涨", tl.CDLHOMINGPIGEON),
-    "matching_low":         ("匹配低位",      "🟢看涨", tl.CDLMATCHINGLOW),
+    "hammer":               ("䭔子线",       "🔴看涨", tl.CDLHAMMER),
+    "inverted_hammer":      ("倒锤子线",      "🔴看涨", tl.CDLINVERTEDHAMMER),
+    "morning_star":         ("晨星",          "🔴看涨", tl.CDLMORNINGSTAR),
+    "morning_doji_star":    ("晨星十字",      "🔴看涨", tl.CDLMORNINGDOJISTAR),
+    "engulfing_bull":       ("看涨吞没",      "🔴看涨", tl.CDLENGULFING),
+    "piercing":             ("刺透形态",      "🔴看涨", tl.CDLPIERCING),
+    "harami_bull":          ("看涨孕线",      "🔴看涨", tl.CDLHARAMI),
+    "harami_cross_bull":    ("看涨十字孕线",   "🔴看涨", tl.CDLHARAMICROSS),
+    "three_white_soldiers": ("三白兵",        "🔴看涨", tl.CDL3WHITESOLDIERS),
+    "three_inside_up":      ("三内升",        "🔴看涨", tl.CDL3INSIDE),
+    "three_outside_up":     ("三外升",        "🔴看涨", tl.CDL3OUTSIDE),
+    "dragonfly_doji":       ("蜻蜓十字",      "🔴看涨", tl.CDLDRAGONFLYDOJI),
+    "abandoned_baby_bull":  ("看涨弃婴",      "🔴看涨", tl.CDLABANDONEDBABY),
+    "tasukigap_bull":       ("向上跳空并列阳", "🔴看涨", tl.CDLTASUKIGAP),
+    "breakaway_bull":       ("看涨脱离",      "🔴看涨", tl.CDLBREAKAWAY),
+    "sticksandwich_bull":   ("看涨条形三明治", "🔴看涨", tl.CDLSTICKSANDWICH),
+    "homing_pigeon":        ("家鸽",          "🔴看涨", tl.CDLHOMINGPIGEON),
+    "matching_low":         ("匹配低位",      "🔴看涨", tl.CDLMATCHINGLOW),
 
     # === 看跌反转 ===
-    "hanging_man":          ("吊颈线",        "🔴看跌", tl.CDLHANGINGMAN),
-    "shooting_star":        ("射击之星",      "🔴看跌", tl.CDLSHOOTINGSTAR),
-    "evening_star":         ("黄昏星",        "🔴看跌", tl.CDLEVENINGSTAR),
-    "evening_doji_star":    ("黄昏十字星",    "🔴看跌", tl.CDLEVENINGDOJISTAR),
-    "engulfing_bear":       ("看跌吞没",      "🔴看跌", tl.CDLENGULFING),
-    "dark_cloud_cover":     ("乌云盖顶",      "🔴看跌", tl.CDLDARKCLOUDCOVER),
-    "harami_bear":          ("看跌孕线",      "🔴看跌", tl.CDLHARAMI),
-    "harami_cross_bear":    ("看跌十字孕线",   "🔴看跌", tl.CDLHARAMICROSS),
-    "three_black_crows":    ("三乌鸦",        "🔴看跌", tl.CDL3BLACKCROWS),
-    "three_inside_down":    ("三内降",        "🔴看跌", tl.CDL3INSIDE),
-    "three_outside_down":   ("三外降",        "🔴看跌", tl.CDL3OUTSIDE),
-    "gravestone_doji":      ("墓碑十字",      "🔴看跌", tl.CDLGRAVESTONEDOJI),
-    "abandoned_baby_bear":  ("看跌弃婴",      "🔴看跌", tl.CDLABANDONEDBABY),
-    "tasukigap_bear":       ("向下跳空并列阴", "🔴看跌", tl.CDLTASUKIGAP),
-    "breakaway_bear":       ("看跌脱离",      "🔴看跌", tl.CDLBREAKAWAY),
-    "advance_block":        ("前进受阻",      "🔴看跌", tl.CDLADVANCEBLOCK),
-    "upside_gap_two_crows": ("向上跳空二乌鸦", "🔴看跌", tl.CDLUPSIDEGAP2CROWS),
-    "two_crows":            ("双乌鸦",        "🔴看跌", tl.CDL2CROWS),
-    "three_stars_south":    ("南方三星",      "🔴看跌", tl.CDL3STARSINSOUTH),
-    "unique_3_river":       ("奇特三河床",    "🔴看跌", tl.CDLUNIQUE3RIVER),
+    "hanging_man":          ("吊颈线",        "🟢看跌", tl.CDLHANGINGMAN),
+    "shooting_star":        ("射击之星",      "🟢看跌", tl.CDLSHOOTINGSTAR),
+    "evening_star":         ("黄昏星",        "🟢看跌", tl.CDLEVENINGSTAR),
+    "evening_doji_star":    ("黄昏十字星",    "🟢看跌", tl.CDLEVENINGDOJISTAR),
+    "engulfing_bear":       ("看跌吞没",      "🟢看跌", tl.CDLENGULFING),
+    "dark_cloud_cover":     ("乌云盖顶",      "🟢看跌", tl.CDLDARKCLOUDCOVER),
+    "harami_bear":          ("看跌孕线",      "🟢看跌", tl.CDLHARAMI),
+    "harami_cross_bear":    ("看跌十字孕线",   "🟢看跌", tl.CDLHARAMICROSS),
+    "three_black_crows":    ("三乌鸦",        "🟢看跌", tl.CDL3BLACKCROWS),
+    "three_inside_down":    ("三内降",        "🟢看跌", tl.CDL3INSIDE),
+    "three_outside_down":   ("三外降",        "🟢看跌", tl.CDL3OUTSIDE),
+    "gravestone_doji":      ("墓碑十字",      "🟢看跌", tl.CDLGRAVESTONEDOJI),
+    "abandoned_baby_bear":  ("看跌弃婴",      "🟢看跌", tl.CDLABANDONEDBABY),
+    "tasukigap_bear":       ("向下跳空并列阴", "🟢看跌", tl.CDLTASUKIGAP),
+    "breakaway_bear":       ("看跌脱离",      "🟢看跌", tl.CDLBREAKAWAY),
+    "advance_block":        ("前进受阻",      "🟢看跌", tl.CDLADVANCEBLOCK),
+    "upside_gap_two_crows": ("向上跳空二乌鸦", "🟢看跌", tl.CDLUPSIDEGAP2CROWS),
+    "two_crows":            ("双乌鸦",        "🟢看跌", tl.CDL2CROWS),
+    "three_stars_south":    ("南方三星",      "🟢看跌", tl.CDL3STARSINSOUTH),
+    "unique_3_river":       ("奇特三河床",    "🟢看跌", tl.CDLUNIQUE3RIVER),
 
     # === 中性/其他 ===
     "doji":                 ("十字星",        "⚪变盘", tl.CDLDOJI),
@@ -88,11 +88,11 @@ TALIB_PATTERNS = {
     "spinning_top":         ("纺锤线",        "⚪观望", tl.CDLSPINNINGTOP),
     "marubozu":             ("光头光脚",      "⚪研判", tl.CDLMARUBOZU),
     "belt_hold":            ("捉腰带线",      "⚪研判", tl.CDLBELTHOLD),
-    "rising_three_methods": ("上升三法",      "🟢持续", tl.CDLRISEFALL3METHODS),
-    "falling_three_methods":("下降三法",      "🔴持续", tl.CDLRISEFALL3METHODS),
+    "rising_three_methods": ("上升三法",      "🔴持续", tl.CDLRISEFALL3METHODS),
+    "falling_three_methods":("下降三法",      "🟢持续", tl.CDLRISEFALL3METHODS),
     "separating_lines":     ("分离线",        "⚪研判", tl.CDLSEPARATINGLINES),
     "conceal_baby_swallow": ("藏婴吞",        "⚪研判", tl.CDLCONCEALBABYSWALL),
-    "ladder_bottom":        ("梯底",          "🟢看涨", tl.CDLLADDERBOTTOM),
+    "ladder_bottom":        ("梯底",          "🔴看涨", tl.CDLLADDERBOTTOM),
     "kicking":              ("反冲形态",      "⚪研判", tl.CDLKICKING),
     "high_wave":            ("大浪线",        "⚪观望", tl.CDLHIGHWAVE),
     "counter_attack":       ("反击线",        "⚪研判", tl.CDLCOUNTERATTACK),
@@ -120,7 +120,7 @@ def _find_local_extrema(prices, window=5):
 def _pattern(name, direction, start_idx, end_idx, data, *, status="forming",
              breakout=None, invalidation=None, measured_target=None, strength="中"):
     """统一复合形态合同；只有 confirmed 才设置 found=True 供策略消费。"""
-    type_text = "🟢看涨" if direction == "bullish" else "🔴看跌"
+    type_text = "🔴看涨" if direction == "bullish" else "🟢看跌"
     date_value = data['date'].iloc[min(end_idx, len(data) - 1)]
     return {
         "name": name, "type": type_text, "direction": direction,
@@ -366,11 +366,11 @@ class PatternDetector:
                         continue
                     value = int(recent[last_idx])
                     # 同一个 TA-Lib 函数可能正负双向触发，避免“看涨吞没”收进负信号。
-                    if ('🟢' in ptype and value < 0) or ('🔴' in ptype and value > 0):
+                    if ('🔴' in ptype and value < 0) or ('🟢' in ptype and value > 0):
                         continue
                     actual_offset = -(lookback - last_idx)
-                    direction = ('bullish' if '🟢' in ptype else
-                                 ('bearish' if '🔴' in ptype else 'neutral'))
+                    direction = ('bullish' if '🔴' in ptype else
+                                 ('bearish' if '🟢' in ptype else 'neutral'))
                     results[pid] = {
                         "name": name_cn, "type": ptype, "direction": direction,
                         "status": "confirmed", "found": True,
@@ -494,19 +494,19 @@ class PatternDetector:
             for pid, info in hits.items():
                 t = info.get('type', '')
                 entry = f"  {t} {info['name']} (强度:{info.get('strength','?')})"
-                if '🟢' in t:
+                if '🔴' in t:
                     bullish.append(entry)
-                elif '🔴' in t:
+                elif '🟢' in t:
                     bearish.append(entry)
                 else:
                     neutral.append(entry)
 
             if bullish:
-                lines.append(f"\n[🟢 看涨信号] ({len(bullish)}个):")
+                lines.append(f"\n[🔴 看涨信号] ({len(bullish)}个):")
                 for b in bullish[:4]:
                     lines.append(b)
             if bearish:
-                lines.append(f"\n[🔴 看跌信号] ({len(bearish)}个):")
+                lines.append(f"\n[🟢 看跌信号] ({len(bearish)}个):")
                 for b in bearish[:4]:
                     lines.append(b)
             if neutral:
@@ -534,12 +534,12 @@ class PatternDetector:
     def get_bullish_patterns(self, results: dict) -> list[str]:
         """提取看涨形态名称"""
         return [v['name'] for k, v in results.items()
-                if v.get('found') and '🟢' in str(v.get('type', ''))]
+                if v.get('found') and '🔴' in str(v.get('type', ''))]
 
     def get_bearish_patterns(self, results: dict) -> list[str]:
         """提取看跌形态名称"""
         return [v['name'] for k, v in results.items()
-                if v.get('found') and '🔴' in str(v.get('type', ''))]
+                if v.get('found') and '🟢' in str(v.get('type', ''))]
 
 
 # ═══════════════════════════════════════════════════════════

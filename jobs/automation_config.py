@@ -448,5 +448,5 @@ if __name__ == '__main__':
     print('=== 自动化开关系统自检 ===')
     print(f'已注册: {len(REGISTRY)} 项')
     for item in list_all():
-        flag = '🟢' if item['enabled'] else '⚪'
+        flag = '✅' if item['enabled'] else '⚪'
         print(f"  {flag} [{item['category']:>4s}] {item['cn']:35s} | {item['schedule']}")

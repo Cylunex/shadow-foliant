@@ -493,7 +493,7 @@ def task_portfolio_indicator_snapshot():
             if pattern_alerts or e_grade_alerts:
                 try:
                     from notification_router import send
-                    body_lines = [f'📈 持仓预警 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
+                    body_lines = [f'⚠️ 持仓预警 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', '']
                     if pattern_alerts:
                         body_lines.append('━━━ 反转形态告警 ━━━')
                         body_lines.extend(pattern_alerts)
@@ -1606,7 +1606,7 @@ def _notify_data_unavailable(name: str, detail: str = ''):
         # 具体到源:列出当前卡死/冷却中的外部源(datahub _route 各源 + 问财熔断),
         # 让通知不只是笼统的"数据源暂不可用"。
         bad_srcs = _current_unhealthy_sources()
-        src_line = (f"\n🔴 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
+        src_line = (f"\n⛔ 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
                     else "\n(未捕到具体源,可能是妙想等非 _route 慢源或整体网络抽风)")
         title_hint = f" ({bad_srcs[0].split(':')[0].split('×')[0]})" if bad_srcs else ""
         body = (f"任务「{cn}」({name}) 因外部数据源暂不可用而结束本次"
@@ -2538,7 +2538,7 @@ def task_morning_strategy():
                     name = row.get('SECURITY_NAME_ABBR', '')
                     net = (row.get('BILLBOARD_NET_AMT') or 0) / 10000
                     # A 股惯例:净卖出 = 利空 = 绿
-                    dt_lines.append(f'  {i}. {code} {name} 🟢净{net:.0f}万')
+                    dt_lines.append(f'  {i}. {code} {name} 🟢净卖{abs(net):.0f}万')
                 dragon_tiger_detailed = '\n'.join(dt_lines)
         except Exception as e:
             dragon_tiger_summary = f'(拉取失败: {e})'
@@ -4833,7 +4833,7 @@ def task_morning_portfolio():
                 lines.append(_ai)
                 lines.append('')
 
-        lines.append('### 🔴 该减/清的(结论先行,按紧迫度)')
+        lines.append('### 🟢 该减/清的(结论先行,按紧迫度)')
         # 术语翻人话:用户看"跌破60日线"比"破MA60(12.3)"懂
         _RTERM = [('破MA60', '跌破60日线·中期破位'), ('破MA20', '跌破20日线·短期走弱'),
                   ('VaR95', '短期波动风险偏高'), ('年回撤', '一年内回撤大')]
@@ -4841,7 +4841,7 @@ def task_morning_portfolio():
             for s in sell_list:
                 sc = s['sell_score']
                 # 风险分 → 动作+减仓比例(破MA60=+2,故 ≥4 多为破位+多重风险)
-                act = '🔴 清仓/大幅减' if sc >= 4 else ('🟡 减一半' if sc >= 2 else '⚪ 先关注')
+                act = '🟢 清仓/大幅减' if sc >= 4 else ('🟢 减一半' if sc >= 2 else '⚪ 先关注')
                 pnl_s = f"，浮盈{s['pnl']}%" if s['pnl'] is not None else ''
                 price_s = f"¥{s['price']}" if s['price'] else ''
                 why = '、'.join(next((h for k, h in _RTERM if r.startswith(k)), r)
@@ -4852,7 +4852,7 @@ def task_morning_portfolio():
             lines.append('  （暂无预警）')
 
         lines.append('')
-        lines.append('### 🟢 持仓出现买点')
+        lines.append('### 🔴 持仓出现买点')
         if buy_list:
             for s in buy_list:
                 price_s = f"¥{s['price']}" if s['price'] else ''
@@ -4896,7 +4896,7 @@ def task_morning_portfolio():
                 if s['sell_score'] > 0:
                     tag = '⚠️ ' + '、'.join(s['sell_reasons'][:2])
                 elif s['buy_signal']:
-                    tag = '🟢 ' + (s.get('buy_reason') or '买点')
+                    tag = '🔴 ' + (s.get('buy_reason') or '买点')
                 else:
                     tag = f"⚡ 异动{s.get('change'):+.1f}%"
                 pri = s['sell_score'] * 2 + (1 if s['buy_signal'] else 0) + (1 if abs(s.get('change') or 0) >= 3 else 0)
@@ -5404,13 +5404,13 @@ def task_weekly_analysis():
         lines.append('')
 
         # ─── 3. 建议减仓 Top5（信心+浮亏排序，带成本/现价/止损） ───
-        lines.append('━━━ 🔴 建议减仓 Top5 ━━━')
+        lines.append('━━━ 🟢 建议减仓 Top5 ━━━')
         sell_stocks.sort(key=lambda x: (-x['confidence'], x['pnl'] if x['price'] > 0 else 999))
         sell_show = [s for s in sell_stocks
                      if s['confidence'] >= 8 or (s['price'] > 0 and s['pnl'] <= -5)] or sell_stocks[:5]
         for i, s in enumerate(sell_show[:5], 1):
             has_price = s['price'] > 0
-            pnl_icon = '🔴' if (has_price and s['pnl'] < -10) else '🟡' if (has_price and s['pnl'] < -3) else '⚪'
+            pnl_icon = '🟢' if (has_price and s['pnl'] < -10) else '🟡' if (has_price and s['pnl'] < -3) else '⚪'
             lines.append(f"  {i}. {pnl_icon} {s['code']} {s['name']}  信心{s['confidence']:.0f}  "
                          f"成本{s['cost']:.3f}→{s['price']:.3f}" if has_price else
                          f"  {i}. ⚪ {s['code']} {s['name']}  信心{s['confidence']:.0f}  （价格数据缺失）")
@@ -5421,12 +5421,12 @@ def task_weekly_analysis():
         lines.append('')
 
         # ─── 4. 建议加仓 Top5 ───
-        lines.append('━━━ 🟢 建议加仓 Top5 ━━━')
+        lines.append('━━━ 🔴 建议加仓 Top5 ━━━')
         buy_stocks.sort(key=lambda x: -x['confidence'])
         for i, s in enumerate(buy_stocks[:5], 1):
             price_display = f"{s['price']:.3f}" if s['price'] > 0 else '数据缺失'
             extra = (f" 目标{s['target']:.2f}" if s['target'] else '') + (f" 止损{s['stop']:.2f}" if s['stop'] else '')
-            lines.append(f"  {i}. 🟢 {s['code']} {s['name']}  信心{s['confidence']:.0f}  现价{price_display} {extra}")
+            lines.append(f"  {i}. 🔴 {s['code']} {s['name']}  信心{s['confidence']:.0f}  现价{price_display} {extra}")
         if not buy_stocks:
             lines.append('  （当前无买入信号）')
         lines.append('')
@@ -5486,8 +5486,8 @@ def task_weekly_analysis():
 
         # ─── 6. 概览 + 周末新闻 ───
         lines.append('━━━ 📊 持仓概览 ━━━')
-        lines.append(f"  共 {len(analysis)} 只持仓 | 🟢买入 {len(buy_stocks)} | "
-                     f"✅持有 {len(hold_stocks)} | 🔴卖出 {len(sell_stocks)}")
+        lines.append(f"  共 {len(analysis)} 只持仓 | 🔴买入 {len(buy_stocks)} | "
+                     f"⚪持有 {len(hold_stocks)} | 🟢卖出 {len(sell_stocks)}")
         lines.append('')
         lines.append('━━━ 📰 周末/隔夜新闻影响 ━━━')
         try:

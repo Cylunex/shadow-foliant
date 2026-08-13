@@ -124,7 +124,7 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         'value': 25.0,
         'type': 'float',
         'cn': '观察区间跌幅上界 (%)',
-        'description': '持仓跌幅超过此值且基本面 D/E 划入"🔴 警报"',
+        'description': '持仓跌幅超过此值且基本面 D/E 划入"⛔ 警报"',
     },
 }
 

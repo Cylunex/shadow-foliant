@@ -92,7 +92,8 @@ def _send_discord(title: str, content: str) -> Tuple[bool, str]:
         'embeds': [{
             'title': title,
             'description': content,
-            'color': 0x00b894,
+            # 通用通知卡片使用中性蓝；市场方向由正文中的 A 股红涨绿跌表达。
+            'color': 0x4F7CFF,
             'timestamp': datetime.utcnow().isoformat(),
         }]
     }
@@ -112,7 +113,7 @@ def _send_slack(title: str, content: str) -> Tuple[bool, str]:
         return False, 'SLACK_WEBHOOK_URL 未配置'
     payload = {
         'text': f'*{title}*',
-        'attachments': [{'text': content, 'color': '#36a64f'}],
+        'attachments': [{'text': content, 'color': '#4F7CFF'}],
     }
     try:
         r = requests.post(url, json=payload, timeout=10)

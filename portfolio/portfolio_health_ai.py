@@ -135,7 +135,7 @@ def _safe_float(v):
         return None
 
 
-_ACT_EMOJI = {'sell': '🔴清仓', 'reduce': '🟠减仓', 'hold': '⚪持有', 'add': '🔴加仓', 'watch': '⚪观望'}
+_ACT_EMOJI = {'sell': '🟢清仓', 'reduce': '🟢减仓', 'hold': '⚪持有', 'add': '🔴加仓', 'watch': '⚪观望'}
 
 
 def _format(items: List[Dict[str, Any]]) -> str:

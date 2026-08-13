@@ -178,7 +178,8 @@ def format_text(rep: dict) -> str:
     L = [f"🪞 交易行为诊断 {rep['score']} 分 — {rep['summary']}",
          f"  {rep['n_trips']}回合 胜率{rep['win_rate']}% 盈亏比{rep['profit_factor']} | "
          f"盈利单{rep['avg_win_pct']}%/{rep['avg_win_hold']}天 亏损单{rep['avg_loss_pct']}%/{rep['avg_loss_hold']}天"]
-    icon = {"alert": "🔴", "warn": "🟡", "info": "🟢"}
+    # 行为诊断是状态严重度，不复用行情红绿。
+    icon = {"alert": "⛔", "warn": "⚠️", "info": "✅"}
     for r in rep["rules"]:
         mark = icon.get(r["severity"], "·") if r["passed"] is not None else "·"
         line = f"  {mark} {r['name']}: {r['detail']}"

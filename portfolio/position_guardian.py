@@ -218,18 +218,18 @@ def _format_recommendation(symbol, name, verdict, reasons,
     stat = (f'  今日 {today_chg:+.2f}%，持仓 {holding_pnl:+.2f}%，'
             f'仓位 {pos_pct:.1f}%，已加 {add_times} 次')
     if verdict == 'approve':
-        return (f'✅ 可以加仓 ｜ {head}\n'
+        return (f'🔴 可以加仓 ｜ {head}\n'
                 f'{stat}\n'
                 f'  跌到你的抄底点、质地也过关 → 可加 1-2 手')
     why = '；'.join(reasons) if reasons else '触发多项风控'
     # 仅"查不到基本面数据"——这是看不清、不是已知很差,别喊止损,先观望就好
     only_coverage = bool(reasons) and all('查不到' in r for r in reasons)
     if only_coverage:
-        return (f'🔻 先别加 ｜ {head}\n'
+        return (f'⚪ 先别加 ｜ {head}\n'
                 f'{stat}\n'
                 f'  为什么:{why}\n'
                 f'  → 看不清质地,先观望,别越跌越补')
-    return (f'🔻 别加仓,该减就减 ｜ {head}\n'
+    return (f'🟢 别加仓,该减就减 ｜ {head}\n'
             f'{stat}\n'
             f'  为什么:{why}\n'
             f'  → 越跌越买容易越套越深,建议减仓/止损,别补仓')
@@ -267,11 +267,11 @@ def format_alert(items: List[Dict[str, Any]]) -> str:
     lines = [f'📊 越跌越买·提示 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
              '_持仓里今天跌到你抄底点的票,哪些能补、哪些该减_']
     if approve:
-        lines.append(f'\n━━━ ✅ 这些可以加 ({len(approve)} 只) ━━━')
+        lines.append(f'\n━━━ 🔴 这些可以加 ({len(approve)} 只) ━━━')
         for x in approve:
             lines.append(x['recommendation'])
     if reject:
-        lines.append(f'\n━━━ 🔻 这些别加,该减就减 ({len(reject)} 只) ━━━')
+        lines.append(f'\n━━━ 🟢 这些别加,该减就减 ({len(reject)} 只) ━━━')
         for x in reject:
             lines.append(x['recommendation'])
     return '\n'.join(lines)

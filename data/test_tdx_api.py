@@ -156,9 +156,9 @@ try:
         
         # 判断MA5和MA20的关系
         if latest['MA5'] > latest['MA20']:
-            print(f"   - 趋势: 🟢 MA5 > MA20 (多头)")
+            print(f"   - 趋势: 🔴 MA5 > MA20 (多头)")
         elif latest['MA5'] < latest['MA20']:
-            print(f"   - 趋势: 🔴 MA5 < MA20 (空头)")
+            print(f"   - 趋势: 🟢 MA5 < MA20 (空头)")
         else:
             print(f"   - 趋势: 🟡 MA5 = MA20 (震荡)")
     else:
