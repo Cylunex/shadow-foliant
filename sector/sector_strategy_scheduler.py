@@ -97,6 +97,10 @@ class SectorStrategyScheduler:
     
     def _run_analysis_safe(self):
         """运行智策分析（带锁保护，防止并发执行）"""
+        from jobs.schedule_policy import weekend_llm_allowed
+        if not weekend_llm_allowed(estimated_minutes=15):
+            print('[智策定时] 周末 LLM 禁用窗口，跳过本次分析')
+            return
         # 尝试获取锁，如果已被占用则跳过本次执行
         if not self._analysis_lock.acquire(blocking=False):
             print("[智策定时] ⚠️ 上一次分析还未完成，跳过本次执行")
@@ -623,4 +627,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n停止测试...")
         sector_strategy_scheduler.stop()
-

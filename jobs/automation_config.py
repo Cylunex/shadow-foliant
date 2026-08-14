@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from db_compat import connect as db_connect, USE_POSTGRES
+from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
 
 _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
@@ -135,19 +136,19 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'weekend_portfolio': {
         'cn': '📊 周末持仓深度合并(周报+压力情景)',
-        'schedule': '周日 15:00',
+        'schedule': f"周日 {WEEKEND_TIMES['weekend_portfolio'][1]}",
         'category': '核心', 'default': True, 'core': True,
-        'description': 'F 合并:顺序跑 ①持仓综合周报(评级/减仓加仓Top5/4象限/已实现盈亏)→ ②8情景压力AI(最脆弱情景/减仓对冲)。合 weekly_analysis+portfolio_stress_ai',
+        'description': 'F 合并:顺序跑 ①8情景压力AI(最脆弱情景/减仓对冲)→ ②持仓综合周报(评级/减仓加仓Top5/4象限/已实现盈亏)。合 portfolio_stress_ai+weekly_analysis',
     },
     'weekly_analysis': {
         'cn': '📊 周日持仓综合周报',
-        'schedule': '已并入 weekend_portfolio(周日15:00)第①步',
+        'schedule': f"已并入 weekend_portfolio(周日{WEEKEND_TIMES['weekend_portfolio'][1]})第①步",
         'category': '核心', 'default': True, 'core': True,
         'description': '评级变化/减仓加仓Top5/4象限体检/已实现盈亏/周末新闻',
     },
     'weekly_db_cleanup': {
         'cn': '🧹 每周数据库清理',
-        'schedule': '周一 03:00',
+        'schedule': f"周日 {WEEKEND_TIMES['weekly_db_cleanup'][1]}",
         'category': '核心', 'default': True, 'core': True,
         'description': '清理过期分析记录 + VACUUM(SQLite)',
     },
@@ -165,7 +166,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'mx_weekend_outlook': {
         'cn': '🔮 周末妙想研判',
-        'schedule': '周日 10:00',
+        'schedule': f"周日 {WEEKEND_TIMES['mx_weekend_outlook'][1]}",
         'category': '核心', 'default': True,
         'description': '周末用东财妙想做前瞻:本周复盘+下周展望+热点题材+重点行业,充分利用周末空档(非交易日照跑)',
     },
@@ -187,7 +188,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',
-        'schedule': '已并入 weekend_portfolio(周日15:00)第②步',
+        'schedule': f"已并入 weekend_portfolio(周日{WEEKEND_TIMES['weekend_portfolio'][1]})第②步",
         'category': '核心',
         'default': True,  # 仍 True:由 weekend_portfolio 调用时要执行(可单独关掉它的子步骤)
         'description': '周末跑全8宏观情景压力+集中度,AI 给最脆弱情景/风险担当持仓/具体减仓对冲建议',
@@ -253,7 +254,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': True,
         'description': '低价(≤20)+非ST+强势板块+短期/历史低位+反转形态，TOP 10 推送',
     },
-    # wf_weekly_portfolio_report 已并入 weekly_analysis(周日 15:00,4象限体检随周报常开)
+    # wf_weekly_portfolio_report 已并入 weekly_analysis(周日 12:05,4象限体检随周报常开)
     'wf_position_guard_check': {
         'cn': '🎯 个人策略：盘中加仓信号',
         'schedule': '已退役(2026-06-25 随 stock_monitor),仅手动/MCP',
@@ -272,14 +273,14 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # ↓↓↓ 基金模块（长期/定投）
     'fund_evening': {
         'cn': '🏦 基金：晚间合并(净值入库+止盈检查)',
-        'schedule': '22:00 每日',
+        'schedule': f"{EVENING_TIMES['fund_evening']} 每日",
         'category': '基金',
         'default': True,  # B 合并:顺序跑 净值入库 → 定投止盈检查(止盈依赖新净值),合一个调度入口
         'description': '盘后先①拉最新净值入库+算基金单日收益,再②按新净值查定投止盈达标。合 fund_nav_refresh+fund_target_check',
     },
     'fund_nav_refresh': {
         'cn': '🏦 基金：盘后净值入库',
-        'schedule': '已并入 fund_evening(22:00),作其子步骤',
+        'schedule': f"已并入 fund_evening({EVENING_TIMES['fund_evening']}),作其子步骤",
         'category': '基金',
         'default': True,  # 仍 True:由 fund_evening 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '对持有基金 + 定投计划标的拉最新净值落 fund_nav 缓存(fund_evening 第①步)',
@@ -300,7 +301,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'fund_target_check': {
         'cn': '🏦 基金：定投止盈检查',
-        'schedule': '已并入 fund_evening(22:00),作其子步骤',
+        'schedule': f"已并入 fund_evening({EVENING_TIMES['fund_evening']}),作其子步骤",
         'category': '基金',
         'default': True,  # 仍 True:由 fund_evening 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '对设了止盈目标的持有基金,按最新净值算浮盈,达标则提醒赎回(fund_evening 第②步)',
@@ -314,14 +315,14 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'pg_backup': {
         'cn': '💾 运维：PG 全量备份到本地 SQLite',
-        'schedule': '02:00 每日',
+        'schedule': f"{EVENING_TIMES['pg_backup']} 每日",
         'category': '运维',
         'default': True,
         'description': '把生产 PostgreSQL 所有表备份到 db/pg_backup.db(离线副本/灾备)',
     },
     'rag_ingest': {
         'cn': '🔎 运维：语义检索语料摄取',
-        'schedule': '02:30 每日',
+        'schedule': f"{EVENING_TIMES['rag_ingest']} 每日（默认关闭）",
         'category': '运维',
         'default': False,
         'description': '已停用；仅 RAG_ENABLED=true 且手动开启时才摄取历史语料',

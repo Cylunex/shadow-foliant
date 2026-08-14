@@ -190,6 +190,10 @@ class PortfolioScheduler:
     
     def _scheduled_job(self):
         """定时任务执行的作业"""
+        from jobs.schedule_policy import weekend_llm_allowed
+        if not weekend_llm_allowed(estimated_minutes=90):
+            print('[持仓定时] 周末 LLM 禁用窗口，跳过本次批量分析')
+            return
         print("\n" + "="*60)
         print(f"定时分析开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*60 + "\n")
@@ -756,4 +760,3 @@ if __name__ == "__main__":
         print(f"  {key}: {value}")
     
     print("\n[OK] 调度器测试完成")
-

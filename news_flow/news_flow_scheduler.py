@@ -240,6 +240,10 @@ class NewsFlowScheduler:
         """运行深度分析任务"""
         task_type = 'deep_analysis'
         task_name = self.TASK_TYPES[task_type]['name']
+        from jobs.schedule_policy import weekend_llm_allowed
+        if not weekend_llm_allowed(estimated_minutes=30):
+            logger.info('[新闻流量] 周末 LLM 禁用窗口，跳过本轮深度分析')
+            return
         
         logger.info(f"[新闻流量] 开始执行: {task_name}")
         start_time = time.time()

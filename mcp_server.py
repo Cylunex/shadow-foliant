@@ -869,12 +869,14 @@ def semantic_search(query: str, top_k: int = 8, source_types: Optional[List[str]
 
 
 # =========================== 任务触发(手动跑定时任务) ===========================
+from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
+
 _TASKS = {
     'morning_strategy':         ('📊 晨间市场报告(AI研判+昨日收益)', '09:00'),
     'fund_dca_reminder':        ('📌 定投提醒', '08:55'),
     'fund_valuation_signal':    ('📈 基金估值信号', '09:05'),
     'unified_selection':        ('🎯 综合选股 TOP15 + 最终TOP5', '09:45'),
-    'morning_portfolio':        ('☀️ 早盘持仓分析(买卖提示+浮盈+异动)', '09:50'),
+    'morning_portfolio':        ('☀️ 早盘持仓分析(买卖提示+浮盈+异动)', '10:05'),
     'mx_selection_review':      ('🔍 妙想第二意见', '10:30'),
     'noon_report':              ('☀️ 午间报告', '12:00'),
     'afternoon_portfolio':      ('📊 尾盘持仓分析', '14:30'),
@@ -890,12 +892,12 @@ _TASKS = {
     'daily_backtest':           ('📐 盘后策略回测', '19:00'),
     'daily_pnl_snapshot':       ('💰 当日盈亏快照', '22:30'),
     'fund_evening':             ('🏦 基金晚间(净值入库+止盈检查)', '22:00'),
-    'pg_backup':                ('💾 数据库备份', '02:00'),
-    'rag_ingest':               ('📚 知识库更新', '02:30'),
-    'weekly_analysis':          ('📊 周日持仓综合周报', '周日 15:00'),
+    'pg_backup':                ('💾 数据库备份', EVENING_TIMES['pg_backup']),
+    'rag_ingest':               ('📚 知识库更新', EVENING_TIMES['rag_ingest']),
+    'weekly_analysis':          ('📊 周日持仓综合周报', f"周日 {WEEKEND_TIMES['weekend_portfolio'][1]}"),
     'wf_weekly_backtest':       ('⏪ 每周回测', '周日 20:00'),
-    'weekly_db_cleanup':        ('🧹 每周数据清理', '周一 03:00'),
-    'ai_eval_weekly':           ('📈 AI推荐周评估', '周一 09:30'),
+    'weekly_db_cleanup':        ('🧹 每周数据清理', f"周日 {WEEKEND_TIMES['weekly_db_cleanup'][1]}"),
+    'ai_eval_weekly':           ('📈 AI推荐周评估', f"周日 {WEEKEND_TIMES['ai_eval_weekly'][1]}"),
     # 2026-06-26 任务整合:ai_rec_check+decision_signal_outcomes→eod_outcomes;fund_nav_refresh+
     # fund_target_check→fund_evening;stock_monitor_check/selection_debate/lockup_radar/research_digest
     # 已退役删除(红蓝→unified_selection、解禁/研报→announcement_scan、急跌→noon/mx/afternoon 尾部)。

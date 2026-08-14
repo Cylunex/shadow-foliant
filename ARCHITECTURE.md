@@ -318,10 +318,10 @@ worker，也不开始计算子任务自身执行超时。上游成功后再异�
 | 18:30/18:35 | `dragon_tiger_archive` / `announcement_scan` | 龙虎榜归档 / 公告+研报+解禁风险预警 | 部分✅ |
 | 19:00 | `daily_backtest` | 🧬 周一/三/五完整策略进化(进程池)，其余交易日轻扫描；样本外部署门 + 组合结构去重 | ✅ |
 | 17:00 | `mx_daily_analysis` | 🌙 妙想收盘复盘 | ✅ |
-| 22:00/22:30 | `fund_nav_refresh` / `daily_pnl_snapshot` | 基金净值 / 💰 今日盈亏 | ❌ |
-| 周日 | `mx_weekend_outlook`(10:00)/`weekly_analysis`(15:00)/`portfolio_stress_ai`(16:00)/`wf_weekly_backtest`(20:00) | 周末研判/周报/🛡️压力预案/周回测 | 部分✅ |
-| 周一 | `weekly_db_cleanup`(03:00)/`ai_eval_weekly`(09:30) | DB 清理 / AI 推荐周评估 | ❌ |
-| 夜间 | `pg_backup`(02:00) | PG 备份 | ❌ |
+| 22:00/22:30 | `fund_evening` / `daily_pnl_snapshot` | 基金净值与止盈检查 / 💰 今日盈亏 | ❌ |
+| 周日 | `mx_weekend_outlook`(08:00)/`weekend_portfolio`(12:05)/`wf_weekly_backtest`(20:00)/`ai_eval_weekly`(20:30) | 高 token LLM 避开 09–12、14–18；晚间两项无 LLM | 部分✅ |
+| 周日 23:15 | `weekly_db_cleanup` | 周清理，通常秒级完成 | ❌ |
+| 夜间 | `rag_ingest`(20:15，默认关闭)/`pg_backup`(23:00) | 可选语料摄取 / PG 备份；按硬超时最晚 23:25 收尾 | ❌ |
 
 `rag_ingest` 已从默认链路停用：注册项保留用于可逆恢复，但默认开关为关闭，且还受
 `RAG_ENABLED=false` 全局门控。Web 语义搜索入口、工作流 RAG provider 和分析补充证据

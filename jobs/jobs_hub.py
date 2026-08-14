@@ -32,6 +32,7 @@ import concurrent.futures
 from db_compat import connect as db_connect, USE_POSTGRES
 from datetime import datetime, date, timedelta
 from typing import Callable, Dict, List, Optional
+from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
 
 import schedule
 import datahub  # 统一外部数据层(行情/北向/龙虎榜/板块/新闻等取数唯一入口)
@@ -3796,7 +3797,7 @@ def task_weekly_backtest():
 
 
 def task_weekly_db_cleanup():
-    """每周一凌晨：清理过期分析记录，VACUUM SQLite"""
+    """每周日晚：清理过期分析记录，VACUUM SQLite（午夜前收尾）。"""
     job = 'weekly_db_cleanup'
     started = datetime.now().isoformat()
     try:
@@ -5105,7 +5106,7 @@ def task_portfolio_health_ai():
 
 
 def task_portfolio_stress_ai():
-    """🛡️ 组合压力情景叙事官(周日 16:00):跑全 8 宏观情景压力 + 集中度 → AI 风险预案
+    """🛡️ 组合压力情景叙事官(周日 12:05 合并任务第一步):跑全 8 宏观情景压力 + 集中度 → AI 风险预案
     (最脆弱情景/风险担当持仓/具体减仓对冲建议)。开关 portfolio_stress_ai(默认开)。周末照跑(静态分析)。"""
     job = 'portfolio_stress_ai'
     try:
@@ -5357,7 +5358,7 @@ def task_mx_daily_analysis():
 
 
 def task_mx_weekend_outlook():
-    """🔮 周末妙想研判(周日):本周复盘 + 下周展望 + 热点题材 + 重点行业。
+    """🔮 周末妙想研判(周日 08:00):本周复盘 + 下周展望 + 热点题材 + 重点行业。
     周末无盘、妙想空着 → 充分利用做前瞻研究(无交易日守卫:周日本就非交易日,照跑)。"""
     job = 'mx_weekend_outlook'
     started = datetime.now().isoformat()
@@ -5572,7 +5573,7 @@ def task_weekly_analysis():
 
 
 def task_weekend_portfolio():
-    """📊 周末持仓深度合并(周日 15:00)—— 合 weekly_analysis + portfolio_stress_ai 为一个调度入口。
+    """📊 周末持仓深度合并(周日 12:05)—— 合 weekly_analysis + portfolio_stress_ai 为一个调度入口。
     ⚠️ 顺序(2026-06-28 调整):**先跑①压力叙事**(单次 LLM、静态分析、~40s、独立于持仓批量)→
     再跑②持仓综合周报(评级变化/减仓加仓Top5/4象限体检;内含 run_once 全持仓 ~83只多智能体 LLM,长)。
     调序原因:外部源降级日(东财封/问财熔断)②每股可达 ~300s、83只远超时,若②在前会**饿死**①;
@@ -5712,10 +5713,11 @@ def register_default_jobs():
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
       17:00 mx_daily_analysis           — 🌙 妙想收盘复盘
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
+      20:15 rag_ingest                  — 🔎 可选 RAG 摄取(默认关闭;启用时也在 21:15 前结束)
       22:00 fund_evening                — 🏦 基金晚间合并(B:净值入库→定投止盈检查) · 22:30 daily_pnl_snapshot
-      02:00/02:30 pg_backup / rag_ingest
-      周日 10:00/15:00/20:00/20:30 mx_weekend_outlook / weekend_portfolio(F:周报+8情景压力合并) / wf_weekly_backtest / ai_eval_weekly
-      周一 03:00 weekly_db_cleanup
+      23:00 pg_backup                   — 💾 PG 备份；周日 23:15 weekly_db_cleanup，夜间最迟按预算 23:25 收尾
+      周日 08:00/12:05 mx_weekend_outlook / weekend_portfolio（高 token LLM，避开 09–12、14–18）
+      周日 20:00/20:30 wf_weekly_backtest / ai_eval_weekly（无 LLM，保留原时间）
       ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
          selection_debate/lockup_radar/research_digest(已并入 unified_selection / announcement_scan)。
 
@@ -5772,44 +5774,47 @@ def register_default_jobs():
     # ---- 🌙 夜间 ----
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)
     hub.register('sector_rotation',             '17:30', task_sector_rotation)        # 📈 题材轮动雷达(盘后,智策引擎)
-    hub.register('daily_pnl_snapshot',          '22:30', task_daily_pnl_snapshot)
+    hub.register('daily_pnl_snapshot', EVENING_TIMES['daily_pnl_snapshot'], task_daily_pnl_snapshot)
     # B 合并(2026-06-26):fund_evening = 原 fund_nav_refresh(22:00 净值入库)→ fund_target_check(止盈检查)
-    hub.register('fund_evening',                '22:00', task_fund_evening)             # 基金晚间合并(先刷净值再查止盈)
-    hub.register('pg_backup',                   '02:00', task_pg_backup)
-    hub.register('rag_ingest',                  '02:30', task_rag_ingest)
+    hub.register('fund_evening', EVENING_TIMES['fund_evening'], task_fund_evening)       # 基金晚间合并(先刷净值再查止盈)
+    hub.register('pg_backup', EVENING_TIMES['pg_backup'], task_pg_backup)
+    hub.register('rag_ingest', EVENING_TIMES['rag_ingest'], task_rag_ingest)
 
     # ---- 📅 周日 ----
     try:
         wrapped = hub._wrap('mx_weekend_outlook', task_mx_weekend_outlook)
-        job = schedule.every().sunday.at('10:00').do(wrapped)
+        job = schedule.every().sunday.at(WEEKEND_TIMES['mx_weekend_outlook'][1]).do(wrapped)
         hub._registered.append({
-            'name': 'mx_weekend_outlook', 'when': 'sun 10:00 CST', 'job': job,
+            'name': 'mx_weekend_outlook',
+            'when': f"sun {WEEKEND_TIMES['mx_weekend_outlook'][1]} CST", 'job': job,
         })
     except Exception as e:
         print(f'[jobs_hub] mx_weekend_outlook 注册失败: {e}')
 
-    # 周末持仓深度合并(2026-06-27):weekly_analysis(15:00)+portfolio_stress_ai(16:00)→ 一条 weekend_portfolio
+    # 周末持仓深度合并移到午间空档，避开用户指定的 14:00–18:00 高 token 禁用窗口。
     try:
         wrapped = hub._wrap('weekend_portfolio', task_weekend_portfolio)
-        job = schedule.every().sunday.at('15:00').do(wrapped)
+        job = schedule.every().sunday.at(WEEKEND_TIMES['weekend_portfolio'][1]).do(wrapped)
         hub._registered.append({
-            'name': 'weekend_portfolio', 'when': 'sun 15:00 CST', 'job': job,
+            'name': 'weekend_portfolio',
+            'when': f"sun {WEEKEND_TIMES['weekend_portfolio'][1]} CST", 'job': job,
         })
     except Exception as e:
         print(f'[jobs_hub] weekend_portfolio 注册失败: {e}')
 
     try:
         wrapped = hub._wrap('weekly_db_cleanup', task_weekly_db_cleanup)
-        job = schedule.every().monday.at('03:00').do(wrapped)
+        job = schedule.every().sunday.at(WEEKEND_TIMES['weekly_db_cleanup'][1]).do(wrapped)
         hub._registered.append({
-            'name': 'weekly_db_cleanup', 'when': 'mon 03:00 CST', 'job': job,
+            'name': 'weekly_db_cleanup',
+            'when': f"sun {WEEKEND_TIMES['weekly_db_cleanup'][1]} CST", 'job': job,
         })
     except Exception as e:
         print(f'[jobs_hub] weekly_db_cleanup 注册失败: {e}')
 
     try:
         wrapped = hub._wrap('wf_weekly_backtest', task_weekly_backtest)
-        job = schedule.every().sunday.at('20:00').do(wrapped)
+        job = schedule.every().sunday.at(WEEKEND_TIMES['wf_weekly_backtest'][1]).do(wrapped)
         hub._registered.append({
             'name': 'wf_weekly_backtest', 'when': 'sun 20:00 CST', 'job': job,
         })
@@ -5821,7 +5826,7 @@ def register_default_jobs():
     # 故从周一早高峰(morning_strategy/strategy_prefetch/unified_selection 挤一堆)挪到周日晚、和周末批作伴。
     try:
         wrapped = hub._wrap('ai_eval_weekly', task_ai_eval_weekly)
-        job = schedule.every().sunday.at('20:30').do(wrapped)
+        job = schedule.every().sunday.at(WEEKEND_TIMES['ai_eval_weekly'][1]).do(wrapped)
         hub._registered.append({
             'name': 'ai_eval_weekly', 'when': 'sun 20:30 CST', 'job': job,
         })
