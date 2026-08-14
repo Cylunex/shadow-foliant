@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 
 _BUY = {'买入', '买', 'buy', 'b', '申购', '加仓'}
@@ -60,8 +59,8 @@ def _time_key(value: Any) -> str:
     normalized = text.replace('/', '-').replace('T', ' ')
     try:
         dt = datetime.fromisoformat(normalized.replace('Z', '+00:00'))
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(ZoneInfo('Asia/Shanghai'))
+        # 兼容历史 PG 口径：用户输入的北京时间被 ::timestamptz 按数据库会话时区落库，
+        # 但列表/API 一直展示原始时分秒；幂等键也必须比较“墙上时间”，不能二次换区。
         return dt.strftime('%Y-%m-%d %H:%M:%S')
     except (TypeError, ValueError):
         return normalized[:19]
