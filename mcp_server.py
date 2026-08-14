@@ -387,11 +387,20 @@ def import_holdings(rows: List[Dict[str, Any]], mode: str = 'upsert') -> Dict[st
 
 
 @mcp.tool()
-def import_trades(rows: List[Dict[str, Any]], update_position: bool = True) -> Dict[str, Any]:
-    """批量导入成交记录(真实买卖流水),默认**自动更新持仓**(买入加仓重算均价/卖出减仓,变动记录带成交时间)。
-    rows: [{code, name, trade_type(买入/卖出), quantity, price, amount?, trade_time?, note?, commission?, tax?}]。"""
-    from portfolio_db import portfolio_db
-    return portfolio_db.import_trades(rows, update_position=update_position)
+def import_trades(rows: Optional[List[Dict[str, Any]]] = None, update_position: bool = True,
+                  table: str = '', dry_run: bool = False,
+                  skip_existing: bool = True) -> Dict[str, Any]:
+    """批量导入真实成交并自动更新持仓；原完整参数用法保持兼容。
+
+    最少只需每行提供 `股票名称/成交时间/成交价/成交量/交易类型(买入|卖出)`，服务端会
+    批量补股票代码和成交额，不要先调用股票查询工具。也可把完整 Markdown 管道表原文直接
+    放进 `table`，无需由 Agent 逐行组装；原 `rows=[{code,name,trade_type,quantity,price,
+    amount?,trade_time?,note?,commission?,tax?}]` 继续可用。默认按代码+时间+方向+数量+价格
+    幂等跳过重复成交；名称不能唯一解析或关键字段错误时整批不写。`dry_run=true` 仅返回补齐预览。
+    """
+    from portfolio.trade_import_service import import_trade_records
+    return import_trade_records(rows=rows, table=table, update_position=update_position,
+                                dry_run=dry_run, skip_existing=skip_existing)
 
 
 @mcp.tool()

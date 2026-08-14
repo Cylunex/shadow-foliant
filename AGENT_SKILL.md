@@ -110,6 +110,12 @@ portfolio_db.import_trades([
 portfolio_db.get_trades('600519')   # 查成交记录(含 pos_quantity/pos_cost_price/delta_qty 持仓快照)
 # 注:trade_records 是「成交记录+变动日志」合并表;成交记录行自带持仓快照(一行=成交+持仓变化)
 
+# Agent 经 MCP 导入时直接调用 import_trades，不要先逐只查询代码：
+# - 原完整 rows=[{code,...}] 保持兼容
+# - 最少只给 股票名称/成交时间/成交价/成交量/交易类型，服务端补代码和成交额
+# - 用户贴 Markdown 表格时原文放 table，无需逐行组装
+# - 默认 skip_existing=true 幂等；不确定时 dry_run=true 先看补齐预览
+
 import portfolio_insights as pi
 pi.holding_duration_distribution(); pi.trading_frequency_analysis(90); pi.portfolio_change_timeline(90)  # 交易习惯洞察(纯库读)
 pi.diagnose_portfolio()             # AI 持仓诊断(LLM;无 key 降级返回规则报表)
@@ -243,6 +249,6 @@ MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(st
 - miniQMT 实盘下单**未**暴露；Web 只作为观测和应急操作面。
 
 ## 五、相关待办
-- ✅ **批量导入成交记录**:已实现(`import_trades`,自动更新持仓 + 持仓快照)。详见 [交接说明.md](交接说明.md) §6。
+- ✅ **批量导入成交记录**:已实现(`import_trades`,自动补代码/金额、直接解析 Markdown 表、幂等去重、自动更新持仓 + 持仓快照)。详见 [交接说明.md](交接说明.md) §6。
 - ✅ **已实现盈亏**:成交与持仓变动进入统一流水，组合页面/绩效模块可读取。
 - ⏳ 未做:成交记录列名中文化;SQLite 兜底版的持仓自动更新;`event_scoring`/`report_templates` 接入业务。

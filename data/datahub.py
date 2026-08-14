@@ -562,6 +562,73 @@ def stock_name(code: str) -> str:
     return stock_names([code]).get(_norm_code(code), "")
 
 
+_SECURITY_MASTER_KEY = "names:_security_master"
+_SECURITY_MASTER_TTL = int(_os.environ.get("DATAHUB_SECURITY_MASTER_TTL", str(30 * 86400)))
+
+
+def _security_master_akshare() -> Dict[str, str]:
+    """一次取 A 股代码表，返回 code→name；只作为名称反查的冷缓存兜底。"""
+    try:
+        import akshare as ak
+        from data.akshare_safe import call as ak_call
+        df = ak_call(ak.stock_info_a_code_name, timeout=20)
+        if df is None or getattr(df, 'empty', True):
+            return {}
+        code_col = next((c for c in ('code', '代码', '股票代码') if c in df.columns), None)
+        name_col = next((c for c in ('name', '名称', '股票简称') if c in df.columns), None)
+        if not code_col or not name_col:
+            return {}
+        out: Dict[str, str] = {}
+        for _, row in df[[code_col, name_col]].iterrows():
+            code = _norm_code(row.get(code_col))
+            name = str(row.get(name_col) or '').strip()
+            if code and name and not name.isdigit():
+                out[code] = name
+        return out
+    except Exception:
+        return {}
+
+
+def stock_codes(names: List[str], allow_refresh: bool = True) -> Dict[str, str]:
+    """按股票**精确名称**批量反查 6 位代码，供成交导入等低轮次 Agent 操作。
+
+    优先使用日常行情已焐热的持久名称缓存；缺失时只批量加载一次 A 股代码表并缓存
+    30 天，不会为每个名称各发一次外部请求。重名或解析不到的名称不返回，由调用方
+    明确报错而不是猜代码。
+    """
+    requested = [str(name or '').strip() for name in (names or []) if str(name or '').strip()]
+    if not requested:
+        return {}
+
+    master = _name_map()
+    cached = _cache_get(_SECURITY_MASTER_KEY, _SECURITY_MASTER_TTL)
+    if isinstance(cached, dict):
+        master.update({str(k): str(v) for k, v in cached.items() if k and v})
+
+    def _reverse(source: Dict[str, str]) -> Dict[str, List[str]]:
+        reverse: Dict[str, List[str]] = {}
+        for code, name in source.items():
+            reverse.setdefault(str(name).strip(), []).append(_norm_code(code))
+        return reverse
+
+    reverse = _reverse(master)
+    missing = [name for name in requested if len(set(reverse.get(name, []))) != 1]
+    if missing and allow_refresh:
+        fresh = _route('security_master', [('akshare', _security_master_akshare)], empty={}) or {}
+        if isinstance(fresh, dict) and fresh:
+            _cache_put(_SECURITY_MASTER_KEY, fresh, _SECURITY_MASTER_TTL)
+            _name_remember({code: {'name': name} for code, name in fresh.items()})
+            master.update(fresh)
+            reverse = _reverse(master)
+
+    out: Dict[str, str] = {}
+    for name in requested:
+        codes = sorted(set(c for c in reverse.get(name, []) if c))
+        if len(codes) == 1:
+            out[name] = codes[0]
+    return out
+
+
 # ── K线磁盘缓存:日线日内不变,回测/因子/优化器反复拉同一批 → 缓存共享大幅提速 ──
 # (_os 已在上方统一缓存层导入;此处自带专用缓存,不走通用 _dh_cache)
 _KLINE_DIR = _os.path.join(_bootstrap.DB_DIR, "kline_cache")
