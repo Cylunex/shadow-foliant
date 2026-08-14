@@ -218,10 +218,10 @@ def seed_defaults():
     """填充内置 prompt 模板（首次启动用）"""
     defaults = [
         {
-            'name': 'overnight_strategy_v3',
+            'name': 'overnight_strategy_v4',
             'agent_type': 'strategy_analyst',
             'scene': 'overnight_strategy',
-            'description': '晨间综合策略 8 维数据分析（v3:并入A股大盘/板块/持仓扫描,含完整 JSON 输出结构）',
+            'description': '晨间综合策略 8 维数据分析（v4:强制非空结构化输出,失败由规则数据兜底）',
             'is_default': True,
             'content': """你是一名资深 A 股策略分析师。请基于以下 8 维数据，综合判断今日 A 股开盘策略。
 
@@ -255,7 +255,9 @@ def seed_defaults():
 【8. 我的持仓技术扫描（含昨日盈亏/浮盈/破位/缠论信号）】
 {hold_summary}
 
-请综合以上信息给出今日开盘策略，严格按 JSON 格式输出（不要任何说明文字）：
+请综合以上信息给出今日开盘策略，严格按 JSON 格式输出（不要任何说明文字）。
+open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；
+hot_sectors 至少给出一项，数据不足时明确写“暂无可靠板块信号”，不得用“（无）”或“未知”占位：
 {{
     "lazy_summary": "3-4句口语化的今日操作要点（大盘基调/该卖谁该留谁/可加谁，像朋友间提醒，直接说人话）",
     "open_strategy": "1-2 句开盘整体策略（高开/低开应对）",

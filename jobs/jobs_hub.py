@@ -2792,6 +2792,11 @@ def task_morning_strategy():
                 f'"candidate_stocks": [...], '
                 f'"position_advice": "针对第8维持仓逐只口语化建议(卖/减/留/可加+一句理由)", "confidence": "高/中/低"}}'
             )
+        prompt += (
+            '\n\n【输出质量要求】只输出一个合法 JSON 对象，不要 Markdown 代码块或说明文字；'
+            'open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；'
+            'hot_sectors 至少给出一项，数据不足时明确写“暂无可靠板块信号”，不得用“（无）”或“未知”占位。'
+        )
 
         from deepseek_client import DeepSeekClient
         client = DeepSeekClient()
@@ -2799,17 +2804,18 @@ def task_morning_strategy():
             {'role': 'system', 'content': '你是资深 A 股策略分析师，擅长综合多维数据给出实操开盘建议。'},
             {'role': 'user', 'content': prompt},
         ]
-        raw = client.call_api(messages, max_tokens=2000, call_type='morning')
+        # 晨报已有规则兜底，不让单一 LLM 两次 40s 超时拖慢整个盘前链路。
+        raw = client.call_api(messages, temperature=0.3, max_tokens=1600,
+                              timeout=25, call_type='morning')
 
-        # 解析 JSON
-        import re
-        diagnosis = {'raw_text': raw[:1500] if raw else ''}
-        try:
-            m = re.search(r'\{[\s\S]*\}', raw or '')
-            if m:
-                diagnosis = json.loads(m.group())
-        except Exception:
-            pass
+        # 严格校验结构化结果；模型空响应/超时/半截 JSON 时，用已采集行情补齐，绝不推空壳。
+        from analysis.morning_strategy_report import build_diagnosis
+        diagnosis, diagnosis_meta = build_diagnosis(raw, prompt_vars)
+        if diagnosis_meta['mode'] != 'ai':
+            _cov = diagnosis_meta['coverage']
+            print('[morning_strategy] LLM 分析降级: '
+                  f"mode={diagnosis_meta['mode']} reason={diagnosis_meta['reason']} "
+                  f"data={_cov['available']}/{_cov['total']}")
 
         # ─── 8. 构建各模块 ───
         now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -2846,7 +2852,12 @@ def task_morning_strategy():
             mod_a.append('━━━ 💼 持仓操作建议 ━━━')
             mod_a.append(str(diagnosis['position_advice']))
             mod_a.append('')
-        mod_a.append(f'数据置信度: {diagnosis.get("confidence", "未知")}')
+        confidence_line = f'数据置信度: {diagnosis.get("confidence", "低")}'
+        if diagnosis_meta['mode'] != 'ai':
+            _cov = diagnosis_meta['coverage']
+            confidence_line += (f"（{'AI+规则' if diagnosis_meta['mode'] == 'hybrid' else '规则兜底'}，"
+                                f"{_cov['available']}/{_cov['total']} 类数据可用）")
+        mod_a.append(confidence_line)
 
         # === 模块B: 新闻简报 — 使用已采集的 news_summary（不复拉） ===
         mod_b = []
@@ -2988,8 +2999,11 @@ def task_morning_strategy():
         except Exception as _be:
             print(f'[morning_strategy] 晨报缓存预热失败: {_be}')
 
+        _cov = diagnosis_meta['coverage']
         _log_run(job, 'success',
-                 error=f'candidates={len(diagnosis.get("candidate_stocks", []) or [])}{rec_summary}',
+                 error=(f"analysis={diagnosis_meta['mode']}/{diagnosis_meta['reason']} "
+                        f"data={_cov['available']}/{_cov['total']} "
+                        f'candidates={len(diagnosis.get("candidate_stocks", []) or [])}{rec_summary}'),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
