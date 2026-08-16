@@ -231,12 +231,17 @@ class WebAuthTests(unittest.TestCase):
             start = client.get("/auth/login", follow_redirects=False)
             query = parse_qs(urlsplit(start.headers["location"]).query)
             self.http.fail_token_exchange = True
-            failed = client.get(
-                "/auth/callback",
-                params={"state": query["state"][0], "code": "bad-code"},
-                follow_redirects=False,
-            )
+            with self.assertLogs("webui", level="WARNING") as captured:
+                failed = client.get(
+                    "/auth/callback",
+                    params={"state": query["state"][0], "code": "bad-code"},
+                    follow_redirects=False,
+                )
             self.assertEqual(failed.status_code, 400)
+            rendered = "\n".join(captured.output)
+            self.assertIn("oidc_callback_rejected stage=exchange_code", rendered)
+            self.assertNotIn("bad-code", rendered)
+            self.assertNotIn(query["state"][0], rendered)
 
     def test_open_redirects_are_rejected(self):
         for value in (

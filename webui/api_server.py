@@ -273,14 +273,21 @@ def auth_login(return_to: str = "/"):
 
 @app.get("/auth/callback")
 def auth_callback(state: str = "", code: str = "", error: str = ""):
+    # Keep this value to a fixed allow-list.  Callback inputs and exception text can contain
+    # authorization codes, state values, provider details, or token material and must never be
+    # copied into logs.
+    stage = "consume_state"
     try:
         service = get_web_auth_service()
         transaction = service.store.consume_login_transaction(state)
+        stage = "provider_response"
         if error:
             raise WebAuthError("identity provider rejected login")
+        stage = "exchange_code"
         token_response = service.oidc.exchange_code(
             code=code, verifier=transaction["code_verifier"]
         )
+        stage = "verify_id_token"
         claims = service.oidc.verify_id_token(
             token_response["id_token"], nonce=transaction["nonce"]
         )
@@ -300,6 +307,7 @@ def auth_callback(state: str = "", code: str = "", error: str = ""):
         response.headers["Cache-Control"] = "no-store"
         return response
     except WebAuthError:
+        _log_webui.warning("oidc_callback_rejected stage=%s", stage)
         return JSONResponse(
             {"ok": False, "error": "OIDC callback validation failed"},
             status_code=400,
