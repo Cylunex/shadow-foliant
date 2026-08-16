@@ -33,6 +33,10 @@ _ALLOWED_JWT_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512")
 class WebAuthError(ValueError):
     """A deliberately non-sensitive authentication failure."""
 
+    def __init__(self, message: str, *, reason: str = "unspecified") -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 @dataclass(frozen=True, slots=True)
 class WebAuthConfig:
@@ -424,7 +428,9 @@ class OIDCClient:
             header = jwt.get_unverified_header(id_token)
             algorithm = str(header.get("alg") or "")
             if algorithm not in _ALLOWED_JWT_ALGORITHMS:
-                raise WebAuthError("ID Token algorithm is not allowed")
+                raise WebAuthError(
+                    "ID Token algorithm is not allowed", reason="algorithm"
+                )
             kid = str(header.get("kid") or "")
             keys = self._get_jwks().get("keys") or []
             candidates = [
@@ -445,7 +451,9 @@ class OIDCClient:
                     and key.get("alg") in (None, "", algorithm)
                 ]
             if len(candidates) != 1:
-                raise WebAuthError("ID Token signing key is unavailable")
+                raise WebAuthError(
+                    "ID Token signing key is unavailable", reason="signing_key"
+                )
             signing_key = jwt.PyJWK.from_dict(candidates[0], algorithm=algorithm).key
             claims = jwt.decode(
                 id_token,
@@ -466,13 +474,27 @@ class OIDCClient:
         except WebAuthError:
             raise
         except Exception as exc:
-            raise WebAuthError("ID Token validation failed") from exc
+            reason = {
+                "DecodeError": "decode",
+                "ExpiredSignatureError": "expired",
+                "ImmatureSignatureError": "not_yet_valid",
+                "InvalidAlgorithmError": "algorithm",
+                "InvalidAudienceError": "audience",
+                "InvalidIssuedAtError": "issued_at",
+                "InvalidIssuerError": "issuer",
+                "InvalidKeyError": "signing_key",
+                "InvalidSignatureError": "signature",
+                "MissingRequiredClaimError": "missing_claim",
+            }.get(type(exc).__name__, "validation")
+            raise WebAuthError("ID Token validation failed", reason=reason) from exc
         if not secrets.compare_digest(str(claims.get("nonce") or ""), nonce):
-            raise WebAuthError("ID Token nonce mismatch")
+            raise WebAuthError("ID Token nonce mismatch", reason="nonce")
         if time.time() - float(claims["iat"]) > (
             self.config.id_token_max_age_seconds + self.config.clock_skew_seconds
         ):
-            raise WebAuthError("ID Token issued-at time is too old")
+            raise WebAuthError(
+                "ID Token issued-at time is too old", reason="issued_at_too_old"
+            )
         claims["groups"] = _normalize_groups(claims.get("groups"))
         return claims
 

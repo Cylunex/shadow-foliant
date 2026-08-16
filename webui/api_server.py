@@ -306,8 +306,10 @@ def auth_callback(state: str = "", code: str = "", error: str = ""):
         set_session_cookie(response, session)
         response.headers["Cache-Control"] = "no-store"
         return response
-    except WebAuthError:
-        _log_webui.warning("oidc_callback_rejected stage=%s", stage)
+    except WebAuthError as exc:
+        _log_webui.warning(
+            "oidc_callback_rejected stage=%s reason=%s", stage, exc.reason
+        )
         return JSONResponse(
             {"ok": False, "error": "OIDC callback validation failed"},
             status_code=400,

@@ -172,19 +172,21 @@ class WebAuthTests(unittest.TestCase):
         self.assertEqual(claims["sub"], "subject-1")
 
         cases = [
-            self._claims(iss="https://wrong.example.com"),
-            self._claims(aud="wrong-client"),
-            self._claims(exp=int(time.time()) - 120),
-            self._claims(iat=int(time.time()) + 300),
-            self._claims(iat=int(time.time()) - 3600),
-            self._claims(nonce="wrong-nonce"),
+            (self._claims(iss="https://wrong.example.com"), "issuer"),
+            (self._claims(aud="wrong-client"), "audience"),
+            (self._claims(exp=int(time.time()) - 120), "expired"),
+            (self._claims(iat=int(time.time()) + 300), "not_yet_valid"),
+            (self._claims(iat=int(time.time()) - 3600), "issued_at_too_old"),
+            (self._claims(nonce="wrong-nonce"), "nonce"),
         ]
         other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        tokens = [self._token(item) for item in cases] + [self._token(self._claims(), other_key)]
-        for token in tokens:
+        tokens = [(self._token(item), reason) for item, reason in cases]
+        tokens.append((self._token(self._claims(), other_key), "signature"))
+        for token, reason in tokens:
             with self.subTest(token=token[-12:]):
-                with self.assertRaises(platform_auth.WebAuthError):
+                with self.assertRaises(platform_auth.WebAuthError) as raised:
                     self.service.oidc.verify_id_token(token, nonce="nonce-1")
+                self.assertEqual(raised.exception.reason, reason)
 
     def test_normal_login_returns_original_path_and_sets_strict_cookie(self):
         from webui.api_server import app
@@ -240,6 +242,7 @@ class WebAuthTests(unittest.TestCase):
             self.assertEqual(failed.status_code, 400)
             rendered = "\n".join(captured.output)
             self.assertIn("oidc_callback_rejected stage=exchange_code", rendered)
+            self.assertIn("reason=unspecified", rendered)
             self.assertNotIn("bad-code", rendered)
             self.assertNotIn(query["state"][0], rendered)
 
