@@ -197,10 +197,22 @@ class LLMRouter:
         return active
 
     def list_active(self) -> List[Dict]:
-        return [{'name': p.name, 'priority': p.priority,
+        active = [{'name': p.name, 'priority': p.priority,
                  'base_url': p.base_url,
                  'default_model': p.default_model,
                  'thinking_model': p.thinking_model} for p in self.providers]
+        try:
+            import platform_llm
+            if platform_llm.configured():
+                active.insert(0, {
+                    'name': 'shadow-platform', 'priority': 0, 'base_url': '<registry>',
+                    'default_model': os.getenv('SHADOW_LLM_CHAT_ALIAS', 'chat-default'),
+                    'thinking_model': os.getenv(
+                        'SHADOW_LLM_REASONING_ALIAS', 'reasoning-default'),
+                })
+        except Exception:
+            pass
+        return active
 
     def call(self, messages: List[Dict[str, str]],
              temperature: float = 0.7, max_tokens: int = 2000,
@@ -219,6 +231,25 @@ class LLMRouter:
                      ⚠️ 关键:openai SDK 默认超时 ~10min, 无超时会让"挂起的 provider"阻塞调用方主路径
                      (选股 job/持仓建议/离场)。这里强制有界:超时即抛错 → 降级下一 provider。
         """
+        try:
+            import platform_llm
+            if platform_llm.configured():
+                try:
+                    return platform_llm.call(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max(max_tokens, 8000) if thinking else max_tokens,
+                        thinking=thinking,
+                        call_type=call_type,
+                    )
+                except Exception:
+                    # Platform SDK is a preferred in-process route. During migration the existing
+                    # provider chain remains the behavioral fallback; no prompt/response/error body
+                    # is copied into this log line.
+                    print('[LLM-Router] Shadow SDK 不可用，继续现有 provider 降级链', flush=True)
+        except Exception:
+            pass
+
         if not self.providers:
             return ('[LLM-Router] 无可用 provider, 请至少配置一个 (API_KEY + BASE_URL)', 'none')
 
@@ -314,6 +345,11 @@ def get_router() -> LLMRouter:
 def reload_router() -> LLMRouter:
     """配置变更后调用, 重建单例(重新读 .env / 重新探活 ollama)"""
     global _singleton
+    try:
+        import platform_llm
+        platform_llm.close_clients()
+    except Exception:
+        pass
     _singleton = LLMRouter()
     return _singleton
 

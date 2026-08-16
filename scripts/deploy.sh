@@ -56,6 +56,17 @@ if [[ -n "$EXPECTED_COMMIT" ]]; then
   fi
 fi
 
+PYTHON_BIN="${PYTHON_BIN:-$PROJECT_DIR/venv2/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "❌ 生产 Python 不可执行: $PYTHON_BIN"
+  exit 1
+fi
+if ! "$PYTHON_BIN" -c 'import jwt; from shadow_sdk import AgentAuthenticator, LLMClient' \
+  >/dev/null 2>&1; then
+  echo "❌ 缺少 PyJWT 或 Shadow Platform SDK；请先在生产 venv 安装已审核 wheel"
+  exit 1
+fi
+
 # 脚本自身随 pull 更新时，当前 Bash 进程可能仍执行已读入的旧内容；自动用新文件重进一次。
 if [[ "$OLD_HEAD" != "$NEW_HEAD" && "${DEPLOY_REEXEC:-0}" != "1" ]] \
    && git diff --name-only "$OLD_HEAD" "$NEW_HEAD" -- scripts/deploy.sh | grep -q .; then
@@ -89,9 +100,10 @@ echo "▶ 健康检查"
 WEB_OK=0
 HEALTH_JSON=""
 for _ in $(seq 1 20); do
-  if HEALTH_JSON="$(curl -fsS --max-time 3 http://127.0.0.1:8601/api/health 2>/dev/null)"; then
+  if curl -fsS --max-time 3 http://127.0.0.1:8601/healthz >/dev/null 2>&1 \
+    && HEALTH_JSON="$(curl -fsS --max-time 3 http://127.0.0.1:8601/readyz 2>/dev/null)"; then
     HEALTH_READY="$(printf '%s' "$HEALTH_JSON" | python3 -c \
-      'import json,sys; print(str(bool((json.load(sys.stdin).get("data") or {}).get("ready"))).lower())' \
+      'import json,sys; print(str(bool(json.load(sys.stdin).get("ready"))).lower())' \
       2>/dev/null || true)"
     if [[ "$HEALTH_READY" == "true" ]]; then
       WEB_OK=1
@@ -107,7 +119,7 @@ if [[ "$WEB_OK" != "1" ]]; then
 fi
 
 HEALTH_REVISION="$(printf '%s' "$HEALTH_JSON" | python3 -c \
-  'import json,sys; print((json.load(sys.stdin).get("data") or {}).get("revision", ""))' \
+  'import json,sys; print(json.load(sys.stdin).get("revision", ""))' \
   2>/dev/null || true)"
 if [[ "$HEALTH_REVISION" != "$NEW_HEAD" ]]; then
   echo "❌ Web 进程版本 $HEALTH_REVISION 与工作区 $NEW_HEAD 不一致"

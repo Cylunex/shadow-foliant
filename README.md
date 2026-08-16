@@ -116,11 +116,15 @@ python webui/run_dev.py
 # http://127.0.0.1:8601
 ```
 
-Web 健康接口只检查本地数据库和手动队列，不会探测行情或调用 LLM：
+公开存活检查无状态且不访问数据库；详细就绪状态仅供受保护的运维入口：
 
 ```bash
-curl http://127.0.0.1:8601/api/health
+curl http://127.0.0.1:8601/healthz
 ```
+
+WebUI 使用原生 OIDC Authorization Code + PKCE。普通投研页面要求 `stock-users`，全局
+持仓、成交、任务和环境配置要求 `stock-admins`；机器调用使用独立 Agent Bearer，不能复用
+浏览器 Cookie。配置项见 [`.env.example`](.env.example)。
 
 ## 推荐的 Agent 工作方式
 

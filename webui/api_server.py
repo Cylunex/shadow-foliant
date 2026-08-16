@@ -22,12 +22,32 @@ _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: E402
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
+from webui.access_control import (  # noqa: E402
+    audit_request,
+    enforce_request_access,
+    unclassified_routes,
+)
+from webui.platform_auth import (  # noqa: E402
+    SESSION_COOKIE,
+    WebAuthError,
+    clear_session_cookie,
+    get_web_auth_service,
+    sanitize_return_to,
+    set_session_cookie,
+)
 
-app = FastAPI(title="shadow-foliant WebUI 原型", version="0.1")
+app = FastAPI(
+    title="shadow-foliant WebUI",
+    version="1.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # CORS 收敛(2026-07-17 安全修):原 allow_origins=["*"] 让任意恶意网页可跨源读/写本地 API
 # (POST /api/env 改 .env 外泄 DEEPSEEK key、POST /api/jobs/*/run 触发任务)。SPA 与本 API 同源
@@ -49,11 +69,28 @@ _STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 @app.middleware("http")
 async def _no_store_static(request, call_next):
-    """静态资源不缓存(开发期改了 css/js 立即生效,免浏览器缓存旧版)。"""
+    """认证页、API 和静态资源均不进入共享或浏览器持久缓存。"""
     resp = await call_next(request)
-    if not request.url.path.startswith("/api"):
-        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
     return resp
+
+
+@app.middleware("http")
+async def _authorize_requests(request: Request, call_next):
+    denied = await enforce_request_access(request)
+    if denied is not None:
+        audit_request(request, denied)
+        denied.headers["Cache-Control"] = "no-store"
+        denied.headers["Referrer-Policy"] = "no-referrer"
+        denied.headers["X-Content-Type-Options"] = "nosniff"
+        denied.headers["X-Request-ID"] = getattr(request.state, "request_id", "")
+        return denied
+    response = await call_next(request)
+    audit_request(request, response)
+    response.headers["X-Request-ID"] = getattr(request.state, "request_id", "")
+    return response
 
 
 _MEM_CACHE: dict = {}  # 进程内存兜底:key -> (expire_ts, value)。Redis 未装/不可用时避免重复抓取风暴。
@@ -195,6 +232,145 @@ def _records(x):
     except Exception:
         pass
     return x
+
+
+# ============================ 身份 / 健康 ============================
+@app.get("/healthz")
+def healthz():
+    """Public liveness only: constant, stateless, and dependency-free."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Protected operational readiness. Authorization is enforced by middleware."""
+    from runtime_health import snapshot
+
+    payload = snapshot()
+    status = 200 if payload.get("ready") else 503
+    return JSONResponse(payload, status_code=status)
+
+
+@app.get("/auth/login")
+def auth_login(return_to: str = "/"):
+    try:
+        service = get_web_auth_service()
+        safe_return = sanitize_return_to(return_to)
+        state, nonce, _verifier, challenge = service.store.create_login_transaction(
+            return_to=safe_return,
+            ttl_seconds=service.config.transaction_ttl_seconds,
+        )
+        target = service.oidc.authorization_url(
+            state=state, nonce=nonce, challenge=challenge
+        )
+        return RedirectResponse(target, status_code=302)
+    except WebAuthError:
+        return JSONResponse(
+            {"ok": False, "error": "browser authentication is unavailable"},
+            status_code=503,
+        )
+
+
+@app.get("/auth/callback")
+def auth_callback(state: str = "", code: str = "", error: str = ""):
+    try:
+        service = get_web_auth_service()
+        transaction = service.store.consume_login_transaction(state)
+        if error:
+            raise WebAuthError("identity provider rejected login")
+        token_response = service.oidc.exchange_code(
+            code=code, verifier=transaction["code_verifier"]
+        )
+        claims = service.oidc.verify_id_token(
+            token_response["id_token"], nonce=transaction["nonce"]
+        )
+        if service.config.required_group not in claims.get("groups", ()):
+            return JSONResponse(
+                {"ok": False, "error": "application access is not permitted"},
+                status_code=403,
+            )
+        identity = service.store.upsert_identity(claims)
+        session = service.store.create_session(
+            identity, ttl_seconds=service.config.session_ttl_seconds
+        )
+        response = RedirectResponse(
+            sanitize_return_to(transaction["return_to"]), status_code=303
+        )
+        set_session_cookie(response, session)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except WebAuthError:
+        return JSONResponse(
+            {"ok": False, "error": "OIDC callback validation failed"},
+            status_code=400,
+        )
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request):
+    service = get_web_auth_service()
+    service.store.revoke_session(request.cookies.get(SESSION_COOKIE, ""))
+    response = RedirectResponse("/", status_code=303)
+    clear_session_cookie(response)
+    return response
+
+
+@app.post("/auth/logout/all")
+def auth_logout_all(request: Request):
+    service = get_web_auth_service()
+    identity = request.state.browser_identity
+    service.store.revoke_user_sessions(identity.shadow_user_id)
+    response = RedirectResponse(service.oidc.global_logout_url(), status_code=303)
+    clear_session_cookie(response)
+    return response
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    service = get_web_auth_service()
+    identity = request.state.browser_identity
+    return _ok(
+        {
+            "shadow_user_id": identity.shadow_user_id,
+            "username": identity.username,
+            "display_name": identity.display_name,
+            "is_admin": identity.in_group(service.config.admin_group),
+        }
+    )
+
+
+@app.post("/api/auth/session/rotate")
+def auth_rotate_session(request: Request):
+    service = get_web_auth_service()
+    replacement = service.store.rotate_session(request.cookies.get(SESSION_COOKIE, ""))
+    if replacement is None:
+        return JSONResponse(
+            {"ok": False, "error": "session is no longer active"}, status_code=401
+        )
+    response = JSONResponse(_ok({"rotated": True}))
+    set_session_cookie(response, replacement)
+    return response
+
+
+@app.get("/api/machine/runtime-health")
+def machine_runtime_health():
+    from runtime_health import snapshot
+
+    return _ok(snapshot())
+
+
+@app.get("/api/machine/agent/cockpit")
+def machine_agent_cockpit(recent_limit: int = 5, compact: bool = True):
+    from jobs.task_control import agent_cockpit
+
+    return _ok(agent_cockpit(recent_limit=recent_limit, compact=compact))
+
+
+@app.get("/api/machine/research/{code}")
+def machine_research_stock(code: str, depth: str = "quick", view: str = "summary"):
+    from mcp_server import research_stock
+
+    return _ok(research_stock(code, depth=depth, view=view))
 
 
 # ============================ 股票(首页) ============================
@@ -2597,10 +2773,15 @@ def strategy_genome_scores_history(strategy_id: str, days: int = 30):
 
 @app.get("/api/health")
 def health():
-    from runtime_health import snapshot
-    return _ok(snapshot())
+    """Legacy safe liveness alias. Detailed readiness moved to protected /readyz."""
+    return _ok({"status": "ok"})
 
 
 # 静态 SPA(放最后,catch-all 不影响上面的 /api 路由)
 if os.path.isdir(_STATIC):
     app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")
+
+
+_missing_route_permissions = unclassified_routes(app)
+if _missing_route_permissions:
+    raise RuntimeError(f"unclassified Web routes: {_missing_route_permissions}")

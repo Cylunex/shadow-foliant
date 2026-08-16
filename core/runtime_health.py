@@ -112,7 +112,8 @@ def _configuration_flags() -> Dict[str, bool]:
     )
     return {
         'llm_configured': any(bool(os.getenv(key, '').strip()) for key in provider_keys)
-                          or bool(os.getenv('OLLAMA_BASE_URL', '').strip()),
+                          or bool(os.getenv('OLLAMA_BASE_URL', '').strip())
+                          or bool(os.getenv('SHADOW_LLM_REGISTRY_FILE', '').strip()),
         'notification_configured': any(bool(os.getenv(key, '').strip()) for key in (
             'QQ_WEBHOOK_URL', 'WEBHOOK_URL', 'EMAIL_TO')),
         'rag_enabled': os.getenv('RAG_ENABLED', 'false').strip().lower()

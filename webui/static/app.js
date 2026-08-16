@@ -1,4 +1,4 @@
-import { createApp, shallowRef, ref, h, onMounted, onUnmounted } from 'vue'
+import { createApp, shallowRef, ref, computed, h, onMounted, onUnmounted } from 'vue'
 import { api } from './lib.js'
 import Stock from './pages/stock.js'
 import Fund from './pages/fund.js'
@@ -47,14 +47,14 @@ const ICONS = {
 
 const NAV_GROUPS = [
   { title:'工作台', items:[
-    { k:'cockpit', icon:'overview', t:'项目总览', desc:'Agent 与运行状态', comp:Cockpit },
-    { k:'briefing', icon:'sun', t:'晨间策略', desc:'盘前重点与持仓', comp:Briefing },
+    { k:'cockpit', icon:'overview', t:'项目总览', desc:'Agent 与运行状态', comp:Cockpit, admin:true },
+    { k:'briefing', icon:'sun', t:'晨间策略', desc:'盘前重点与持仓', comp:Briefing, admin:true },
   ]},
   { title:'资产管理', items:[
-    { k:'port', icon:'portfolio', t:'持仓总览', desc:'盈亏、风险与绩效', comp:Portfolio },
-    { k:'trade', icon:'trade', t:'成交记录', desc:'交易与归因', comp:Trade },
-    { k:'exit', icon:'broom', t:'清仓助手', desc:'退出优先级', comp:Exit },
-    { k:'fund', icon:'fund', t:'基金定投', desc:'净值与计划', comp:Fund },
+    { k:'port', icon:'portfolio', t:'持仓总览', desc:'盈亏、风险与绩效', comp:Portfolio, admin:true },
+    { k:'trade', icon:'trade', t:'成交记录', desc:'交易与归因', comp:Trade, admin:true },
+    { k:'exit', icon:'broom', t:'清仓助手', desc:'退出优先级', comp:Exit, admin:true },
+    { k:'fund', icon:'fund', t:'基金定投', desc:'净值与计划', comp:Fund, admin:true },
   ]},
   { title:'投研中心', items:[
     { k:'stock', icon:'stock', t:'股票研究', desc:'行情与深度分析', comp:Stock },
@@ -66,14 +66,14 @@ const NAV_GROUPS = [
     { k:'mx', icon:'brain', t:'妙想 AI', desc:'外部第二意见', comp:Miaoxiang },
   ]},
   { title:'策略与自动化', items:[
-    { k:'monitor', icon:'eye', t:'监测盯盘', desc:'条件与提醒', comp:Monitor },
-    { k:'reco', icon:'stock', t:'推荐跟踪', desc:'真实盈亏闭环', comp:Reco },
-    { k:'signals', icon:'signal', t:'决策信号', desc:'动作与后验', comp:Signals },
+    { k:'monitor', icon:'eye', t:'监测盯盘', desc:'条件与提醒', comp:Monitor, admin:true },
+    { k:'reco', icon:'stock', t:'推荐跟踪', desc:'真实盈亏闭环', comp:Reco, admin:true },
+    { k:'signals', icon:'signal', t:'决策信号', desc:'动作与后验', comp:Signals, admin:true },
     { k:'backtest', icon:'test', t:'策略回测', desc:'组合与归因', comp:Backtest },
     { k:'genome', icon:'genome', t:'策略进化', desc:'上线集与 A/B', comp:Genome },
-    { k:'workflow', icon:'workflow', t:'AI 工作流', desc:'多智能体编排', comp:Workflow },
+    { k:'workflow', icon:'workflow', t:'AI 工作流', desc:'多智能体编排', comp:Workflow, admin:true },
     { k:'history', icon:'history', t:'分析历史', desc:'结果与评估', comp:History },
-    { k:'settings', icon:'settings', t:'系统设置', desc:'任务与配置', comp:Settings },
+    { k:'settings', icon:'settings', t:'系统设置', desc:'任务与配置', comp:Settings, admin:true },
   ]},
 ]
 const NAV = NAV_GROUPS.flatMap(group => group.items)
@@ -90,6 +90,10 @@ createApp({
     const collapsed = ref(false)
     const theme = ref(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
     const health = ref(null)
+    const identity = ref(null)
+    const visibleGroups = computed(()=>NAV_GROUPS.map(group=>({
+      ...group, items:group.items.filter(item=>!item.admin || identity.value?.is_admin)
+    })).filter(group=>group.items.length))
     let healthTimer = null
     try { collapsed.value = localStorage.getItem('sf-nav-collapsed') === 'true' } catch(e) {}
 
@@ -104,12 +108,18 @@ createApp({
       try { localStorage.setItem('sf-nav-collapsed', String(collapsed.value)) } catch(e) {}
     }
     function go(it){ cur.value = it; location.hash = it.k; navOpen.value = false }
-    function goHash(hash){ const item=NAV.find(n=>n.k===hash); if(item) go(item) }
+    function goHash(hash){ const item=visibleGroups.value.flatMap(g=>g.items).find(n=>n.k===hash); if(item) go(item) }
     async function loadHealth(){ try { health.value = await api('/api/health') } catch(e) { health.value = null } }
+    async function loadIdentity(){
+      try {
+        identity.value = await api('/api/auth/me')
+        if(cur.value.admin && !identity.value?.is_admin) cur.value = visibleGroups.value[0]?.items[0] || NAV.find(n=>!n.admin)
+      } catch(e) {}
+    }
     function onHash(){ const it=NAV.find(n=>n.k===location.hash.slice(1)); if(it) cur.value=it }
     onMounted(()=>{
       window.addEventListener('hashchange', onHash)
-      loadHealth(); healthTimer=setInterval(()=>{ if(!document.hidden) loadHealth() }, 60000)
+      loadIdentity(); loadHealth(); healthTimer=setInterval(()=>{ if(!document.hidden) loadHealth() }, 60000)
     })
     onUnmounted(()=>{ window.removeEventListener('hashchange', onHash); if(healthTimer) clearInterval(healthTimer) })
 
@@ -117,7 +127,7 @@ createApp({
       h('div', { class:'appbar' }, [
         h('button', { class:'icon-button hamburger', 'aria-label':'打开菜单', onClick:()=>{ navOpen.value=!navOpen.value } }, '☰'),
         h('div', { class:'mobile-brand' }, [h('span',{class:'brand-mark'},'S'), h('span',cur.value.t)]),
-        h('span',{class:['status-dot',health.value?.ready?'ready':'offline']}),
+        h('span',{class:['status-dot',health.value?.status==='ok'?'ready':'offline']}),
         h('button', { class:'icon-button', 'aria-label':'切换主题', onClick:toggleTheme }, theme.value==='dark'?'☾':'☀'),
       ]),
       h('div', { class:['nav-backdrop',{show:navOpen.value}], onClick:()=>{navOpen.value=false} }),
@@ -129,7 +139,7 @@ createApp({
           ]),
           h('button',{class:'collapse-btn','aria-label':collapsed.value?'展开侧栏':'收起侧栏',onClick:toggleCollapsed},collapsed.value?'›':'‹'),
         ]),
-        h('nav',{class:'nav-scroll'},NAV_GROUPS.map(group=>h('section',{class:'nav-section'},[
+        h('nav',{class:'nav-scroll'},visibleGroups.value.map(group=>h('section',{class:'nav-section'},[
           h('div',{class:'nav-section-title'},group.title),
           ...group.items.map(it=>h('button',{
             class:['nav-item',{active:cur.value.k===it.k}],title:collapsed.value?it.t:'',onClick:()=>go(it)
@@ -137,18 +147,24 @@ createApp({
         ]))),
         h('div',{class:'sidebar-footer'},[
           h('div',{class:'runtime-state'},[
-            h('span',{class:['status-dot',health.value?.ready?'ready':'offline']}),
+            h('span',{class:['status-dot',health.value?.status==='ok'?'ready':'offline']}),
             h('span',{class:'runtime-copy'},[
-              h('b',health.value?.ready?'服务正常':'连接不可用'),
-              h('small',health.value?.revision?health.value.revision.slice(0,8):'等待健康检查'),
+              h('b',health.value?.status==='ok'?'服务正常':'连接不可用'),
+              h('small',identity.value?.display_name || identity.value?.username || '已登录'),
             ])
           ]),
           h('button',{class:'theme-switch',onClick:toggleTheme,title:'切换明暗主题'},theme.value==='dark'?'☾':'☀'),
+          h('form',{method:'post',action:'/auth/logout'},[
+            h('button',{class:'theme-switch',type:'submit',title:'退出本站'},'退出')
+          ]),
+          h('form',{method:'post',action:'/auth/logout/all'},[
+            h('button',{class:'theme-switch',type:'submit',title:'退出全部 Shadow 应用'},'全退')
+          ]),
         ])
       ]),
       h('main',{class:['main',{expanded:collapsed.value}]},[
         h('header',{class:'page-topbar'},[
-          h('div',[h('div',{class:'page-kicker'},NAV_GROUPS.find(g=>g.items.includes(cur.value))?.title||'工作台'),h('div',{class:'page-title'},cur.value.t)]),
+          h('div',[h('div',{class:'page-kicker'},visibleGroups.value.find(g=>g.items.includes(cur.value))?.title||'工作台'),h('div',{class:'page-title'},cur.value.t)]),
           h('div',{class:'page-tools'},[
             h('span',{class:'market-legend'},[h('i',{class:'up'}), '红涨', h('i',{class:'down'}), '绿跌']),
             h('button',{class:'icon-button desktop-theme','aria-label':'切换主题',onClick:toggleTheme},theme.value==='dark'?'☾':'☀'),

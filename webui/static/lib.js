@@ -55,6 +55,11 @@ export async function api(path, opts){
   //    本地根路径(localhost:8601/)下解析为 /api/x,照常工作。
   let p = String(path).replace(/^\/+/, '').replace(/^api\//, '')
   const r = await fetch('api/' + p, opts)
+  if(r.status === 401){
+    const here = location.pathname + location.search + location.hash
+    location.assign('/auth/login?return_to=' + encodeURIComponent(here))
+    throw new Error('登录已失效')
+  }
   const j = await r.json()
   if(!j.ok) throw new Error(j.error || '请求失败')
   return j.data

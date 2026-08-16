@@ -10,7 +10,6 @@ __pycache__/
 /.cursor
 /.idea/
 /.venv/
-/openspec
 TradEnv/
 *.pyc
 __pycache__/
