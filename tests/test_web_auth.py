@@ -44,7 +44,15 @@ class _FakeOIDCHTTP:
         self.claim_overrides = {}
         self.expected_nonce = ""
         self.last_token_data = None
+        self.last_userinfo_authorization = None
         self.fail_token_exchange = False
+        self.userinfo_payload = {
+            "sub": "subject-1",
+            "preferred_username": "example-user",
+            "name": "Example User",
+            "email": "user@example.com",
+            "groups": ["stock-users"],
+        }
 
     def get(self, url, **_kwargs):
         if url.endswith("/.well-known/openid-configuration"):
@@ -53,12 +61,18 @@ class _FakeOIDCHTTP:
                     "issuer": self.issuer,
                     "authorization_endpoint": self.issuer + "/authorize",
                     "token_endpoint": self.issuer + "/token",
+                    "userinfo_endpoint": self.issuer + "/userinfo",
                     "jwks_uri": self.issuer + "/jwks",
                     "end_session_endpoint": self.issuer + "/logout",
                 }
             )
         if url.endswith("/jwks"):
             return _Response({"keys": [self.jwk]})
+        if url.endswith("/userinfo"):
+            self.last_userinfo_authorization = _kwargs.get("headers", {}).get(
+                "Authorization"
+            )
+            return _Response(self.userinfo_payload)
         return _Response({}, 404)
 
     def post(self, url, *, data, auth, **_kwargs):
@@ -245,6 +259,43 @@ class WebAuthTests(unittest.TestCase):
             self.assertIn("reason=unspecified", rendered)
             self.assertNotIn("bad-code", rendered)
             self.assertNotIn(query["state"][0], rendered)
+
+    def test_missing_id_token_groups_are_verified_via_userinfo(self):
+        from webui.api_server import app
+
+        self.http.claim_overrides = {"groups": None}
+        with TestClient(app, base_url="https://stock.example.com") as client:
+            start = client.get("/auth/login", follow_redirects=False)
+            query = parse_qs(urlsplit(start.headers["location"]).query)
+            self.http.expected_nonce = query["nonce"][0]
+            callback = client.get(
+                "/auth/callback",
+                params={"state": query["state"][0], "code": "example-code"},
+                follow_redirects=False,
+            )
+            self.assertEqual(callback.status_code, 303)
+            self.assertEqual(
+                self.http.last_userinfo_authorization, "Bearer discard-me"
+            )
+
+    def test_userinfo_subject_must_match_verified_id_token(self):
+        from webui.api_server import app
+
+        self.http.claim_overrides = {"groups": None}
+        self.http.userinfo_payload = {"sub": "different-subject", "groups": ["stock-users"]}
+        with TestClient(app, base_url="https://stock.example.com") as client:
+            start = client.get("/auth/login", follow_redirects=False)
+            query = parse_qs(urlsplit(start.headers["location"]).query)
+            self.http.expected_nonce = query["nonce"][0]
+            with self.assertLogs("webui", level="WARNING") as captured:
+                callback = client.get(
+                    "/auth/callback",
+                    params={"state": query["state"][0], "code": "example-code"},
+                    follow_redirects=False,
+                )
+            self.assertEqual(callback.status_code, 400)
+            self.assertIn("reason=userinfo_subject", "\n".join(captured.output))
+            self.assertNotIn(platform_auth.SESSION_COOKIE, callback.cookies)
 
     def test_open_redirects_are_rejected(self):
         for value in (

@@ -495,7 +495,51 @@ class OIDCClient:
             raise WebAuthError(
                 "ID Token issued-at time is too old", reason="issued_at_too_old"
             )
-        claims["groups"] = _normalize_groups(claims.get("groups"))
+        # The OIDC provider may return requested profile claims from UserInfo instead of
+        # duplicating them in the ID Token.  An explicitly present malformed groups claim is
+        # still rejected; an absent claim is completed from UserInfo by the callback.
+        raw_groups = claims.get("groups")
+        claims["groups"] = () if raw_groups is None else _normalize_groups(raw_groups)
+        return claims
+
+    def fetch_userinfo(self, access_token: str) -> dict[str, Any]:
+        if not access_token or len(access_token) > 8192:
+            raise WebAuthError("OIDC access token is unavailable", reason="userinfo")
+        endpoint = str(self._get_metadata().get("userinfo_endpoint") or "")
+        if not endpoint:
+            raise WebAuthError("OIDC UserInfo endpoint is unavailable", reason="userinfo")
+        try:
+            response = self.http.get(
+                endpoint,
+                timeout=10,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {access_token}",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            raise WebAuthError("OIDC UserInfo request failed", reason="userinfo") from exc
+        if not isinstance(payload, dict) or not str(payload.get("sub") or "").strip():
+            raise WebAuthError("OIDC UserInfo response is invalid", reason="userinfo")
+        payload["groups"] = _normalize_groups(payload.get("groups"))
+        return payload
+
+    def complete_profile_claims(
+        self, claims: dict[str, Any], token_response: dict[str, Any]
+    ) -> dict[str, Any]:
+        if claims.get("groups"):
+            return claims
+        userinfo = self.fetch_userinfo(str(token_response.get("access_token") or ""))
+        if not secrets.compare_digest(
+            str(userinfo.get("sub") or ""), str(claims.get("sub") or "")
+        ):
+            raise WebAuthError("OIDC UserInfo subject mismatch", reason="userinfo_subject")
+        claims["groups"] = userinfo["groups"]
+        for name in ("preferred_username", "name", "email"):
+            if not claims.get(name) and userinfo.get(name):
+                claims[name] = userinfo[name]
         return claims
 
     def global_logout_url(self) -> str:
@@ -524,7 +568,12 @@ class OIDCClient:
                 raise WebAuthError("OIDC discovery failed") from exc
             if not isinstance(metadata, dict) or metadata.get("issuer") != self.config.issuer:
                 raise WebAuthError("OIDC discovery issuer mismatch")
-            for name in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+            for name in (
+                "authorization_endpoint",
+                "token_endpoint",
+                "userinfo_endpoint",
+                "jwks_uri",
+            ):
                 _require_https_url(name, str(metadata.get(name) or ""))
             if metadata.get("end_session_endpoint"):
                 _require_https_url("end session endpoint", metadata["end_session_endpoint"])
@@ -621,7 +670,7 @@ def _normalize_groups(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, (list, tuple)):
-        raise WebAuthError("groups claim is invalid")
+        raise WebAuthError("groups claim is invalid", reason="groups")
     groups = tuple(sorted({str(item).strip() for item in value if str(item).strip()}))
     return groups
 

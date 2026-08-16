@@ -291,6 +291,8 @@ def auth_callback(state: str = "", code: str = "", error: str = ""):
         claims = service.oidc.verify_id_token(
             token_response["id_token"], nonce=transaction["nonce"]
         )
+        stage = "complete_profile"
+        claims = service.oidc.complete_profile_claims(claims, token_response)
         if service.config.required_group not in claims.get("groups", ()):
             return JSONResponse(
                 {"ok": False, "error": "application access is not permitted"},
