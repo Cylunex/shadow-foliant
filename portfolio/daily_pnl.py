@@ -72,13 +72,21 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         # 不会写当日 row → 这里读到 None → 推送显示"股票 +0(0只)"虚假数据。
         # 缺当日快照时立即调 portfolio_snapshot.save_snapshot 现场算一份, 再读。
         if row is None or row[3] is None:
+            # PostgreSQL 下 SELECT 会开启事务并持有表级 AccessShareLock；save_snapshot()
+            # 会用另一个连接执行幂等 ALTER TABLE 迁移，需要 AccessExclusiveLock。如果这里
+            # 不先结束当前读事务，两条连接会被同一个任务自锁，继而让后续整库备份也排队。
+            conn.close()
             try:
                 from portfolio.portfolio_snapshot import save_snapshot as _save_snap
                 print(f'[daily_pnl] 当日 stock_portfolio_snapshots 缺失, 兜底现场算({snap_date})')
                 _save_snap(snap_date)
-                row = _read_today_snapshot()
             except Exception as e:
                 print(f'[daily_pnl] 兜底 save_snapshot 失败: {type(e).__name__}: {str(e)[:80]}')
+            finally:
+                # 无论兜底成功与否，后续基金合并都使用新事务，且重新读取股票快照。
+                conn = _conn()
+                cur = conn.cursor()
+            row = _read_today_snapshot()
         if row and row[3] is not None:
             stock_mv = float(row[1])
             stock_count = int(row[2] or 0)

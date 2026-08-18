@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core import platform_llm  # noqa: E402
+from core.llm_router import _platform_token_budget  # noqa: E402
 
 
 class PlatformLLMTests(unittest.TestCase):
@@ -56,6 +57,12 @@ class PlatformLLMTests(unittest.TestCase):
         self.assertEqual(payload["instructions"], "rules")
         self.assertEqual(payload["input"], [{"role": "user", "content": "body"}])
         self.assertNotIn("model", payload)
+
+    def test_platform_chat_budget_leaves_room_after_reasoning(self):
+        with patch.dict(os.environ, {"SHADOW_LLM_MIN_OUTPUT_TOKENS": "2000"}):
+            self.assertEqual(_platform_token_budget(400, False), 2000)
+            self.assertEqual(_platform_token_budget(3000, False), 3000)
+        self.assertEqual(_platform_token_budget(400, True), 8000)
 
 
 if __name__ == "__main__":

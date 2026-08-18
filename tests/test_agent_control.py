@@ -120,6 +120,13 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(
             REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])
 
+    def test_naive_job_timestamp_is_stored_as_shanghai_time(self):
+        normalized = jobs_hub._normalize_run_timestamp('2026-08-17T16:30:00')
+        parsed = datetime.fromisoformat(normalized)
+
+        self.assertEqual(parsed.utcoffset(), timedelta(hours=8))
+        self.assertEqual(parsed.hour, 16)
+
     def test_pending_dependency_defers_without_consuming_worker(self):
         pending = {
             'state': 'pending',

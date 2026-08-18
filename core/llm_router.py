@@ -136,6 +136,23 @@ def _build_registry() -> List[LLMProvider]:
     ]
 
 
+def _platform_token_budget(requested: int, thinking: bool) -> int:
+    """给 Platform 路由保留足够的正文预算。
+
+    部分 OpenAI-compatible reasoning 模型即使走 chat alias，也会把隐藏推理计入
+    ``max_tokens``。生产已观察到 400/800/1200 的调用只返回 reasoning_content、
+    finish_reason=length 且正文为空，随后又重复请求 legacy provider。提高上限不会强制
+    模型写满，只避免推理耗尽预算；可用环境变量按成本偏好下调。
+    """
+    if thinking:
+        return max(int(requested), 8000)
+    try:
+        minimum = max(1, int(os.getenv('SHADOW_LLM_MIN_OUTPUT_TOKENS', '2000')))
+    except (TypeError, ValueError):
+        minimum = 2000
+    return max(int(requested), minimum)
+
+
 def _normalize_ollama_url(url: str) -> str:
     """OLLAMA_BASE_URL 留空 → 返回空(不激活); 否则确保以 /v1 结尾。"""
     url = url.strip().rstrip('/')
@@ -238,15 +255,16 @@ class LLMRouter:
                     return platform_llm.call(
                         messages,
                         temperature=temperature,
-                        max_tokens=max(max_tokens, 8000) if thinking else max_tokens,
+                        max_tokens=_platform_token_budget(max_tokens, thinking),
                         thinking=thinking,
                         call_type=call_type,
                     )
-                except Exception:
+                except Exception as exc:
                     # Platform SDK is a preferred in-process route. During migration the existing
                     # provider chain remains the behavioral fallback; no prompt/response/error body
                     # is copied into this log line.
-                    print('[LLM-Router] Shadow SDK 不可用，继续现有 provider 降级链', flush=True)
+                    print(f'[LLM-Router] Shadow Platform 调用失败({type(exc).__name__})，'
+                          '继续现有 provider 降级链', flush=True)
         except Exception:
             pass
 

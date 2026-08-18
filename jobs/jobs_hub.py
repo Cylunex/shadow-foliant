@@ -30,7 +30,7 @@ import concurrent.futures
 
 # DB 路由（USE_POSTGRES=true 时走 PG，否则用 SQLite）
 from db_compat import connect as db_connect, USE_POSTGRES
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
 
@@ -47,6 +47,31 @@ _SNAPSHOT_DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 # _log_run 高频调用，缓存 SQLite 连接复用（线程安全锁保护）
 _LOG_DB_LOCK = threading.Lock()
 _LOG_DB_CACHE: dict = {'conn': None, 'pid': None}
+_RUN_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _normalize_run_timestamp(value: str = None, *, default_now: bool = False):
+    """把任务遥测时间统一成带 ``+08:00`` 的 ISO 字符串。
+
+    jobs_hub 的业务时钟是上海时间，但大量任务仍传 ``datetime.now().isoformat()``，
+    该字符串没有 offset。PostgreSQL 的会话时区为 UTC 时会把它误当 UTC，随后
+    ``_latest_job_run_today`` 用上海日界查询就会读到前一天记录。带时区的 deferred
+    记录与无时区的普通记录混写后，甚至会出现“上游刚成功、下游却看到 skipped”。
+    """
+    if value is None:
+        if not default_now:
+            return None
+        return datetime.now(_RUN_TIMEZONE).isoformat()
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_RUN_TIMEZONE)
+    return parsed.astimezone(_RUN_TIMEZONE).isoformat()
 
 
 def _get_log_db():
@@ -241,7 +266,13 @@ def _log_run(job_name: str, status: str, error: str = None,
             cur.execute('''
                 INSERT INTO job_runs(job_name, started_at, finished_at, status, error)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (job_name, started_at or datetime.now().isoformat(), finished_at, status, error))
+            ''', (
+                job_name,
+                _normalize_run_timestamp(started_at, default_now=True),
+                _normalize_run_timestamp(finished_at),
+                status,
+                error,
+            ))
             conn.commit()
     except Exception as _le:
         # 写失败连接可能处于 aborted 态 → 作废缓存,下次重连(探活 SELECT 1 也会兜住,这里更主动)
