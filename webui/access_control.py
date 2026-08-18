@@ -8,14 +8,18 @@ import os
 import secrets
 import threading
 from enum import Enum
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Match
 
 from webui.platform_auth import SESSION_COOKIE, WebAuthError, get_web_auth_service
+
+
+_STATIC_ROOT = Path(__file__).with_name("static").resolve()
 
 
 class Access(str, Enum):
@@ -231,6 +235,11 @@ async def enforce_request_access(request: Request) -> Response | None:
     if key is None or (key[1] == "" and not path.startswith(("/api", "/auth"))):
         if path.startswith("/api") or path.startswith("/auth"):
             return _json_error(403, "route is not authorized")
+        # StaticFiles 挂载在根路径，会让任意扫描路径都匹配成 SPA。旧逻辑先将这些
+        # 不存在的路径重定向到 OIDC，扫描器跟随后会创建登录事务并访问 IdP。
+        # 只允许真实入口和已存在的静态文件进入浏览器鉴权，其余直接 404。
+        if not _is_known_spa_resource(path):
+            return _json_error(404, "not found")
         access = Access.USER
         template = "<spa>"
     else:
@@ -347,6 +356,20 @@ def _get_agent_authenticator() -> Any:
 
 def _json_error(status_code: int, message: str) -> JSONResponse:
     return JSONResponse({"ok": False, "error": message}, status_code=status_code)
+
+
+def _is_known_spa_resource(path: str) -> bool:
+    if path in {"/", "/index.html"}:
+        return True
+    relative = unquote(str(path or "")).lstrip("/")
+    if not relative or "\\" in relative:
+        return False
+    try:
+        candidate = (_STATIC_ROOT / relative).resolve()
+        candidate.relative_to(_STATIC_ROOT)
+    except (OSError, ValueError):
+        return False
+    return candidate.is_file()
 
 
 def _is_loopback(request: Request) -> bool:

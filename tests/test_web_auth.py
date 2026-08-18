@@ -358,6 +358,18 @@ class WebAuthTests(unittest.TestCase):
             client.cookies.set(platform_auth.SESSION_COOKIE, admin_session.session_token)
             self.assertEqual(client.get("/api/env").status_code, 200)
 
+    def test_unknown_scanner_path_does_not_create_oidc_redirect(self):
+        from webui.api_server import app
+
+        with TestClient(app, base_url="https://stock.example.com") as client:
+            response = client.get("/wp-login.php", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("location", response.headers)
+        with self.service.store._connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM web_auth_transactions").fetchone()[0]
+        self.assertEqual(count, 0)
+
     def test_public_health_is_stateless_and_readiness_is_protected_detail(self):
         from webui.api_server import app
 
