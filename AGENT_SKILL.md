@@ -249,6 +249,6 @@ MCP server 已实现:`mcp_server.py`(FastMCP)。启动 `python mcp_server.py`(st
 - miniQMT 实盘下单**未**暴露；Web 只作为观测和应急操作面。
 
 ## 五、相关待办
-- ✅ **批量导入成交记录**:已实现(`import_trades`,自动补代码/金额、直接解析 Markdown 表、幂等去重、自动更新持仓 + 持仓快照)。详见 [交接说明.md](交接说明.md) §6。
+- ✅ **批量导入成交记录**:已实现(`import_trades`,自动补代码/金额、直接解析 Markdown 表、幂等去重、自动更新持仓 + 持仓快照)。
 - ✅ **已实现盈亏**:成交与持仓变动进入统一流水，组合页面/绩效模块可读取。
 - ⏳ 未做:成交记录列名中文化;SQLite 兜底版的持仓自动更新;`event_scoring`/`report_templates` 接入业务。

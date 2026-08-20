@@ -26,3 +26,15 @@ test_push.txt
 /db/
 
 venv2/
+
+# Real deployment and operations material is maintained outside the repository.
+/deploy/
+/ops/
+/operations/
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+*.secret
+config/*.local.*
