@@ -16,6 +16,25 @@ class DailyPnlFallbackTests(unittest.TestCase):
         finally:
             daily_pnl._INITIALIZED = previous
 
+    def test_current_schema_initialization_does_not_run_ddl(self):
+        conn = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchall.return_value = [
+            ('fund_total_count',),
+            ('fund_fresh_count',),
+        ]
+        conn.cursor.return_value = cursor
+
+        with mock.patch.object(daily_pnl, '_conn', return_value=conn), \
+                mock.patch.object(daily_pnl, 'is_postgres', return_value=True):
+            daily_pnl._init_db_once()
+
+        statements = [str(call.args[0]).strip().upper()
+                      for call in cursor.execute.call_args_list]
+        self.assertFalse(any(sql.startswith(('CREATE ', 'ALTER ')) for sql in statements))
+        conn.commit.assert_called_once()
+        conn.close.assert_called_once()
+
     def test_missing_snapshot_releases_read_transaction_before_fallback(self):
         first_conn = mock.Mock()
         first_cursor = mock.Mock()

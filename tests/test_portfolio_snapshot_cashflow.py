@@ -20,6 +20,28 @@ class PortfolioSnapshotCashflowTests(unittest.TestCase):
         finally:
             portfolio_snapshot._INITIALIZED = previous
 
+    def test_current_schema_initialization_does_not_run_ddl(self):
+        conn = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchall.return_value = [
+            ('daily_mv_change',),
+            ('quote_count',),
+            ('fallback_count',),
+            ('anomaly_count',),
+            ('trade_watermark',),
+        ]
+        conn.cursor.return_value = cursor
+
+        with mock.patch.object(portfolio_snapshot, '_conn', return_value=conn), \
+                mock.patch.object(portfolio_snapshot, 'is_postgres', return_value=True):
+            portfolio_snapshot._init_db_once()
+
+        statements = [str(call.args[0]).strip().upper()
+                      for call in cursor.execute.call_args_list]
+        self.assertFalse(any(sql.startswith(('CREATE ', 'ALTER ')) for sql in statements))
+        conn.commit.assert_called_once()
+        conn.close.assert_called_once()
+
     def test_late_backfilled_trade_enters_next_snapshot_as_cashflow(self):
         trades = [
             {

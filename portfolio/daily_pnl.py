@@ -36,41 +36,53 @@ def init_db():
         _INITIALIZED = True
 
 
+def _table_columns(cur, table: str) -> set[str]:
+    """只读获取现有列，避免每个短进程都用幂等 DDL 探测表结构。"""
+    if is_postgres():
+        cur.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema=current_schema() AND table_name=?""",
+            (table,),
+        )
+        return {str(row[0]) for row in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in cur.fetchall()}
+
+
 def _init_db_once():
     num = "DOUBLE PRECISION" if is_postgres() else "REAL"
     ts = "TIMESTAMPTZ DEFAULT NOW()" if is_postgres() else "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
     conn = _conn()
     cur = conn.cursor()
-    cur.execute(f"""CREATE TABLE IF NOT EXISTS daily_pnl_snapshots (
-        snap_date DATE PRIMARY KEY,
-        stock_count INTEGER DEFAULT 0,
-        stock_mv {num} DEFAULT 0,
-        stock_daily_pnl {num} DEFAULT 0,
-        stock_daily_pct {num} DEFAULT 0,
-        fund_count INTEGER DEFAULT 0,
-        fund_total_count INTEGER DEFAULT 0,
-        fund_fresh_count INTEGER DEFAULT 0,
-        fund_mv {num} DEFAULT 0,
-        fund_daily_pnl {num} DEFAULT 0,
-        fund_daily_pct {num} DEFAULT 0,
-        total_daily_pnl {num} DEFAULT 0,
-        total_daily_pct {num} DEFAULT 0,
-        created_at {ts})""")
-    for ddl in (
-        'fund_total_count INTEGER DEFAULT 0',
-        'fund_fresh_count INTEGER DEFAULT 0',
-    ):
-        try:
-            if is_postgres():
-                cur.execute(f'ALTER TABLE daily_pnl_snapshots ADD COLUMN IF NOT EXISTS {ddl}')
-            else:
-                cur.execute(f'ALTER TABLE daily_pnl_snapshots ADD COLUMN {ddl}')
-        except Exception:
-            if is_postgres():
-                conn.rollback()
-                cur = conn.cursor()
-    conn.commit()
-    conn.close()
+    try:
+        columns = _table_columns(cur, 'daily_pnl_snapshots')
+        if not columns:
+            cur.execute(f"""CREATE TABLE IF NOT EXISTS daily_pnl_snapshots (
+                snap_date DATE PRIMARY KEY,
+                stock_count INTEGER DEFAULT 0,
+                stock_mv {num} DEFAULT 0,
+                stock_daily_pnl {num} DEFAULT 0,
+                stock_daily_pct {num} DEFAULT 0,
+                fund_count INTEGER DEFAULT 0,
+                fund_total_count INTEGER DEFAULT 0,
+                fund_fresh_count INTEGER DEFAULT 0,
+                fund_mv {num} DEFAULT 0,
+                fund_daily_pnl {num} DEFAULT 0,
+                fund_daily_pct {num} DEFAULT 0,
+                total_daily_pnl {num} DEFAULT 0,
+                total_daily_pct {num} DEFAULT 0,
+                created_at {ts})""")
+            columns = {'fund_total_count', 'fund_fresh_count'}
+        for name, ddl in (
+            ('fund_total_count', 'fund_total_count INTEGER DEFAULT 0'),
+            ('fund_fresh_count', 'fund_fresh_count INTEGER DEFAULT 0'),
+        ):
+            if name not in columns:
+                suffix = ' IF NOT EXISTS' if is_postgres() else ''
+                cur.execute(f'ALTER TABLE daily_pnl_snapshots ADD COLUMN{suffix} {ddl}')
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def calculate_fund_pnl(holdings: List[Dict], nav_cache: Dict[str, Dict],

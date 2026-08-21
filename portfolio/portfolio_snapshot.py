@@ -40,36 +40,54 @@ def init_db():
         _INITIALIZED = True
 
 
+def _table_columns(cur, table: str) -> set[str]:
+    """只读获取现有列；表已就绪时绝不申请 PostgreSQL DDL 强锁。"""
+    if is_postgres():
+        cur.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema=current_schema() AND table_name=?""",
+            (table,),
+        )
+        return {str(row[0]) for row in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in cur.fetchall()}
+
+
 def _init_db_once():
     num = 'DOUBLE PRECISION' if is_postgres() else 'REAL'
     ts = 'TIMESTAMPTZ DEFAULT NOW()' if is_postgres() else 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
     conn = _conn()
     cur = conn.cursor()
-    cur.execute(f"""CREATE TABLE IF NOT EXISTS stock_portfolio_snapshots (
-        snap_date DATE PRIMARY KEY, total_mv {num}, total_cost {num},
-        pnl_pct {num}, n_stocks INTEGER, holdings_json TEXT, daily_mv_change {num} DEFAULT 0,
-        quote_count INTEGER DEFAULT 0, fallback_count INTEGER DEFAULT 0,
-        anomaly_count INTEGER DEFAULT 0, created_at {ts})""")
-    # 兼容旧表：逐列迁移（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
-    migrations = [
-        ('daily_mv_change', f'daily_mv_change {num} DEFAULT 0'),
-        ('quote_count', 'quote_count INTEGER DEFAULT 0'),
-        ('fallback_count', 'fallback_count INTEGER DEFAULT 0'),
-        ('anomaly_count', 'anomaly_count INTEGER DEFAULT 0'),
+    try:
+        columns = _table_columns(cur, 'stock_portfolio_snapshots')
+        if not columns:
+            cur.execute(f"""CREATE TABLE IF NOT EXISTS stock_portfolio_snapshots (
+                snap_date DATE PRIMARY KEY, total_mv {num}, total_cost {num},
+                pnl_pct {num}, n_stocks INTEGER, holdings_json TEXT,
+                daily_mv_change {num} DEFAULT 0,
+                quote_count INTEGER DEFAULT 0, fallback_count INTEGER DEFAULT 0,
+                anomaly_count INTEGER DEFAULT 0, trade_watermark BIGINT,
+                created_at {ts})""")
+            columns = {
+                'daily_mv_change', 'quote_count', 'fallback_count',
+                'anomaly_count', 'trade_watermark',
+            }
         # 成交 id 水位比成交日期可靠：补录成交可以晚于当日快照，但不能在下一交易日
         # 被当成收益。旧行保留 NULL，首轮由 created_at 反推当时已存在的最大成交 id。
-        ('trade_watermark', 'trade_watermark BIGINT'),
-    ]
-    for name, ddl in migrations:
-        try:
-            if is_postgres():
-                cur.execute(f"ALTER TABLE stock_portfolio_snapshots ADD COLUMN IF NOT EXISTS {ddl}")
-            else:
-                cur.execute(f"ALTER TABLE stock_portfolio_snapshots ADD COLUMN {ddl}")
-        except Exception:
-            pass
-    conn.commit()
-    conn.close()
+        migrations = [
+            ('daily_mv_change', f'daily_mv_change {num} DEFAULT 0'),
+            ('quote_count', 'quote_count INTEGER DEFAULT 0'),
+            ('fallback_count', 'fallback_count INTEGER DEFAULT 0'),
+            ('anomaly_count', 'anomaly_count INTEGER DEFAULT 0'),
+            ('trade_watermark', 'trade_watermark BIGINT'),
+        ]
+        for name, ddl in migrations:
+            if name not in columns:
+                suffix = ' IF NOT EXISTS' if is_postgres() else ''
+                cur.execute(f"ALTER TABLE stock_portfolio_snapshots ADD COLUMN{suffix} {ddl}")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _net_trade_flow(after_date: str, upto_date: str) -> float:
