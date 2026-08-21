@@ -1,5 +1,7 @@
 import unittest
+from unittest import mock
 
+from portfolio import portfolio_snapshot
 from portfolio.portfolio_snapshot import (
     _infer_trade_watermark,
     _watermarked_trade_flow,
@@ -7,6 +9,17 @@ from portfolio.portfolio_snapshot import (
 
 
 class PortfolioSnapshotCashflowTests(unittest.TestCase):
+    def test_schema_initialization_runs_once_per_process(self):
+        previous = portfolio_snapshot._INITIALIZED
+        try:
+            portfolio_snapshot._INITIALIZED = False
+            with mock.patch.object(portfolio_snapshot, '_init_db_once') as initialize:
+                portfolio_snapshot.init_db()
+                portfolio_snapshot.init_db()
+            initialize.assert_called_once_with()
+        finally:
+            portfolio_snapshot._INITIALIZED = previous
+
     def test_late_backfilled_trade_enters_next_snapshot_as_cashflow(self):
         trades = [
             {

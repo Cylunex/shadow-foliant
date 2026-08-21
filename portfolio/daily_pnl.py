@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from typing import Dict, List, Optional
 
 if not any(os.path.basename(p) == "shadow-foliant" for p in sys.path):
@@ -16,6 +17,8 @@ from db_compat import connect, is_postgres  # noqa: E402
 
 
 _DB_FILE = "stock_portfolio_snapshots.db"
+_INIT_LOCK = threading.Lock()
+_INITIALIZED = False
 
 
 def _conn():
@@ -23,6 +26,17 @@ def _conn():
 
 
 def init_db():
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
+    with _INIT_LOCK:
+        if _INITIALIZED:
+            return
+        _init_db_once()
+        _INITIALIZED = True
+
+
+def _init_db_once():
     num = "DOUBLE PRECISION" if is_postgres() else "REAL"
     ts = "TIMESTAMPTZ DEFAULT NOW()" if is_postgres() else "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
     conn = _conn()

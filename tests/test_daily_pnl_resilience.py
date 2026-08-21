@@ -5,6 +5,17 @@ from portfolio import daily_pnl
 
 
 class DailyPnlFallbackTests(unittest.TestCase):
+    def test_schema_initialization_runs_once_per_process(self):
+        previous = daily_pnl._INITIALIZED
+        try:
+            daily_pnl._INITIALIZED = False
+            with mock.patch.object(daily_pnl, '_init_db_once') as initialize:
+                daily_pnl.init_db()
+                daily_pnl.init_db()
+            initialize.assert_called_once_with()
+        finally:
+            daily_pnl._INITIALIZED = previous
+
     def test_missing_snapshot_releases_read_transaction_before_fallback(self):
         first_conn = mock.Mock()
         first_cursor = mock.Mock()
