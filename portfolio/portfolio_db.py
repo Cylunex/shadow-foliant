@@ -788,15 +788,18 @@ class PortfolioDB:
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trade_records'")
             if not cur.fetchone():
                 return []
-            sel = ("stock_code, stock_name, trade_type, quantity, price, amount, "
-                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra")
+            cols_available = {r[1] for r in cur.execute("PRAGMA table_info(trade_records)").fetchall()}
+            created_sel = 'created_at' if 'created_at' in cols_available else 'NULL AS created_at'
+            sel = ("id, stock_code, stock_name, trade_type, quantity, price, amount, "
+                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra, " + created_sel)
             if code:
                 cur.execute(f"""SELECT {sel} FROM trade_records WHERE stock_code=?
                                ORDER BY trade_time DESC LIMIT ?""", (code, limit))
             else:
                 cur.execute(f"""SELECT {sel} FROM trade_records ORDER BY trade_time DESC LIMIT ?""", (limit,))
-            cols = ['code', 'name', 'trade_type', 'quantity', 'price', 'amount',
-                    'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra']
+            cols = ['id', 'code', 'name', 'trade_type', 'quantity', 'price', 'amount',
+                    'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra',
+                    'created_at']
             return [dict(zip(cols, r)) for r in cur.fetchall()]
         finally:
             conn.close()
@@ -863,4 +866,3 @@ if __name__ == "__main__":
             print(f"  {h['analysis_time']}: {h['rating']} (信心度: {h['confidence']})")
     
     print("\n[OK] 数据库测试完成")
-

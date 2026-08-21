@@ -501,8 +501,10 @@ class PortfolioDBPG:
         conn = get_conn()
         cur = conn.cursor()
         try:
-            sel = ("stock_code, stock_name, trade_type, quantity, price, amount, "
-                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra")
+            # id/created_at 是快照现金流的“录入水位”。成交时间可以补录或回填，不能
+            # 单独用来判断这笔资金是否已经反映在上一张持仓快照中。
+            sel = ("id, stock_code, stock_name, trade_type, quantity, price, amount, "
+                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra, created_at")
             if code:
                 cur.execute(f"""SELECT {sel} FROM trade_records
                                WHERE stock_code=%s AND trade_type IN ('买入','卖出')
@@ -510,8 +512,9 @@ class PortfolioDBPG:
             else:
                 cur.execute(f"""SELECT {sel} FROM trade_records WHERE trade_type IN ('买入','卖出')
                                ORDER BY trade_time DESC LIMIT %s""", (limit,))
-            cols = ['code', 'name', 'trade_type', 'quantity', 'price', 'amount',
-                    'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra']
+            cols = ['id', 'code', 'name', 'trade_type', 'quantity', 'price', 'amount',
+                    'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra',
+                    'created_at']
             return [dict(zip(cols, r)) for r in cur.fetchall()]
         finally:
             cur.close()

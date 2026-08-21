@@ -1232,21 +1232,13 @@ def task_fund_nav_refresh():
         codes = {h['code'] for h in fund_db.get_holdings()}
         codes |= {p['code'] for p in fund_db.get_plans(only_enabled=True)}
         saved = 0
-        nav_cache = {}  # {code: {'unit_nav': float, 'daily_return': float or None}}
         for code in sorted(codes):
             df = fund_data.get_nav_history(code)
             if df is not None and not df.empty:
                 saved += fund_db.save_nav(code, df.tail(120))
-                last = df.iloc[-1]
-                try:
-                    unav = float(last['unit_nav'])
-                except (TypeError, ValueError, KeyError):
-                    unav = None
-                try:
-                    dr = float(last.get('daily_return'))
-                except (TypeError, ValueError):
-                    dr = None
-                nav_cache[code] = {'unit_nav': unav, 'daily_return': dr, 'nav_date': str(last['date'])[:10]}
+        # 网络局部失败时沿用库内最近净值计市值；只有净值日期=今天且存在上一期
+        # 净值的基金才进入当日收益，避免把滞后 QDII/失联源冒充成今日涨跌。
+        nav_cache = fund_db.get_nav_pairs(codes)
         # 落组合净值快照
         snap = fund_db.save_portfolio_snapshot(
             datetime.now().strftime('%Y-%m-%d'),
@@ -1255,35 +1247,24 @@ def task_fund_nav_refresh():
         # 只纳入当日净值已出的基金，避免混入不同日期的日增长率
         snap_date = datetime.now().strftime('%Y-%m-%d')
         holdings = fund_db.get_holdings()
-        fund_count = fund_mv = fund_daily_pnl = 0
-        for h in holdings:
-            code = h['code']
-            shares = h.get('shares', 0) or 0
-            if shares <= 0:
-                continue
-            info = nav_cache.get(code, {})
-            unit_nav = info.get('unit_nav')
-            nav_date = info.get('nav_date', '')
-            if unit_nav is None:
-                continue
-            mv = shares * unit_nav
-            fund_mv += mv
-            fund_count += 1
-            # 只算当日净值对应收益，跨日不混
-            if nav_date == snap_date:
-                daily_r = info.get('daily_return')
-                if daily_r is not None:
-                    fund_daily_pnl += mv * daily_r / 100
-        fund_daily_pct = (fund_daily_pnl / (fund_mv - fund_daily_pnl) * 100) if (fund_mv - fund_daily_pnl) > 0 else 0
+        from portfolio.daily_pnl import calculate_fund_pnl, upsert_fund_pnl
+        fund_result = calculate_fund_pnl(holdings, nav_cache, snap_date)
         try:
-            from portfolio.daily_pnl import upsert_fund_pnl
-            upsert_fund_pnl(snap_date, fund_count, round(fund_mv, 2),
-                           round(fund_daily_pnl, 2), round(fund_daily_pct, 4))
+            upsert_fund_pnl(
+                snap_date,
+                fund_result['fund_count'],
+                fund_result['fund_mv'],
+                fund_result['fund_daily_pnl'],
+                fund_result['fund_daily_pct'],
+                fund_total_count=fund_result['fund_total_count'],
+                fund_fresh_count=fund_result['fund_fresh_count'],
+            )
         except Exception:
             pass
         _log_run(job, 'success',
                  error=f'funds={len(codes)} nav_rows={saved} snap={snap} '
-                       f'fund_pnl={fund_daily_pnl:.0f}',
+                       f'fund_pnl={fund_result["fund_daily_pnl"]:.0f} '
+                       f'fresh={fund_result["fund_fresh_count"]}/{fund_result["fund_total_count"]}',
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
@@ -1339,7 +1320,9 @@ def task_daily_pnl_snapshot():
         from portfolio.daily_pnl import merge_save, get_summary
         r = merge_save(snap_date)
         status = 'success' if r else 'skipped'
-        err = f'stock={r["stock_count"]}/{r["stock_daily_pnl"]:.0f} fund={r["fund_count"]}/{r["fund_daily_pnl"]:.0f}' if r else 'no data'
+        err = (f'stock={r["stock_count"]}/{r["stock_daily_pnl"]:.0f} '
+               f'fund={r.get("fund_fresh_count", 0)}/{r.get("fund_total_count", r["fund_count"])}'
+               f'/{r["fund_daily_pnl"]:.0f}') if r else 'no data'
         # 收盘后推送"今日盈亏"一条(通知驱动:一眼看到今天股票+基金合计赚亏)
         if r:
             try:
@@ -1356,7 +1339,9 @@ def task_daily_pnl_snapshot():
                         _stock_note += f"（含{r['stock_anomaly_count']}只异常报价）"
                 lines = [
                     f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}{_stock_note}",
-                    f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · 基金 {r.get('fund_daily_pnl', 0):+,.0f}({r.get('fund_count', 0)}只)",
+                    f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · "
+                    f"基金 {r.get('fund_daily_pnl', 0):+,.0f}"
+                    f"({r.get('fund_fresh_count', 0)}/{r.get('fund_total_count', r.get('fund_count', 0))}只净值已更新)",
                 ]
                 if s.get('mtd_pnl') is not None:
                     lines.append(f"  本月累计 {s['mtd_pnl']:+,.0f} · 近{s.get('period_days', 0)}日 {s.get('period_pnl', 0):+,.0f}(胜率{s.get('win_rate', 0)}%)")
@@ -2730,7 +2715,8 @@ def task_morning_strategy():
                 pnl_text = (
                     f"💰 昨日收益({_p['snap_date']}): "
                     f"股票({_p['stock_count']}只) {_p['stock_daily_pnl']:+,.0f}元({_p['stock_daily_pct']:+.2f}%) | "
-                    f"基金({_p['fund_count']}只) {_p['fund_daily_pnl']:+,.0f}元({_p['fund_daily_pct']:+.2f}%) | "
+                    f"基金({_p.get('fund_fresh_count', 0)}/{_p.get('fund_total_count', _p['fund_count'])}只净值已更新) "
+                    f"{_p['fund_daily_pnl']:+,.0f}元({_p['fund_daily_pct']:+.2f}%) | "
                     f"合计 {_p['total_daily_pnl']:+,.0f}元({_p['total_daily_pct']:+.2f}%)")
         except Exception:
             pass

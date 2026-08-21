@@ -34,14 +34,74 @@ def init_db():
         stock_daily_pnl {num} DEFAULT 0,
         stock_daily_pct {num} DEFAULT 0,
         fund_count INTEGER DEFAULT 0,
+        fund_total_count INTEGER DEFAULT 0,
+        fund_fresh_count INTEGER DEFAULT 0,
         fund_mv {num} DEFAULT 0,
         fund_daily_pnl {num} DEFAULT 0,
         fund_daily_pct {num} DEFAULT 0,
         total_daily_pnl {num} DEFAULT 0,
         total_daily_pct {num} DEFAULT 0,
         created_at {ts})""")
+    for ddl in (
+        'fund_total_count INTEGER DEFAULT 0',
+        'fund_fresh_count INTEGER DEFAULT 0',
+    ):
+        try:
+            if is_postgres():
+                cur.execute(f'ALTER TABLE daily_pnl_snapshots ADD COLUMN IF NOT EXISTS {ddl}')
+            else:
+                cur.execute(f'ALTER TABLE daily_pnl_snapshots ADD COLUMN {ddl}')
+        except Exception:
+            if is_postgres():
+                conn.rollback()
+                cur = conn.cursor()
     conn.commit()
     conn.close()
+
+
+def calculate_fund_pnl(holdings: List[Dict], nav_cache: Dict[str, Dict],
+                       snap_date: str) -> Dict:
+    """按份额×净值差精算；滞后净值只计市值，不冒充当日收益。"""
+    total_count = valued_count = fresh_count = 0
+    fund_mv = fund_daily_pnl = fund_prev_mv = 0.0
+    for holding in holdings or []:
+        try:
+            shares = float(holding.get('shares') or 0)
+        except (TypeError, ValueError):
+            shares = 0.0
+        if shares <= 0:
+            continue
+        total_count += 1
+        code = str(holding.get('code') or '').zfill(6)
+        info = nav_cache.get(code) or {}
+        try:
+            unit_nav = float(info.get('unit_nav'))
+        except (TypeError, ValueError):
+            continue
+        if unit_nav <= 0:
+            continue
+        valued_count += 1
+        fund_mv += shares * unit_nav
+        if str(info.get('nav_date') or '')[:10] != str(snap_date)[:10]:
+            continue
+        try:
+            prev_nav = float(info.get('prev_nav'))
+        except (TypeError, ValueError):
+            prev_nav = 0.0
+        if prev_nav <= 0:
+            continue
+        fresh_count += 1
+        fund_prev_mv += shares * prev_nav
+        fund_daily_pnl += shares * (unit_nav - prev_nav)
+    fund_daily_pct = (fund_daily_pnl / fund_prev_mv * 100) if fund_prev_mv > 0 else 0
+    return {
+        'fund_count': valued_count,
+        'fund_total_count': total_count,
+        'fund_fresh_count': fresh_count,
+        'fund_mv': round(fund_mv, 2),
+        'fund_daily_pnl': round(fund_daily_pnl, 2),
+        'fund_daily_pct': round(fund_daily_pct, 4),
+    }
 
 
 def merge_save(snap_date: str) -> Optional[Dict]:
@@ -99,9 +159,11 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         pass
 
     # ─── 基金：读已有记录（fund_nav_refresh 22:00 写入） ───
-    fund_count = fund_mv = fund_daily_pnl = fund_daily_pct = 0
+    fund_count = fund_total_count = fund_fresh_count = 0
+    fund_mv = fund_daily_pnl = fund_daily_pct = 0
     cur.execute(
-        """SELECT fund_count, fund_mv, fund_daily_pnl, fund_daily_pct
+        """SELECT fund_count, fund_total_count, fund_fresh_count,
+                  fund_mv, fund_daily_pnl, fund_daily_pct
            FROM daily_pnl_snapshots WHERE snap_date=?""",
         (snap_date,),
     )
@@ -114,7 +176,8 @@ def merge_save(snap_date: str) -> Optional[Dict]:
             from fund_db import save_portfolio_snapshot as _fund_snap
             _fund_snap(snap_date)
             cur.execute(
-                """SELECT fund_count, fund_mv, fund_daily_pnl, fund_daily_pct
+                """SELECT fund_count, fund_total_count, fund_fresh_count,
+                          fund_mv, fund_daily_pnl, fund_daily_pct
                    FROM daily_pnl_snapshots WHERE snap_date=?""", (snap_date,))
             existing = cur.fetchone()
         except Exception as _fe:
@@ -122,9 +185,11 @@ def merge_save(snap_date: str) -> Optional[Dict]:
             fund_pending = True   # 取数异常 → 基金数据确实缺失,标注供推送提示,而非按 0
     if existing:
         fund_count = int(existing[0] or 0)
-        fund_mv = float(existing[1] or 0)
-        fund_daily_pnl = float(existing[2] or 0)
-        fund_daily_pct = float(existing[3] or 0)
+        fund_total_count = int(existing[1] or fund_count)
+        fund_fresh_count = int(existing[2] or 0)
+        fund_mv = float(existing[3] or 0)
+        fund_daily_pnl = float(existing[4] or 0)
+        fund_daily_pct = float(existing[5] or 0)
 
     total_daily_pnl = stock_daily_pnl + fund_daily_pnl
     total_prev = (stock_mv - stock_daily_pnl) + (fund_mv - fund_daily_pnl)
@@ -134,9 +199,10 @@ def merge_save(snap_date: str) -> Optional[Dict]:
     cur.execute(
         """INSERT INTO daily_pnl_snapshots
            (snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
-            fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+            fund_count, fund_total_count, fund_fresh_count,
+            fund_mv, fund_daily_pnl, fund_daily_pct,
             total_daily_pnl, total_daily_pct)
-           VALUES (?,?,?,?,?, ?,?,?,?, ?,?)""",
+           VALUES (?,?,?,?,?, ?,?,?, ?,?,?, ?,?)""",
         (
             snap_date,
             stock_count,
@@ -144,6 +210,8 @@ def merge_save(snap_date: str) -> Optional[Dict]:
             round(stock_daily_pnl, 2),
             round(stock_daily_pct, 4),
             fund_count,
+            fund_total_count,
+            fund_fresh_count,
             round(fund_mv, 2),
             round(fund_daily_pnl, 2),
             round(fund_daily_pct, 4),
@@ -160,6 +228,8 @@ def merge_save(snap_date: str) -> Optional[Dict]:
         "stock_daily_pnl": round(stock_daily_pnl, 2),
         "stock_daily_pct": round(stock_daily_pct, 4),
         "fund_count": fund_count,
+        "fund_total_count": fund_total_count,
+        "fund_fresh_count": fund_fresh_count,
         "fund_mv": round(fund_mv, 2),
         "fund_daily_pnl": round(fund_daily_pnl, 2),
         "fund_daily_pct": round(fund_daily_pct, 4),
@@ -172,31 +242,38 @@ def merge_save(snap_date: str) -> Optional[Dict]:
 
 
 def upsert_fund_pnl(snap_date: str, fund_count: int, fund_mv: float,
-                     fund_daily_pnl: float, fund_daily_pct: float):
+                    fund_daily_pnl: float, fund_daily_pct: float,
+                    *, fund_total_count: int = None, fund_fresh_count: int = None):
     """由 fund_nav_refresh 调用：写入基金收益部分（仅更新当日基金字段，不碰其他）。"""
     init_db()
     conn = _conn()
     cur = conn.cursor()
+    fund_total_count = fund_count if fund_total_count is None else int(fund_total_count)
+    fund_fresh_count = fund_count if fund_fresh_count is None else int(fund_fresh_count)
     cur.execute("SELECT snap_date FROM daily_pnl_snapshots WHERE snap_date=?", (snap_date,))
     exists = cur.fetchone()
     if exists:
         cur.execute(
             """UPDATE daily_pnl_snapshots SET
                fund_count=?, fund_mv=?, fund_daily_pnl=?, fund_daily_pct=?,
+               fund_total_count=?, fund_fresh_count=?,
                total_daily_pnl = COALESCE(stock_daily_pnl,0) + ?,
                total_daily_pct = CASE WHEN (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) > 0
                    THEN (COALESCE(stock_daily_pnl,0) + ?) / (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) * 100
                    ELSE 0 END
                WHERE snap_date=?""",
             (fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+             fund_total_count, fund_fresh_count,
              fund_daily_pnl, fund_mv, fund_daily_pnl, fund_daily_pnl, fund_mv, fund_daily_pnl, snap_date),
         )
     else:
         cur.execute(
             """INSERT INTO daily_pnl_snapshots
-               (snap_date, fund_count, fund_mv, fund_daily_pnl, fund_daily_pct, total_daily_pnl, total_daily_pct)
-               VALUES (?,?,?,?,?,?,?)""",
-            (snap_date, fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+               (snap_date, fund_count, fund_total_count, fund_fresh_count,
+                fund_mv, fund_daily_pnl, fund_daily_pct, total_daily_pnl, total_daily_pct)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (snap_date, fund_count, fund_total_count, fund_fresh_count,
+             fund_mv, fund_daily_pnl, fund_daily_pct,
              fund_daily_pnl, fund_daily_pct),
         )
     conn.commit()
@@ -211,7 +288,8 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
     if snap_date:
         cur.execute(
             """SELECT snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
-                      fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+                      fund_count, fund_total_count, fund_fresh_count,
+                      fund_mv, fund_daily_pnl, fund_daily_pct,
                       total_daily_pnl, total_daily_pct
                FROM daily_pnl_snapshots WHERE snap_date=?""",
             (snap_date,),
@@ -219,7 +297,8 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
     else:
         cur.execute(
             """SELECT snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
-                      fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+                      fund_count, fund_total_count, fund_fresh_count,
+                      fund_mv, fund_daily_pnl, fund_daily_pct,
                       total_daily_pnl, total_daily_pct
                FROM daily_pnl_snapshots ORDER BY snap_date DESC LIMIT 1"""
         )
@@ -229,7 +308,8 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
         return None
     cols = [
         "snap_date", "stock_count", "stock_mv", "stock_daily_pnl", "stock_daily_pct",
-        "fund_count", "fund_mv", "fund_daily_pnl", "fund_daily_pct",
+        "fund_count", "fund_total_count", "fund_fresh_count",
+        "fund_mv", "fund_daily_pnl", "fund_daily_pct",
         "total_daily_pnl", "total_daily_pct",
     ]
     return dict(zip(cols, row))

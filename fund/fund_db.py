@@ -433,6 +433,34 @@ def get_latest_navs(codes=None) -> Dict[str, Dict]:
     return out
 
 
+def get_nav_pairs(codes=None, upto_date: str = None) -> Dict[str, Dict]:
+    """取截止日期每只基金的最新/上一期净值，供收益按真实净值差精算。"""
+    conn = _conn()
+    cur = conn.cursor()
+    where = 'WHERE nav_date<=?' if upto_date else ''
+    params = (str(upto_date)[:10],) if upto_date else ()
+    cur.execute(f"""SELECT f.code, f.unit_nav, f.nav_date, f.daily_return,
+        (SELECT p.unit_nav FROM fund_nav p
+          WHERE p.code=f.code AND p.nav_date<f.nav_date
+          ORDER BY p.nav_date DESC LIMIT 1) AS prev_nav
+      FROM fund_nav f
+      JOIN (SELECT code, MAX(nav_date) md FROM fund_nav {where} GROUP BY code) m
+        ON f.code=m.code AND f.nav_date=m.md""", params)
+    out = {}
+    for code, nav, nav_date, daily_return, prev_nav in cur.fetchall():
+        out[str(code)] = {
+            'unit_nav': _f(nav),
+            'nav_date': str(nav_date)[:10] if nav_date else None,
+            'daily_return': _f(daily_return),
+            'prev_nav': _f(prev_nav),
+        }
+    conn.close()
+    if codes:
+        cset = {str(c).zfill(6) for c in codes}
+        out = {k: v for k, v in out.items() if k in cset}
+    return out
+
+
 def save_nav(code: str, nav_df):
     """把净值 DataFrame[date,unit_nav,acc_nav,daily_return] 落库(幂等 upsert)。"""
     if nav_df is None or len(nav_df) == 0:
