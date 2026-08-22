@@ -166,6 +166,8 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
         good = (not v.empty) if isinstance(v, pd.DataFrame) else bool(v)
         _record(key, good, _time.time() - t0)
         if good:
+            if isinstance(v, pd.DataFrame):
+                v.attrs['datahub_route_source'] = name
             return v
     return empty
 
@@ -475,22 +477,53 @@ def _fetcher():
 #  行情域:实时报价 / 个股信息 / K线 / 指数
 # ══════════════════════════════════════════════════════════
 
+def _quotes_zzshare(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import zzshare as _zz
+        return _zz.get_quotes(codes)
+    except Exception:
+        return {}
+
+
+def _quotes_easy_tdx(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import easy_tdx as _tdx
+        return _tdx.get_quotes(codes)
+    except Exception:
+        return {}
+
+
+def _quotes_tdx_python(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import tdx_python as _tdx
+        return _tdx.get_quotes(codes)
+    except Exception:
+        return {}
+
+
 def quotes(codes: List[str]) -> Dict[str, dict]:
     """批量实时行情。返回 {code(6位): 标准quote dict}。
-    datahub 级并列三源(2026-06-24,根治"腾讯卡满超时被砍→东财兜底没轮到→全空"):
+    datahub 级多源链(2026-08 增补正式 API 与 TDX 协议源):
       - a_stock:腾讯主 + 东财补缺(逐代码互补,处理"腾讯偶尔缺几只冷门票")
       - eastmoney:纯东财 ulist(腾讯整体卡死/被 _route 砍掉时的独立兜底,独立超时+健康度记账)
       - sina:纯新浪 hq(真·独立源,非东财非腾讯;腾讯+东财同公司都挂时的最后底。
         只有行情无 PE/PB/市值,这些字段 0,但 name/价/涨跌核心字段保住,报告不至全空)
+      - zzshare:配置 Token 后加入；tdx-python:已验证的 TDX 二进制协议兜底
+      - easy-tdx:仅在显式启用时加入旧协议兼容链
     _route 按健康度排序:某源连续卡死会降级,其余自动上位,不再让单点拖垮取数。"""
     codes = [str(c) for c in (codes or []) if c]
     if not codes:
         return {}
-    raw = _route("quotes",
-                 [("a_stock", lambda: _adapter().get_quotes(codes)),
-                  ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes)),
-                  ("sina", lambda: _adapter().get_quotes_sina(codes))],
-                 empty={}) or {}
+    sources = [("a_stock", lambda: _adapter().get_quotes(codes)),
+               ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes)),
+               ("sina", lambda: _adapter().get_quotes_sina(codes))]
+    if _zzshare_available():
+        sources.append(("zzshare", lambda: _quotes_zzshare(codes)))
+    if _tdx_python_available():
+        sources.append(("tdx_python", lambda: _quotes_tdx_python(codes)))
+    if _easy_tdx_available():
+        sources.append(("easy_tdx", lambda: _quotes_easy_tdx(codes)))
+    raw = _route("quotes", sources, empty={}) or {}
     norm = {_norm_code(k): v for k, v in raw.items()}
     _name_remember(norm)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)
     return norm
@@ -634,12 +667,17 @@ def stock_codes(names: List[str], allow_refresh: bool = True) -> Dict[str, str]:
 _KLINE_DIR = _os.path.join(_bootstrap.DB_DIR, "kline_cache")
 
 
-def _kline_ttl() -> int:
+def _kline_ttl(interval: str = "1d") -> int:
     """K线磁盘缓存有效期(秒)。2026-06-26 拉长到 3 天:年K(日线序列)的历史 bar 永不变、
     只今日最新一根会动,而盘中最新价一律走 quotes(腾讯)补 + 盘后 prefetch 每晚刷新缓存 →
     3 天容差对均线/形态判断无实质影响,却大幅减少对 K线源(尤其 qfq 主源东财 push2his)的回源。
     配合 kline() 的"取数失败回退历史缓存 + 缓存不主动过期删除":源全挂时永远有历史 K线可用。
     env DATAHUB_KLINE_TTL_DAYS 可调(默认 3)。"""
+    if _is_intraday_interval(interval):
+        try:
+            return max(int(_os.environ.get('DATAHUB_INTRADAY_KLINE_TTL_SEC', '60')), 1)
+        except (TypeError, ValueError):
+            return 60
     try:
         days = float(_os.environ.get('DATAHUB_KLINE_TTL_DAYS', '3'))
     except (TypeError, ValueError):
@@ -722,6 +760,135 @@ def _kline_eastmoney(code: str, period: str = "1y", interval: str = "1d",
         return pd.DataFrame()
 
 
+_INTRADAY_MINUTES = {
+    '1m': 1, '1min': 1,
+    '5m': 5, '5min': 5,
+    '15m': 15, '15min': 15,
+    '30m': 30, '30min': 30,
+    '60m': 60, '60min': 60, '1h': 60,
+}
+
+
+def _is_intraday_interval(interval: str) -> bool:
+    return str(interval).strip().lower() in _INTRADAY_MINUTES
+
+
+def _normalize_kline_interval(interval: str):
+    key = str(interval).strip().lower()
+    if key in _INTRADAY_MINUTES:
+        return key
+    if key in ('1d', 'daily', 'day', 'd', '101'):
+        return 'day'
+    return None
+
+
+def _kline_bar_count(period: str, interval: str) -> int:
+    """按 A 股每交易日 240 分钟估算 bar 数，并约束单次历史请求规模。"""
+    try:
+        max_bars = max(int(_os.environ.get('MARKET_DATA_MAX_BARS', '3200')), 1)
+    except (TypeError, ValueError):
+        max_bars = 3200
+    if _is_intraday_interval(interval):
+        minutes = _INTRADAY_MINUTES[str(interval).strip().lower()]
+        trading_days = max(int(_period_days(period) * 250 / 365) + 2, 1)
+        return min(trading_days * max(240 // minutes, 1), max_bars)
+    return min(max(int(_period_days(period) * 250 / 365) + 20, 30), max_bars)
+
+
+def _provider_kline_to_contract(df: pd.DataFrame, period: str, interval: str) -> pd.DataFrame:
+    """原子源小写 OHLCV → datahub 的 Date index + 大写列契约。"""
+    if df is None or getattr(df, 'empty', True):
+        return pd.DataFrame()
+    required = {'date', 'open', 'high', 'low', 'close', 'volume'}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+    try:
+        dates = pd.to_datetime(df['date'], errors='coerce')
+        if not _is_intraday_interval(interval):
+            dates = dates.dt.normalize()
+        out = pd.DataFrame({
+            'Date': dates,
+            'Open': pd.to_numeric(df['open'], errors='coerce'),
+            'Close': pd.to_numeric(df['close'], errors='coerce'),
+            'High': pd.to_numeric(df['high'], errors='coerce'),
+            'Low': pd.to_numeric(df['low'], errors='coerce'),
+            'Volume': pd.to_numeric(df['volume'], errors='coerce'),
+        }).dropna(subset=['Date']).drop_duplicates(subset=['Date'], keep='last')
+        out = out.set_index('Date').sort_index()
+        return _slice_by_days(out, _period_days(period))
+    except Exception:
+        return pd.DataFrame()
+
+
+def _easy_tdx_available() -> bool:
+    try:
+        from data.sources import easy_tdx as _tdx
+        return _tdx.available()
+    except Exception:
+        return False
+
+
+def _tdx_python_available() -> bool:
+    try:
+        from data.sources import tdx_python as _tdx
+        return _tdx.available()
+    except Exception:
+        return False
+
+
+def _zzshare_available() -> bool:
+    try:
+        from data.sources import zzshare as _zz
+        return _zz.available()
+    except Exception:
+        return False
+
+
+def _kline_easy_tdx(code: str, period: str = '1y', interval: str = '1d') -> pd.DataFrame:
+    freq = _normalize_kline_interval(interval)
+    if freq is None:
+        return pd.DataFrame()
+    try:
+        from data.sources import easy_tdx as _tdx
+        raw = _tdx.get_kline(
+            _norm_code(code), frequency=freq, count=_kline_bar_count(period, interval),
+            bar_time='end',
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_tdx_python(code: str, period: str = '1y', interval: str = '1d') -> pd.DataFrame:
+    freq = _normalize_kline_interval(interval)
+    if freq is None:
+        return pd.DataFrame()
+    try:
+        from data.sources import tdx_python as _tdx
+        raw = _tdx.get_kline(
+            _norm_code(code), frequency=freq, count=_kline_bar_count(period, interval)
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_zzshare(code: str, period: str = '1y', interval: str = '1d',
+                   adjust: str = 'raw') -> pd.DataFrame:
+    freq = _normalize_kline_interval(interval)
+    if freq is None:
+        return pd.DataFrame()
+    try:
+        from data.sources import zzshare as _zz
+        raw = _zz.get_kline(
+            _norm_code(code), period_days=_period_days(period), frequency=freq,
+            adjust=adjust, count=_kline_bar_count(period, interval),
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
 def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """mootdx 通达信公网日线(raw)——真·独立协议源:东财/新浪等 HTTP 源全被机房墙时的最后兜底
     (走通达信二进制协议、非 HTTP)。返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV,
@@ -730,11 +897,13 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
        让 _route 跳过,无害。
     ⚠️ 成交量单位自适应:通达信日线 volume 多为"手",但为防版本差异污染**三方共享的 K线缓存**,
        用 amount/volume/close 反推均价倍率(≈100=手→×100, ≈1=股→×1),不靠外部源对比。"""
-    if interval not in ('1d', 'daily', '101'):
+    freq = _normalize_kline_interval(interval)
+    if freq is None:
         return pd.DataFrame()
     try:
         from data.sources.mootdx import get_kline as _tdx_k
-        df = _tdx_k(_norm_code(code), frequency='day', count=800, adjust='')
+        df = _tdx_k(_norm_code(code), frequency=freq,
+                    count=min(_kline_bar_count(period, interval), 800), adjust='')
     except Exception:
         return pd.DataFrame()
     if df is None or len(df) == 0 or not {'date', 'open', 'high', 'low', 'close', 'volume'}.issubset(df.columns):
@@ -755,7 +924,9 @@ def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         out = pd.DataFrame({
             # ⚠️ 通达信日线 date 带收盘时间 15:00:00,必须 normalize 到纯日期(00:00:00)对齐
             # 新浪/东财,否则 DatetimeIndex 对不上 → 污染三方共享 K线缓存、回测按日期取值错位
-            'Date': pd.to_datetime(df['date'], errors='coerce').dt.normalize(),
+            'Date': (pd.to_datetime(df['date'], errors='coerce')
+                     if _is_intraday_interval(interval)
+                     else pd.to_datetime(df['date'], errors='coerce').dt.normalize()),
             'Open': pd.to_numeric(df['open'], errors='coerce'),
             'Close': pd.to_numeric(df['close'], errors='coerce'),
             'High': pd.to_numeric(df['high'], errors='coerce'),
@@ -913,13 +1084,15 @@ def _tushare_available() -> bool:
 
 
 def _tag_kline(df: pd.DataFrame, source: str, *, stale: bool = False,
-               cache_age_days: float = 0.0) -> pd.DataFrame:
+               cache_age_days: float = 0.0, interval: str = '1d') -> pd.DataFrame:
     """把来源/新鲜度附在 DataFrame.attrs，不改变既有列和索引契约。"""
     if isinstance(df, pd.DataFrame):
+        actual_source = df.attrs.get('datahub_route_source') if source == 'live' else None
         df.attrs.update({
-            'datahub_source': source,
+            'datahub_source': actual_source or source,
             'datahub_stale': bool(stale),
             'datahub_cache_age_days': round(float(cache_age_days or 0), 2),
+            'datahub_interval': interval,
         })
     return df
 
@@ -933,7 +1106,11 @@ def kline_quality(df: pd.DataFrame, max_stale_days: float = 3.0) -> dict:
         age = float(df.attrs.get('datahub_cache_age_days', 0) or 0)
     except (TypeError, ValueError):
         age = 0.0
-    actionable = not (stale and age > max_stale_days)
+    interval = str(df.attrs.get('datahub_interval', '1d'))
+    allowed_age_days = max_stale_days
+    if _is_intraday_interval(interval):
+        allowed_age_days = min(max_stale_days, 10 / 1440)
+    actionable = not (stale and age > allowed_age_days)
     return {'usable': True, 'actionable': actionable, 'stale': stale,
             'cache_age_days': age, 'source': df.attrs.get('datahub_source', 'unknown'),
             'reason': '' if actionable else f'stale_cache_{age:.1f}d'}
@@ -944,10 +1121,10 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
     ⭐ 两套复权缓存(2026-06-24):
       adjust='raw'(默认):不复权,真实成交价 —— 回测/持仓盈亏/决策后验/显示真实价 用。
-        源链:StockDataFetcher(新浪 raw 主源)→ 东财 push2his fqt=0 → mootdx 通达信。缓存键无后缀。
+        日线在既有 HTTP/baostock 链中加入 zzshare 与已验证的 tdx-python 独立兜底；缓存键无后缀。
       adjust='qfq':前复权,消除除权跳空 —— InStock/形态/缠论/因子/技术指标 用(行业标准)。
-        源链:东财 push2his fqt=1 → akshare qfq(均走东财,东财封时取不到 → fallback raw,**不写 qfq 缓存**)。
-        新浪只能 raw 不入 qfq 源;mootdx 只 raw 不入 qfq 源。缓存键 _qfq 后缀,与 raw 互不污染。
+        在新浪/baostock/东财既有链中加入 zzshare qfq；全部失败才 fallback raw，且不写 qfq 缓存。
+        分钟线独立使用 zzshare → tdx-python → 显式兼容源链，不混入日线复权逻辑。
     健康度路由自动把可达源排前。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
     adjust = 'qfq' if str(adjust) == 'qfq' else 'raw'
@@ -955,13 +1132,55 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}{suffix}.pkl")
     if use_cache:
         try:
-            if _os.path.isfile(cache_f) and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl():
+            if (_os.path.isfile(cache_f)
+                    and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl(interval)):
                 df = pd.read_pickle(cache_f)
                 if isinstance(df, pd.DataFrame) and not df.empty:
                     age = (_time.time() - _os.path.getmtime(cache_f)) / 86400
-                    return _tag_kline(df, 'fresh_cache', cache_age_days=age)
+                    return _tag_kline(df, 'fresh_cache', cache_age_days=age, interval=interval)
         except Exception:
             pass
+
+    # 分钟线使用 zzshare 正式 API → 已验证 tdx-python → 显式旧协议兼容的独立链。
+    # 分钟 bar 不在这里做前复权；公司行动因子应由更高层显式处理。
+    if _is_intraday_interval(interval):
+        intraday_sources = []
+        if _zzshare_available():
+            intraday_sources.append(
+                ('zzshare', lambda: _kline_zzshare(code, period, interval, 'raw'))
+            )
+        if _tdx_python_available():
+            intraday_sources.append(
+                ('tdx_python', lambda: _kline_tdx_python(code, period, interval))
+            )
+        if _easy_tdx_available():
+            intraday_sources.append(
+                ('easy_tdx', lambda: _kline_easy_tdx(code, period, interval))
+            )
+        intraday_sources.append(
+            ('mootdx', lambda: _kline_mootdx(code, period, interval))
+        )
+        df = _route('kline_intraday', intraday_sources, empty=pd.DataFrame(), timeout=20)
+        df = _sanitize_kline(df)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            if use_cache:
+                try:
+                    _os.makedirs(_KLINE_DIR, exist_ok=True)
+                    df.to_pickle(cache_f)
+                except Exception:
+                    pass
+            return _tag_kline(df, 'live', interval=interval)
+        if use_cache:
+            try:
+                if _os.path.isfile(cache_f):
+                    stale = pd.read_pickle(cache_f)
+                    if isinstance(stale, pd.DataFrame) and not stale.empty:
+                        age = (_time.time() - _os.path.getmtime(cache_f)) / 86400
+                        return _tag_kline(stale, 'stale_cache', stale=True,
+                                          cache_age_days=age, interval=interval)
+            except Exception:
+                pass
+        return pd.DataFrame()
 
     # baostock(证券宝)免费全历史(1990至今)+ 稳定(不像东财常被反爬封):
     #   · 长周期(≥2y)居首拿全历史(解新浪~365根回测深度限制);
@@ -990,22 +1209,30 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                     _bl.to_pickle(cache_f)
                 except Exception:
                     pass
-            return _tag_kline(_bl, 'live')
+            return _tag_kline(_bl, 'live', interval=interval)
 
     if adjust == 'raw':
         # 摊平 8 源链(2026-06-28 阶段3⑤):直连原子源,**无 fetcher 嵌套**——根治旧 east/mootdx
         # 在 fetcher 内层降级链 + 外层 _route **双重出现**的重复路由,链路从 4-5 跳压成 1 层。
-        # 顺序:新浪(可达+并发+当日bar,主源)→ baostock(免费稳定全历史,优先于常被封东财)→ 东财
-        #   → mootdx(通达信独立协议,机房全墙时兜底)→ 腾讯(真独立公司,补深市ETF/sina盲区)
+        # 顺序:新浪(可达+并发+当日bar,主源)→ baostock(免费稳定全历史)→ 配置后的 zzshare
+        #   → 已验证 tdx-python → 显式 easy-tdx 兼容 → 东财 → mootdx → 腾讯
         #   → akshare(末位整合库)→ tushare(可选,无 token 不入链)。健康度路由自动把可达源排前。
         _srcs_raw = [
             ("sina_raw", lambda: _kline_sina_raw(code, period, interval)),
             ("baostock", lambda: _kline_baostock(code, period, interval, 'raw')),
+        ]
+        if _zzshare_available():
+            _srcs_raw.append(("zzshare", lambda: _kline_zzshare(code, period, interval, 'raw')))
+        if _tdx_python_available():
+            _srcs_raw.append(("tdx_python", lambda: _kline_tdx_python(code, period, interval)))
+        if _easy_tdx_available():
+            _srcs_raw.append(("easy_tdx", lambda: _kline_easy_tdx(code, period, interval)))
+        _srcs_raw.extend([
             ("east", lambda: _kline_eastmoney(code, period, interval, 'raw')),
             ("mootdx", lambda: _kline_mootdx(code, period, interval)),
             ("tencent", lambda: _kline_tencent_raw(code, period, interval)),
             ("akshare", lambda: _kline_akshare_raw(code, period, interval)),
-        ]
+        ])
         if _tushare_available():
             _srcs_raw.append(("tushare", lambda: _kline_tushare_raw(code, period, interval)))
         df = _route("kline", _srcs_raw, empty=pd.DataFrame(), timeout=45)
@@ -1023,7 +1250,9 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         if (_health('kline_qfq:east_qfq', _now) < -0.5
                 and _health('kline_qfq:sina_qfq', _now) < -0.5
                 and _health('kline_qfq:tickflow_qfq', _now) < -0.5
-                and _health('kline_qfq:baostock_qfq', _now) < -0.5):
+                and _health('kline_qfq:baostock_qfq', _now) < -0.5
+                and (not _zzshare_available()
+                     or _health('kline_qfq:zzshare_qfq', _now) < -0.5)):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
         # 短超时 10s。**优先真非东财源**(用户诉求:东财常被封):sina_qfq(新浪,快)→ baostock_qfq(稳,全历史)
         # → east_qfq(东财,降级)→ tickflow_qfq(限流慢,末位)。东财封时前两个非东财源顶上,
@@ -1033,7 +1262,13 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         _east_q = ("east_qfq", lambda: _kline_eastmoney(code, period, interval, 'qfq'))
         _tick_q = ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))
         # 长历史(≥2y)已在上面直调 baostock,这里只管常规多源(短周期/长历史 baostock 失败的兜底)
-        df = _route("kline_qfq", [_sina_q, _bao_q, _east_q, _tick_q],
+        _qfq_sources = [_sina_q, _bao_q]
+        if _zzshare_available():
+            _qfq_sources.append(
+                ("zzshare_qfq", lambda: _kline_zzshare(code, period, interval, 'qfq'))
+            )
+        _qfq_sources.extend([_east_q, _tick_q])
+        df = _route("kline_qfq", _qfq_sources,
                     empty=pd.DataFrame(), timeout=10)
     df = _sanitize_kline(df)
     # 取数成功 → 写缓存(刷新 mtime)返回
@@ -1044,7 +1279,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                 df.to_pickle(cache_f)
             except Exception:
                 pass
-        return _tag_kline(df, 'live')
+        return _tag_kline(df, 'live', interval=interval)
     # —— 取数失败(空 DF)——
     # ① 历史缓存兜底(即使已过 TTL):缓存不主动过期删除,源全挂时永远有历史 K线可用(2026-06-26)。
     #    回测/因子/技术分析宁可用几天前的历史序列,也好过空 DF 直接断流。
@@ -1057,7 +1292,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                     print(f'[datahub.kline] {_norm_code(code)} {period}{suffix} 取数失败,'
                           f'回退历史缓存(age {_age_d}d)', flush=True)
                     return _tag_kline(stale, 'stale_cache', stale=True,
-                                      cache_age_days=_age_d)
+                                      cache_age_days=_age_d, interval=interval)
         except Exception:
             pass
     # ② qfq 且无历史缓存可兜 → 退回 raw(技术分析有数据胜过无;raw 自身也走①历史兜底)。绝不写 qfq 缓存防污染。

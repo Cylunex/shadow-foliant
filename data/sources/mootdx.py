@@ -3,9 +3,8 @@
 为什么用它:原 monitor/smart_monitor_tdx_data.py 写死内网 http://192.168.x.x:8181 的 Go 服务,
 OpenClaw/异地部署没有该服务。mootdx 直连公网通达信行情服务器(端口7709),纯 Python、无券商、无 key。
 
-⚠️ 关键经验(实测):mootdx 的 `bestip` 自动选服务器在本网络不可靠(会选到不通的服务器报错),
-因此本模块**内置候选服务器列表 + socket 探测第一个可连的**,而不用 bestip。可用 env `TDX_SERVERS`
-覆盖(形如 "ip:port,ip:port")。
+该实现只作为旧环境兼容。服务器列表必须通过仓库外 `TDX_SERVERS` 注入；新部署使用 easy-tdx
+自动选优，不在仓库维护实际行情节点。
 
 返回统一标准格式:DataFrame[date(datetime), open, high, low, close, volume, amount] 升序。
 取不到/不可用一律返回 None(由上层 data_source_manager 继续降级)。
@@ -21,17 +20,6 @@ from typing import Optional
 
 import pandas as pd
 
-# 候选公网通达信行情服务器(实测可连优先;mootdx bestip 不可靠故内置)
-_DEFAULT_SERVERS = [
-    ('123.125.108.14', 7709),
-    ('124.71.187.122', 7709),
-    ('110.41.147.114', 7709),
-    ('119.147.212.81', 7709),
-    ('218.108.98.244', 7709),
-    ('124.74.236.94', 7709),
-    ('60.12.136.250', 7709),
-]
-
 # mootdx frequency 取值:8=1m 0=5m 1=15m 2=30m 3=1h 9=日 5=周 6=月
 _FREQ_MAP = {
     '1m': 8, '5m': 0, '15m': 1, '30m': 2, '1h': 3, '60m': 3,
@@ -45,6 +33,8 @@ _unavailable = False         # mootdx 未安装等硬性不可用
 
 
 def _candidate_servers():
+    if os.getenv('TDX_USE_MOOTDX', 'false').lower() in ('false', '0', 'no'):
+        return []
     env = os.getenv('TDX_SERVERS', '').strip()
     if env:
         out = []
@@ -54,7 +44,7 @@ def _candidate_servers():
                 out.append((ip.strip(), int(port)))
         if out:
             return out
-    return _DEFAULT_SERVERS
+    return []
 
 
 def _probe_server(timeout=2.0):

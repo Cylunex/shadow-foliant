@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -366,7 +367,8 @@ class WebAuthTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertNotIn("location", response.headers)
-        with self.service.store._connect() as conn:
+        # sqlite3.Connection 的 context manager 只提交事务，不会关闭句柄；Windows 下会锁住临时库。
+        with closing(self.service.store._connect()) as conn:
             count = conn.execute("SELECT COUNT(*) FROM web_auth_transactions").fetchone()[0]
         self.assertEqual(count, 0)
 

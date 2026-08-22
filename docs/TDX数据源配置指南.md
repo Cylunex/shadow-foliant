@@ -1,273 +1,68 @@
-# 📡 TDX数据源配置指南
+# A 股分钟行情与 TDX 配置
 
-## 📖 简介
+Foliant 的分钟 K 线统一从 `datahub.kline()` 获取。默认路由是：
 
-AgentStock1智能盯盘系统已集成TDX股票数据API接口，为用户提供更稳定、更快速的实时行情数据获取能力。
+1. 配置了 Token 的 `zzshare` 正式 API；
+2. 已实测返回日线、分钟线和快照的 `tdx-python`；
+3. 显式启用并另行安装后的 `easy-tdx` 纯 Python 兼容层；
+4. 旧 `mootdx`（仅兼容已有环境）。
 
-### 数据源优先级
+日线保持原多源行为，并把 zzshare、tdx-python 加入独立兜底。上层不得直接调用任一 SDK。
 
-系统采用多数据源降级机制：
-1. **TDX API**（优先）- 快速、稳定的本地化数据接口
-2. **AKShare**（备选）- 免费的金融数据接口
-3. **Tushare**（兜底）- 需要积分的专业数据接口
+## 配置
 
----
+真实 Token、节点和网络信息只写仓库外 `.env` 或受限生产配置：
 
-## 🚀 快速开始
-
-### 1. 环境变量配置
-
-在项目根目录的`.env`文件中添加以下配置：
-
-```bash
-# TDX股票数据API配置
-TDX_ENABLED=true
-TDX_BASE_URL=http://127.0.0.1:8080
+```dotenv
+ZZSHARE_TOKEN=
+ZZSHARE_ENABLED=true
+TDX_USE_TDX_PYTHON=true
+TDX_PYTHON_ADDRESS=
+TDX_PYTHON_TIMEOUT_MS=5000
+TDX_PYTHON_START_TIMEOUT=8
+TDX_PYTHON_REQUEST_TIMEOUT=10
+TDX_USE_EASY_TDX=false
+MARKET_DATA_MAX_BARS=3200
+DATAHUB_INTRADAY_KLINE_TTL_SEC=60
 ```
 
-**配置说明：**
-- `TDX_ENABLED`: 是否启用TDX数据源（`true`=启用，`false`=禁用）
-- `TDX_BASE_URL`: TDX API服务地址（根据实际部署地址修改）
+- `TDX_PYTHON_ADDRESS` 留空时由 SDK 自动选择；固定节点只写受限生产配置。
+- 设置固定节点时只在服务器受限配置中填写，不提交到仓库。
+- `MARKET_DATA_MAX_BARS` 是一次逻辑请求上限；TDX 每页最多 800 条，适配层自动分页。
+- zzshare 单次分钟请求受其服务配额限制，当前适配层最多请求 1000 条。
+- `tdx-python` 需要 CPython 3.12+。SDK 在独立持久子进程运行，其原生连接日志不会进入应用日志。
 
-### 2. 验证配置
-
-启动系统后，在日志中查看以下信息：
-
-```
-TDX数据源已启用: http://127.0.0.1:8080
-✅ TDX成功获取 600519 (贵州茅台) 实时行情
-```
-
----
-
-## 📊 TDX数据源功能
-
-### 支持的数据类型
-
-1. **实时行情数据**
-   - 当前价、涨跌幅、涨跌额
-   - 开盘价、最高价、最低价、昨收价
-   - 成交量、成交额
-   - 买卖五档盘口数据
-
-2. **K线数据**
-   - 日K线、周K线、月K线
-   - 分钟K线（1/5/15/30/60分钟）
-   - 支持最多800条历史数据
-
-3. **技术指标**
-   - 均线：MA5、MA20、MA60
-   - MACD指标：DIF、DEA、MACD
-   - RSI指标：RSI6、RSI12、RSI24
-   - KDJ指标：K、D、J值
-   - 布林带：上轨、中轨、下轨
-
-### 数据单位说明
-
-TDX接口返回的数据单位与系统内部使用的单位不同，系统会自动转换：
-
-| 数据类型 | TDX返回单位 | 系统使用单位 | 转换公式 |
-|---------|------------|-------------|---------|
-| 价格 | 厘 | 元 | 元 = 厘 / 1000 |
-| 成交量 | 手 | 手 | 无需转换 |
-| 成交额 | 厘 | 元 | 元 = 厘 / 1000 |
-
----
-
-## 🔧 配置示例
-
-### 场景1：使用本地TDX服务
-
-```bash
-# .env文件配置
-TDX_ENABLED=true
-TDX_BASE_URL=http://127.0.0.1:8080
-```
-
-### 场景2：使用局域网TDX服务
-
-```bash
-# .env文件配置
-TDX_ENABLED=true
-TDX_BASE_URL=http://127.0.0.1:8080
-```
-
-### 场景3：禁用TDX，使用AKShare
-
-```bash
-# .env文件配置
-TDX_ENABLED=false
-# TDX_BASE_URL配置可省略
-```
-
----
-
-## 🎯 智能盯盘中的应用
-
-### AI分析数据来源
-
-当启用TDX数据源后，智能盯盘的AI分析将优先使用TDX获取：
-
-1. **实时行情** - 用于判断当前市场状态
-2. **技术指标** - 用于分析趋势和买卖点
-3. **K线数据** - 用于图表展示和历史分析
-
-### 数据刷新策略
-
-- **交易时段**：每次分析都获取最新数据
-- **非交易时段**：使用最近一个交易日的数据
-- **降级机制**：TDX失败时自动切换到AKShare或Tushare
-
----
-
-## 🛠️ 故障排查
-
-### 问题1：TDX连接失败
-
-**现象：**
-```
-TDX连接失败，请检查接口地址: http://127.0.0.1:8080
-```
-
-**解决方案：**
-1. 检查TDX服务是否启动
-2. 确认服务地址和端口是否正确
-3. 测试网络连接：`curl http://127.0.0.1:8080/api/quote?code=000001`
-
-### 问题2：TDX请求超时
-
-**现象：**
-```
-TDX请求超时 600519
-```
-
-**解决方案：**
-1. 检查网络状况
-2. TDX服务器负载是否过高
-3. 调整超时时间（在`smart_monitor_tdx_data.py`中修改`timeout`参数）
-
-### 问题3：TDX返回数据为空
-
-**现象：**
-```
-TDX未返回股票 600519 的行情数据
-```
-
-**解决方案：**
-1. 确认股票代码格式正确（6位数字）
-2. 检查TDX服务是否正常工作
-3. 查看TDX服务日志
-
----
-
-## 📈 性能优势
-
-使用TDX数据源的优势：
-
-| 对比项 | TDX | AKShare | Tushare |
-|-------|-----|---------|---------|
-| 速度 | ⚡⚡⚡ 极快 | ⚡⚡ 较快 | ⚡ 一般 |
-| 稳定性 | ✅ 极高 | ⚠️ 中等 | ✅ 高 |
-| IP限制 | ❌ 无 | ⚠️ 有 | ❌ 无 |
-| 积分要求 | ❌ 无 | ❌ 无 | ✅ 需要 |
-| 成本 | 💰 本地部署 | 🆓 免费 | 💰 积分制 |
-
----
-
-## 🔄 降级机制说明
-
-系统采用智能降级策略，确保数据获取的可靠性：
-
-```
-1. 首选TDX（如果启用）
-   ↓ 失败
-2. 降级到AKShare
-   ↓ 失败
-3. 降级到Tushare（如果配置）
-   ↓ 失败
-4. 返回错误，停止分析
-```
-
-**日志示例：**
-```
-TDX获取失败 600519，尝试降级到AKShare
-AKShare获取失败 600519，尝试降级到Tushare
-✅ Tushare降级成功，获取到 600519 数据
-```
-
----
-
-## 💡 最佳实践
-
-### 推荐配置
-
-```bash
-# 主数据源：TDX（快速、稳定）
-TDX_ENABLED=true
-TDX_BASE_URL=http://127.0.0.1:8080
-
-# 备用数据源：Tushare（需要配置Token）
-TUSHARE_TOKEN=your_tushare_token_here
-```
-
-### 优化建议
-
-1. **本地部署TDX服务** - 降低网络延迟
-2. **配置Tushare Token** - 确保数据源冗余
-3. **定期检查日志** - 及时发现数据源异常
-4. **监控TDX服务** - 保证服务可用性
-
----
-
-## 📝 技术细节
-
-### 数据获取流程
+## 使用
 
 ```python
-# 智能盯盘数据获取示例
-from smart_monitor_data import SmartMonitorDataFetcher
+from data import datahub
 
-# 初始化（自动读取配置）
-fetcher = SmartMonitorDataFetcher()
-
-# 获取综合数据（自动选择最优数据源）
-data = fetcher.get_comprehensive_data('600519')
-
-# 数据包含：
-# - 实时行情：current_price, change_pct, volume, amount...
-# - 技术指标：ma5, ma20, macd, rsi, kdj, boll...
-# - 数据源标识：data_source='tdx'/'akshare'/'tushare'
+bars_1m = datahub.kline("600000", period="1mo", interval="1m")
+bars_5m = datahub.kline("000001", period="3mo", interval="5m")
+quality = datahub.kline_quality(bars_1m)
 ```
 
-### 手动指定数据源
+返回格式保持项目既有契约：`DatetimeIndex(name="Date")`，列为
+`Open/Close/High/Low/Volume`，成交量统一为“股”。分钟时间采用 bar 右端点语义，例如
+五分钟上午最后一根标为 11:30。
 
-```python
-# 强制使用TDX
-fetcher = SmartMonitorDataFetcher(use_tdx=True, tdx_base_url='http://localhost:8080')
+`DataFrame.attrs["datahub_source"]` 标明实际来源。分钟缓存默认 60 秒；外部源全部失败时可返回
+历史缓存，但超过 10 分钟会被 `kline_quality()` 标记为不可用于实时决策。
 
-# 禁用TDX，使用AKShare
-fetcher = SmartMonitorDataFetcher(use_tdx=False)
+## 边界
+
+- TDX 是轮询行情，不是交易所推送，不用于高频交易或下单时钟。
+- TCP 可连接不等于行情可用；运行健康以返回有效探针 bar 为准。easy-tdx/pytdx 在当前网络实测
+  节点可连接但返回空，因此只保留兼容级别，不承担可用性承诺。
+- 浏览器不持有 zzshare Token；Token 不进入 URL、日志、业务数据库或前端响应。
+- 分钟线不在数据源层静默前复权。需要跨除权日研究时，由研究层显式合并公司行动因子。
+- 公共健康检查不探测外部行情；数据源状态从 DataHub 的运行统计观察。
+
+## 验证
+
+```bash
+python -m pytest tests/test_a_share_market_sources.py
+python scripts/smoke_test_a_share_sources.py
 ```
 
----
-
-## 🔗 相关文档
-
-- [TDX API接口文档](../API_接口文档.md)
-- [智能盯盘使用指南](./智能盯盘使用指南.md)
-- [数据源冗余机制使用指南](./数据源冗余机制使用指南.md)
-
----
-
-## 📞 技术支持
-
-如有问题，请参考：
-1. 查看系统日志文件
-2. 检查TDX服务状态
-3. 提交GitHub Issues
-
----
-
-**更新日期：** 2024-11-04  
-**版本：** v1.0
-
+冒烟脚本只输出可用性、行数、时间范围与字段，不输出 Token、节点、价格或成交数据。

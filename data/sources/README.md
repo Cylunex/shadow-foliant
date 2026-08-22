@@ -51,8 +51,7 @@
   - ✅ **adapter 全 provider 归位**(1456→621 行):东财(eastmoney.py:行情ulist/资金流/datacenter个股/研报新闻基本面/板块排名/龙虎榜聚合)、腾讯·新浪(quotes/indices)、同花顺(ths.py)、百度(baidu.py)、财联社(cls.py)、巨潮(cninfo.py)。adapter 仅余派生计算/编排/接口类。
   - ✅ **拆 StockDataFetcher + 摊平 raw 链(2026-06-28,最高风险刀)**:技术指标 → `data/indicators.py`;`tencent.kline`(腾讯 fqkline raw,量纲随板块);新增 `akshare.py`(kline 末位)+ `tushare.py`(可选,`available()` 闸)。`datahub.kline(raw)._route` 摊平成一层直连原子源 `[sina_raw, baostock, east, mootdx, tencent, akshare(+tushare)]`;`StockDataFetcher._get_chinese_stock_data` 委托 `datahub.kline`。raw/qfq 75 项对照仅 8 项 ETF 差异(均为改进:列收敛 OCHLV + 修 ETF 成交量 手→股 100x)。
 - **阶段 4(✅ 主体完成 2026-06-28)**:✅ 清 orphan `_sina_financial_report` 死链;✅ 扩 smoke(raw 链逐原子源契约+同构);✅ `akshare.py` 收齐板块 ths(`sector_ranking`/`sector_fund_flow`/`sector_spot`,adapter/datahub 委托);✅ 删 `manager.get_stock_hist_data` 8 源链 + `data/ashare_fallback.py`(info/情绪 2 消费方改委托 datahub.kline)。**K线取数 100% 收口 datahub.kline,阶段 0–4 全部完成。** 详见重构计划 §7。
+- **A股分钟源(2026-08)**:`zzshare.py` 为有 Token 的正式 API 主源；`tdx_python.py` 是实测可返回日线/分钟/快照的 TDX 主兜底，并用隔离子进程屏蔽原生节点日志；`easy_tdx.py` / `mootdx.py` 只保留旧协议兼容。分钟链和日线链仍统一由 `datahub.kline` 编排。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。
-</content>
-</invoke>
