@@ -10,7 +10,7 @@ import pandas as pd
 
 import _bootstrap  # noqa: F401
 import datahub
-from data.sources import easy_tdx, tdx_python, zzshare
+from data.sources import easy_tdx, eltdx, tdx_python, zzshare
 
 
 class _Market(IntEnum):
@@ -120,6 +120,42 @@ class ZzshareSourceTest(unittest.TestCase):
         self.assertEqual(records, [])
 
 
+class ElTdxSourceTest(unittest.TestCase):
+    def tearDown(self):
+        eltdx._reset_for_tests()
+
+    def test_symbol_mapping(self):
+        self.assertEqual(eltdx._sdk_symbol('600000'), 'sh600000')
+        self.assertEqual(eltdx._sdk_symbol('000001'), 'sz000001')
+        self.assertEqual(eltdx._sdk_symbol('920001'), 'bj920001')
+
+    def test_kline_pages_and_normalizes_volume_to_shares(self):
+        calls = []
+
+        class Client:
+            def get_kline(self, frequency, code, *, start, count):
+                calls.append((frequency, code, start, count))
+                n = count if start == 0 else 100
+                rows = [types.SimpleNamespace(
+                    time=pd.Timestamp('2026-08-20 09:31') + pd.Timedelta(minutes=i + start),
+                    open_price=10.0, high_price=10.2, low_price=9.9,
+                    close_price=10.1, volume=12, amount=12120,
+                ) for i in range(n)]
+                return types.SimpleNamespace(items=rows)
+
+            def close(self):
+                pass
+
+        eltdx._client = Client()
+        with patch.dict(os.environ, {'MARKET_DATA_MAX_BARS': '3200'}):
+            out = eltdx.get_kline('600000', '1m', 900)
+        self.assertEqual([call[2] for call in calls], [0, 800])
+        self.assertEqual(len(out), 900)
+        self.assertEqual(float(out.iloc[0]['volume']), 1200.0)
+        self.assertTrue(out['date'].is_monotonic_increasing)
+        self.assertIsNone(out['date'].dt.tz)
+
+
 class TdxPythonSourceTest(unittest.TestCase):
     def tearDown(self):
         tdx_python._reset_for_tests()
@@ -177,9 +213,11 @@ class DataHubIntradayTest(unittest.TestCase):
 
     def test_minute_route_prefers_zzshare_and_records_source(self):
         with patch.object(datahub, '_zzshare_available', return_value=True), \
+                patch.object(datahub, '_eltdx_available', return_value=True), \
                 patch.object(datahub, '_tdx_python_available', return_value=True), \
                 patch.object(datahub, '_easy_tdx_available', return_value=True), \
                 patch.object(datahub, '_kline_zzshare', return_value=self._frame()) as zz, \
+                patch.object(datahub, '_kline_eltdx') as eltdx_source, \
                 patch.object(datahub, '_kline_tdx_python') as modern_tdx, \
                 patch.object(datahub, '_kline_easy_tdx') as tdx, \
                 patch.object(datahub, '_kline_mootdx') as old:
@@ -189,20 +227,24 @@ class DataHubIntradayTest(unittest.TestCase):
         self.assertEqual(out.attrs['datahub_source'], 'zzshare')
         self.assertEqual(out.attrs['datahub_interval'], '1m')
         zz.assert_called_once()
+        eltdx_source.assert_not_called()
         modern_tdx.assert_not_called()
         tdx.assert_not_called()
         old.assert_not_called()
 
-    def test_empty_primary_falls_back_to_verified_tdx(self):
+    def test_empty_primary_falls_back_to_python_311_tdx(self):
         with patch.object(datahub, '_zzshare_available', return_value=True), \
+                patch.object(datahub, '_eltdx_available', return_value=True), \
                 patch.object(datahub, '_tdx_python_available', return_value=True), \
                 patch.object(datahub, '_easy_tdx_available', return_value=False), \
                 patch.object(datahub, '_kline_zzshare', return_value=pd.DataFrame()), \
-                patch.object(datahub, '_kline_tdx_python', return_value=self._frame()) as tdx, \
+                patch.object(datahub, '_kline_eltdx', return_value=self._frame()) as tdx, \
+                patch.object(datahub, '_kline_tdx_python') as enhanced_tdx, \
                 patch.object(datahub, '_kline_mootdx') as old:
             out = datahub.kline('600000', '1mo', '1m', use_cache=False)
-        self.assertEqual(out.attrs['datahub_source'], 'tdx_python')
+        self.assertEqual(out.attrs['datahub_source'], 'eltdx')
         tdx.assert_called_once()
+        enhanced_tdx.assert_not_called()
         old.assert_not_called()
 
     def test_stale_minute_cache_is_not_actionable_after_ten_minutes(self):

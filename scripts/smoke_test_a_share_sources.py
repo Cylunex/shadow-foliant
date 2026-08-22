@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import _bootstrap  # noqa: F401
 import datahub
-from data.sources import easy_tdx, tdx_python, zzshare
+from data.sources import easy_tdx, eltdx, tdx_python, zzshare
 
 
 def _summary(name, available, frame):
@@ -36,6 +36,16 @@ def main() -> int:
     zz_ready = zzshare.available()
     zz_frame = zzshare.get_kline("600000", frequency="1m", count=5) if zz_ready else None
     results.append(_summary("zzshare", zz_ready, zz_frame))
+
+    eltdx_ready = eltdx.available()
+    eltdx_frame = eltdx.get_kline("600000", frequency="1m", count=5) if eltdx_ready else None
+    eltdx_summary = _summary("eltdx", eltdx_ready, eltdx_frame)
+    if eltdx_ready:
+        eltdx_summary['daily_ok'] = not eltdx.get_kline(
+            "600000", frequency="1d", count=5
+        ).empty
+        eltdx_summary['quote_ok'] = bool(eltdx.get_quote("600000"))
+    results.append(eltdx_summary)
 
     tdx_ready = tdx_python.available()
     tdx_frame = tdx_python.get_kline("600000", frequency="1m", count=5) if tdx_ready else None

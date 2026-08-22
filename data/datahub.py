@@ -493,6 +493,14 @@ def _quotes_easy_tdx(codes: List[str]) -> Dict[str, dict]:
         return {}
 
 
+def _quotes_eltdx(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import eltdx as _tdx
+        return _tdx.get_quotes(codes)
+    except Exception:
+        return {}
+
+
 def _quotes_tdx_python(codes: List[str]) -> Dict[str, dict]:
     try:
         from data.sources import tdx_python as _tdx
@@ -508,7 +516,8 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
       - eastmoney:纯东财 ulist(腾讯整体卡死/被 _route 砍掉时的独立兜底,独立超时+健康度记账)
       - sina:纯新浪 hq(真·独立源,非东财非腾讯;腾讯+东财同公司都挂时的最后底。
         只有行情无 PE/PB/市值,这些字段 0,但 name/价/涨跌核心字段保住,报告不至全空)
-      - zzshare:配置 Token 后加入；tdx-python:已验证的 TDX 二进制协议兜底
+      - zzshare:配置 Token 后加入；eltdx:兼容 Python 3.10+ 的已验证 TDX 协议兜底
+      - tdx-python:Python 3.12+ 环境的增强 TDX 兜底
       - easy-tdx:仅在显式启用时加入旧协议兼容链
     _route 按健康度排序:某源连续卡死会降级,其余自动上位,不再让单点拖垮取数。"""
     codes = [str(c) for c in (codes or []) if c]
@@ -519,6 +528,8 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
                ("sina", lambda: _adapter().get_quotes_sina(codes))]
     if _zzshare_available():
         sources.append(("zzshare", lambda: _quotes_zzshare(codes)))
+    if _eltdx_available():
+        sources.append(("eltdx", lambda: _quotes_eltdx(codes)))
     if _tdx_python_available():
         sources.append(("tdx_python", lambda: _quotes_tdx_python(codes)))
     if _easy_tdx_available():
@@ -828,6 +839,14 @@ def _easy_tdx_available() -> bool:
         return False
 
 
+def _eltdx_available() -> bool:
+    try:
+        from data.sources import eltdx as _tdx
+        return _tdx.available()
+    except Exception:
+        return False
+
+
 def _tdx_python_available() -> bool:
     try:
         from data.sources import tdx_python as _tdx
@@ -853,6 +872,20 @@ def _kline_easy_tdx(code: str, period: str = '1y', interval: str = '1d') -> pd.D
         raw = _tdx.get_kline(
             _norm_code(code), frequency=freq, count=_kline_bar_count(period, interval),
             bar_time='end',
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_eltdx(code: str, period: str = '1y', interval: str = '1d') -> pd.DataFrame:
+    freq = _normalize_kline_interval(interval)
+    if freq is None:
+        return pd.DataFrame()
+    try:
+        from data.sources import eltdx as _tdx
+        raw = _tdx.get_kline(
+            _norm_code(code), frequency=freq, count=_kline_bar_count(period, interval)
         )
         return _provider_kline_to_contract(raw, period, interval)
     except Exception:
@@ -1121,10 +1154,10 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
     ⭐ 两套复权缓存(2026-06-24):
       adjust='raw'(默认):不复权,真实成交价 —— 回测/持仓盈亏/决策后验/显示真实价 用。
-        日线在既有 HTTP/baostock 链中加入 zzshare 与已验证的 tdx-python 独立兜底；缓存键无后缀。
+        日线在既有 HTTP/baostock 链中加入 zzshare、eltdx 与 tdx-python 独立兜底；缓存键无后缀。
       adjust='qfq':前复权,消除除权跳空 —— InStock/形态/缠论/因子/技术指标 用(行业标准)。
         在新浪/baostock/东财既有链中加入 zzshare qfq；全部失败才 fallback raw，且不写 qfq 缓存。
-        分钟线独立使用 zzshare → tdx-python → 显式兼容源链，不混入日线复权逻辑。
+        分钟线独立使用 zzshare → eltdx → tdx-python → 显式兼容源链，不混入日线复权逻辑。
     健康度路由自动把可达源排前。磁盘缓存日线提速。失败返回空 DF。
     use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
     adjust = 'qfq' if str(adjust) == 'qfq' else 'raw'
@@ -1141,13 +1174,17 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         except Exception:
             pass
 
-    # 分钟线使用 zzshare 正式 API → 已验证 tdx-python → 显式旧协议兼容的独立链。
+    # 分钟线使用 zzshare → Python 3.10+ eltdx → Python 3.12+ tdx-python → 旧协议兼容链。
     # 分钟 bar 不在这里做前复权；公司行动因子应由更高层显式处理。
     if _is_intraday_interval(interval):
         intraday_sources = []
         if _zzshare_available():
             intraday_sources.append(
                 ('zzshare', lambda: _kline_zzshare(code, period, interval, 'raw'))
+            )
+        if _eltdx_available():
+            intraday_sources.append(
+                ('eltdx', lambda: _kline_eltdx(code, period, interval))
             )
         if _tdx_python_available():
             intraday_sources.append(
@@ -1214,8 +1251,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
     if adjust == 'raw':
         # 摊平 8 源链(2026-06-28 阶段3⑤):直连原子源,**无 fetcher 嵌套**——根治旧 east/mootdx
         # 在 fetcher 内层降级链 + 外层 _route **双重出现**的重复路由,链路从 4-5 跳压成 1 层。
-        # 顺序:新浪(可达+并发+当日bar,主源)→ baostock(免费稳定全历史)→ 配置后的 zzshare
-        #   → 已验证 tdx-python → 显式 easy-tdx 兼容 → 东财 → mootdx → 腾讯
+        # 顺序:新浪→baostock→配置后的 zzshare→Python 3.10+ eltdx→Python 3.12+ tdx-python
+        #   → 显式 easy-tdx 兼容 → 东财 → mootdx → 腾讯。
         #   → akshare(末位整合库)→ tushare(可选,无 token 不入链)。健康度路由自动把可达源排前。
         _srcs_raw = [
             ("sina_raw", lambda: _kline_sina_raw(code, period, interval)),
@@ -1223,6 +1260,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         ]
         if _zzshare_available():
             _srcs_raw.append(("zzshare", lambda: _kline_zzshare(code, period, interval, 'raw')))
+        if _eltdx_available():
+            _srcs_raw.append(("eltdx", lambda: _kline_eltdx(code, period, interval)))
         if _tdx_python_available():
             _srcs_raw.append(("tdx_python", lambda: _kline_tdx_python(code, period, interval)))
         if _easy_tdx_available():

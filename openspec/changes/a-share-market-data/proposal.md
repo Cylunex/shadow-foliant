@@ -9,10 +9,10 @@ fall through daily-oriented web scrapers or return empty without a production-re
 ## Change
 
 - Add zzshare as a token-authenticated A-share daily/minute source.
-- Add the currently maintained tdx-python implementation as the verified TDX fallback and isolate
-  its native SDK in a log-suppressed worker process.
+- Add eltdx as the verified Python 3.10+ production TDX fallback. Retain tdx-python on Python 3.12+
+  as an enhanced fallback and isolate its native SDK in a log-suppressed worker process.
 - Retain easy-tdx and mootdx only as compatibility fallbacks.
-- Route intraday bars through an explicit zzshare -> tdx-python -> easy-tdx -> mootdx chain.
+- Route intraday bars through an explicit zzshare -> eltdx -> tdx-python -> compatibility chain.
 - Normalize Shanghai, Shenzhen, and Beijing symbols, bar timestamps, OHLC fields, and volume in shares.
 - Add bounded TDX pagination, short intraday caching, stale-data decision guards, and sanitized SDK logs.
 - Keep all credentials, selected hosts, and provider configuration outside the repository.

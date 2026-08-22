@@ -8,7 +8,8 @@ and stale-data policy.
 
 ## TDX lifecycle
 
-tdx-python runs in one persistent spawned worker per Foliant process. The worker owns the native
+eltdx is the Python 3.10+ production fallback and keeps a bounded in-process connection pool.
+tdx-python is an additional Python 3.12+ fallback running in one spawned worker per Foliant process. The worker owns the native
 client, discards its stdout/stderr so selected nodes cannot enter application logs, and returns only
 primitive bar/quote fields over a Pipe. Parent-side timeouts discard and recreate a stuck worker.
 Logical requests are bounded and split into protocol pages of at most 800 bars. easy-tdx and mootdx

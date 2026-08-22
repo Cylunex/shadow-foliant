@@ -1,6 +1,6 @@
 # Tasks
 
-- [x] Add zzshare, tdx-python, and easy-tdx atomic provider adapters.
+- [x] Add zzshare, eltdx, tdx-python, and easy-tdx atomic provider adapters.
 - [x] Isolate native TDX logs and connections in a bounded worker process.
 - [x] Add explicit intraday routing and retain mootdx compatibility fallback.
 - [x] Normalize A-share market codes, timestamps, OHLCV fields, and volume units.
