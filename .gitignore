@@ -18,6 +18,11 @@ __pycache__/
 *.log
 /logs/
 
+# Runtime market/reference caches may be regenerated. Keep legacy top-level
+# SQLite files visible so they cannot silently return to production.
+/db/*
+!/db/*.db
+
 # 调试/测试临时输出
 *_debug_output.txt
 test_pull.txt
