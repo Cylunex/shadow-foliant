@@ -200,14 +200,34 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
     """
     ranked: List[Dict[str, Any]] = []
     for raw in rows or []:
-        row = dict(raw or {})
-        code = str(row.get("code") or "").strip()
-        score = _number(row.get("score"))
+        source = dict(raw or {})
+        code = str(source.get("code") or source.get("symbol") or "").strip()
+        score = _number(
+            source.get("local_score", source.get("score", source.get("total_score")))
+        )
         if not code or score is None:
             continue
-        row["final_score"] = round(score, 4)
-        row["final_reason"] = "本地PIT总分确定性排序"
-        row["ranking_source"] = "local_pit_snapshot"
+        row = {
+            "run_id": source.get("run_id"),
+            "snapshot_id": source.get("snapshot_id"),
+            "selection_date": source.get("selection_date"),
+            "market_as_of": source.get("market_as_of"),
+            "valuation_as_of": source.get("valuation_as_of"),
+            "financial_as_of": source.get("financial_as_of"),
+            "code": code,
+            "symbol": code,
+            "rank": int(source.get("rank") or 9999),
+            "local_score": round(score, 4),
+            "score_components": dict(source.get("score_components") or {}),
+            "technical_state": source.get("technical_state") or source.get("local_state"),
+            "data_quality": _number(
+                source.get("data_quality", source.get("data_coverage"))
+            ),
+            "rule_version": source.get("rule_version") or "local-pit-v3",
+            "final_score": round(score, 4),
+            "final_reason": "本地PIT总分确定性排序",
+            "ranking_source": "local_pit_snapshot",
+        }
         ranked.append(row)
     ranked.sort(key=lambda row: (
         -float(row["final_score"]), int(row.get("rank") or 9999), str(row.get("code") or "")
@@ -218,7 +238,7 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
     rows = list(rows or [])
     lines = [
-        '从综合 TOP15 再筛一层：规则强度 + 多源共振 + 红蓝复核 + 周日共振 + 量价/突破趋势 + 追高/持仓拥挤风险。',
+        '正式 TOP5 由本地 PIT 总分确定；实时行情、持仓和红蓝结论仅作为下方显示复核，不改变成员或顺序。',
         '是否提高总仓位仍以 10:05 的组合动作分级为准。',
         '',
     ]

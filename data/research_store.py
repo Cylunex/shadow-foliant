@@ -20,7 +20,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def _json(value) -> str:
@@ -58,13 +58,14 @@ def _iso_date(value: object) -> str:
 
 class ResearchStore:
     def __init__(self, path: Optional[str] = None, *, connect_fn: Optional[Callable] = None,
-                 is_postgres: Optional[bool] = None):
+                 is_postgres: Optional[bool] = None, ensure_schema: bool = True):
         self.path = str(path or DEFAULT_PATH)
         self._connect_fn = connect_fn or db_connect
         # Explicit test adapters may use an in-memory database. Production never
         # guesses the dialect from a global feature flag: the default connector is PG.
         self._is_postgres = (connect_fn is None) if is_postgres is None else is_postgres
-        self.ensure_schema()
+        if ensure_schema:
+            self.ensure_schema()
 
     def connect(self):
         return self._connect_fn(self.path)
@@ -74,6 +75,9 @@ class ResearchStore:
         cur = conn.cursor()
         id_type = "TEXT PRIMARY KEY"
         statements = [
+            """CREATE TABLE IF NOT EXISTS research_schema_migrations (
+                version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+            )""",
             f"""CREATE TABLE IF NOT EXISTS research_sync_runs (
                 run_id {id_type}, provider TEXT NOT NULL, capability TEXT NOT NULL,
                 as_of TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
@@ -83,6 +87,11 @@ class ResearchStore:
             """CREATE TABLE IF NOT EXISTS research_trade_calendar (
                 trade_date TEXT PRIMARY KEY, provider TEXT NOT NULL,
                 retrieved_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_trade_calendar_evidence (
+                trade_date TEXT NOT NULL, provider TEXT NOT NULL,
+                is_open INTEGER NOT NULL, retrieved_at TEXT NOT NULL,
+                PRIMARY KEY(trade_date,provider)
             )""",
             """CREATE TABLE IF NOT EXISTS research_security_snapshots (
                 snapshot_date TEXT NOT NULL, symbol TEXT NOT NULL, ts_code TEXT NOT NULL,
@@ -177,6 +186,7 @@ class ResearchStore:
                 PRIMARY KEY(run_id, symbol, candidate_kind)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
+            "CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence ON research_trade_calendar_evidence(trade_date,is_open)",
             "CREATE INDEX IF NOT EXISTS idx_research_security_snapshot ON research_security_snapshots(snapshot_date,symbol)",
             "CREATE INDEX IF NOT EXISTS idx_research_financial_visible ON research_financial_facts(table_name,first_seen_as_of,pub_date,symbol)",
             "CREATE INDEX IF NOT EXISTS idx_research_finance_asof ON research_financial_pit(as_of, table_name)",
@@ -187,10 +197,22 @@ class ResearchStore:
         try:
             for sql in statements:
                 cur.execute(sql)
-            self._migrate_v1_rows(cur)
+            self._apply_schema_migrations(cur)
             conn.commit()
         finally:
             conn.close()
+
+    def _apply_schema_migrations(self, cur) -> None:
+        """Run compatibility copies once and record the applied warehouse version."""
+        version = "2-copy-legacy-pit"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if cur.fetchone():
+            return
+        self._migrate_v1_rows(cur)
+        cur.execute(
+            "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+            (version, datetime.now().astimezone().isoformat()),
+        )
 
     def _migrate_v1_rows(self, cur) -> None:
         """Copy legacy cache rows into immutable V2 facts without deleting rollback data."""
@@ -489,19 +511,77 @@ class ResearchStore:
         )
         return len(rows)
 
-    def expected_market_as_of(self, selection_date: str) -> Optional[str]:
-        """Return the last locally recorded completed trading day before selection."""
+    def upsert_calendar_evidence(self, evidence: Iterable[tuple[str, bool]], *,
+                                 provider: str) -> int:
+        """Persist one provider's explicit open/closed evidence for calendar consensus."""
+        now = datetime.now().astimezone().isoformat()
+        rows = sorted({
+            (_iso_date(day), str(provider), int(bool(is_open)), now)
+            for day, is_open in evidence if _iso_date(day)
+        })
+        self._executemany(
+            """INSERT INTO research_trade_calendar_evidence
+               (trade_date,provider,is_open,retrieved_at) VALUES (?,?,?,?)
+               ON CONFLICT(trade_date,provider) DO UPDATE SET
+               is_open=excluded.is_open,retrieved_at=excluded.retrieved_at""",
+            rows,
+        )
+        return len(rows)
+
+    def calendar_consensus(self, cutoff: str, *, inclusive: bool = False) -> dict:
+        """Return two-source calendar coverage and the latest unanimously open day."""
+        cutoff = _iso_date(cutoff)
+        recent_start = (pd.Timestamp(cutoff).date() - timedelta(days=14)).isoformat()
         conn = self.connect()
         try:
             cur = conn.cursor()
             cur.execute(
-                "SELECT MAX(trade_date) FROM research_trade_calendar WHERE trade_date<?",
-                (_iso_date(selection_date),),
+                """SELECT provider,MAX(trade_date) FROM research_trade_calendar_evidence
+                   GROUP BY provider"""
             )
-            row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
+            provider_coverage = {str(row[0]): str(row[1]) for row in cur.fetchall()}
+            covered = sorted(
+                provider for provider, through in provider_coverage.items()
+                if through and through >= cutoff
+            )
+            operator = "<=" if inclusive else "<"
+            cur.execute(
+                f"""SELECT trade_date,COUNT(DISTINCT provider),MIN(is_open),MAX(is_open)
+                    FROM research_trade_calendar_evidence
+                    WHERE trade_date{operator}?
+                    GROUP BY trade_date ORDER BY trade_date DESC""",
+                (cutoff,),
+            )
+            latest_open = None
+            disagreement_dates: List[str] = []
+            for trade_date, provider_count, minimum, maximum in cur.fetchall():
+                if int(provider_count or 0) < 2:
+                    continue
+                if int(minimum) != int(maximum):
+                    if str(trade_date) >= recent_start:
+                        disagreement_dates.append(str(trade_date))
+                    continue
+                if latest_open is None and int(minimum) == 1:
+                    latest_open = str(trade_date)
+            return {
+                "ready": len(covered) >= 2 and not disagreement_dates,
+                "provider_count": len(provider_coverage),
+                "covered_provider_count": len(covered),
+                "coverage_through_date": min(
+                    (provider_coverage[p] for p in covered), default=None
+                ),
+                "latest_confirmed_open_date": latest_open,
+                "disagreement_count": len(disagreement_dates),
+            }
         finally:
             conn.close()
+
+    def expected_market_as_of(self, selection_date: str, *, inclusive: bool = False) -> Optional[str]:
+        """Return the latest independently confirmed completed trading day."""
+        consensus = self.calendar_consensus(selection_date, inclusive=inclusive)
+        if not consensus.get("ready"):
+            return None
+        return consensus.get("latest_confirmed_open_date")
 
     def stale_trading_days(self, actual: str, expected: str) -> int:
         conn = self.connect()
@@ -605,20 +685,80 @@ class ResearchStore:
         finally:
             conn.close()
 
-    def load_valuations(self, as_of: str) -> pd.DataFrame:
+    def latest_valuation_as_of(self, as_of: str) -> Optional[str]:
         conn = self.connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT MAX(trade_date) FROM research_valuations WHERE trade_date<=?", (as_of,))
+            cur.execute(
+                """SELECT MAX(trade_date) FROM research_valuations
+                   WHERE trade_date<=? AND quality_status NOT IN ('failed','unknown_unit')""",
+                (_iso_date(as_of),),
+            )
             row = cur.fetchone()
-            if not row or not row[0]:
+            return str(row[0]) if row and row[0] else None
+        finally:
+            conn.close()
+
+    def load_valuations(self, as_of: str, *, exact: bool = False) -> pd.DataFrame:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            valuation_date = _iso_date(as_of) if exact else self.latest_valuation_as_of(as_of)
+            if not valuation_date:
                 return pd.DataFrame()
             cur.execute(
                 """SELECT symbol,trade_date,market_cap,circulating_market_cap,turnover_ratio,
                           pe_ttm,pe_lyr,pb,ps,pcf,quality_status
-                   FROM research_valuations WHERE trade_date=?""", (row[0],),
+                   FROM research_valuations WHERE trade_date=?
+                   AND quality_status NOT IN ('failed','unknown_unit')""", (valuation_date,),
             )
             return self._frame(cur)
+        finally:
+            conn.close()
+
+    def pit_coverage(self, as_of: str) -> dict:
+        """Describe the honest forward-PIT boundary without inferring historical visibility."""
+        cutoff = _iso_date(as_of)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT MIN(trade_date),MAX(CASE WHEN trade_date<=? THEN trade_date END)
+                   FROM research_daily_bars""", (cutoff,)
+            )
+            market_start, market_end = cur.fetchone() or (None, None)
+            cur.execute(
+                "SELECT COUNT(DISTINCT trade_date) FROM research_daily_bars WHERE trade_date<=?",
+                (cutoff,),
+            )
+            market_days = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute(
+                """SELECT MIN(snapshot_date),MAX(CASE WHEN snapshot_date<=? THEN snapshot_date END)
+                   FROM research_security_snapshots""", (cutoff,)
+            )
+            universe_start, universe_end = cur.fetchone() or (None, None)
+            cur.execute(
+                """SELECT MIN(first_seen_as_of),
+                          MAX(CASE WHEN first_seen_as_of<=? THEN first_seen_as_of END)
+                   FROM research_financial_facts""", (cutoff,)
+            )
+            finance_start, finance_end = cur.fetchone() or (None, None)
+            starts = [str(value) for value in (universe_start, finance_start) if value]
+            coverage_start = max(starts) if len(starts) == 2 else None
+            return {
+                "market_history_start_date": str(market_start) if market_start else None,
+                "market_history_end_date": str(market_end) if market_end else None,
+                "market_history_days": market_days,
+                "universe_pit_start_date": str(universe_start) if universe_start else None,
+                "universe_pit_end_date": str(universe_end) if universe_end else None,
+                "financial_pit_start_date": str(finance_start) if finance_start else None,
+                "financial_pit_end_date": str(finance_end) if finance_end else None,
+                "pit_coverage_start_date": coverage_start,
+                "market_history_ready": market_days >= 70,
+                "universe_pit_ready": bool(universe_start and universe_start <= cutoff),
+                "financial_pit_ready": bool(finance_start and finance_start <= cutoff),
+                "historical_pit_available": bool(coverage_start and cutoff >= coverage_start),
+            }
         finally:
             conn.close()
 
@@ -660,7 +800,8 @@ class ResearchStore:
             cur = conn.cursor()
             cur.execute(
                 """SELECT symbol,event_type,event_date,effective_at,direction,confidence,
-                          materiality,surprise,novelty,source_origin AS source,official,title
+                          materiality,surprise,novelty,source_family,
+                          source_origin AS source,event_cluster_id,entity_impact,official,title
                    FROM research_event_records
                    WHERE confirmation_status='confirmed' AND effective_at>=? AND effective_at<=?""",
                 (start, as_of),
@@ -706,6 +847,45 @@ class ResearchStore:
             )
             conn.commit()
             return run_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def attach_selection_reference(self, run_id: str, reference: Sequence[dict],
+                                   comparison: dict) -> None:
+        """Attach best-effort external discovery after the formal local run is persisted."""
+        conn = self.connect()
+        try:
+            conn.execute(
+                """UPDATE selection_runs SET reference_source=?,comparison=?
+                   WHERE run_id=?""",
+                ("wencai" if reference else None, _json(comparison), str(run_id)),
+            )
+            rows = []
+            for rank, item in enumerate(reference, 1):
+                symbol = _symbol(item.get("symbol"))
+                if not symbol:
+                    continue
+                rows.append((
+                    str(run_id), symbol, "wencai_reference", rank,
+                    None, None, None, None, None, None, None, None, None,
+                    None, None, "[]", _json(item.get("source_labels", [])), _json(item),
+                ))
+            if rows:
+                conn.cursor().executemany(
+                    """INSERT INTO selection_candidates
+                       (run_id,symbol,candidate_kind,rank_pos,total_score,fundamental_score,
+                        technical_60_score,industry_score,quality_score,correction_120,
+                        correction_250,event_correction,data_coverage,state,industry,reasons,
+                        source_labels,payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(run_id,symbol,candidate_kind) DO UPDATE SET
+                        rank_pos=excluded.rank_pos,source_labels=excluded.source_labels,
+                        payload=excluded.payload""",
+                    rows,
+                )
+            conn.commit()
         except Exception:
             conn.rollback()
             raise

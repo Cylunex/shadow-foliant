@@ -10,6 +10,8 @@ import pandas as pd
 import _bootstrap  # noqa: F401
 from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy
 from analysis.selection_finalizer import finalize_local_selection
+from core.research_health import snapshot as research_health_snapshot
+from data.research_sync import ResearchSynchronizer
 from data.research_store import ResearchStore
 from data.source_contracts import contracts, get_contract
 from data.sources import zzshare
@@ -27,6 +29,7 @@ class SourceContractTest(unittest.TestCase):
         self.assertGreaterEqual(matrix["zzshare"]["realtime"]["min_interval_seconds"], 3.0)
         self.assertEqual(matrix["eltdx"]["bars"]["page_size"], 800)
         self.assertEqual(matrix["baostock"]["daily"]["max_concurrency"], 1)
+        self.assertTrue(matrix["baostock"]["calendar"]["supports_pit"])
         self.assertTrue(matrix["zzshare"]["finance_pit"]["supports_pit"])
         self.assertEqual(matrix["pywencai"]["discovery"]["capability"],
                          "external_reference_only")
@@ -88,6 +91,23 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(api.calls[0][0], "market/trade/days")
         self.assertEqual(api.calls[1][0], "v3/fundamentals/valuation/2026-08-21")
         self.assertEqual(api.calls[2][0], "v3/fundamentals/indicator/pit/2026-08-21")
+
+    def test_zzshare_calendar_filters_explicit_closed_dates(self):
+        class Api:
+            def trade_days(self, **kwargs):
+                return pd.DataFrame([
+                    {"cal_date": "2026-08-21", "is_open": 1},
+                    {"cal_date": "2026-08-22", "is_open": 0},
+                ])
+
+        zzshare._api = Api()
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                days = zzshare.get_trade_days("2026-08-21", "2026-08-22")
+        finally:
+            zzshare._reset_for_tests()
+        self.assertEqual(days, ["2026-08-21"])
 
     def test_zzshare_security_master_normalizes_numeric_listed_status(self):
         class Api:
@@ -159,7 +179,17 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         } for i in range(count)])
         securities.attrs["provenance"] = self._provenance(end.date().isoformat())
         self.store.upsert_securities(securities)
-        self.store.upsert_trade_days(day.date().isoformat() for day in dates)
+        selection_date = (end + pd.offsets.BDay(1)).date().isoformat()
+        calendar_days = pd.date_range(start=dates.min(), end=selection_date, freq="D")
+        open_days = {day.date().isoformat() for day in dates}
+        open_days.add(selection_date)
+        for provider in ("fixture-calendar-a", "fixture-calendar-b"):
+            self.store.upsert_calendar_evidence(
+                ((day.date().isoformat(), day.date().isoformat() in open_days)
+                 for day in calendar_days),
+                provider=provider,
+            )
+        self.store.upsert_trade_days(sorted(open_days), provider="fixture-consensus")
 
         records = []
         for i in range(count):
@@ -172,7 +202,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
                     "ts_code": f"{600000 + i:06d}.SH", "trade_date": day.date().isoformat(),
                     "open": close * 0.995, "high": close * 1.01, "low": close * 0.99,
                     "close": close, "volume": 1_000_000 + i * 1000 + pos * 10,
-                    "turnover": close * 1_000_000, "turnover_rate": 1.2,
+                    "turnover": max(30_000_000, close * 1_000_000), "turnover_rate": 1.2,
                     "is_paused": 0, "is_st": 0,
                 })
         bars = pd.DataFrame(records)
@@ -200,7 +230,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             } for i in range(count)])
             frame.attrs["provenance"] = self._provenance(end.date().isoformat())
             self.store.upsert_financial_pit(table, frame, as_of=end.date().isoformat())
-        return (end + pd.offsets.BDay(1)).date().isoformat()
+        return selection_date
 
     def test_future_finance_never_enters_pit_store(self):
         frame = pd.DataFrame([{
@@ -211,6 +241,16 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertEqual(self.store.upsert_financial_pit(
             "indicator", frame, as_of="2026-08-21"
         ), 0)
+
+    def test_calendar_sync_persists_independent_open_closed_evidence(self):
+        syncer = ResearchSynchronizer(self.store)
+        with patch("data.research_sync.zzshare.get_trade_days", return_value=["2026-08-21"]), \
+                patch("data.research_sync.baostock.trade_days", return_value=["2026-08-21"]):
+            result = syncer.sync_calendar("2026-08-20", "2026-08-22")
+        self.assertEqual(result["quality_status"], "ok")
+        consensus = self.store.calendar_consensus("2026-08-22")
+        self.assertTrue(consensus["ready"], consensus)
+        self.assertEqual(consensus["latest_confirmed_open_date"], "2026-08-21")
 
     def test_finance_revisions_are_preserved_and_loaded_point_in_time(self):
         for as_of, pub_date, roe in (
@@ -317,11 +357,14 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             self.store,
             SelectionPolicy(max_per_industry=5, max_pairwise_correlation=0.8),
         )
-        base = np.linspace(-0.01, 0.01, 60)
+        dates = pd.bdate_range("2026-06-01", periods=60)
+        base = pd.Series(np.linspace(-0.01, 0.01, 60), index=dates)
         frame = pd.DataFrame([
-            {"symbol": "600001", "industry": "甲", "return_vector_60": base},
-            {"symbol": "600002", "industry": "乙", "return_vector_60": base * 1.01},
-            {"symbol": "600003", "industry": "丙", "return_vector_60": base[::-1]},
+            {"symbol": "600001", "industry": "甲", "return_series_60": base},
+            {"symbol": "600002", "industry": "乙", "return_series_60": base * 1.01},
+            {"symbol": "600003", "industry": "丙", "return_series_60": pd.Series(
+                base.to_numpy()[::-1], index=dates
+            )},
         ])
         result = selector._diversify(frame)
         self.assertEqual(result["symbol"].tolist(), ["600001", "600003"])
@@ -337,9 +380,61 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
     def test_stale_market_snapshot_fails_closed(self):
         self._seed()
         self.store.upsert_trade_days(["2026-08-24"])
+        for provider in ("fixture-calendar-a", "fixture-calendar-b"):
+            self.store.upsert_calendar_evidence(
+                [("2026-08-25", False)], provider=provider
+            )
         result = LocalStockSelector(self.store).run("2026-08-25", persist=False)
         self.assertEqual(result["status"], "incomplete")
         self.assertEqual(result["metadata"]["reason"], "local market snapshot is stale")
+
+    def test_stale_valuation_snapshot_fails_closed(self):
+        selection_date = self._seed()
+        conn = self.store.connect()
+        try:
+            conn.execute("UPDATE research_valuations SET trade_date='2026-08-20'")
+            conn.commit()
+        finally:
+            conn.close()
+        result = LocalStockSelector(self.store).run(selection_date, persist=False)
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(
+            result["metadata"]["reason"], "valuation snapshot stale or incomplete"
+        )
+        self.assertEqual(result["metadata"]["valuation_as_of"], "2026-08-20")
+
+    def test_calendar_disagreement_fails_closed(self):
+        selection_date = self._seed()
+        self.store.upsert_calendar_evidence(
+            [("2026-08-21", False)], provider="fixture-calendar-b"
+        )
+        result = LocalStockSelector(self.store).run(selection_date, persist=False)
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(
+            result["metadata"]["reason"], "trade calendar consensus unavailable"
+        )
+        self.assertEqual(result["metadata"]["calendar_consensus"]["disagreement_count"], 1)
+
+    def test_historical_selection_before_pit_start_is_rejected_explicitly(self):
+        self._seed()
+        result = LocalStockSelector(self.store).run("2026-08-20", persist=False)
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["metadata"]["reason"], "historical_pit_unavailable")
+
+    def test_research_readiness_is_distinct_and_aggregate(self):
+        selection_date = self._seed()
+        result = LocalStockSelector(self.store).run(selection_date, persist=True)
+        self.assertEqual(result["status"], "success")
+        sync_id = self.store.start_sync("zzshare", "daily_market", "2026-08-21")
+        self.store.finish_sync(
+            sync_id, status="success", row_count=24, quality_status="ok"
+        )
+        readiness = research_health_snapshot(
+            store=self.store, selection_date=selection_date
+        )
+        self.assertTrue(readiness["ready"], readiness)
+        self.assertEqual(readiness["expected_market_date"], "2026-08-21")
+        self.assertNotIn("symbols", readiness)
 
     def test_final_top_five_ignores_llm_and_quote_fields(self):
         rows = [
@@ -351,6 +446,16 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         result = finalize_local_selection(rows, limit=2)
         self.assertEqual([row["code"] for row in result], ["600002", "600001"])
         self.assertTrue(all(row["ranking_source"] == "local_pit_snapshot" for row in result))
+        forbidden = {
+            "price", "change_pct", "held", "debate_verdict",
+            "debate_confidence", "debate_reason", "name",
+        }
+        self.assertTrue(all(forbidden.isdisjoint(row) for row in result))
+        changed = [
+            {**row, "price": 999, "held": True, "debate_verdict": "买入"}
+            for row in rows
+        ]
+        self.assertEqual(result, finalize_local_selection(changed, limit=2))
 
 
 if __name__ == "__main__":

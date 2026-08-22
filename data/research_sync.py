@@ -90,15 +90,55 @@ class ResearchSynchronizer:
                                    detail={"error_type": type(exc).__name__})
             raise
 
+    def sync_calendar(self, start_date: str, end_date: str) -> dict:
+        """Build explicit open/closed evidence and require zzshare/BaoStock consensus."""
+        start = pd.Timestamp(start_date).date().isoformat()
+        end = pd.Timestamp(end_date).date().isoformat()
+        run_id = self.store.start_sync("consensus", "trade_calendar", end)
+        try:
+            primary = set(zzshare.get_trade_days(start, end))
+            validator = set(baostock.trade_days(start, end))
+            if not primary or not validator:
+                raise RuntimeError("independent trade calendar source unavailable")
+            calendar_days = [
+                day.date().isoformat() for day in pd.date_range(start=start, end=end, freq="D")
+            ]
+            self.store.upsert_calendar_evidence(
+                ((day, day in primary) for day in calendar_days), provider="zzshare"
+            )
+            self.store.upsert_calendar_evidence(
+                ((day, day in validator) for day in calendar_days), provider="baostock"
+            )
+            confirmed = sorted(primary & validator)
+            disagreements = sorted(primary ^ validator)
+            self.store.upsert_trade_days(confirmed, provider="zzshare+baostock")
+            quality = "ok" if not disagreements else "incomplete"
+            detail = {
+                "provider_count": 2,
+                "confirmed_open_days": len(confirmed),
+                "disagreement_count": len(disagreements),
+                "coverage_through_date": end,
+            }
+            self.store.finish_sync(
+                run_id, status="success", row_count=len(calendar_days) * 2,
+                quality_status=quality, detail=detail,
+            )
+            return {**detail, "quality_status": quality, "trade_days": confirmed}
+        except Exception as exc:
+            self.store.finish_sync(
+                run_id, status="error", row_count=0, quality_status="failed",
+                detail={"error_type": type(exc).__name__},
+            )
+            raise
+
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
                  fallback: bool = True, refresh_calendar: bool = True) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()
         if refresh_calendar:
             day = pd.Timestamp(trade_date).date()
-            calendar = zzshare.get_trade_days(
+            self.sync_calendar(
                 (day - timedelta(days=14)).isoformat(), (day + timedelta(days=1)).isoformat()
             )
-            self.store.upsert_trade_days(calendar)
         run_id = self.store.start_sync("zzshare", "daily_market", trade_date)
         result: Dict[str, object] = {"trade_date": trade_date, "providers": {}}
         try:
@@ -171,11 +211,12 @@ class ResearchSynchronizer:
         end = pd.Timestamp(end_date or date.today()).date()
         start = end - timedelta(days=max(int(trading_days) * 2, 800))
         self.sync_master()
-        calendar = zzshare.get_trade_days(start.isoformat(), end.isoformat())
-        calendar = [day for day in calendar if day <= end.isoformat()][-int(trading_days):]
+        calendar_result = self.sync_calendar(start.isoformat(), end.isoformat())
+        calendar = [
+            day for day in calendar_result["trade_days"] if day <= end.isoformat()
+        ][-int(trading_days):]
         if len(calendar) < min(int(trading_days), 320):
             raise RuntimeError("insufficient trading calendar for research bootstrap")
-        self.store.upsert_trade_days(calendar)
         completed = 0
         incomplete = 0
         for trade_day in calendar:

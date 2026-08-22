@@ -1,4 +1,6 @@
 import os
+import importlib
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -69,6 +71,14 @@ class AgentWeekendStatusTest(unittest.TestCase):
         from jobs import task_control
         source = inspect.getsource(task_control.agent_cockpit)
         self.assertIn("weekday() < 5", source)
+
+
+class LegacyAutostartTest(unittest.TestCase):
+    def test_import_has_no_process_side_effect(self):
+        sys.modules.pop("autostart", None)
+        with patch.dict(os.environ, {"AUTOSTART_ENABLED": "true"}):
+            module = importlib.import_module("autostart")
+        self.assertFalse(module._STARTED)
 
 
 class StrategyDeploymentQualityTest(unittest.TestCase):

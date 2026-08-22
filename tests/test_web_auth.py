@@ -397,11 +397,22 @@ class WebAuthTests(unittest.TestCase):
         with patch(
             "runtime_health.snapshot",
             return_value={"ready": True, "status": "ready", "revision": "example"},
+        ), patch(
+            "core.research_health.snapshot",
+            return_value={
+                "ready": True, "status": "ready",
+                "usable_qfq_coverage": 0.99,
+                "valuation_coverage": 0.98,
+                "financial_coverage": 0.90,
+            },
         ):
             with TestClient(app, base_url="https://stock.example.com") as client:
                 ready = client.get("/readyz")
                 self.assertEqual(ready.status_code, 200)
                 self.assertTrue(ready.json()["ready"])
+                research = client.get("/research-readyz")
+                self.assertEqual(research.status_code, 200)
+                self.assertTrue(research.json()["ready"])
 
     def test_local_and_global_logout_revoke_server_sessions(self):
         from webui.api_server import app

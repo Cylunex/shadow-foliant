@@ -99,6 +99,41 @@ def index_kline(code: str, period: str = "3y", interval: str = "1d"):
     return kline(code, period, interval, 'raw', bs_code=bs)
 
 
+def trade_days(start_date: str, end_date: str):
+    """Return BaoStock-confirmed open dates for independent calendar consensus."""
+    try:
+        import pandas as pd
+    except Exception:
+        return []
+    if _in_cooldown() or not _LOCK.acquire(timeout=2):
+        return []
+    rows = []
+    try:
+        try:
+            bs = _ensure()
+            with source_call("baostock", "calendar"):
+                result = bs.query_trade_dates(
+                    start_date=str(start_date), end_date=str(end_date)
+                )
+            if getattr(result, "error_code", "1") != "0":
+                _mark_fail()
+                return []
+            while result.next():
+                rows.append(result.get_row_data())
+        except Exception:
+            _mark_fail()
+            return []
+    finally:
+        _LOCK.release()
+    if not rows:
+        return []
+    frame = pd.DataFrame(rows, columns=["calendar_date", "is_trading_day"])
+    dates = pd.to_datetime(frame["calendar_date"], errors="coerce")
+    opened = frame["is_trading_day"].astype(str).str.strip().isin({"1", "true", "True"})
+    _mark_ok()
+    return sorted(d.date().isoformat() for d in dates[opened].dropna())
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw",
           bs_code: str = None):
     """返回 datahub 同款 K线 DataFrame(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。

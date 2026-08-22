@@ -145,10 +145,10 @@ SCHEMA: List[Dict[str, str]] = [
      'help': '每日盈亏快照 走哪些渠道。默认 qq'},
     # —— 自动启动(autostart)——
     {'key': 'AUTOSTART_ENABLED', 'label': '总开关', 'group': '自动启动', 'type': 'bool',
-     'help': '启动时拉起后台服务/调度'},
+     'help': '旧兼容入口，默认关闭；生产由 Supervisor 管理'},
     {'key': 'AUTOSTART_MONITOR', 'label': '价格监测', 'group': '自动启动', 'type': 'bool', 'help': ''},
     {'key': 'AUTOSTART_JOBS_HUB', 'label': 'Jobs Hub 调度', 'group': '自动启动', 'type': 'bool',
-     'help': '定时任务调度器(需常驻进程)'},
+     'help': '已废弃；Jobs Hub 常驻进程由 Supervisor 管理'},
     {'key': 'AUTOSTART_NEWS_FLOW', 'label': '新闻流量调度', 'group': '自动启动', 'type': 'bool', 'help': '耗 AI token'},
 ]
 

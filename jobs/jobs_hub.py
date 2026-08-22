@@ -4247,9 +4247,32 @@ def task_unified_selection():
         return
     started = datetime.now().isoformat()
     try:
-        # 1. 问财继续并行一段时间，仅作外部发现/对照。它不能加候选、加分、
-        #    满足硬门槛，且本地仓覆盖不足时不得回退成主链。
-        strategy_scan = _run_strategy_scans()
+        # 1. 本地 PIT 数据仓先独立产出并持久化。外部参考即使超时也不能延迟
+        #    数据门槛判断，更不能在本地仓不完整时成为救援候选。
+        #    交易日历是本地准入的一部分，盘前先刷新两条独立证据链。
+        from data.research_sync import ResearchSynchronizer
+        calendar_end = datetime.now().date()
+        ResearchSynchronizer().sync_calendar(
+            (calendar_end - timedelta(days=14)).isoformat(), calendar_end.isoformat()
+        )
+        from analysis.local_stock_selector import LocalStockSelector, _normalize_reference
+        selector = LocalStockSelector()
+        local_result = selector.run(datetime.now().strftime('%Y-%m-%d'), persist=True)
+        local_candidates = local_result.get('candidates', [])
+        if not local_candidates:
+            reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
+            raise RuntimeError(f'本地选股未产出: {reason}')
+
+        # 2. 问财继续保留一段时间，仅作外部发现/对照。独立短截止时间结束后，
+        #    参考结果附着到已存在的本地 run，不重新计算正式分数。
+        try:
+            strategy_scan = _call_with_hard_timeout(
+                '问财参考', _run_strategy_scans, timeout=45
+            )
+        except Exception as _wre:
+            print(f'[unified_selection] 问财参考放弃(不影响本地主链): '
+                  f'{type(_wre).__name__}')
+            strategy_scan = {'results': {}}
         wencai_reference = []
         for sname, (ok, df, msg) in strategy_scan.get('results', {}).items():
             if ok and df is not None:
@@ -4260,19 +4283,17 @@ def task_unified_selection():
                             'symbol': code,
                             'source_labels': [_WENCAI_SOURCE_LABELS.get(sname, sname)],
                         })
-
-        # 2. 本地 PIT 数据仓主链：基本面/估值 TOP200 → 60日 TOP50 →
-        #    120/250 日风险修正 → 行业分散 → TOP15。
-        from analysis.local_stock_selector import LocalStockSelector
-        local_result = LocalStockSelector().run(
-            datetime.now().strftime('%Y-%m-%d'),
-            wencai_reference=wencai_reference,
-            persist=True,
-        )
-        local_candidates = local_result.get('candidates', [])
-        if not local_candidates:
-            reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
-            raise RuntimeError(f'本地选股未产出: {reason}')
+        wencai_reference = _normalize_reference(wencai_reference)
+        comparison = selector._comparison(local_candidates, wencai_reference)
+        local_result['wencai_reference'] = wencai_reference
+        local_result['comparison'] = comparison
+        try:
+            selector.store.attach_selection_reference(
+                local_result.get('run_id'), wencai_reference, comparison
+            )
+        except Exception as _are:
+            print(f'[unified_selection] 问财参考保存失败(不影响本地主链): '
+                  f'{type(_are).__name__}')
         candidates = {}
         top_list = []
         for item in local_candidates:
@@ -4289,7 +4310,7 @@ def task_unified_selection():
                 'score_components': {
                     key: item.get(key) for key in (
                         'fundamental_score', 'technical_60_score', 'industry_score',
-                        'quality_score', 'correction_120', 'correction_250', 'event_correction'
+                        'data_quality_score', 'correction_120', 'correction_250', 'event_correction'
                     )
                 },
             }
@@ -4394,15 +4415,36 @@ def task_unified_selection():
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
 
-        # 持久化 Agent 可直接读取的选股产物。picks/rows 仍保留原 TOP15 语义，避免影响
-        # 妙想复核、午间盯盘等消费者；final_picks/final_rows 是二次优选结果。
+        # 正式产物与显示 overlay 分离。旧 rows/final_rows 保持展示兼容，但
+        # local_primary_top15/deterministic_top5 只能含本地快照字段。
         artifact_rows = []
+        local_formal_rows = []
+        deterministic_rows = []
         final_rows = []
         try:
+            local_by_code = {
+                str(item.get('symbol') or ''): item for item in local_candidates
+            }
             for rank, code in enumerate(top_list, 1):
                 cinfo = candidates.get(code) or {}
+                local_item = local_by_code.get(code) or {}
                 q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
                 debate = debate_map.get(code) or {}
+                local_formal_rows.append({
+                    'run_id': local_result.get('run_id'),
+                    'snapshot_id': local_result.get('metadata', {}).get('snapshot_id'),
+                    'selection_date': local_result.get('selection_date'),
+                    'market_as_of': local_result.get('metadata', {}).get('market_as_of'),
+                    'valuation_as_of': local_result.get('metadata', {}).get('valuation_as_of'),
+                    'financial_as_of': local_result.get('metadata', {}).get('financial_as_of'),
+                    'rank': rank,
+                    'code': code,
+                    'local_score': round(float(cinfo.get('score') or 0), 4),
+                    'score_components': local_item.get('score_components') or {},
+                    'technical_state': cinfo.get('state'),
+                    'data_quality': cinfo.get('data_coverage'),
+                    'rule_version': local_result.get('metadata', {}).get('rule_version'),
+                })
                 artifact_rows.append({
                     'rank': rank,
                     'code': code,
@@ -4425,14 +4467,21 @@ def task_unified_selection():
                     'data_coverage': cinfo.get('data_coverage'),
                 })
             from analysis.selection_finalizer import finalize_local_selection
-            final_rows = finalize_local_selection(artifact_rows, limit=5)
+            local_formal_rows = finalize_local_selection(local_formal_rows, limit=15)
+            deterministic_rows = local_formal_rows[:5]
+            overlay_by_code = {row['code']: row for row in artifact_rows}
+            final_rows = [
+                {**overlay_by_code.get(row['code'], {}), **row}
+                for row in deterministic_rows
+            ]
             save_indicator_snapshot('_last_selection', {
                 'picks': top_list,
                 'rows': artifact_rows,
-                'final_picks': [row['code'] for row in final_rows],
+                'final_picks': [row['code'] for row in deterministic_rows],
                 'final_rows': final_rows,
-                'local_primary_top15': artifact_rows,
-                'deterministic_top5': final_rows,
+                'local_primary_top15': local_formal_rows,
+                'deterministic_top5': deterministic_rows,
+                'display_overlay': artifact_rows,
                 'ai_review': list(debate_map.values()),
                 'external_reference': local_result.get('comparison', {}),
                 'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
@@ -4487,10 +4536,11 @@ def task_unified_selection():
                         rid = save_recommendation(
                             symbol=str(code), name=row.get('name') or '',
                             source='unified_selection_final', rating='candidate',
-                            confidence=row.get('debate_confidence') or '中',
+                            confidence='中',
                             ref_price=_safe_float(row.get('price')),
-                            reason=('最终优选 分' + str(round(row.get('final_score', 0), 1))
-                                    + ' ' + str(row.get('final_reason') or '')[:160]),
+                            reason=('本地PIT最终优选 分'
+                                    + str(round(row.get('final_score', 0), 1))
+                                    + ' 规则版本:' + str(row.get('rule_version') or '')),
                         )
                         if rid:
                             final_rec_n += 1

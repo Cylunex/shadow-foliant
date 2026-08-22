@@ -38,7 +38,7 @@ def _add(target: dict[tuple[str, str], Access], access: Access, method: str, *pa
 ROUTE_POLICIES: dict[tuple[str, str], Access] = {}
 
 _add(ROUTE_POLICIES, Access.PUBLIC, "GET", "/healthz", "/api/health", "/auth/login", "/auth/callback")
-_add(ROUTE_POLICIES, Access.READY, "GET", "/readyz")
+_add(ROUTE_POLICIES, Access.READY, "GET", "/readyz", "/research-readyz")
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/auth/me")
 _add(ROUTE_POLICIES, Access.USER, "POST", "/api/auth/session/rotate", "/auth/logout", "/auth/logout/all")
 

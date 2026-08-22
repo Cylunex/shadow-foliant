@@ -207,7 +207,7 @@ def _with_provenance(df: pd.DataFrame, *, as_of: str, adjustment: str = "not_app
         "retrieved_at": datetime.now().astimezone().isoformat(),
         "adjustment": adjustment,
         "unit": unit,
-        "schema_version": "1",
+        "schema_version": "3",
         "quality_status": quality_status,
     }
     return out
@@ -358,6 +358,15 @@ def get_trade_days(start_date: str, end_date: str) -> List[str]:
     if frame.empty:
         return []
     candidates = []
+    open_column = next(
+        (column for column in ("is_open", "is_trading_day", "open") if column in frame.columns),
+        None,
+    )
+    if open_column:
+        opened = frame[open_column].astype(str).str.strip().str.lower().isin(
+            {"1", "true", "yes", "y", "open", "交易"}
+        )
+        frame = frame[opened].copy()
     for column in ("trade_date", "date", "day", "cal_date", "value"):
         if column in frame.columns:
             candidates.extend(frame[column].tolist())

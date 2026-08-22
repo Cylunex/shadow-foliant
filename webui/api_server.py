@@ -251,6 +251,24 @@ def readyz():
     return JSONResponse(payload, status_code=status)
 
 
+@app.get("/research-readyz")
+def research_readyz():
+    """Protected aggregate readiness for research data and selection outputs."""
+    from core.research_health import snapshot
+
+    try:
+        payload = snapshot()
+    except Exception as exc:
+        payload = {
+            "service": "shadow-foliant-research",
+            "status": "degraded", "ready": False,
+            "checks": {"warehouse": False},
+            "error_type": type(exc).__name__,
+        }
+    status = 200 if payload.get("ready") else 503
+    return JSONResponse(payload, status_code=status)
+
+
 @app.get("/auth/login")
 def auth_login(return_to: str = "/"):
     try:

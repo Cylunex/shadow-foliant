@@ -155,6 +155,11 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
         amount_unit="yuan", quota_basis="operational",
         notes="Single serialized session; Foliant does not rely on an undocumented daily quota.",
     ),
+    ("baostock", "calendar"): EndpointContract(
+        "baostock", "calendar", "a_share_trade_calendar", "anonymous_login", None, None,
+        0.2, 1, 15.0, 1, supports_pit=True, quota_basis="operational",
+        notes="Independent validator for zzshare calendar consensus.",
+    ),
     ("cninfo", "announcements"): EndpointContract(
         "cninfo", "announcements", "official_disclosures", "none", None, 30,
         1.0, 1, 20.0, 2, supports_pit=True, quota_basis="operational",

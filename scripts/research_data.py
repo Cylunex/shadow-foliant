@@ -23,6 +23,10 @@ def main() -> int:
     sync.add_argument("--date", default=date.today().isoformat())
     select = sub.add_parser("select", help="run the local primary selector")
     select.add_argument("--date", default=date.today().isoformat())
+    select.add_argument(
+        "--data-cutoff",
+        help="explicit completed market date to include (for post-close/manual replay)",
+    )
     sub.add_parser("contracts", help="show credential-free source capability limits")
     args = parser.parse_args()
 
@@ -40,7 +44,9 @@ def main() -> int:
         result = {"master": syncer.sync_master(), "day": syncer.sync_day(args.date)}
     else:
         from analysis.local_stock_selector import LocalStockSelector
-        selected = LocalStockSelector().run(args.date, persist=True)
+        selected = LocalStockSelector().run(
+            args.date, data_cutoff=args.data_cutoff, persist=True
+        )
         result = {
             "status": selected.get("status"), "selection_date": selected.get("selection_date"),
             "coverage": selected.get("coverage"), "candidate_count": len(selected.get("candidates", [])),

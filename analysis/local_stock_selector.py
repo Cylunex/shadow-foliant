@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import hashlib
+import json
 import math
 import os
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -44,6 +46,21 @@ def _percentile(series: pd.Series, *, higher_is_better: bool = True,
         ranks = numeric[valid].rank(method="average", pct=True)
         result.loc[valid] = ranks if higher_is_better else (1.0 - ranks + 1.0 / valid.sum())
     return result.clip(0.0, 1.0)
+
+
+def _industry_percentile(series: pd.Series, industries: pd.Series, *,
+                         higher_is_better: bool = True) -> pd.Series:
+    """Prefer classified industry ranks; fall back to market ranks for tiny groups."""
+    market = _percentile(series, higher_is_better=higher_is_better)
+    result = market.copy()
+    labels = industries.fillna("").astype(str).str.strip()
+    for label, index in labels.groupby(labels).groups.items():
+        if not label or label == "未分类" or len(index) < 5:
+            continue
+        result.loc[index] = _percentile(
+            series.loc[index], higher_is_better=higher_is_better
+        )
+    return result
 
 
 def _bounded(value: float, lower: float, upper: float) -> float:
@@ -103,6 +120,10 @@ class SelectionPolicy:
     min_warehouse_coverage: float = 0.80
     min_financial_universe_coverage: float = 0.70
     min_stock_fundamental_metrics: int = 4
+    min_valuation_coverage: float = 0.70
+    min_listing_trading_days: int = 70
+    min_average_amount_20: float = 20_000_000.0
+    min_correlation_days: int = 40
 
     @classmethod
     def from_env(cls) -> "SelectionPolicy":
@@ -126,6 +147,18 @@ class SelectionPolicy:
             min_stock_fundamental_metrics=max(
                 1, min(6, int(os.getenv("LOCAL_SELECTION_MIN_FUNDAMENTAL_METRICS", "4")))
             ),
+            min_valuation_coverage=_bounded(
+                float(os.getenv("LOCAL_SELECTION_MIN_VALUATION_COVERAGE", "0.70")), 0.1, 1.0
+            ),
+            min_listing_trading_days=max(
+                60, int(os.getenv("LOCAL_SELECTION_MIN_LISTING_TRADING_DAYS", "70"))
+            ),
+            min_average_amount_20=max(
+                0.0, float(os.getenv("LOCAL_SELECTION_MIN_AVERAGE_AMOUNT_20", "20000000"))
+            ),
+            min_correlation_days=max(
+                20, min(60, int(os.getenv("LOCAL_SELECTION_MIN_CORRELATION_DAYS", "40")))
+            ),
         )
 
 
@@ -136,18 +169,29 @@ class LocalStockSelector:
         self.policy = policy or SelectionPolicy.from_env()
 
     def run(self, selection_date: Optional[str] = None,
-            *, wencai_reference: Optional[Iterable[object]] = None,
+            *, data_cutoff: Optional[str] = None,
+            wencai_reference: Optional[Iterable[object]] = None,
             persist: bool = True) -> dict:
         selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
+        cutoff = pd.Timestamp(data_cutoff).date().isoformat() if data_cutoff else selection_date
+        inclusive_cutoff = data_cutoff is not None
+        reference = _normalize_reference(wencai_reference)
+        pit = self.store.pit_coverage(selection_date)
+        if pit.get("pit_coverage_start_date") and not pit.get("historical_pit_available"):
+            return self._failed(
+                selection_date, "historical_pit_unavailable", 0, reference, persist,
+                metadata={**pit, "data_cutoff": cutoff},
+            )
         universe = self.store.load_universe(selection_date)
         panel = self.store.load_daily_panel(
-            selection_date, trading_days=self.policy.preferred_history_days + 20
+            cutoff, trading_days=self.policy.preferred_history_days + 20
         )
-        reference = _normalize_reference(wencai_reference)
         if universe.empty or panel.empty:
             return self._failed(
-                selection_date, "local warehouse is empty", len(universe), reference, persist
+                selection_date, "local warehouse is empty", len(universe), reference, persist,
+                metadata={**pit, "data_cutoff": cutoff},
             )
+        pit_universe_count = int(len(universe.drop_duplicates("symbol")))
 
         panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
         panel = panel.dropna(subset=["trade_date", "symbol", "close"])
@@ -157,24 +201,30 @@ class LocalStockSelector:
         if panel.empty:
             return self._failed(
                 selection_date, "local warehouse has no usable normalized bars",
-                len(universe), reference, persist,
+                pit_universe_count, reference, persist,
+                metadata={**pit, "data_cutoff": cutoff},
             )
-        expected_market_as_of = self.store.expected_market_as_of(selection_date)
-        if not expected_market_as_of:
+        calendar = self.store.calendar_consensus(cutoff, inclusive=inclusive_cutoff)
+        expected_market_as_of = calendar.get("latest_confirmed_open_date")
+        if not calendar.get("ready") or not expected_market_as_of:
             return self._failed(
-                selection_date, "local trading calendar is unavailable", len(universe),
-                reference, persist,
+                selection_date, "trade calendar consensus unavailable", pit_universe_count,
+                reference, persist, metadata={**pit, "data_cutoff": cutoff,
+                                              "calendar_consensus": calendar},
             )
         market_as_of = panel["trade_date"].max()
         actual_market_as_of = market_as_of.date().isoformat()
         stale_days = self.store.stale_trading_days(actual_market_as_of, expected_market_as_of)
         if actual_market_as_of != expected_market_as_of:
             return self._failed(
-                selection_date, "local market snapshot is stale", len(universe), reference,
+                selection_date, "local market snapshot is stale", pit_universe_count, reference,
                 persist, metadata={
                     "market_as_of": actual_market_as_of,
                     "expected_market_as_of": expected_market_as_of,
                     "stale_trading_days": stale_days,
+                    "data_cutoff": cutoff,
+                    "calendar_consensus": calendar,
+                    **pit,
                 },
             )
         history_counts = panel.groupby("symbol")["trade_date"].nunique()
@@ -189,25 +239,59 @@ class LocalStockSelector:
         primary_coverage = float(universe["symbol"].isin(primary_symbols).mean()) if len(universe) else 0.0
         if coverage < self.policy.min_warehouse_coverage:
             return self._failed(
-                selection_date, "local warehouse coverage below threshold", len(universe),
+                selection_date, "local warehouse coverage below threshold", pit_universe_count,
                 reference, persist, coverage=coverage,
                 metadata={"market_as_of": actual_market_as_of,
                           "expected_market_as_of": expected_market_as_of,
                           "stale_trading_days": stale_days,
                           "primary_coverage": primary_coverage,
-                          "usable_qfq_coverage": coverage}
+                          "usable_qfq_coverage": coverage,
+                          "data_cutoff": cutoff,
+                          "calendar_consensus": calendar,
+                          **pit}
             )
 
         universe = self._hard_gates(universe, panel, market_as_of)
         if universe.empty:
             return self._failed(
-                selection_date, "no securities passed local hard gates", 0,
-                reference, persist, coverage=coverage,
+                selection_date, "no securities passed local hard gates", pit_universe_count,
+                reference, persist, coverage=coverage, metadata={**pit, "data_cutoff": cutoff},
             )
 
-        valuations = self.store.load_valuations(selection_date)
-        fundamentals = self._fundamentals(selection_date)
         features = self._build_features(universe, panel, market_as_of)
+        features = self._liquidity_gates(features)
+        if features.empty:
+            return self._failed(
+                selection_date, "no securities passed liquidity gates", pit_universe_count,
+                reference, persist, coverage=coverage, metadata={**pit, "data_cutoff": cutoff},
+            )
+        breadth_frame = features.copy()
+        latest_valuation_as_of = self.store.latest_valuation_as_of(actual_market_as_of)
+        valuations = self.store.load_valuations(actual_market_as_of, exact=True)
+        valuation_symbols = set(valuations.get("symbol", pd.Series(dtype=str)).astype(str))
+        valuation_coverage = float(
+            features["symbol"].isin(valuation_symbols).mean()
+        ) if len(features) else 0.0
+        valuation_stale_days = (
+            self.store.stale_trading_days(latest_valuation_as_of, actual_market_as_of)
+            if latest_valuation_as_of else None
+        )
+        if (latest_valuation_as_of != actual_market_as_of
+                or valuation_coverage < self.policy.min_valuation_coverage):
+            return self._failed(
+                selection_date, "valuation snapshot stale or incomplete", pit_universe_count,
+                reference, persist, coverage=coverage, metadata={
+                    "market_as_of": actual_market_as_of,
+                    "expected_market_as_of": expected_market_as_of,
+                    "valuation_as_of": latest_valuation_as_of,
+                    "valuation_coverage": round(valuation_coverage, 6),
+                    "valuation_stale_trading_days": valuation_stale_days,
+                    "data_cutoff": cutoff,
+                    "calendar_consensus": calendar,
+                    **pit,
+                },
+            )
+        fundamentals = self._fundamentals(selection_date)
         frame = features
         if not valuations.empty and "symbol" in valuations.columns:
             frame = frame.merge(valuations, on="symbol", how="left", suffixes=("", "_valuation"))
@@ -218,17 +302,26 @@ class LocalStockSelector:
         financial_coverage = float(qualified.mean()) if len(frame) else 0.0
         if financial_coverage < self.policy.min_financial_universe_coverage:
             return self._failed(
-                selection_date, "financial coverage below threshold", len(universe), reference,
+                selection_date, "financial coverage below threshold", pit_universe_count, reference,
                 persist, coverage=coverage, metadata={
                     "market_as_of": actual_market_as_of,
                     "expected_market_as_of": expected_market_as_of,
                     "stale_trading_days": stale_days,
                     "primary_coverage": primary_coverage,
                     "usable_qfq_coverage": coverage,
+                    "valuation_as_of": latest_valuation_as_of,
+                    "valuation_coverage": round(valuation_coverage, 6),
+                    "valuation_stale_trading_days": valuation_stale_days,
                     "financial_coverage": financial_coverage,
+                    "data_cutoff": cutoff,
+                    "calendar_consensus": calendar,
+                    **pit,
                 },
             )
-        frame = frame[qualified].copy()
+        non_negative_equity = frame.get(
+            "net_assets_positive", pd.Series(True, index=frame.index)
+        ).fillna(True).astype(bool)
+        frame = frame[qualified & non_negative_equity].copy()
         fundamental_pool = frame.sort_values(
             ["fundamental_score", "fundamental_coverage", "history_coverage"], ascending=False
         ).head(self.policy.fundamental_top_n).copy()
@@ -237,11 +330,11 @@ class LocalStockSelector:
         technical_pool = fundamental_pool.sort_values(
             ["technical_60_score", "fundamental_score"], ascending=False
         ).head(self.policy.technical_top_n).copy()
-        technical_pool = self._score_industry_and_quality(technical_pool, frame)
+        technical_pool = self._score_industry_and_quality(technical_pool, breadth_frame)
         technical_pool = self._apply_events(technical_pool, selection_date)
         technical_pool["total_score"] = (
             technical_pool["fundamental_score"] + technical_pool["technical_60_score"]
-            + technical_pool["industry_score"] + technical_pool["quality_score"]
+            + technical_pool["industry_score"] + technical_pool["data_quality_score"]
             + technical_pool["correction_120"] + technical_pool["correction_250"]
             + technical_pool["event_correction"]
         )
@@ -255,10 +348,20 @@ class LocalStockSelector:
         industry_coverage = float(
             (industry_values.ne("") & industry_values.ne("未分类")).mean()
         ) if len(frame) else 0.0
+        rule_version = "local-pit-v3"
+        snapshot_payload = json.dumps({
+            "selection_date": selection_date,
+            "market_as_of": actual_market_as_of,
+            "valuation_as_of": latest_valuation_as_of,
+            "financial_as_of": pit.get("financial_pit_end_date"),
+            "rule_version": rule_version,
+            "candidates": candidates,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        snapshot_id = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
         run = {
             "selection_date": selection_date,
             "status": "success" if candidates else "error",
-            "universe_count": int(len(history_counts)),
+            "universe_count": pit_universe_count,
             "eligible_count": int(len(frame)),
             "coverage": coverage,
             "comparison": comparison,
@@ -268,7 +371,16 @@ class LocalStockSelector:
                 "stale_trading_days": stale_days,
                 "primary_coverage": round(primary_coverage, 6),
                 "usable_qfq_coverage": round(coverage, 6),
+                "valuation_as_of": latest_valuation_as_of,
+                "valuation_coverage": round(valuation_coverage, 6),
+                "valuation_stale_trading_days": valuation_stale_days,
                 "financial_coverage": round(financial_coverage, 6),
+                "financial_as_of": pit.get("financial_pit_end_date"),
+                "data_cutoff": cutoff,
+                "calendar_consensus": calendar,
+                "snapshot_id": snapshot_id,
+                "rule_version": rule_version,
+                **pit,
                 "period_semantics": "trading_days",
                 "primary_pipeline": "local_pit",
                 "reference_affects_score": False,
@@ -312,10 +424,17 @@ class LocalStockSelector:
         # The normalized store value is L. Keep compatibility with snapshots
         # ingested before normalization, where zzshare encoded listed as 1.
         listed = statuses.isin({"L", "1", "LISTED", "ACTIVE", "TRUE"})
-        result = result[listed & ~names.str.upper().str.contains(r"(?:^|\*)ST", regex=True)]
+        result = result[
+            listed
+            & ~names.str.upper().str.contains(r"(?:^|\*)ST", regex=True)
+            & ~names.str.contains("退", regex=False)
+        ]
         if os.getenv("EXCLUDE_KCB", "true").lower() not in {"0", "false", "no", "off"}:
             result = result[~result["symbol"].str.startswith(("688", "689"))]
-        result = result[result["history_days"] >= self.policy.min_history_days]
+        minimum_history = max(
+            self.policy.min_history_days, self.policy.min_listing_trading_days
+        )
+        result = result[result["history_days"] >= minimum_history]
         latest = panel[panel["trade_date"] == market_as_of].set_index("symbol")
         result["latest_volume"] = result["symbol"].map(latest["volume"])
         result["latest_close"] = result["symbol"].map(latest["close"])
@@ -360,11 +479,16 @@ class LocalStockSelector:
         rows = []
         for symbol, bars in panel[panel["symbol"].isin(meta.index)].groupby("symbol"):
             bars = bars.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
-            closes = pd.to_numeric(bars["close"], errors="coerce").dropna().to_numpy(dtype=float)
+            bars = bars.copy()
+            bars["close"] = pd.to_numeric(bars["close"], errors="coerce")
+            bars = bars[bars["close"].notna() & (bars["close"] > 0)].copy()
+            closes = bars["close"].to_numpy(dtype=float)
             if len(closes) < self.policy.min_history_days:
                 continue
             volumes = pd.to_numeric(bars["volume"], errors="coerce").fillna(0).to_numpy(dtype=float)
-            rets = pd.Series(closes).pct_change().dropna()
+            amounts = pd.to_numeric(bars.get("amount"), errors="coerce").fillna(0).to_numpy(dtype=float)
+            return_series = bars.set_index("trade_date")["close"].pct_change().dropna().tail(60)
+            rets = return_series.reset_index(drop=True)
             ma60 = float(np.mean(closes[-60:]))
             low60, high60 = float(np.min(closes[-60:])), float(np.max(closes[-60:]))
             industry = str(meta.loc[symbol].get("industry") or "未分类")
@@ -381,7 +505,19 @@ class LocalStockSelector:
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
                 "volume_20_vs_60": float(np.mean(volumes[-20:]) / np.mean(volumes[-60:]))
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
-                "return_vector_60": rets.tail(60).to_numpy(dtype=float),
+                "average_amount_20": float(np.mean(amounts[-20:])) if len(amounts) >= 20 else None,
+                "average_amount_60": float(np.mean(amounts[-60:])) if len(amounts) >= 60 else None,
+                "paused_days_20": int(pd.to_numeric(
+                    bars.get("is_paused", pd.Series(0, index=bars.index)), errors="coerce"
+                ).fillna(0).tail(20).astype(bool).sum()),
+                "one_price_up": bool(
+                    len(bars) >= 2
+                    and _number(bars.iloc[-1].get("high")) is not None
+                    and _number(bars.iloc[-1].get("low")) is not None
+                    and abs(float(bars.iloc[-1]["high"]) - float(bars.iloc[-1]["low"])) < 1e-9
+                    and closes[-1] / closes[-2] - 1.0 >= 0.08
+                ),
+                "return_series_60": return_series,
                 "correction_120": self._medium_correction(closes),
                 "correction_250": self._long_correction(closes),
                 "state": self._technical_state(closes),
@@ -391,10 +527,29 @@ class LocalStockSelector:
         if frame.empty:
             return frame
         market_return = frame["ret_60"].median(skipna=True)
-        industry_return = frame.groupby("industry")["ret_60"].transform("median")
+        classified = (
+            frame["industry"].fillna("").astype(str).str.strip().ne("")
+            & frame["industry"].fillna("").astype(str).str.strip().ne("未分类")
+        )
+        industry_return = pd.Series(np.nan, index=frame.index, dtype=float)
+        industry_return.loc[classified] = frame.loc[classified].groupby(
+            "industry"
+        )["ret_60"].transform("median")
         frame["market_excess_60"] = frame["ret_60"] - market_return
         frame["industry_excess_60"] = frame["ret_60"] - industry_return
         return frame
+
+    def _liquidity_gates(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        average_amount = pd.to_numeric(frame["average_amount_20"], errors="coerce")
+        paused = pd.to_numeric(frame["paused_days_20"], errors="coerce").fillna(0)
+        one_price_up = frame["one_price_up"].fillna(False).astype(bool)
+        return frame[
+            (average_amount >= self.policy.min_average_amount_20)
+            & (paused <= 2)
+            & ~one_price_up
+        ].copy()
 
     @staticmethod
     def _medium_correction(closes: np.ndarray) -> float:
@@ -459,12 +614,19 @@ class LocalStockSelector:
         pb = pd.to_numeric(out["pb"], errors="coerce") if "pb" in out else pd.Series(np.nan, index=out.index)
         pe = pe.where(pe > 0)
         pb = pb.where(pb > 0)
+        industries = out.get("industry", pd.Series("", index=out.index))
+        known_equity = assets.notna() & liabilities.notna()
+        out["net_assets_positive"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+        out.loc[known_equity, "net_assets_positive"] = (
+            assets[known_equity] - liabilities[known_equity]
+        ) > 0
         out["fundamental_score"] = (
-            _percentile(roe) * 8 + _percentile(growth) * 8
+            _industry_percentile(roe, industries) * 8
+            + _industry_percentile(growth, industries) * 8
             + _percentile(debt, higher_is_better=False) * 6
             + _percentile(cash_quality.clip(-5, 5)) * 6
-            + _percentile(pe, higher_is_better=False) * 7
-            + _percentile(pb, higher_is_better=False) * 5
+            + _industry_percentile(pe, industries, higher_is_better=False) * 7
+            + _industry_percentile(pb, industries, higher_is_better=False) * 5
         )
         out["fundamental_coverage"] = pd.concat(
             [roe, growth, debt, cash_quality, pe, pb], axis=1
@@ -534,7 +696,9 @@ class LocalStockSelector:
             out["history_coverage"] * 0.45 + out["fundamental_coverage"] * 0.40
             + valuation_present * 0.15
         ).clip(0, 1)
-        out["quality_score"] = out["data_coverage"] * 15
+        out["data_quality_score"] = out["data_coverage"] * 15
+        # Database compatibility only; formal payloads use data_quality_score.
+        out["quality_score"] = out["data_quality_score"]
         return out
 
     def _apply_events(self, frame: pd.DataFrame, selection_date: str) -> pd.DataFrame:
@@ -543,18 +707,50 @@ class LocalStockSelector:
         out["event_correction"] = 0.0
         if events.empty:
             return out
+        event_types = {
+            "监管处罚": "regulatory", "立案调查": "regulatory", "监管": "regulatory",
+            "财务造假": "fraud", "业绩预告": "earnings", "业绩": "earnings",
+            "重大合同": "contract", "合同": "contract", "股东增减持": "shareholder",
+            "减持": "shareholder", "增持": "shareholder", "限售解禁": "lockup",
+            "解禁": "lockup", "回购": "buyback", "诉讼仲裁": "litigation",
+            "诉讼": "litigation", "股权质押": "pledge", "冻结": "pledge",
+            "资产减值": "impairment", "商誉减值": "impairment",
+            "审计意见": "audit",
+        }
+        events["canonical_type"] = events["event_type"].map(
+            lambda value: event_types.get(str(value).strip(), str(value).strip().lower())
+        )
+        events["cluster_key"] = events["event_cluster_id"].fillna("").astype(str)
+        missing_cluster = events["cluster_key"].eq("")
+        events.loc[missing_cluster, "cluster_key"] = (
+            events.loc[missing_cluster, "symbol"].astype(str) + ":"
+            + events.loc[missing_cluster, "canonical_type"].astype(str) + ":"
+            + events.loc[missing_cluster, "event_date"].astype(str)
+        )
+        events = events.sort_values(
+            ["official", "materiality", "confidence"], ascending=False
+        ).drop_duplicates(["symbol", "cluster_key"], keep="first")
         event_days = pd.to_datetime(events["effective_at"], errors="coerce")
         age = (pd.Timestamp(selection_date) - event_days).dt.days.clip(lower=0)
-        half_life = events["event_type"].map({
+        half_life = events["canonical_type"].map({
             "regulatory": 60, "fraud": 120, "earnings": 30, "dividend": 20,
-            "contract": 30, "shareholder": 45, "lockup": 20,
+            "contract": 30, "shareholder": 45, "lockup": 20, "buyback": 30,
+            "litigation": 60, "pledge": 60, "impairment": 90, "audit": 120,
         }).fillna(14)
         decay = np.power(0.5, age / half_life)
+        novelty = pd.to_numeric(events["novelty"], errors="coerce").fillna(0).clip(0, 1)
+        entity_weight = events["entity_impact"].map({
+            "issuer": 1.0, "subsidiary": 0.7, "counterparty": 0.5,
+        }).fillna(0.6)
+        source_weight = np.where(
+            events["source_family"].astype(str).eq("official_disclosure"), 1.0,
+            np.where(events["official"].astype(bool), 1.0, 0.65),
+        )
         raw = (pd.to_numeric(events["direction"], errors="coerce").fillna(0)
                * pd.to_numeric(events["confidence"], errors="coerce").fillna(0)
                * pd.to_numeric(events["materiality"], errors="coerce").fillna(0).clip(0, 1)
                * (1.0 + pd.to_numeric(events["surprise"], errors="coerce").fillna(0).clip(-1, 1) * 0.25)
-               * decay * np.where(events["official"].astype(bool), 1.0, 0.65))
+               * (0.5 + novelty * 0.5) * entity_weight * decay * source_weight)
         # Bad news is intentionally asymmetric: risk correction dominates upside catalysts.
         events = events.assign(weighted=np.where(raw < 0, raw * 25, raw * 12))
         corrections = events.groupby("symbol")["weighted"].sum().clip(-25, 12)
@@ -596,14 +792,18 @@ class LocalStockSelector:
             board = "沪市主板"
         return f"board:{board}"
 
-    @staticmethod
-    def _correlation(left: pd.Series, right: pd.Series) -> float:
-        a = np.asarray(left.get("return_vector_60", []), dtype=float)
-        b = np.asarray(right.get("return_vector_60", []), dtype=float)
-        size = min(len(a), len(b))
-        if size < 20:
+    def _correlation(self, left: pd.Series, right: pd.Series) -> float:
+        a = left.get("return_series_60")
+        b = right.get("return_series_60")
+        if not isinstance(a, pd.Series) or not isinstance(b, pd.Series):
             return -1.0
-        corr = float(np.corrcoef(a[-size:], b[-size:])[0, 1])
+        aligned = pd.concat(
+            [pd.to_numeric(a, errors="coerce"), pd.to_numeric(b, errors="coerce")],
+            axis=1, join="inner",
+        ).dropna()
+        if len(aligned) < self.policy.min_correlation_days:
+            return -1.0
+        corr = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
         return corr if math.isfinite(corr) else -1.0
 
     @staticmethod
@@ -623,7 +823,8 @@ class LocalStockSelector:
                 "fundamental_score": round(float(row["fundamental_score"]), 4),
                 "technical_60_score": round(float(row["technical_60_score"]), 4),
                 "industry_score": round(float(row["industry_score"]), 4),
-                "quality_score": round(float(row["quality_score"]), 4),
+                "data_quality_score": round(float(row["data_quality_score"]), 4),
+                "quality_score": round(float(row["data_quality_score"]), 4),
                 "correction_120": round(float(row["correction_120"]), 4),
                 "correction_250": round(float(row["correction_250"]), 4),
                 "event_correction": round(float(row["event_correction"]), 4),
@@ -634,7 +835,7 @@ class LocalStockSelector:
                     "correction_120": round(float(row["correction_120"]), 4),
                     "correction_250": round(float(row["correction_250"]), 4),
                     "industry": round(float(row["industry_score"]), 4),
-                    "data_quality": round(float(row["quality_score"]), 4),
+                    "data_quality": round(float(row["data_quality_score"]), 4),
                     "event": round(float(row["event_correction"]), 4),
                 },
                 "industry_breadth": {
