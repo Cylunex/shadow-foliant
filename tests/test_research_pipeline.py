@@ -205,7 +205,8 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         policy = SelectionPolicy(
             fundamental_top_n=20, technical_top_n=12, diversified_top_n=8,
             final_n=6, min_history_days=60, preferred_history_days=400,
-            max_per_industry=2, min_warehouse_coverage=0.8,
+            max_per_industry=2, max_pairwise_correlation=1.0,
+            min_warehouse_coverage=0.8,
         )
         result = LocalStockSelector(self.store, policy).run(
             selection_date,
@@ -235,6 +236,37 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         result = LocalStockSelector(self.store).run(selection_date, persist=False)
         self.assertEqual(result["status"], "success")
         self.assertGreater(len(result["candidates"]), 0)
+
+    def test_diversification_uses_board_buckets_when_industry_is_missing(self):
+        policy = SelectionPolicy(max_per_industry=2, max_pairwise_correlation=1.0)
+        selector = LocalStockSelector(self.store, policy)
+        rng = np.random.default_rng(7)
+        frame = pd.DataFrame([{
+            "symbol": symbol, "industry": "未分类", "market": "",
+            "return_vector_60": rng.normal(0, 0.01, 60), "total_score": 100 - pos,
+        } for pos, symbol in enumerate([
+            "600001", "600002", "600003", "000001", "000002", "000003",
+            "300001", "300002", "300003",
+        ])])
+        result = selector._diversify(frame)
+        self.assertEqual(len(result), 6)
+        self.assertEqual(result["symbol"].str.startswith("6").sum(), 2)
+        self.assertEqual(result["symbol"].str.startswith("0").sum(), 2)
+        self.assertEqual(result["symbol"].str.startswith("3").sum(), 2)
+
+    def test_diversification_rejects_highly_correlated_candidates(self):
+        selector = LocalStockSelector(
+            self.store,
+            SelectionPolicy(max_per_industry=5, max_pairwise_correlation=0.8),
+        )
+        base = np.linspace(-0.01, 0.01, 60)
+        frame = pd.DataFrame([
+            {"symbol": "600001", "industry": "甲", "return_vector_60": base},
+            {"symbol": "600002", "industry": "乙", "return_vector_60": base * 1.01},
+            {"symbol": "600003", "industry": "丙", "return_vector_60": base[::-1]},
+        ])
+        result = selector._diversify(frame)
+        self.assertEqual(result["symbol"].tolist(), ["600001", "600003"])
 
     def test_incomplete_warehouse_does_not_fall_back_to_wencai(self):
         result = LocalStockSelector(self.store).run(

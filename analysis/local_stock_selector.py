@@ -99,6 +99,7 @@ class SelectionPolicy:
     min_history_days: int = 60
     preferred_history_days: int = 400
     max_per_industry: int = 3
+    max_pairwise_correlation: float = 0.90
     min_warehouse_coverage: float = 0.80
 
     @classmethod
@@ -111,6 +112,9 @@ class SelectionPolicy:
             min_history_days=max(60, int(os.getenv("LOCAL_SELECTION_MIN_HISTORY_DAYS", "60"))),
             preferred_history_days=max(320, int(os.getenv("LOCAL_SELECTION_PREFERRED_HISTORY_DAYS", "400"))),
             max_per_industry=max(1, int(os.getenv("LOCAL_SELECTION_MAX_PER_INDUSTRY", "3"))),
+            max_pairwise_correlation=_bounded(
+                float(os.getenv("LOCAL_SELECTION_MAX_PAIRWISE_CORRELATION", "0.90")), 0.5, 1.0
+            ),
             min_warehouse_coverage=_bounded(
                 float(os.getenv("LOCAL_SELECTION_MIN_WAREHOUSE_COVERAGE", "0.80")), 0.1, 1.0
             ),
@@ -193,6 +197,10 @@ class LocalStockSelector:
         diversified = self._diversify(technical_pool)
         candidates = self._records(diversified.head(self.policy.final_n))
         comparison = self._comparison(candidates, reference)
+        industry_values = frame["industry"].fillna("").astype(str).str.strip()
+        industry_coverage = float(
+            (industry_values.ne("") & industry_values.ne("未分类")).mean()
+        ) if len(frame) else 0.0
         run = {
             "selection_date": selection_date,
             "status": "success" if candidates else "error",
@@ -205,6 +213,11 @@ class LocalStockSelector:
                 "period_semantics": "trading_days",
                 "primary_pipeline": "local_pit",
                 "reference_affects_score": False,
+                "industry_coverage": round(industry_coverage, 6),
+                "diversification_mode": (
+                    "industry" if industry_coverage >= 0.95 else "industry_with_board_fallback"
+                ),
+                "max_pairwise_correlation": self.policy.max_pairwise_correlation,
                 "stage_counts": {
                     "fundamental": len(fundamental_pool), "technical": len(technical_pool),
                     "diversified": len(diversified), "final": len(candidates),
@@ -298,6 +311,7 @@ class LocalStockSelector:
             industry = str(meta.loc[symbol].get("industry") or "未分类")
             rows.append({
                 "symbol": symbol, "name": meta.loc[symbol].get("name"), "industry": industry,
+                "market": meta.loc[symbol].get("market"),
                 "history_days": len(closes), "close": closes[-1], "ret_60": _trading_return(closes, 60),
                 "ma60_slope": _ma_slope(closes, 60), "above_ma60": closes[-1] / ma60 - 1.0,
                 "range_pos_60": (closes[-1] - low60) / (high60 - low60) if high60 > low60 else 0.5,
@@ -308,6 +322,7 @@ class LocalStockSelector:
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
                 "volume_20_vs_60": float(np.mean(volumes[-20:]) / np.mean(volumes[-60:]))
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
+                "return_vector_60": rets.tail(60).to_numpy(dtype=float),
                 "correction_120": self._medium_correction(closes),
                 "correction_250": self._long_correction(closes),
                 "state": self._technical_state(closes),
@@ -422,6 +437,12 @@ class LocalStockSelector:
             _percentile(out["industry_breadth"]) * 8
             + _percentile(out["industry_return"]) * 7
         )
+        out["industry_classified"] = (
+            out["industry"].fillna("").astype(str).str.strip().ne("")
+            & out["industry"].fillna("").astype(str).str.strip().ne("未分类")
+        )
+        # Missing industry data must not receive a synthetic median sector score.
+        out.loc[~out["industry_classified"], "industry_score"] = 0.0
         valuation_columns = [c for c in ("pe_ttm", "pb") if c in out.columns]
         valuation_present = (out[valuation_columns].notna().mean(axis=1) if valuation_columns
                              else pd.Series(0.0, index=out.index))
@@ -457,14 +478,47 @@ class LocalStockSelector:
     def _diversify(self, frame: pd.DataFrame) -> pd.DataFrame:
         rows, counts = [], {}
         for _, row in frame.iterrows():
-            industry = str(row.get("industry") or "未分类")
-            if counts.get(industry, 0) >= self.policy.max_per_industry:
+            industry = str(row.get("industry") or "").strip()
+            bucket = (f"industry:{industry}" if industry and industry != "未分类"
+                      else self._board_bucket(row))
+            if counts.get(bucket, 0) >= self.policy.max_per_industry:
+                continue
+            if any(self._correlation(row, selected) >= self.policy.max_pairwise_correlation
+                   for selected in rows):
                 continue
             rows.append(row)
-            counts[industry] = counts.get(industry, 0) + 1
+            counts[bucket] = counts.get(bucket, 0) + 1
             if len(rows) >= self.policy.diversified_top_n:
                 break
         return pd.DataFrame(rows, columns=frame.columns)
+
+    @staticmethod
+    def _board_bucket(row: pd.Series) -> str:
+        market = str(row.get("market") or "").strip()
+        if market and market.lower() != "nan":
+            return f"board:{market}"
+        symbol = "".join(ch for ch in str(row.get("symbol") or "") if ch.isdigit())[-6:]
+        if symbol.startswith(("300", "301")):
+            board = "创业板"
+        elif symbol.startswith(("4", "8", "92")):
+            board = "北交所"
+        elif symbol.startswith(("0", "2")):
+            board = "深市主板"
+        elif symbol.startswith(("688", "689")):
+            board = "科创板"
+        else:
+            board = "沪市主板"
+        return f"board:{board}"
+
+    @staticmethod
+    def _correlation(left: pd.Series, right: pd.Series) -> float:
+        a = np.asarray(left.get("return_vector_60", []), dtype=float)
+        b = np.asarray(right.get("return_vector_60", []), dtype=float)
+        size = min(len(a), len(b))
+        if size < 20:
+            return -1.0
+        corr = float(np.corrcoef(a[-size:], b[-size:])[0, 1])
+        return corr if math.isfinite(corr) else -1.0
 
     @staticmethod
     def _records(frame: pd.DataFrame) -> List[dict]:

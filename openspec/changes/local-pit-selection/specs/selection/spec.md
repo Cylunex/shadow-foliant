@@ -44,6 +44,21 @@ NOT alter primary gates, component scores, ranking, industry quota or fallback.
 - Then the stock appears only in `reference_only`
 - And it is absent from primary candidates
 
+## Diversification under incomplete classification
+
+Known industries MUST enforce the configured per-industry cap. Missing industry
+classification MUST receive no synthetic industry score and MUST use an explicit
+market-board fallback bucket. Candidate pairs above the configured 60-trading-day
+return-correlation threshold MUST NOT both survive diversification.
+
+### Scenario: provider omits industry classification
+
+- Given a listed security with no industry value
+- When diversification runs
+- Then its industry score is zero
+- And its concentration bucket is derived from the disclosed market board
+- And run metadata reports the board-fallback mode and industry coverage
+
 ## Interface contracts
 
 Every formal provider endpoint MUST declare authentication, hard/page limits,
