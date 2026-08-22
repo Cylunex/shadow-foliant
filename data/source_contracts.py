@@ -145,8 +145,8 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ),
     ("baostock", "daily"): EndpointContract(
         "baostock", "daily", "daily_ohlcv", "anonymous_login", None, None,
-        0.2, 1, 15.0, 1, adjustment="raw/qfq", quota_basis="published",
-        notes="Single serialized session; provider documents a 50000 request daily ceiling.",
+        0.2, 1, 15.0, 1, adjustment="raw/qfq", quota_basis="operational",
+        notes="Single serialized session; Foliant does not rely on an undocumented daily quota.",
     ),
     ("cninfo", "announcements"): EndpointContract(
         "cninfo", "announcements", "official_disclosures", "none", None, 30,
