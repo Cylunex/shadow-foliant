@@ -43,7 +43,8 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 
 "$python_bin" -m pip install -r requirements.txt
-"$python_bin" -m compileall -q .
+"$python_bin" -m compileall -q \
+  -x '(^|[\\/])(venv2?|\.git|node_modules)([\\/]|$)' .
 find scripts -type f -name '*.sh' -exec bash -n {} +
 
 if [[ "${DEPLOY_RESTART:-false}" != "true" ]]; then
