@@ -167,6 +167,25 @@ def _safe_frame(endpoint: str, call: Callable[[], object]) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _call_shortcut_or_query(api, method: str, *, path: str,
+                            kwargs: Optional[dict] = None,
+                            query_kwargs: Optional[dict] = None):
+    """Use a released shortcut when present, otherwise the SDK's generic query.
+
+    zzshare documents several newer endpoints before every PyPI build exposes
+    their generated shortcut methods.  Keeping the fallback here avoids a Git
+    dependency while still using the SDK's authenticated, retrying transport.
+    """
+    params = dict(kwargs or {})
+    shortcut = getattr(api, method, None)
+    if callable(shortcut):
+        return shortcut(**params)
+    query = getattr(api, "query", None)
+    if not callable(query):
+        return []
+    return query(path, params=dict(query_kwargs) if query_kwargs is not None else params)
+
+
 def _with_provenance(df: pd.DataFrame, *, as_of: str, adjustment: str = "not_applicable",
                      unit: str = "provider_native", quality_status: str = "ok") -> pd.DataFrame:
     out = df.copy()
@@ -315,8 +334,9 @@ def get_trade_days(start_date: str, end_date: str) -> List[str]:
     if api is None:
         return []
     frame = _safe_frame(
-        "trade_calendar", lambda: api.trade_days(
-            day_start=str(start_date), day_end=str(end_date)
+        "trade_calendar", lambda: _call_shortcut_or_query(
+            api, "trade_days", path="market/trade/days",
+            kwargs={"day_start": str(start_date), "day_end": str(end_date)},
         )
     )
     if frame.empty:
@@ -372,8 +392,18 @@ def get_valuation(trade_date: str) -> pd.DataFrame:
     api = _get_api()
     if api is None:
         return pd.DataFrame()
-    df = _safe_frame("valuation", lambda: api.finance_valuation(str(trade_date)))
-    return _with_provenance(df, as_of=str(trade_date), unit="provider_documented")
+    day = _normalize_date(trade_date)
+    if not day:
+        return pd.DataFrame()
+    df = _safe_frame(
+        "valuation", lambda: _call_shortcut_or_query(
+            api, "finance_valuation",
+            path=f"v3/fundamentals/valuation/{day}",
+            kwargs={"date_value": day},
+            query_kwargs={},
+        )
+    )
+    return _with_provenance(df, as_of=day, unit="provider_documented")
 
 
 _FINANCE_TABLES = {"valuation", "indicator", "income", "balance", "cash_flow"}
@@ -387,22 +417,28 @@ def get_finance_pit(table: str, trade_date: str, codes: Optional[List[str]] = No
     api = _get_api()
     if api is None:
         return pd.DataFrame()
+    day = _normalize_date(trade_date)
+    if not day:
+        return pd.DataFrame()
     normalized_codes = [_ts_code(code) for code in (codes or [])]
-    kwargs = {"codes": ",".join(code for code in normalized_codes if code)} if codes else {}
+    query_params = {"codes": ",".join(code for code in normalized_codes if code)} if codes else {}
+    shortcut_params = {"table": table, "trade_date": day, **query_params}
     df = _safe_frame(
-        "finance_pit", lambda: api.finance_pit(
-            table=table, trade_date=str(trade_date), **kwargs
+        "finance_pit", lambda: _call_shortcut_or_query(
+            api, "finance_pit", path=f"v3/fundamentals/{table}/pit/{day}",
+            kwargs=shortcut_params,
+            query_kwargs=query_params,
         )
     )
     if df.empty:
-        return _with_provenance(df, as_of=str(trade_date))
+        return _with_provenance(df, as_of=day)
     out = df.copy()
     pub_col = next((c for c in ("pubDate", "pub_date", "publish_date") if c in out.columns), None)
     if pub_col and table != "valuation":
-        cutoff = pd.Timestamp(str(trade_date)).normalize()
+        cutoff = pd.Timestamp(day).normalize()
         published = pd.to_datetime(out[pub_col], errors="coerce").dt.normalize()
         out = out[published.notna() & (published <= cutoff)].copy()
-    return _with_provenance(out.reset_index(drop=True), as_of=str(trade_date))
+    return _with_provenance(out.reset_index(drop=True), as_of=day)
 
 
 def _reset_for_tests() -> None:

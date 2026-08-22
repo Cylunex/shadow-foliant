@@ -58,6 +58,36 @@ class SourceContractTest(unittest.TestCase):
             zzshare._reset_for_tests()
         self.assertEqual(result["code"].tolist(), ["600000.SH"])
 
+    def test_zzshare_generic_query_compatibility_for_new_shortcuts(self):
+        class Api:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, path, params=None):
+                self.calls.append((path, params or {}))
+                if path == "market/trade/days":
+                    return {"trade_days": ["2026-08-20", "2026-08-21"]}
+                if "/valuation/" in path:
+                    return [{"code": "600000.SH", "trade_date": "2026-08-21"}]
+                return [{"code": "600000.SH", "pubDate": "2026-08-20"}]
+
+        api = Api()
+        zzshare._api = api
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                days = zzshare.get_trade_days("2026-08-20", "2026-08-21")
+                valuation = zzshare.get_valuation("2026-08-21")
+                finance = zzshare.get_finance_pit("indicator", "2026-08-21")
+        finally:
+            zzshare._reset_for_tests()
+        self.assertEqual(days, ["2026-08-20", "2026-08-21"])
+        self.assertEqual(len(valuation), 1)
+        self.assertEqual(len(finance), 1)
+        self.assertEqual(api.calls[0][0], "market/trade/days")
+        self.assertEqual(api.calls[1][0], "v3/fundamentals/valuation/2026-08-21")
+        self.assertEqual(api.calls[2][0], "v3/fundamentals/indicator/pit/2026-08-21")
+
 
 class ResearchStoreAndSelectionTest(unittest.TestCase):
     def setUp(self):
