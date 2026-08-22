@@ -4,18 +4,14 @@
 口径:每笔【卖出】的已实现盈亏 = (卖出价 - 卖出时持仓成本 pos_cost_price) × 数量 - 佣金 - 印花税。
 pos_cost_price 是 import_trades 写入的成交时点成本快照(移动加权),为 NULL(卖出未持有股)的算不了,跳过。
 
-  backfill()   — PG: 把算出的盈亏回填 trade_records.profit_loss(建列时就有,从来没填过);幂等
-  summary()    — 汇总(总盈亏/胜率/单笔均值/按股票),PG/SQLite 通用(内存计算,不依赖回填)
+  backfill()   — 把算出的盈亏回填 trade_records.profit_loss(建列时就有,从来没填过);幂等
+  summary()    — 汇总(总盈亏/胜率/单笔均值/按股票),内存计算且不依赖回填
   format_text()— 推送用文本
 """
 import json
-import os
 from typing import Any, Dict, List, Optional
 
 import _bootstrap  # noqa: F401
-
-USE_PG = os.getenv('USE_POSTGRES', '').lower() in ('1', 'true', 'yes', 'on')
-
 
 def _fees(extra: Any) -> float:
     """从 extra(JSON 字符串或 dict)取 佣金+印花税"""
@@ -53,9 +49,7 @@ def _pl_of(row: Dict) -> Optional[float]:
 
 
 def backfill() -> Dict[str, int]:
-    """PG: 为 profit_loss IS NULL 的卖出行回填已实现盈亏。幂等,可重复跑。"""
-    if not USE_PG:
-        return {'updated': 0, 'skipped': 0, 'note': 'SQLite 模式无 profit_loss 列,summary() 直接内存计算'}
+    """为 profit_loss IS NULL 的卖出行回填已实现盈亏。幂等,可重复跑。"""
     from core.database_pg import get_conn
     conn = get_conn()
     cur = conn.cursor()
@@ -82,7 +76,7 @@ def backfill() -> Dict[str, int]:
 
 def summary(days: Optional[int] = None, limit: int = 5000) -> Dict[str, Any]:
     """已实现盈亏汇总(按卖出笔):total/笔数/胜率/盈亏比/按股票明细。
-    通过 portfolio_db.get_trades 取数,PG/SQLite 通用。days=N 只看最近 N 天。"""
+    通过 portfolio_db.get_trades 取数。days=N 只看最近 N 天。"""
     from portfolio_db import portfolio_db
     rows = portfolio_db.get_trades(limit=limit) or []
     if days:

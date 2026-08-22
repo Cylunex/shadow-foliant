@@ -23,13 +23,12 @@ import os
 import sys
 import json
 import math
-import sqlite3
 import threading
 import time
 import concurrent.futures
 
-# DB 路由（USE_POSTGRES=true 时走 PG，否则用 SQLite）
-from db_compat import connect as db_connect, USE_POSTGRES
+# PostgreSQL runtime storage.
+from db_compat import connect as db_connect
 from datetime import datetime, date, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
@@ -39,12 +38,12 @@ import datahub  # 统一外部数据层(行情/北向/龙虎榜/板块/新闻等
 
 
 # =============================================================================
-# 快照存储 — SQLite，PG 切换沿用 USE_POSTGRES
+# 快照存储使用 PostgreSQL。
 # =============================================================================
 
 _SNAPSHOT_DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
-# _log_run 高频调用，缓存 SQLite 连接复用（线程安全锁保护）
+# _log_run 高频调用，缓存连接复用（线程安全锁保护）
 _LOG_DB_LOCK = threading.Lock()
 _LOG_DB_CACHE: dict = {'conn': None, 'pid': None}
 _RUN_TIMEZONE = timezone(timedelta(hours=8))
@@ -89,63 +88,16 @@ def _get_log_db():
                 cache['conn'].close()
             except Exception:
                 pass
-    from db_compat import USE_POSTGRES
-    # SQLite 传 check_same_thread=False:连接被缓存、可能由不同任务线程复用,
-    # 全部使用都在 _LOG_DB_LOCK 内串行,跨线程安全。
-    conn = db_connect(_SNAPSHOT_DB_PATH) if USE_POSTGRES else \
-        db_connect(_SNAPSHOT_DB_PATH, check_same_thread=False)
-    if not USE_POSTGRES:
-        conn.execute('PRAGMA journal_mode=WAL')
+    conn = db_connect(_SNAPSHOT_DB_PATH)
     cache['conn'] = conn
     cache['pid'] = pid
     return conn
 
 
-def _init_snapshot_db():
-    """初始化快照表 — PG 模式下表已通过 scripts/init_postgres.sql 建好，跳过"""
-    if USE_POSTGRES:
-        return
-    conn = db_connect(_SNAPSHOT_DB_PATH)
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS indicator_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            snapshot_date TEXT NOT NULL,
-            indicators TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, snapshot_date)
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS market_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_date TEXT NOT NULL UNIQUE,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS job_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            status TEXT NOT NULL,
-            error TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-
-_init_snapshot_db()
-
-
 def _json_sanitize(obj):
     """递归把 NaN/Inf → None。PG 的 JSONB 列拒收 NaN/Infinity 字面量,而 json.dumps 默认
     (allow_nan=True)会把 float('nan') 原样写成 NaN → 写库报 `invalid input syntax for type
-    json: Token "NaN" is invalid`(SQLite 不校验 JSON 所以本地发现不了)。datahub 行情/北向
+    json: Token "NaN" is invalid`。datahub 行情/北向
     记录里常有 NaN(如 turnover_ratio),写快照前必须洗。numpy.float64 是 float 子类,
     isnan/isinf 通吃;其余 numpy 标量随后由 json.dumps(default=str) 兜底。"""
     if isinstance(obj, float):
@@ -174,7 +126,7 @@ def save_indicator_snapshot(symbol: str, indicators: Dict):
 
 
 def _coerce_json(value):
-    """PG JSONB 已是 dict/list；SQLite TEXT 需要 json.loads"""
+    """JSONB 通常已是 dict/list；兼容历史文本行。"""
     if value is None:
         return None
     if isinstance(value, (dict, list)):
@@ -254,7 +206,7 @@ def get_market_snapshot(date: str = None) -> Optional[Dict]:
 def _log_run(job_name: str, status: str, error: str = None,
              started_at: str = None, finished_at: str = None, notify: bool = True):
     # 整个 jobs_hub 的可观测性靠这一个 DB 写入点,它被成功/失败/跳过三条路径调用。
-    # 必须设防:SQLite 写锁(database is locked)或连接失效时,遥测写失败绝不能击穿任务执行/调度
+    # 必须设防：遥测连接失效时，写失败不能击穿任务执行/调度。
     # (尤其 except 路径与 _skip_if_not_trading 内的调用,二次抛出会丢日志/让静默跳过变异常)。
     try:
         # 整个写入持锁串行(INSERT 极小,无争用之忧):缓存连接是共享对象,取用与写入必须原子,
@@ -1522,32 +1474,6 @@ def task_rag_ingest():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
-def task_pg_backup():
-    """💾 每日把生产 PG 全量备份到本地 SQLite(db/pg_backup.db)。开关 pg_backup,默认开。"""
-    job = 'pg_backup'
-    try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            return
-    except Exception:
-        pass
-    started = datetime.now().isoformat()
-    try:
-        from cache import lock
-        with lock('job:pg_backup', ttl=1800) as ok:   # 防多实例并发备份
-            if not ok:
-                _log_run(job, 'skipped', error='another backup running (lock held)',
-                         started_at=started, finished_at=datetime.now().isoformat())
-                return
-            from pg_backup import backup_pg_to_sqlite
-            r = backup_pg_to_sqlite()
-        _log_run(job, 'success', error=f"tables={r['tables']} rows={r['rows']} -> {r['file']}",
-                 started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
-
-
 def task_daily_market_snapshot():
     """采集大盘+北向资金快照（盘后跑）"""
     job = 'daily_market_snapshot'
@@ -1759,7 +1685,6 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 深度批量,筛选后排 ETF+Top-N 个股,
                                          # 默认 Top-20,见 PORTFOLIO_DEEP_TOP_N)。5400s 给降级日(每股~300s)足量头量(2026-06-28)
     'eod_outcomes':              900,    # 依赖等待在 worker 外；这里只计推荐池回填 + 信号后验
-    'pg_backup':                 600,
 }
 _TASK_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
@@ -2037,7 +1962,7 @@ class _JobsHub:
         ]
 
     def _poll_manual_tasks(self):
-        """从 PG/SQLite 原子领取 Agent/Web 任务并交给专用 worker。"""
+        """从 PostgreSQL 原子领取 Agent/Web 任务并交给专用 worker。"""
         self._manual_futures = {f for f in self._manual_futures if not f.done()}
         capacity = self._manual_worker_count - len(self._manual_futures)
         if capacity <= 0:
@@ -2467,7 +2392,7 @@ def _format_strategy_results(results: dict) -> str:
 def _run_daily_signal_scan(mode: str, job_name: str):
     """通用 wrapper：调用 scripts/daily_signal_scan.py 的指定 mode
 
-    用 subprocess 隔离调用，避免 streamlit 进程跟脚本环境冲突
+    用 subprocess 隔离调用，避免任务进程与脚本环境冲突
     """
     if _skip_if_not_trading(job_name):
         return
@@ -3852,7 +3777,7 @@ def task_weekly_backtest():
 
 
 def task_weekly_db_cleanup():
-    """每周日晚：清理过期分析记录，VACUUM SQLite（午夜前收尾）。"""
+    """每周日晚清理过期业务分析记录；数据库空间由 PG autovacuum 管理。"""
     job = 'weekly_db_cleanup'
     started = datetime.now().isoformat()
     try:
@@ -3865,17 +3790,7 @@ def task_weekly_db_cleanup():
                 cleaned += portfolio_db.delete_old_analysis(days=90) or 0
         except Exception as e:
             notes.append(f'cleanup_err={e}')
-        # VACUUM:仅 SQLite 需要手动 VACUUM;PG 由 autovacuum 处理,
-        # 且 VACUUM 不能在事务块内执行(db_compat 的 PG 连接非 autocommit → 必然报错)。
-        if USE_POSTGRES:
-            notes.append('vacuum_skipped=pg(autovacuum)')
-        else:
-            try:
-                conn = db_connect(_SNAPSHOT_DB_PATH)
-                conn.execute('VACUUM')
-                conn.close()
-            except Exception as e:
-                notes.append(f'vacuum_err={e}')
+        notes.append('storage=pg_autovacuum')
         _log_run(job, 'success', error=f'cleaned_rows={cleaned}; ' + '; '.join(notes),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
@@ -4415,7 +4330,7 @@ def task_unified_selection():
             # shutdown(wait=True) 等 worker 跑完 → 护栏形同虚设(红蓝卡死照样拖满 1800s)。
             # 改走 _call_with_hard_timeout(常驻池+不 join,孤儿线程留给底层自然结束;2026-07-16 修)。
             _dres = _call_with_hard_timeout(
-                '红蓝对抗', lambda: run_selection_debate(top_list[:10], 10, True), timeout=360)
+                '红蓝对抗', lambda: run_selection_debate(top_list[:10], 10, False), timeout=360)
             for _it in (_dres.get('items') or []):
                 debate_map[str(_it.get('code'))] = _it
         except Exception as _de:
@@ -4470,16 +4385,8 @@ def task_unified_selection():
             if _rej:
                 body += '\n🟢 避开:' + '、'.join((r.get('name') or r['code']) for r in _rej)
 
-        # ── 红蓝对抗门控(2026-06-26):被「否决」的票剔出推荐池/盘后扫描快照,不再当推荐追踪胜率 ──
-        # 此前否决票照样入池污染胜率闭环(ai_eval_weekly)。表格仍显示🟢避开(可见性不丢),只停止入池。
-        # 只拦「否决」,不误伤「谨慎/买入」。开关 SELECTION_DEBATE_GATE(默认开;设 false/0/no/off 关闭)。
+        # 红蓝对抗是独立 AI review，不得修改本地正式候选或后验样本。
         _vetoed = []
-        if debate_map and os.getenv('SELECTION_DEBATE_GATE', 'true').lower() not in ('false', '0', 'no', 'off'):
-            _vetoed = [c for c in top_list if debate_map.get(c, {}).get('verdict') == '否决']
-            if _vetoed:
-                top_list = [c for c in top_list if c not in set(_vetoed)]
-                body += f'\n🛡️ 门控:已剔除 {len(_vetoed)} 只(不入推荐池/不再追踪胜率)'
-                print(f'[unified_selection] 红蓝门控剔除 {len(_vetoed)} 只: {"、".join(_vetoed)}')
 
         # 附：策略基因组热度摘要
         if strategy_weights:
@@ -4492,35 +4399,10 @@ def task_unified_selection():
         artifact_rows = []
         final_rows = []
         try:
-            from analysis.technical_state import analyze_technical_state as _analyze_technical_state
-            _selection_dfs = {}
             for rank, code in enumerate(top_list, 1):
                 cinfo = candidates.get(code) or {}
                 q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
                 debate = debate_map.get(code) or {}
-                _timeframe = {'available': False, 'weekly_regime': 'unknown',
-                              'resonance': 'unknown', 'reason': '周线数据不可用'}
-                _technical = {'available': False, 'score': 0.0,
-                              'grade': 'neutral', 'reason': '日K数据不可用'}
-                try:
-                    from analysis.multi_timeframe import evaluate as _eval_timeframe
-                    _df = datahub.kline(code, '1y', adjust='qfq')
-                    _quality = datahub.kline_quality(_df)
-                    if (_df is not None and not getattr(_df, 'empty', True)
-                            and _quality.get('actionable')):
-                        _selection_dfs[code] = _df
-                        try:
-                            _timeframe = _eval_timeframe(_df)
-                        except Exception as _mte:
-                            _timeframe['reason'] = f'{type(_mte).__name__}: {str(_mte)[:50]}'
-                        try:
-                            _technical = _analyze_technical_state(_df)
-                        except Exception as _tse:
-                            _technical['reason'] = f'{type(_tse).__name__}: {str(_tse)[:50]}'
-                    elif _quality.get('reason'):
-                        _timeframe['reason'] = f"K线不可用于决策:{_quality['reason']}"
-                except Exception as _te:
-                    _timeframe['reason'] = f'{type(_te).__name__}: {str(_te)[:50]}'
                 artifact_rows.append({
                     'rank': rank,
                     'code': code,
@@ -4538,33 +4420,21 @@ def task_unified_selection():
                     'debate_verdict': debate.get('verdict'),
                     'debate_confidence': debate.get('confidence'),
                     'debate_reason': debate.get('reason') or debate.get('summary'),
-                    'multi_timeframe': _timeframe,
-                    'technical_state': _technical,
+                    'score_components': cinfo.get('score_components') or {},
+                    'local_state': cinfo.get('state'),
+                    'data_coverage': cinfo.get('data_coverage'),
                 })
-            from analysis.selection_finalizer import finalize_selection
-            final_rows = finalize_selection(
-                artifact_rows,
-                limit=5,
-                portfolio=[{'code': code} for code in held_codes],
-            )
-            # 最终 5 只补确定性交易计划。只复用上面已读的缓存 K，不新增 LLM/外部源调用。
-            try:
-                from analysis.trade_plan import build_trade_plan
-                for _row in final_rows:
-                    _code = _row.get('code')
-                    _df = _selection_dfs.get(_code)
-                    if _df is not None:
-                        _row['trade_plan'] = build_trade_plan(
-                            _code, _df, name=_row.get('name') or '',
-                            technical_state=_row.get('technical_state'))
-            except Exception as _tpe:
-                print(f'[unified_selection] 交易计划生成失败(不影响最终TOP5): '
-                      f'{type(_tpe).__name__}: {str(_tpe)[:80]}')
+            from analysis.selection_finalizer import finalize_local_selection
+            final_rows = finalize_local_selection(artifact_rows, limit=5)
             save_indicator_snapshot('_last_selection', {
                 'picks': top_list,
                 'rows': artifact_rows,
                 'final_picks': [row['code'] for row in final_rows],
                 'final_rows': final_rows,
+                'local_primary_top15': artifact_rows,
+                'deterministic_top5': final_rows,
+                'ai_review': list(debate_map.values()),
+                'external_reference': local_result.get('comparison', {}),
                 'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                 'vetoed': _vetoed,
                 'source_breakdown': source_count,
@@ -5113,8 +4983,12 @@ def task_announcement_scan():
         # ② 公告分级(持仓+选股,近5天)
         try:
             from announcement_scan import run_announcement_scan
-            an = run_announcement_scan(codes, days=5, record_signals=True)
-            if an.get('items'):
+            an = run_announcement_scan(codes, days=5, record_signals=False)
+            confirmed_events = [
+                item for item in (an.get('items') or [])
+                if item.get('confirmation_status') == 'confirmed'
+            ]
+            if confirmed_events:
                 from data.research_store import ResearchStore
                 _direction = {'利好': 1.0, '利空': -1.0, '中性': 0.0}
                 ResearchStore().save_events([{
@@ -5127,7 +5001,18 @@ def task_announcement_scan():
                     'source': item.get('source') or 'cninfo',
                     'official': bool(item.get('official')),
                     'title': item.get('summary') or '',
-                } for item in an['items']])
+                    'source_family': item.get('source_family'),
+                    'source_origin': item.get('source_origin'),
+                    'document_id': item.get('document_id'),
+                    'event_cluster_id': item.get('event_cluster_id'),
+                    'materiality': item.get('materiality'),
+                    'surprise': item.get('surprise'),
+                    'novelty': item.get('novelty'),
+                    'confirmation_status': item.get('confirmation_status'),
+                    'entity_impact': item.get('entity_impact'),
+                    'original_values': item.get('original_values'),
+                    'normalized_values': item.get('normalized_values'),
+                } for item in confirmed_events])
             if an.get('alerts'):
                 bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in an['alerts'])
                 risk_parts.append('【📢 公告利空】\n' + bad)
@@ -5652,7 +5537,7 @@ def register_default_jobs():
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
       20:15 rag_ingest                  — 🔎 可选 RAG 摄取(默认关闭;启用时也在 21:15 前结束)
       22:00 fund_evening                — 🏦 基金晚间合并(B:净值入库→定投止盈检查) · 22:30 daily_pnl_snapshot
-      23:00 pg_backup                   — 💾 PG 备份；周日 23:15 weekly_db_cleanup，夜间最迟按预算 23:25 收尾
+      周日 23:15 weekly_db_cleanup      — 清理过期业务记录
       周日 08:00/12:05 mx_weekend_outlook / weekend_portfolio（高 token LLM，避开 09–12、14–18）
       周日 20:00/20:30 wf_weekly_backtest / ai_eval_weekly（无 LLM，保留原时间）
       ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
@@ -5715,7 +5600,6 @@ def register_default_jobs():
     hub.register('daily_pnl_snapshot', EVENING_TIMES['daily_pnl_snapshot'], task_daily_pnl_snapshot)
     # B 合并(2026-06-26):fund_evening = 原 fund_nav_refresh(22:00 净值入库)→ fund_target_check(止盈检查)
     hub.register('fund_evening', EVENING_TIMES['fund_evening'], task_fund_evening)       # 基金晚间合并(先刷净值再查止盈)
-    hub.register('pg_backup', EVENING_TIMES['pg_backup'], task_pg_backup)
     hub.register('rag_ingest', EVENING_TIMES['rag_ingest'], task_rag_ingest)
 
     # ---- 📅 周日 ----
@@ -5774,7 +5658,7 @@ def register_default_jobs():
 
 def serve_forever():
     """独立运行模式：注册任务并保持主线程运行
-    供 watchdog 或 entrypoint 直接启动，不依赖 Streamlit daemon thread
+    供 watchdog 或 entrypoint 直接启动，不依赖 Web 进程
     """
     import time
     register_default_jobs()

@@ -1,6 +1,4 @@
 import unittest
-import os
-import tempfile
 from unittest import mock
 
 import numpy as np
@@ -96,31 +94,6 @@ class SignalTransitionTests(unittest.TestCase):
         self.assertFalse(is_material_transition("buy", "add"))
         self.assertTrue(is_material_transition("watch", "buy"))
         self.assertTrue(is_material_transition("buy", "reduce"))
-
-    @unittest.skipIf(decision_signal.USE_POSTGRES, "本用例验证 SQLite 迁移与事件落库")
-    def test_state_change_invalidates_old_signal_and_persists_event(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            old_path = decision_signal._DB_PATH
-            old_ready = decision_signal._tables_ready
-            decision_signal._DB_PATH = os.path.join(tmp, "signals.db")
-            decision_signal._tables_ready = False
-            try:
-                _, created1 = decision_signal.create_signal(
-                    "600001", action="hold", source_type="test", horizon="swing")
-                _, created2 = decision_signal.create_signal(
-                    "600001", action="sell", source_type="test", horizon="swing")
-                self.assertTrue(created1)
-                self.assertTrue(created2)
-                active = decision_signal.list_signals(
-                    code="600001", source_type="test", status="active")
-                self.assertEqual([row["action"] for row in active], ["sell"])
-                events = decision_signal.list_transitions(code="600001", material_only=True)
-                self.assertEqual(len(events), 1)
-                self.assertEqual(events[0]["from_action"], "hold")
-                self.assertEqual(events[0]["to_action"], "sell")
-            finally:
-                decision_signal._DB_PATH = old_path
-                decision_signal._tables_ready = old_ready
 
     def test_low_sample_outcome_never_enters_prompt_feedback(self):
         bucket = {'hit': 3, 'miss': 0}

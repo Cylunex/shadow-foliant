@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -14,7 +15,12 @@ from jobs import ai_recommendation_monitor
 from jobs import jobs_hub
 from jobs.automation_config import REGISTRY
 from data.factor_collector import _snapshot_date
+from monitor import monitor_db as monitor_db_module
 from monitor.monitor_db import StockMonitorDatabase
+
+
+def _sqlite_test_connect(path, **_kwargs):
+    return sqlite3.connect(path)
 
 
 class MainForceQualityTests(unittest.TestCase):
@@ -44,22 +50,24 @@ class MainForceQualityTests(unittest.TestCase):
 class MonitorDatabaseTests(unittest.TestCase):
     def test_single_monitor_mapping_and_name_update(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = StockMonitorDatabase(os.path.join(tmp, 'monitor.db'))
-            monitor_id = db.add_monitored_stock(
-                '600519', '贵州茅台', '持有', {'min': 1400, 'max': 1500},
-                1700, 1350, trading_hours_only=False,
-            )
-            first = db.get_monitor_by_code('600519')
-            self.assertFalse(first['trading_hours_only'])
-            self.assertFalse(first['quant_enabled'])
-            self.assertIsNone(first['quant_config'])
+            with mock.patch.object(monitor_db_module, 'USE_POSTGRES', False), \
+                    mock.patch.object(monitor_db_module, 'db_connect', _sqlite_test_connect):
+                db = StockMonitorDatabase(os.path.join(tmp, 'monitor.db'))
+                monitor_id = db.add_monitored_stock(
+                    '600519', '贵州茅台', '持有', {'min': 1400, 'max': 1500},
+                    1700, 1350, trading_hours_only=False,
+                )
+                first = db.get_monitor_by_code('600519')
+                self.assertFalse(first['trading_hours_only'])
+                self.assertFalse(first['quant_enabled'])
+                self.assertIsNone(first['quant_config'])
 
-            db.update_monitored_stock(
-                monitor_id, '买入', {'min': 1450, 'max': 1520},
-                1750, 1380, 30, True, True, name='茅台')
-            updated = db.get_monitor_by_code('600519')
-            self.assertEqual(updated['name'], '茅台')
-            self.assertTrue(updated['trading_hours_only'])
+                db.update_monitored_stock(
+                    monitor_id, '买入', {'min': 1450, 'max': 1520},
+                    1750, 1380, 30, True, True, name='茅台')
+                updated = db.get_monitor_by_code('600519')
+                self.assertEqual(updated['name'], '茅台')
+                self.assertTrue(updated['trading_hours_only'])
 
 
 class RecommendationLifecycleTests(unittest.TestCase):
@@ -70,23 +78,26 @@ class RecommendationLifecycleTests(unittest.TestCase):
             ai_recommendation_monitor._DB_PATH = os.path.join(tmp, 'recommendations.db')
             ai_recommendation_monitor._perf_cols_ready = False
             try:
-                rec_id = ai_recommendation_monitor.save_recommendation(
-                    '600519', '贵州茅台', source='test', rating='买入',
-                    ref_price=100, take_profit=120, stop_loss=90)
-                rows = ai_recommendation_monitor.list_active(symbol='600519')
-                self.assertEqual(rows[0]['id'], rec_id)
+                with mock.patch.object(ai_recommendation_monitor, 'USE_POSTGRES', False), \
+                        mock.patch.object(ai_recommendation_monitor, 'db_connect',
+                                          _sqlite_test_connect):
+                    rec_id = ai_recommendation_monitor.save_recommendation(
+                        '600519', '贵州茅台', source='test', rating='买入',
+                        ref_price=100, take_profit=120, stop_loss=90)
+                    rows = ai_recommendation_monitor.list_active(symbol='600519')
+                    self.assertEqual(rows[0]['id'], rec_id)
 
-                closed = ai_recommendation_monitor.close_recommendation(
-                    rec_id, reason='test', close_price=110)
-                self.assertTrue(closed['closed'])
-                self.assertEqual(closed['realized_pnl_pct'], 10.0)
-                self.assertEqual(
-                    ai_recommendation_monitor.close_recommendation(
-                        rec_id, reason='again', close_price=105)['error'],
-                    'already_closed',
-                )
-                self.assertEqual(
-                    ai_recommendation_monitor.list_active(symbol='600519'), [])
+                    closed = ai_recommendation_monitor.close_recommendation(
+                        rec_id, reason='test', close_price=110)
+                    self.assertTrue(closed['closed'])
+                    self.assertEqual(closed['realized_pnl_pct'], 10.0)
+                    self.assertEqual(
+                        ai_recommendation_monitor.close_recommendation(
+                            rec_id, reason='again', close_price=105)['error'],
+                        'already_closed',
+                    )
+                    self.assertEqual(
+                        ai_recommendation_monitor.list_active(symbol='600519'), [])
             finally:
                 ai_recommendation_monitor._DB_PATH = original_path
                 ai_recommendation_monitor._perf_cols_ready = original_ready
@@ -249,15 +260,21 @@ class AsyncTaskControlTests(unittest.TestCase):
         self.original_initialized = task_control._INITIALIZED
         self.original_resolve = task_control._resolve_task
         self.original_stale_check = task_control._LAST_STALE_CHECK
+        self.original_connect = task_control.db_connect
+        self.original_pg = task_control.USE_POSTGRES
         task_control._DB_PATH = os.path.join(self.tmp.name, 'task_runs.db')
         task_control._INITIALIZED = False
         task_control._LAST_STALE_CHECK = 0.0
+        task_control.db_connect = _sqlite_test_connect
+        task_control.USE_POSTGRES = False
 
     def tearDown(self):
         task_control._DB_PATH = self.original_db_path
         task_control._INITIALIZED = self.original_initialized
         task_control._resolve_task = self.original_resolve
         task_control._LAST_STALE_CHECK = self.original_stale_check
+        task_control.db_connect = self.original_connect
+        task_control.USE_POSTGRES = self.original_pg
         self.tmp.cleanup()
 
     def test_submit_is_async_queryable_and_idempotent(self):

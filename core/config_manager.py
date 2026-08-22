@@ -38,12 +38,6 @@ class ConfigManager:
                 "required": False,
                 "type": "password"
             },
-            "USE_POSTGRES": {
-                "value": "true",
-                "description": "启用PostgreSQL数据库（替代SQLite）",
-                "required": False,
-                "type": "boolean"
-            },
             "PG_HOST": {
                 "value": "127.0.0.1",
                 "description": "PostgreSQL服务器地址",
@@ -224,7 +218,6 @@ class ConfigManager:
             
             # PostgreSQL 数据库配置
             lines.append("# ========== PostgreSQL 数据库配置 ==========")
-            lines.append(f'USE_POSTGRES="{config.get("USE_POSTGRES", "true")}"')
             lines.append(f'PG_HOST="{config.get("PG_HOST", "127.0.0.1")}"')
             lines.append(f'PG_PORT="{config.get("PG_PORT", "55432")}"')
             lines.append(f'PG_DATABASE="{config.get("PG_DATABASE", "aiagents_stock")}"')

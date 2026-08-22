@@ -12,7 +12,8 @@ requests also collide with the trading-time workload.
 
 - Make a local, versioned point-in-time warehouse the only primary selection input.
 - Use zzshare for whole-market daily, valuation and PIT financial snapshots, with
-  bounded TDX and BaoStock repair paths for exact-date market-data gaps.
+  bounded BaoStock qfq repair for exact-date adjusted-market-data gaps. TDX raw
+  bars remain an independent validation/quote source.
 - Formalize provider capability, authentication, pagination, concurrency, timeout,
   retry, frequency and PIT semantics as executable contracts.
 - Rank fundamentals/valuation to 200, 60-trading-day structure to 50, apply
@@ -23,8 +24,8 @@ requests also collide with the trading-time workload.
 
 ## Compatibility
 
-The existing `unified_selection` task name, TOP15 delivery artifact, downstream
-TOP5 finalizer and later Agent review remain. The meaning of its candidate score
+The existing `unified_selection` task name, TOP15 delivery artifact, deterministic
+TOP5 projection and later Agent review remain. The meaning of its candidate score
 changes from source-hit count to the documented local score. Until the warehouse
 has sufficient coverage, the task fails closed instead of silently restoring the
 old Wencai-led behavior.

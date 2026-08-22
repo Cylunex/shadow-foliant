@@ -5,28 +5,20 @@
 
 import pandas as pd
 import sys
-import io
 import warnings
 from datetime import datetime, timedelta
 import akshare as ak
 
 warnings.filterwarnings('ignore')
 
-# 设置标准输出编码为UTF-8（仅在命令行环境，避免streamlit冲突）
+# 设置标准输出编码为 UTF-8。
 def _setup_stdout_encoding():
-    """仅在命令行环境设置标准输出编码"""
-    if sys.platform == 'win32' and not hasattr(sys.stdout, '_original_stream'):
+    """在 Windows 命令行尽量使用 UTF-8。"""
+    if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
         try:
-            # 检测是否在streamlit环境中
-            import streamlit
-            # 在streamlit中不修改stdout
-            return
-        except ImportError:
-            # 不在streamlit环境，可以安全修改
-            try:
-                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
-            except:
-                pass
+            sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
+        except (AttributeError, OSError):
+            pass
 
 _setup_stdout_encoding()
 

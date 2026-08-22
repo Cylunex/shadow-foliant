@@ -192,6 +192,29 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5,
     return ranked[:max(0, int(limit))]
 
 
+def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+    """Create the immutable deterministic TOP N from local PIT scores only.
+
+    Quotes, LLM verdicts, online technical calls and current holdings are deliberately
+    excluded from ranking. They may be attached later as review/display metadata.
+    """
+    ranked: List[Dict[str, Any]] = []
+    for raw in rows or []:
+        row = dict(raw or {})
+        code = str(row.get("code") or "").strip()
+        score = _number(row.get("score"))
+        if not code or score is None:
+            continue
+        row["final_score"] = round(score, 4)
+        row["final_reason"] = "本地PIT总分确定性排序"
+        row["ranking_source"] = "local_pit_snapshot"
+        ranked.append(row)
+    ranked.sort(key=lambda row: (
+        -float(row["final_score"]), int(row.get("rank") or 9999), str(row.get("code") or "")
+    ))
+    return ranked[:max(0, int(limit))]
+
+
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
     rows = list(rows or [])
     lines = [

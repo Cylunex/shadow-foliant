@@ -6,7 +6,6 @@ import _bootstrap  # noqa: F401  路径引导
 用于存储和管理新闻流量监测数据
 包含：快照、新闻、情绪、预警、AI分析、定时任务日志
 """
-import sqlite3
 import json
 import logging
 from datetime import datetime, timedelta
@@ -29,12 +28,7 @@ class NewsFlowDatabase:
 
     def get_connection(self):
         """获取数据库连接（PG / SQLite 自动路由）"""
-        conn = db_connect(self.db_path)
-        try:
-            conn.row_factory = sqlite3.Row  # PG 模式下 db_compat 会 silent ignore
-        except Exception:
-            pass
-        return conn
+        return db_connect(self.db_path)
 
     def init_database(self):
         """初始化数据库表。PG 模式建 PG 方言表(BIGSERIAL/DOUBLE PRECISION),SQLite 走原路径。"""

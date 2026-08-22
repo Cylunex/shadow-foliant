@@ -76,8 +76,6 @@ SCHEMA: List[Dict[str, str]] = [
     {'key': 'OLLAMA_MODEL', 'label': '本地 Ollama 默认模型', 'group': 'LLM 降级(可选)', 'type': 'text',
      'help': '默认 qwen2.5:14b ;需先 ollama pull'},
     # —— 数据库 ——
-    {'key': 'USE_POSTGRES', 'label': '启用 PostgreSQL', 'group': '数据库', 'type': 'bool',
-     'help': '关 → 退 SQLite(离线/试用);盈利闭环表需 PG'},
     {'key': 'PG_HOST', 'label': 'PG 主机', 'group': '数据库', 'type': 'text', 'help': ''},
     {'key': 'PG_PORT', 'label': 'PG 端口', 'group': '数据库', 'type': 'int', 'help': ''},
     {'key': 'PG_DATABASE', 'label': 'PG 库名', 'group': '数据库', 'type': 'text', 'help': ''},

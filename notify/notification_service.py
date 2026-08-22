@@ -3,11 +3,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import json
 import os
-from typing import Dict, List
-try:
-    import streamlit as st   # 旧 Streamlit UI 残留;2026-06 迁 FastAPI 后仅 _show_streamlit_notification 用(UI 已废),设为可选
-except Exception:
-    st = None
+from typing import Dict
 
 from monitor_db import monitor_db
 
@@ -94,7 +90,7 @@ class NotificationService:
         改成 qq,email 才同时发邮件 — 不再强制两边都推。
 
         ⚠️ 真实渠道全部失败时返回 False(不标记 sent, 下轮重试);
-        完全没配真实渠道时用界面通知兜底(仅记录)。
+        完全没配真实渠道时保持待发送，不伪装成投递成功。
         """
         # ---- 优先路径: 走 notification_router ----
         try:
@@ -129,9 +125,8 @@ class NotificationService:
         if success:
             return True
         if not real_attempted:
-            # 没配任何真实推送渠道 → 界面通知兜底(仅记录)
-            self._show_streamlit_notification(notification)
-            return True
+            print("⚠️ 未配置真实通知渠道，通知保持待发")
+            return False
         # 配了真实渠道却都失败 → 不算已发,保持待发、下轮重试(并在日志暴露失败)
         print("❌ 所有已配置的真实推送渠道均失败,通知保持待发(下轮重试)")
         return False
@@ -142,13 +137,12 @@ class NotificationService:
             # 检查邮件配置是否完整
             if not all([self.config['smtp_server'], self.config['email_from'], 
                        self.config['email_password'], self.config['email_to']]):
-                print("⚠️ 邮件配置不完整，使用界面通知")
+                print("⚠️ 邮件配置不完整")
                 print(f"  - SMTP服务器: {self.config['smtp_server'] or '未配置'}")
                 print(f"  - 发件人: {self.config['email_from'] or '未配置'}")
                 print(f"  - 收件人: {self.config['email_to'] or '未配置'}")
                 print(f"  - 密码: {'已配置' if self.config['email_password'] else '未配置'}")
-                self._show_streamlit_notification(notification)
-                return True
+                return False
             
             # 创建邮件
             msg = MIMEMultipart()
@@ -193,39 +187,7 @@ class NotificationService:
             
         except Exception as e:
             print(f"邮件发送失败: {e}")
-            # 邮件发送失败时，使用界面通知作为备用方案
-            print("使用界面通知作为备用方案")
-            self._show_streamlit_notification(notification)
-            return True
-    
-    def _show_streamlit_notification(self, notification: Dict):
-        """在Streamlit界面显示通知(已废:Streamlit UI 2026-06 迁 FastAPI;无 streamlit 直接跳过)"""
-        if st is None:
-            return
-        # 使用session_state存储通知
-        if 'notifications' not in st.session_state:
-            st.session_state.notifications = []
-        
-        # 避免重复通知，使用symbol代替stock_id
-        notification_key = f"{notification.get('symbol','')}_{notification.get('type','')}_{notification.get('triggered_at','')}"
-        if notification_key not in [n.get('key') for n in st.session_state.notifications]:
-            st.session_state.notifications.append({
-                'key': notification_key,
-                'symbol': notification['symbol'],
-                'name': notification['name'],
-                'type': notification['type'],
-                'message': notification['message'],
-                'timestamp': notification.get('triggered_at', '')
-            })
-    
-    def get_streamlit_notifications(self) -> List[Dict]:
-        """获取Streamlit界面通知"""
-        return st.session_state.get('notifications', [])
-    
-    def clear_streamlit_notifications(self):
-        """清空Streamlit界面通知"""
-        if 'notifications' in st.session_state:
-            st.session_state.notifications = []
+            return False
     
     def test_email_config(self) -> bool:
         """测试邮件配置"""

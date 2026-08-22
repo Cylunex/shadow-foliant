@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 from data.research_store import ResearchStore
-from data.sources import baostock, eltdx, zzshare
+from data.sources import baostock, zzshare
 
 
 def _flag(value) -> bool:
@@ -36,41 +36,39 @@ def _normalize_market_bars(frame: pd.DataFrame, trade_date: str) -> pd.DataFrame
     return out
 
 
-def _fallback_bar(symbol: str, trade_date: str) -> pd.DataFrame:
-    """Use two independent TDX/BaoStock paths; only an exact-date row is accepted."""
-    for provider, call in (
-        ("eltdx", lambda: eltdx.get_kline(symbol, "day", 20)),
-        ("baostock", lambda: baostock.kline(symbol, "1mo", "1d", "qfq")),
-    ):
-        try:
-            frame = call()
-        except Exception:
-            frame = pd.DataFrame()
-        if frame is None or frame.empty:
-            continue
-        if "date" in frame.columns:
-            raw = frame.copy()
-            raw["trade_date"] = pd.to_datetime(raw["date"], errors="coerce").dt.date.astype(str)
-            rename = {c: c.lower() for c in ("Open", "High", "Low", "Close", "Volume") if c in raw.columns}
-            raw = raw.rename(columns=rename)
-        else:
-            raw = frame.reset_index().copy()
-            date_col = "Date" if "Date" in raw.columns else raw.columns[0]
-            raw["trade_date"] = pd.to_datetime(raw[date_col], errors="coerce").dt.date.astype(str)
-            raw = raw.rename(columns={c: c.lower() for c in ("Open", "High", "Low", "Close", "Volume") if c in raw.columns})
-        row = raw[raw["trade_date"] == trade_date].tail(1)
-        if row.empty:
-            continue
-        row = row.copy()
-        row["ts_code"] = symbol
-        row.attrs["provenance"] = {
-            "provider": provider, "origin": "independent_fallback", "as_of": trade_date,
-            "effective_at": trade_date, "retrieved_at": pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
-            "adjustment": "qfq" if provider == "baostock" else "raw",
-            "unit": "price/currency/shares", "schema_version": "1", "quality_status": "fallback",
-        }
-        return row
-    return pd.DataFrame()
+def _fallback_qfq_bar(symbol: str, trade_date: str) -> pd.DataFrame:
+    """BaoStock alone repairs qfq rows; raw TDX remains a validation/quote source."""
+    try:
+        frame = baostock.kline(symbol, "1mo", "1d", "qfq")
+    except Exception:
+        frame = pd.DataFrame()
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    if "date" in frame.columns:
+        raw = frame.copy()
+        raw["trade_date"] = pd.to_datetime(raw["date"], errors="coerce").dt.date.astype(str)
+        raw = raw.rename(columns={
+            c: c.lower() for c in ("Open", "High", "Low", "Close", "Volume") if c in raw.columns
+        })
+    else:
+        raw = frame.reset_index().copy()
+        date_col = "Date" if "Date" in raw.columns else raw.columns[0]
+        raw["trade_date"] = pd.to_datetime(raw[date_col], errors="coerce").dt.date.astype(str)
+        raw = raw.rename(columns={
+            c: c.lower() for c in ("Open", "High", "Low", "Close", "Volume") if c in raw.columns
+        })
+    row = raw[raw["trade_date"] == trade_date].tail(1)
+    if row.empty:
+        return pd.DataFrame()
+    row = row.copy()
+    row["ts_code"] = symbol
+    row.attrs["provenance"] = {
+        "provider": "baostock", "origin": "independent_qfq_fallback", "as_of": trade_date,
+        "effective_at": trade_date, "retrieved_at": pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
+        "adjustment": "qfq", "unit": "price/currency/shares", "schema_version": "2",
+        "quality_status": "fallback",
+    }
+    return row
 
 
 class ResearchSynchronizer:
@@ -93,13 +91,22 @@ class ResearchSynchronizer:
             raise
 
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
-                 fallback: bool = True) -> dict:
+                 fallback: bool = True, refresh_calendar: bool = True) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()
+        if refresh_calendar:
+            day = pd.Timestamp(trade_date).date()
+            calendar = zzshare.get_trade_days(
+                (day - timedelta(days=14)).isoformat(), (day + timedelta(days=1)).isoformat()
+            )
+            self.store.upsert_trade_days(calendar)
         run_id = self.store.start_sync("zzshare", "daily_market", trade_date)
         result: Dict[str, object] = {"trade_date": trade_date, "providers": {}}
         try:
             frame = _normalize_market_bars(zzshare.get_market_daily(trade_date), trade_date)
-            primary_rows = self.store.upsert_daily_bars(frame, adjustment="qfq")
+            self.store.upsert_daily_bars(frame, adjustment="qfq")
+            primary_rows = self.store.daily_bar_symbol_count(
+                trade_date, adjustment="qfq", provider="zzshare"
+            )
             result["providers"]["zzshare"] = primary_rows
 
             # Coverage is an ingestion-health metric, so a weekend/manual sync
@@ -120,11 +127,10 @@ class ResearchSynchronizer:
             if fallback and missing:
                 cap = max(0, int(os.getenv("RESEARCH_FALLBACK_SYMBOLS_PER_RUN", "100")))
                 for symbol in missing[:cap]:
-                    row = _fallback_bar(symbol, trade_date)
+                    row = _fallback_qfq_bar(symbol, trade_date)
                     if not row.empty:
-                        adjustment = row.attrs.get("provenance", {}).get("adjustment", "raw")
-                        fallback_rows += self.store.upsert_daily_bars(row, adjustment=adjustment)
-            result["providers"]["independent_fallback"] = fallback_rows
+                        fallback_rows += self.store.upsert_daily_bars(row, adjustment="qfq")
+            result["providers"]["baostock_qfq_fallback"] = fallback_rows
 
             valuation = zzshare.get_valuation(trade_date)
             result["valuation_rows"] = self.store.upsert_valuations(valuation, as_of=trade_date)
@@ -136,17 +142,24 @@ class ResearchSynchronizer:
                         table, pit, as_of=trade_date
                     )
 
-            coverage = primary_rows / expected if expected else 0.0
-            quality = "ok" if expected and coverage >= minimum_ratio else "incomplete"
+            usable_rows = self.store.daily_bar_symbol_count(trade_date, adjustment="qfq")
+            primary_coverage = primary_rows / expected if expected else 0.0
+            usable_coverage = usable_rows / expected if expected else 0.0
+            quality = "ok" if expected and usable_coverage >= minimum_ratio else "incomplete"
             result["expected"] = expected
-            result["coverage"] = round(coverage, 6)
+            result["primary_coverage"] = round(primary_coverage, 6)
+            result["usable_qfq_coverage"] = round(usable_coverage, 6)
+            result["fallback_repaired_count"] = fallback_rows
+            result["coverage"] = result["usable_qfq_coverage"]
             result["quality_status"] = quality
             total_rows = primary_rows + fallback_rows + int(result["valuation_rows"]) + sum(
                 int(value) for value in result["finance_rows"].values()
             )
             self.store.finish_sync(run_id, status="success" if primary_rows else "error",
                                    row_count=total_rows, quality_status=quality,
-                                   detail={"coverage": result["coverage"], "fallback_rows": fallback_rows})
+                                   detail={"primary_coverage": result["primary_coverage"],
+                                           "usable_qfq_coverage": result["usable_qfq_coverage"],
+                                           "fallback_repaired_count": fallback_rows})
             return result
         except Exception as exc:
             self.store.finish_sync(run_id, status="error", row_count=0, quality_status="failed",
@@ -162,13 +175,18 @@ class ResearchSynchronizer:
         calendar = [day for day in calendar if day <= end.isoformat()][-int(trading_days):]
         if len(calendar) < min(int(trading_days), 320):
             raise RuntimeError("insufficient trading calendar for research bootstrap")
+        self.store.upsert_trade_days(calendar)
         completed = 0
         incomplete = 0
         for trade_day in calendar:
-            result = self.sync_day(trade_day, fundamentals=False, fallback=False)
+            result = self.sync_day(
+                trade_day, fundamentals=False, fallback=False, refresh_calendar=False
+            )
             completed += int(result.get("providers", {}).get("zzshare", 0) > 0)
             incomplete += int(result.get("quality_status") != "ok")
-        latest = self.sync_day(calendar[-1], fundamentals=True, fallback=True)
+        latest = self.sync_day(
+            calendar[-1], fundamentals=True, fallback=True, refresh_calendar=False
+        )
         return {
             "requested_days": len(calendar), "completed_days": completed,
             "incomplete_days": incomplete, "latest": latest,

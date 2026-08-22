@@ -1,7 +1,7 @@
 """Native OIDC and opaque server-side sessions for the Stock Web application.
 
 OIDC tokens are verified and discarded during callback processing. The browser only receives a
-random session handle; SQLite stores its SHA-256 digest and normalized identity attributes.
+random session handle; PostgreSQL stores its SHA-256 digest and normalized identity attributes.
 """
 
 from __future__ import annotations
@@ -11,19 +11,19 @@ import hashlib
 import json
 import os
 import secrets
-import sqlite3
 import threading
 import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlencode, urlsplit
 
 import requests
 
 import _bootstrap
+from db_compat import connect as db_connect
 
 SESSION_COOKIE = "__Host-shadow_stock_session"
 _OIDC_SCOPES = "openid profile email groups"
@@ -137,16 +137,20 @@ class SessionRecord:
 class SessionStore:
     """Small persistent store for OIDC transactions, identities, and revocable sessions."""
 
-    def __init__(self, database_path: str) -> None:
+    def __init__(self, database_path: str = "", *, connect_fn: Callable | None = None,
+                 is_postgres: bool = True) -> None:
         self.database_path = database_path
+        self._connect_fn = connect_fn or db_connect
+        self._is_postgres = is_postgres
         self._init_lock = threading.Lock()
         self._initialized = False
 
-    def _connect(self) -> sqlite3.Connection:
+    def _raw_connect(self):
+        return self._connect_fn(self.database_path)
+
+    def _connect(self):
         self._ensure_schema()
-        conn = sqlite3.connect(self.database_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self._raw_connect()
 
     def _ensure_schema(self) -> None:
         if self._initialized:
@@ -154,13 +158,10 @@ class SessionStore:
         with self._init_lock:
             if self._initialized:
                 return
-            path = Path(self.database_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self.database_path, timeout=10)
+            conn = self._raw_connect()
             try:
-                conn.executescript(
+                statements = (
                     """
-                    PRAGMA journal_mode=WAL;
                     CREATE TABLE IF NOT EXISTS web_auth_transactions (
                         state_hash TEXT PRIMARY KEY,
                         nonce TEXT NOT NULL,
@@ -168,7 +169,9 @@ class SessionStore:
                         return_to TEXT NOT NULL,
                         expires_at REAL NOT NULL,
                         created_at REAL NOT NULL
-                    );
+                    )
+                    """,
+                    """
                     CREATE TABLE IF NOT EXISTS shadow_identities (
                         shadow_user_id TEXT PRIMARY KEY,
                         issuer TEXT NOT NULL,
@@ -180,7 +183,9 @@ class SessionStore:
                         created_at REAL NOT NULL,
                         last_seen_at REAL NOT NULL,
                         UNIQUE (issuer, subject)
-                    );
+                    )
+                    """,
+                    """
                     CREATE TABLE IF NOT EXISTS web_sessions (
                         session_hash TEXT PRIMARY KEY,
                         shadow_user_id TEXT NOT NULL,
@@ -189,18 +194,18 @@ class SessionStore:
                         expires_at REAL NOT NULL,
                         revoked_at REAL,
                         FOREIGN KEY (shadow_user_id) REFERENCES shadow_identities(shadow_user_id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_web_sessions_user
-                        ON web_sessions(shadow_user_id, expires_at);
+                    )
+                    """,
                     """
+                    CREATE INDEX IF NOT EXISTS idx_web_sessions_user
+                        ON web_sessions(shadow_user_id, expires_at)
+                    """,
                 )
+                for statement in statements:
+                    conn.execute(statement)
                 conn.commit()
             finally:
                 conn.close()
-            try:
-                os.chmod(self.database_path, 0o600)
-            except OSError:
-                pass
             self._initialized = True
 
     def create_login_transaction(
@@ -227,10 +232,11 @@ class SessionStore:
         now = time.time()
         conn = self._connect()
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN")
+            lock_clause = " FOR UPDATE" if self._is_postgres else ""
             row = conn.execute(
                 """SELECT nonce, code_verifier, return_to, expires_at
-                   FROM web_auth_transactions WHERE state_hash = ?""",
+                   FROM web_auth_transactions WHERE state_hash = ?""" + lock_clause,
                 (_digest(state),),
             ).fetchone()
             conn.execute(
@@ -256,11 +262,13 @@ class SessionStore:
         proposed_id = str(uuid.uuid4())
         groups_json = json.dumps(groups, ensure_ascii=False, separators=(",", ":"))
         with closing(self._connect()) as conn, conn:
+            insert_prefix = "INSERT INTO" if self._is_postgres else "INSERT OR IGNORE INTO"
+            conflict = " ON CONFLICT (issuer, subject) DO NOTHING" if self._is_postgres else ""
             conn.execute(
-                """INSERT OR IGNORE INTO shadow_identities
+                f"""{insert_prefix} shadow_identities
                    (shadow_user_id, issuer, subject, username, display_name, email,
                     groups_json, created_at, last_seen_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?){conflict}""",
                 (
                     proposed_id,
                     issuer,
@@ -600,10 +608,16 @@ class OIDCClient:
 
 
 class WebAuthService:
-    def __init__(self, config: WebAuthConfig, *, http: Any = requests) -> None:
+    def __init__(self, config: WebAuthConfig, *, http: Any = requests,
+                 session_connect_fn: Callable | None = None,
+                 session_is_postgres: bool = True) -> None:
         config.validate()
         self.config = config
-        self.store = SessionStore(config.database_path)
+        self.store = SessionStore(
+            config.database_path,
+            connect_fn=session_connect_fn,
+            is_postgres=session_is_postgres,
+        )
         self.oidc = OIDCClient(config, http=http)
 
 

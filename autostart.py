@@ -1,18 +1,16 @@
 """
 autostart.py — 项目启动时自动拉起所有后台服务和定时调度
 
-在 app.py 顶部 `import autostart` 即可激活。
+由服务入口显式调用 `autostart()` 激活。
 
 设计：
-  * Module-level `_STARTED` flag — Streamlit 每次 re-run app.py 时都会 import，
-    但 Python 模块缓存确保只第一次执行；同时显式 flag 防止意外重复。
+  * Module-level `_STARTED` flag 防止意外重复启动。
   * 每个服务独立 try/except — 单个失败不影响其他。
   * 全部由 .env 开关控制，默认全开。
 
 控制开关（.env）：
     AUTOSTART_ENABLED=true            总开关
     AUTOSTART_MONITOR=true            价格监测（含交易时段调度）
-    AUTOSTART_LOW_PRICE_BULL=false    低价擒牛策略监测
     AUTOSTART_JOBS_HUB=true           Jobs Hub（盘前预热+盘后快照+策略扫描）
     AUTOSTART_NEWS_FLOW=false         新闻流量调度器
     AUTOSTART_SECTOR_STRATEGY=false   智策板块每日（默认关，AI 调用成本高）
@@ -38,7 +36,7 @@ def _on(env_key: str, default: str = 'true') -> bool:
 
 
 def _emit(level: str, msg: str):
-    """统一格式的日志输出（流到 streamlit 启动控制台）"""
+    """输出统一格式的服务启动日志。"""
     print(f'[autostart] {level} {msg}', flush=True)
 
 
@@ -61,17 +59,6 @@ def _start_monitor():
         _emit('✅', 'monitor_scheduler started')
     except Exception as e:
         _emit('❌', f'monitor_service/scheduler failed: {e}')
-
-
-def _start_low_price_bull():
-    """低价擒牛策略监测（持仓状态下自动判断卖出）"""
-    try:
-        from low_price_bull_service import low_price_bull_service as lpb_svc
-        if not getattr(lpb_svc, 'running', False):
-            lpb_svc.start()
-        _emit('✅', 'low_price_bull_service started')
-    except Exception as e:
-        _emit('❌', f'low_price_bull_service failed: {e}')
 
 
 def _start_jobs_hub():
@@ -161,8 +148,6 @@ def autostart():
         _start_monitor()
     if _on('AUTOSTART_JOBS_HUB', 'true'):
         _start_jobs_hub()
-    if _on('AUTOSTART_LOW_PRICE_BULL', 'false'):
-        _start_low_price_bull()
     if _on('AUTOSTART_NEWS_FLOW', 'false'):
         _start_news_flow()
     if _on('AUTOSTART_SECTOR_STRATEGY', 'false'):

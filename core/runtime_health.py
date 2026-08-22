@@ -50,7 +50,7 @@ _REVISION = _git_revision()
 
 
 def _database_check() -> Dict[str, Any]:
-    from db_compat import USE_POSTGRES, connect
+    from db_compat import connect
 
     conn = None
     try:
@@ -58,11 +58,11 @@ def _database_check() -> Dict[str, Any]:
         cur = conn.cursor()
         cur.execute('SELECT 1')
         cur.fetchone()
-        return {'ok': True, 'backend': 'postgresql' if USE_POSTGRES else 'sqlite'}
+        return {'ok': True, 'backend': 'postgresql'}
     except Exception as exc:
         return {
             'ok': False,
-            'backend': 'postgresql' if USE_POSTGRES else 'sqlite',
+            'backend': 'postgresql',
             'error_type': type(exc).__name__,
         }
     finally:

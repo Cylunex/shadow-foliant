@@ -102,10 +102,10 @@ def _ts_code(symbol: str) -> str:
     return f"{digits}.{suffix}"
 
 
-def _volume_multiplier(df: pd.DataFrame, volume_col: str) -> float:
-    """用成交额/量/价自校验“手/股”量纲；样本不足时按 Tushare 风格的“手”处理。"""
+def _volume_multiplier(df: pd.DataFrame, volume_col: str) -> Optional[float]:
+    """Validate shares/lots from amount ÷ volume ÷ price; never guess unknown units."""
     if "amount" not in df.columns:
-        return 100.0
+        return None
     try:
         volume = pd.to_numeric(df[volume_col], errors="coerce")
         amount = pd.to_numeric(df["amount"], errors="coerce")
@@ -113,10 +113,13 @@ def _volume_multiplier(df: pd.DataFrame, volume_col: str) -> float:
         valid = (volume > 0) & (amount > 0) & (close > 0)
         if int(valid.sum()) >= 3:
             ratio = float((amount[valid] / volume[valid] / close[valid]).median())
-            return 1.0 if abs(ratio - 1.0) < abs(ratio - 100.0) else 100.0
+            if 0.5 <= ratio <= 2.0:
+                return 1.0
+            if 50.0 <= ratio <= 200.0:
+                return 100.0
     except Exception:
         pass
-    return 100.0
+    return None
 
 
 def _standardize(df: Optional[pd.DataFrame], *, time_col: str, volume_col: str) -> pd.DataFrame:
@@ -132,14 +135,18 @@ def _standardize(df: Optional[pd.DataFrame], *, time_col: str, volume_col: str) 
         "high": pd.to_numeric(df["high"], errors="coerce"),
         "low": pd.to_numeric(df["low"], errors="coerce"),
         "close": pd.to_numeric(df["close"], errors="coerce"),
-        "volume": pd.to_numeric(df[volume_col], errors="coerce") * mult,
+        "volume": (pd.to_numeric(df[volume_col], errors="coerce") * mult
+                   if mult is not None else pd.Series(float("nan"), index=df.index)),
     })
     if "amount" in df.columns:
         out["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     if time_col == "trade_date":
         out["date"] = out["date"].dt.normalize()
-    return (out.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
-            .sort_values("date").reset_index(drop=True))
+    out = (out.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
+           .sort_values("date").reset_index(drop=True))
+    out.attrs["quality_status"] = "ok" if mult is not None else "unknown_unit"
+    out.attrs["volume_unit"] = "shares" if mult is not None else "unknown"
+    return out
 
 
 def _safe_frame(endpoint: str, call: Callable[[], object]) -> pd.DataFrame:
@@ -383,13 +390,22 @@ def get_market_daily(trade_date: str, *, adjust: str = "qfq") -> pd.DataFrame:
     )
     if df.empty:
         return df
+    out = df.copy()
+    volume_col = next((name for name in ("volume", "vol") if name in out.columns), None)
+    multiplier = _volume_multiplier(out, volume_col) if volume_col else None
+    if volume_col:
+        out["volume"] = (pd.to_numeric(out[volume_col], errors="coerce") * multiplier
+                         if multiplier is not None else float("nan"))
+    quality_status = "ok" if multiplier is not None else "unknown_unit"
+    unit = "price/currency/shares" if multiplier is not None else "price/currency/unknown"
     if contract.hard_max_rows and len(df) >= contract.hard_max_rows:
         return _with_provenance(
-            df, as_of=str(trade_date), adjustment=adjust, unit="price/currency/shares",
+            out, as_of=str(trade_date), adjustment=adjust, unit=unit,
             quality_status="possibly_truncated",
         )
     return _with_provenance(
-        df, as_of=str(trade_date), adjustment=adjust, unit="price/currency/shares"
+        out, as_of=str(trade_date), adjustment=adjust, unit=unit,
+        quality_status=quality_status,
     )
 
 

@@ -137,7 +137,7 @@ def _cmd_analyze(args, ctx):
                 f'  ADX: {ind.get("adx")}（>25 强趋势）\n'
                 f'  CCI: {ind.get("cci")}\n'
                 f'  ATR: {ind.get("atr")}（止损 ≈ 2*ATR）\n'
-                f'\n如需完整 AI 决策，请到 Streamlit 主程序。')
+                f'\n如需完整 AI 决策，请到 Stock Web。')
     except Exception as e:
         return f'指标采集失败: {e}'
 

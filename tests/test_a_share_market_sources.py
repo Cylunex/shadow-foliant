@@ -3,6 +3,7 @@ import os
 import sys
 import types
 import unittest
+from datetime import timedelta
 from enum import IntEnum
 from unittest.mock import patch
 
@@ -48,7 +49,7 @@ class EasyTdxSourceTest(unittest.TestCase):
             def get_security_bars(self, market, code, category, start, count, bar_time):
                 calls.append((market, code, category, start, count, bar_time))
                 n = count if start == 0 else 100
-                base = pd.Timestamp('2026-08-20 09:31') - pd.Timedelta(minutes=start)
+                base = pd.Timestamp('2026-08-20 09:31') - timedelta(minutes=int(start))
                 return pd.DataFrame({
                     'datetime': pd.date_range(base, periods=n, freq='min'),
                     'open': [10.0] * n, 'high': [10.2] * n,
@@ -199,7 +200,7 @@ class ElTdxSourceTest(unittest.TestCase):
                 calls.append((frequency, code, start, count))
                 n = count if start == 0 else 100
                 rows = [types.SimpleNamespace(
-                    time=pd.Timestamp('2026-08-20 09:31') + pd.Timedelta(minutes=i + start),
+                    time=pd.Timestamp('2026-08-20 09:31') + timedelta(minutes=int(i + start)),
                     open_price=10.0, high_price=10.2, low_price=9.9,
                     close_price=10.1, volume=12, amount=12120,
                 ) for i in range(n)]

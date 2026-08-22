@@ -1,7 +1,7 @@
-"""批量/单股多智能体分析 —— 从原 app.py 抽出的共享逻辑(去 Streamlit 依赖)。
+"""批量/单股多智能体分析共享逻辑。
 
-原 `app.py` 既是 Streamlit 入口又放了 `analyze_single_stock_for_batch`,被 portfolio_manager
-等非 UI 模块引用。迁移到 WebUI、删除 app.py 前,把这段纯逻辑抽到这里,供任意调用方复用
+`analyze_single_stock_for_batch` 被 portfolio_manager
+等非 UI 模块引用，这段纯逻辑供任意调用方复用
 (portfolio_manager / webui / jobs 均可 `from batch_analyze import analyze_single_stock_for_batch`)。
 """
 

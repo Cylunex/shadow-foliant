@@ -53,7 +53,7 @@ _ensure_paths()
 # ---------------------------------------------------------------------------
 # 统一加载项目根 .env(2026-06-12 集中到此)
 # 此前各模块各自 `load_dotenv()`(不带路径)→ 只从当前 cwd 找 .env;脚本/任务 cwd 不在
-# 项目根时读不到 → USE_POSTGRES=None 静默回落 SQLite、PG_PASSWORD 拿到默认 changeme 连不上。
+# 项目根时读不到 PostgreSQL 配置。
 # 在此按"本文件所在的项目根"显式加载一次,override=False(系统/supervisor 注入的真实环境变量优先),
 # 幂等。凡入口首行 `import _bootstrap` 的进程(webui/jobs/mcp/scripts)都不再依赖 cwd。
 # ---------------------------------------------------------------------------
@@ -90,22 +90,19 @@ try:
         lambda v, cur: float(v) if v is not None else None)
     _pgext.register_type(_DEC2FLOAT)
 except Exception:
-    pass  # 未装 psycopg2(纯 SQLite 环境)忽略
+    pass
 
 
 # ---------------------------------------------------------------------------
-# 数据库目录:所有 SQLite .db 统一放 ROOT/db/(PG 模式不用,但保留为缓存/归档)
+# Legacy logical database-name helper. Runtime persistence is PostgreSQL-only;
+# this function remains temporarily so old call sites can pass a harmless name
+# into the PostgreSQL adapter without creating local files.
 # ---------------------------------------------------------------------------
 DB_DIR = os.path.join(ROOT, 'db')
-os.makedirs(DB_DIR, exist_ok=True)
 
 
 def db_path(name: str) -> str:
-    """返回 db/ 目录下数据库文件的绝对路径。
-
-    用法:`import _bootstrap; sqlite3.connect(_bootstrap.db_path('xxx.db'))`
-    已是绝对路径 / 内存库(:memory:)则原样返回。
-    """
+    """Return a legacy logical persistence name; no local database is created."""
     if name == ':memory:' or os.path.isabs(name):
         return name
     return os.path.join(DB_DIR, os.path.basename(name))

@@ -30,14 +30,7 @@ import user_strategy_config as cfg
 
 
 def _portfolio_db():
-    """统一 PG/SQLite 入口"""
-    use_pg = os.getenv('USE_POSTGRES', '').lower() in ('1', 'true', 'yes', 'on')
-    if use_pg:
-        try:
-            from portfolio_db_pg import portfolio_db
-            return portfolio_db
-        except Exception:
-            pass
+    """返回 PostgreSQL 持仓存储。"""
     from portfolio_db import portfolio_db
     return portfolio_db
 
@@ -66,9 +59,9 @@ def _get_add_times(symbol: str) -> int:
     """过去 365 天加仓次数(delta_qty>0 的变动记录)。
 
     2026-07-17 修:原直查 portfolio_changes 表 —— 该表已并入 trade_records(生产 PG 无此表,
-    SQLite 更从未建过),查询必抛、被裸 except 吞成恒返 0 → evaluate_one 的加仓次数上限风控
+    旧本地库更从未建过),查询必抛、被裸 except 吞成恒返 0 → evaluate_one 的加仓次数上限风控
     (max_add)从未生效、推送恒显示"已加 0 次"。改走 portfolio_db.get_change_history(合并表
-    的统一抽象,PG 读 trade_records;SQLite 模式本就无变动记录,返 0 与文档一致)。"""
+    的统一抽象，统一读取 trade_records)。"""
     try:
         from portfolio_db import portfolio_db
         rows = portfolio_db.get_change_history(code=symbol, since_days=365, limit=1000) or []

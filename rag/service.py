@@ -6,7 +6,7 @@ ingest_*                : 把各源文本嵌入入库(analysis_records / 本地�
 
 数据源:
   analysis  ← PG analysis_records(历史多智能体分析:评级/风险/操作建议)
-  news      ← 本地 db/news_flow.db platform_news(8000+ 条)
+  news      ← PG platform_news
   reco      ← PG ai_recommendations(推荐理由)
   report    ← 实时抓个股研报(按需,ingest_reports(symbols))
 """
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
 from typing import Any, List, Dict, Optional
 
@@ -85,21 +84,16 @@ def ingest_analyses(limit: int = 500) -> int:
 
 
 def ingest_news(limit: int = 2000) -> int:
-    """本地 news_flow.db platform_news → 标题+内容。"""
+    """PostgreSQL platform_news → 标题+内容。"""
     if not is_rag_enabled():
         return 0
-    path = _bootstrap.db_path('news_flow.db')
-    if not os.path.exists(path):
-        print('[rag] 无本地 news_flow.db,跳过新闻摄取'); return 0
     try:
-        c = sqlite3.connect(path)
-        cols = [r[1] for r in c.execute("PRAGMA table_info(platform_news)")]
-        tcol = next((x for x in ('title', 'titre', '标题') if x in cols), cols[1] if len(cols) > 1 else 'title')
-        ccol = next((x for x in ('content', 'summary', 'desc', 'description') if x in cols), tcol)
-        idcol = 'id' if 'id' in cols else tcol
-        rows = c.execute(f"SELECT {idcol},{tcol},{ccol} FROM platform_news "
-                         f"ORDER BY rowid DESC LIMIT {int(limit)}").fetchall()
-        c.close()
+        conn = _pg(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,title,content FROM platform_news ORDER BY id DESC LIMIT %s",
+            (max(1, int(limit)),),
+        )
+        rows = cur.fetchall(); conn.close()
     except Exception as e:
         print(f'[rag] 读 platform_news 失败: {type(e).__name__}: {e}'); return 0
     docs = [{'source_type': 'news', 'ref_id': f'news_{rid}', 'title': str(t or '')[:120],

@@ -153,7 +153,7 @@ class StockMonitorService:
         }
 
     def _ui_message(self, level: str, msg: str):
-        """输出消息 —— 原走 Streamlit st.*,2026-06 迁 FastAPI 后 Streamlit UI 已废,统一 print。"""
+        """向服务日志输出监测消息。"""
         print(f'[monitor_service] {msg}')
 
     def start_monitoring(self, force: bool = False):

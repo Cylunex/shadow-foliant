@@ -7,11 +7,10 @@ import _bootstrap  # noqa: F401  路径引导
 缺口:`datahub.announcements(code)` 端点存在却零调用,公告未进任何分析。利空公告(商誉减值/大额减持/
 立案调查/业绩暴雷)是 A股最典型可预知下杀,现有 risk agent 只算 VaR 不读公告。
 
-本模块对 持仓+监控池 拉近 N 天新公告,用 LLM 按股提炼**最具市场影响的事件 + 方向(利好/利空/中性)
-+ 强度(1-5)**。利空强 → create_signal(action='reduce', source_type='announcement_risk')+ 即时告警;
-利好强 → create_signal(action='buy', source_type='announcement_catalyst')。16:10 自动方向后验。
+本模块对持仓+监控池拉近 N 天新公告，用 LLM 对标题做初筛。标题级判断只用于待确认
+提示，不创建交易信号，也不写入正式 EventRecord；正文数字与重大性规则确认后才可进入评分。
 
-接口:run_announcement_scan(codes, days=5, max_llm=40, record_signals=True) -> dict
+接口:run_announcement_scan(codes, days=5, max_llm=40, record_signals=False) -> dict
 """
 
 import re
@@ -45,7 +44,10 @@ def _recent_records(code: str, days: int, cap: int = 8) -> List[dict]:
         if d and d >= cutoff:
             t = str(a.get('title') or '').strip()
             if t:
-                out.append({'title': t, 'date': d, 'type': str(a.get('type') or '')})
+                url = str(a.get('url') or '')
+                document_id = (re.search(r'annoId=([^&]+)', url) or [None, ''])[1]
+                out.append({'title': t, 'date': d, 'type': str(a.get('type') or ''),
+                            'url': url, 'document_id': document_id})
     return out[:cap]
 
 
@@ -91,8 +93,8 @@ def _llm_classify(blocks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 
 
 def run_announcement_scan(codes: List[str], days: int = 5, max_llm: int = 40,
-                          record_signals: bool = True) -> Dict[str, Any]:
-    """扫描 codes 近 days 天公告 → AI 分类分级 → 利空/利好强信号。返回 {ok, items, alerts, text, summary}。"""
+                          record_signals: bool = False) -> Dict[str, Any]:
+    """扫描标题并输出待正文确认的参考事件；``record_signals`` 仅保留调用兼容。"""
     out = {'ok': False, 'items': [], 'alerts': [], 'text': '', 'summary': ''}
     codes = list(dict.fromkeys([str(c).strip() for c in (codes or []) if c]))[:max_llm]
     if not codes:
@@ -127,30 +129,16 @@ def run_announcement_scan(codes: List[str], days: int = 5, max_llm: int = 40,
         event_date = max((item['date'] for item in b.get('announcements', []) if item.get('date')),
                          default=datetime.now().strftime('%Y-%m-%d'))
         it = {'code': code, 'name': names.get(code, ''), 'event_date': event_date,
-              'source': 'cninfo', 'official': True, **v}
+              'source': 'cninfo', 'source_family': 'official_disclosure',
+              'source_origin': 'cninfo', 'official': True,
+              'document_id': next((item.get('document_id') for item in b['announcements']
+                                   if item.get('document_id')), ''),
+              'confirmation_status': 'title_only', 'materiality': None,
+              'surprise': None, 'novelty': None, 'entity_impact': 'issuer', **v}
         items.append(it)
         is_bad = v['direction'] == '利空' and v['strength'] >= 3
-        is_good = v['direction'] == '利好' and v['strength'] >= 3
         if is_bad:
             alerts.append(it)
-        if record_signals and (is_bad or is_good):
-            try:
-                from decision_signal import create_signal
-                price = None
-                try:
-                    price = (datahub.quote(code) or {}).get('price')
-                    price = float(price) if price not in (None, '', '?') else None
-                except Exception:
-                    pass
-                create_signal(
-                    code=code, name=names.get(code, ''),
-                    action='reduce' if is_bad else 'buy',
-                    source_type='announcement_risk' if is_bad else 'announcement_catalyst',
-                    source_ref='announcement', confidence='高' if v['strength'] >= 4 else '中',
-                    horizon='swing', ref_price=price,
-                    reason=f"公告[{v['type']}·{v['direction']}{v['strength']}]:{v['summary']}")
-            except Exception:
-                pass
 
     out['ok'] = True
     out['items'] = items

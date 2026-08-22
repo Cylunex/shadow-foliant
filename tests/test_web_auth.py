@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import logging
+import sqlite3
 import sys
 import tempfile
 import time
@@ -22,6 +23,13 @@ if str(ROOT) not in sys.path:
 
 from webui import access_control, platform_auth  # noqa: E402
 from webui.log_filters import RedactRequestQueryFilter  # noqa: E402
+
+
+def _sqlite_test_connection(path):
+    """Explicit test-only database adapter; production sessions use PostgreSQL."""
+    conn = sqlite3.connect(path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 class _Response:
@@ -121,7 +129,12 @@ class WebAuthTests(unittest.TestCase):
             post_logout_redirect_uri="https://stock.example.com/",
             session_db=str(root / "auth.db"),
         )
-        self.service = platform_auth.WebAuthService(self.config, http=self.http)
+        self.service = platform_auth.WebAuthService(
+            self.config,
+            http=self.http,
+            session_connect_fn=lambda path: _sqlite_test_connection(path),
+            session_is_postgres=False,
+        )
         platform_auth._service = self.service
         access_control.reset_agent_authenticator()
 
@@ -367,7 +380,7 @@ class WebAuthTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertNotIn("location", response.headers)
-        # sqlite3.Connection 的 context manager 只提交事务，不会关闭句柄；Windows 下会锁住临时库。
+        # 测试连接的 context manager 只提交事务，不会关闭句柄；显式关闭避免 Windows 锁文件。
         with closing(self.service.store._connect()) as conn:
             count = conn.execute("SELECT COUNT(*) FROM web_auth_transactions").fetchone()[0]
         self.assertEqual(count, 0)

@@ -1,15 +1,15 @@
-"""
-统一的 SQLite/PostgreSQL 兼容层
+"""PostgreSQL runtime adapter for legacy qmark-style SQL call sites.
 
-设计目标：让原有 SQLite 代码几乎零修改即可走 PG，关键是：
+SQLite is no longer a supported runtime. The adapter keeps only the narrow API
+surface needed while legacy modules are converted to native PostgreSQL SQL:
   1. ? 占位符自动转 %s
   2. INSERT 后用 PG 的 lastval() 模拟 SQLite 的 lastrowid
   3. AUTOCOMMIT 行为对齐
   4. 透明的 cursor / connection 包装
 
 用法：
-    from db_compat import connect, USE_POSTGRES
-    conn = connect('stock_monitor.db')  # USE_POSTGRES=true 时返回 PG conn
+    from db_compat import connect
+    conn = connect()  # 返回 PostgreSQL 连接
     cur = conn.cursor()
     cur.execute('INSERT INTO x(name) VALUES (?)', (name,))
     new_id = cur.lastrowid  # PG 模式自动用 lastval()
@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 
 try:
     from dotenv import load_dotenv
@@ -28,16 +27,13 @@ try:
 except ImportError:
     pass
 
-USE_POSTGRES = os.getenv('USE_POSTGRES', '').lower() in ('1', 'true', 'yes', 'on')
+USE_POSTGRES = True
 
-_psycopg2 = None
-if USE_POSTGRES:
-    try:
-        import psycopg2 as _psycopg2
-        import psycopg2.extras  # noqa: F401
-    except ImportError:
-        print('[db_compat] ⚠️ USE_POSTGRES=true 但未装 psycopg2，回退 SQLite')
-        USE_POSTGRES = False
+try:
+    import psycopg2 as _psycopg2
+    import psycopg2.extras  # noqa: F401
+except ImportError:
+    _psycopg2 = None
 
 PG_CONFIG = {
     'host': os.getenv('PG_HOST', '127.0.0.1'),
@@ -50,8 +46,6 @@ PG_CONFIG = {
 
 def _convert_placeholders(sql: str) -> str:
     """? → %s（PG）。同时处理 SQLite→PG 常见差异：datetime() 函数。"""
-    if not USE_POSTGRES:
-        return sql
     sql = sql.replace('?', '%s')
     # SQLite datetime(column) → PG: column (timestamptz 可直接比较)
     sql = sql.replace('datetime(triggered_at)', 'triggered_at')
@@ -139,10 +133,16 @@ class _PGCursor:
 
 class _PGConnection:
     def __init__(self):
+        if _psycopg2 is None:
+            raise RuntimeError("PostgreSQL runtime requires psycopg2")
+        required = ("dbname", "user")
+        missing = [key for key in required if not str(PG_CONFIG.get(key) or "").strip()]
+        if missing:
+            raise RuntimeError("PostgreSQL configuration is incomplete")
         self._conn = _psycopg2.connect(**PG_CONFIG)
 
     def cursor(self):
-        return _PGCursor(self._conn.cursor())
+        return _PGCursor(self._conn.cursor(cursor_factory=_psycopg2.extras.DictCursor))
 
     def commit(self):
         return self._conn.commit()
@@ -172,40 +172,27 @@ class _PGConnection:
         return self
 
     def __exit__(self, *a):
-        self.close()
+        exc_type = a[0] if a else None
+        try:
+            self.rollback() if exc_type else self.commit()
+        finally:
+            self.close()
 
 
 def connect(sqlite_path: str = None, **kwargs):
-    """主入口
-
-    Args:
-        sqlite_path: SQLite 数据库文件路径（PG 模式下忽略）
-        **kwargs: 额外参数（如 check_same_thread）仅对 SQLite 有效
-
-    Returns:
-        Connection 对象（PG 包装 / SQLite 原生），接口对齐
-    """
-    if USE_POSTGRES:
-        return _PGConnection()
-    conn = sqlite3.connect(sqlite_path, **kwargs)
-    # SQLite 默认外键不开
-    try:
-        conn.execute('PRAGMA foreign_keys = ON')
-    except Exception:
-        pass
-    return conn
+    """Return a PostgreSQL connection; path/SQLite kwargs are ignored for compatibility."""
+    return _PGConnection()
 
 
 def is_postgres() -> bool:
-    return USE_POSTGRES
+    return True
 
 
 def coerce_json(value):
     """智能处理 JSON 字段读取
 
-    PG JSONB 列读出来是 dict/list（psycopg2 自动反序列化）
-    SQLite TEXT 列读出来是 str，需要 json.loads
-    用 isinstance 判断避免 json.loads(dict) 报错
+    PostgreSQL JSONB is normally decoded already; TEXT payloads remain supported
+    while schemas are migrated.
     """
     if value is None:
         return None
@@ -224,7 +211,7 @@ def pg_config_snapshot() -> dict:
 
 
 def upsert_sql(table: str, keys, all_cols, values):
-    """幂等 upsert: PG 用 ON CONFLICT DO UPDATE，SQLite 用 INSERT OR REPLACE。
+    """Build an idempotent PostgreSQL ON CONFLICT upsert.
 
     table: 表名
     keys: 主键/唯一键列名列表 (如 ['code','nav_date'])
@@ -233,33 +220,23 @@ def upsert_sql(table: str, keys, all_cols, values):
 
     返回 (sql, ordered_values)
     """
-    if USE_POSTGRES:
-        vals_placeholder = [_convert_placeholders('?') for _ in all_cols]
-        update_cols = [c for c in all_cols if c not in keys]
-        update_set = ', '.join(f'{c}=EXCLUDED.{c}' for c in update_cols) if update_cols else 'DO NOTHING'
-        sql = f'INSERT INTO {table} ({", ".join(all_cols)}) VALUES ({", ".join(vals_placeholder)}) ON CONFLICT ({", ".join(keys)}) DO UPDATE SET {update_set}'
-        return sql, tuple(values)
-    else:
-        sql = f'INSERT OR REPLACE INTO {table} ({", ".join(all_cols)}) VALUES ({", ".join(["?" for _ in all_cols])})'
-        return sql, tuple(values)
+    vals_placeholder = [_convert_placeholders('?') for _ in all_cols]
+    update_cols = [c for c in all_cols if c not in keys]
+    action = (f'DO UPDATE SET {", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)}'
+              if update_cols else 'DO NOTHING')
+    sql = (f'INSERT INTO {table} ({", ".join(all_cols)}) '
+           f'VALUES ({", ".join(vals_placeholder)}) '
+           f'ON CONFLICT ({", ".join(keys)}) {action}')
+    return sql, tuple(values)
 
 
 if __name__ == '__main__':
-    print(f'USE_POSTGRES: {USE_POSTGRES}')
-    if USE_POSTGRES:
-        print(f'PG config: {pg_config_snapshot()}')
-        try:
-            conn = connect('dummy.db')
-            cur = conn.cursor()
-            cur.execute("SELECT current_database(), version()")
-            print('PG 连接成功:', cur.fetchone())
-            conn.close()
-        except Exception as e:
-            print(f'PG 连接失败: {e}')
-    else:
-        conn = connect(':memory:')
+    print(f'PG config: {pg_config_snapshot()}')
+    try:
+        conn = connect()
         cur = conn.cursor()
-        cur.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)')
-        cur.execute('INSERT INTO t(v) VALUES (?)', ('hello',))
-        print('SQLite lastrowid:', cur.lastrowid)
+        cur.execute("SELECT current_database(), version()")
+        print('PG 连接成功:', cur.fetchone())
         conn.close()
+    except Exception as e:
+        print(f'PG 连接失败: {type(e).__name__}')

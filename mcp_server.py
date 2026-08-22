@@ -901,7 +901,6 @@ _TASKS = {
     'daily_backtest':           ('📐 盘后策略回测', '19:00'),
     'daily_pnl_snapshot':       ('💰 当日盈亏快照', '22:30'),
     'fund_evening':             ('🏦 基金晚间(净值入库+止盈检查)', '22:00'),
-    'pg_backup':                ('💾 数据库备份', EVENING_TIMES['pg_backup']),
     'rag_ingest':               ('📚 知识库更新', EVENING_TIMES['rag_ingest']),
     'weekly_analysis':          ('📊 周日持仓综合周报', f"周日 {WEEKEND_TIMES['weekend_portfolio'][1]}"),
     'wf_weekly_backtest':       ('⏪ 每周回测', '周日 20:00'),

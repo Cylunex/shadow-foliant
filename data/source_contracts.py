@@ -30,6 +30,8 @@ class EndpointContract:
     retries: int
     supports_pit: bool = False
     adjustment: str = "not_applicable"
+    volume_unit: str = "not_applicable"
+    amount_unit: str = "not_applicable"
     quota_basis: str = "operational"
     notes: str = ""
 
@@ -89,18 +91,21 @@ def contracts() -> Dict[str, Dict[str, dict]]:
 
 _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ("zzshare", "daily_symbol"): EndpointContract(
-        "zzshare", "daily_symbol", "daily_ohlcv", "optional_token", 1000, 1000,
-        1.0, 1, 15.0, 2, adjustment="raw/qfq/hfq", quota_basis="published",
+        "zzshare", "daily_symbol", "daily_ohlcv", "token", 1000, 1000,
+        1.0, 1, 15.0, 2, adjustment="raw/qfq/hfq", volume_unit="runtime_validated",
+        amount_unit="provider_native", quota_basis="published",
         notes="Use offset pagination beyond 1000 rows.",
     ),
     ("zzshare", "daily_market"): EndpointContract(
-        "zzshare", "daily_market", "daily_market_snapshot", "optional_token", 10000, 6000,
-        1.0, 1, 20.0, 2, adjustment="raw/qfq/hfq", quota_basis="published",
+        "zzshare", "daily_market", "daily_market_snapshot", "token", 10000, 6000,
+        1.0, 1, 20.0, 2, adjustment="raw/qfq/hfq", volume_unit="runtime_validated",
+        amount_unit="provider_native", quota_basis="published",
         notes="Provider documents 10000 maximum and recommends 6000 for one market day.",
     ),
     ("zzshare", "minute"): EndpointContract(
-        "zzshare", "minute", "minute_ohlcv", "optional_token", 1000, 1000,
-        1.0, 1, 15.0, 2, adjustment="raw", quota_basis="operational",
+        "zzshare", "minute", "minute_ohlcv", "token", 1000, 1000,
+        1.0, 1, 15.0, 2, adjustment="raw", volume_unit="runtime_validated",
+        amount_unit="provider_native", quota_basis="operational",
         notes="Foliant caps one request at 1000; upstream does not publish a larger guarantee.",
     ),
     ("zzshare", "realtime"): EndpointContract(
@@ -109,11 +114,11 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
         notes="Provider documents 20 calls per minute; one request should batch symbols.",
     ),
     ("zzshare", "security_master"): EndpointContract(
-        "zzshare", "security_master", "security_master", "optional_token", None, None,
+        "zzshare", "security_master", "security_master", "token", None, None,
         1.0, 1, 20.0, 2, quota_basis="operational",
     ),
     ("zzshare", "trade_calendar"): EndpointContract(
-        "zzshare", "trade_calendar", "a_share_trade_calendar", "optional_token", None, None,
+        "zzshare", "trade_calendar", "a_share_trade_calendar", "token", None, None,
         1.0, 1, 20.0, 2, supports_pit=True, quota_basis="operational",
     ),
     ("zzshare", "valuation"): EndpointContract(
@@ -127,7 +132,8 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ),
     ("eltdx", "bars"): EndpointContract(
         "eltdx", "bars", "daily/minute_ohlcv", "none", 3200, 800,
-        0.05, 2, 8.0, 1, adjustment="raw", quota_basis="protocol",
+        0.05, 2, 8.0, 1, adjustment="raw", volume_unit="provider_native",
+        amount_unit="provider_native", quota_basis="protocol",
         notes="800 bars per protocol page; logical request is bounded by MARKET_DATA_MAX_BARS.",
     ),
     ("eltdx", "quotes"): EndpointContract(
@@ -145,7 +151,8 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ),
     ("baostock", "daily"): EndpointContract(
         "baostock", "daily", "daily_ohlcv", "anonymous_login", None, None,
-        0.2, 1, 15.0, 1, adjustment="raw/qfq", quota_basis="operational",
+        0.2, 1, 15.0, 1, adjustment="raw/qfq", volume_unit="shares",
+        amount_unit="yuan", quota_basis="operational",
         notes="Single serialized session; Foliant does not rely on an undocumented daily quota.",
     ),
     ("cninfo", "announcements"): EndpointContract(
@@ -196,8 +203,24 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
     key = (provider.lower(), endpoint.lower(), contract)
     with _GATES_LOCK:
         gate = _GATES.setdefault(key, _Gate(contract))
+    rate_slot = None
+    # Do not probe an implicit localhost Redis from data-source hot paths. A
+    # shared gate is enabled only when deployment explicitly configures Redis.
+    if os.getenv("REDIS_URL") or os.getenv("REDIS_HOST"):
+        try:
+            from cache import rate_slot
+        except Exception:
+            rate_slot = None
     with gate.enter():
-        yield contract
+        if rate_slot is None:
+            yield contract
+        else:
+            with rate_slot(
+                f"source:{key[0]}:{key[1]}",
+                contract.min_interval_seconds,
+                contract.timeout_seconds,
+            ):
+                yield contract
 
 
 def _reset_for_tests() -> None:

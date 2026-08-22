@@ -7,14 +7,12 @@ EVENING_TIMES = {
     'rag_ingest': '20:15',          # 默认关闭；启用时 60 分钟预算，21:15 前收尾
     'fund_evening': '22:00',        # 20 分钟预算，22:20 前收尾
     'daily_pnl_snapshot': '22:30',  # 默认 10 分钟预算，22:40 前收尾
-    'pg_backup': '23:00',           # 10 分钟预算，23:10 前收尾
 }
 
 EVENING_MAX_RUNTIME_MINUTES = {
     'rag_ingest': 60,
     'fund_evening': 20,
     'daily_pnl_snapshot': 10,
-    'pg_backup': 10,
     'weekly_db_cleanup': 10,
 }
 

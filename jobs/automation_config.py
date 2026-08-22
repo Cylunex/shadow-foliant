@@ -156,7 +156,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🧹 每周数据库清理',
         'schedule': f"周日 {WEEKEND_TIMES['weekly_db_cleanup'][1]}",
         'category': '核心', 'default': True, 'core': True,
-        'description': '清理过期分析记录 + VACUUM(SQLite)',
+        'description': '清理过期分析记录；空间回收由 PostgreSQL autovacuum 管理',
     },
     'mx_daily_analysis': {
         'cn': '🌙 妙想收盘复盘',
@@ -318,13 +318,6 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '基金',
         'default': True,  # 仍 True:由 fund_premarket 调用时要执行(只是不再单独注册调度);可单独关掉它的子步骤
         'description': '扫常用宽基指数滚动PE分位,低估的提示加投(估值定投择时依据)',
-    },
-    'pg_backup': {
-        'cn': '💾 运维：PG 全量备份到本地 SQLite',
-        'schedule': f"{EVENING_TIMES['pg_backup']} 每日",
-        'category': '运维',
-        'default': True,
-        'description': '把生产 PostgreSQL 所有表备份到 db/pg_backup.db(离线副本/灾备)',
     },
     'rag_ingest': {
         'cn': '🔎 运维：语义检索语料摄取',

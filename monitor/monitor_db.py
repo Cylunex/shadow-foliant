@@ -1,8 +1,8 @@
 import os, sys  # noqa: E401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: F401  路径引导
-import sqlite3
 import json
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 import os
@@ -77,7 +77,7 @@ class StockMonitorDatabase:
         # 检查并添加trading_hours_only字段（兼容已有数据库）
         try:
             cursor.execute("SELECT trading_hours_only FROM monitored_stocks LIMIT 1")
-        except sqlite3.OperationalError:
+        except Exception:
             cursor.execute("ALTER TABLE monitored_stocks ADD COLUMN trading_hours_only BOOLEAN DEFAULT TRUE")
             print("✅ 已添加trading_hours_only字段")
         
@@ -622,5 +622,22 @@ class StockMonitorDatabase:
         print(f"\n[OK] 批量同步完成: 新增{added}只, 更新{updated}只, 失败{failed}只")
         return result
 
-# 全局数据库实例
-monitor_db = StockMonitorDatabase()
+class _LazyMonitorDatabase:
+    """Delay the production connection until a monitor operation is requested."""
+
+    def __init__(self):
+        self._instance = None
+        self._lock = threading.Lock()
+
+    def _get(self):
+        if self._instance is None:
+            with self._lock:
+                if self._instance is None:
+                    self._instance = StockMonitorDatabase()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+monitor_db = _LazyMonitorDatabase()

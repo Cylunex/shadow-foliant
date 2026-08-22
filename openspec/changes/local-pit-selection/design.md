@@ -8,7 +8,7 @@ records provider, origin, as-of/effective/retrieval timestamps, adjustment/unit,
 schema version and quality. Initial history is populated in 320-500 whole-market
 date requests rather than thousands of per-symbol calls.
 
-At selection time the process performs no bulk external market or financial reads:
+At selection time the formal rank performs no external market or financial reads:
 
 ```text
 local universe + PIT fundamentals + qfq bars + structured events
@@ -17,9 +17,10 @@ local universe + PIT fundamentals + qfq bars + structured events
   -> 60-day structure TOP50
   -> 120/250 corrections
   -> industry breadth/concentration TOP20
-  -> final TOP5-15
+  -> local TOP15 -> deterministic TOP5
 
 Wencai cache -> reference candidates -> overlap/difference report only
+Agent/quotes -> review and display metadata only
 ```
 
 ## Interface boundaries
@@ -39,8 +40,9 @@ exact-date acceptance and source repair. The selector reads only the warehouse.
 - Informational: Wencai overlap and optional event descriptions. Missing values do
   not change the primary score.
 
-Warehouse coverage below the configured minimum yields an incomplete run with no
-primary candidates. It never activates an external discovery fallback.
+Stale prior-trading-day data, unknown volume units, warehouse coverage below the
+configured minimum, or insufficient financial coverage yields an incomplete run
+with no primary candidates. It never activates an external discovery fallback.
 
 ## Scoring
 

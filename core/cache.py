@@ -131,7 +131,7 @@ def cached(prefix: str, ttl: int = 60):
 def lock(name: str, ttl: int = 300, wait: float = 0):
     """分布式锁(SET NX EX)。拿到 yield True,拿不到 yield False。Redis 不可用直接 yield True(单机退化)。
     用法:
-        with lock('job:pg_backup') as ok:
+        with lock('job:research_sync') as ok:
             if not ok: return   # 别处在跑,跳过
             ...
     """
@@ -157,6 +157,34 @@ def lock(name: str, ttl: int = 300, wait: float = 0):
                     c.delete(key)
             except Exception:
                 pass
+
+
+@contextmanager
+def rate_slot(name: str, interval_seconds: float, wait_seconds: float = 10.0):
+    """Reserve a cross-process Redis slot for the whole minimum interval.
+
+    The key is deliberately left to expire instead of being deleted on exit.
+    If Redis is unavailable, the caller still retains its in-process gate.
+    """
+    c = _redis()
+    if not c or interval_seconds <= 0:
+        yield
+        return
+    key = _NS + 'rate:' + name
+    ttl_ms = max(1, int(float(interval_seconds) * 1000))
+    deadline = time.monotonic() + max(0.1, float(wait_seconds))
+    token = str(time.time_ns())
+    while True:
+        try:
+            if c.set(key, token, nx=True, px=ttl_ms):
+                yield
+                return
+        except Exception:
+            yield
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f'distributed source rate limit reached: {name}')
+        time.sleep(min(0.1, max(0.01, interval_seconds / 10)))
 
 
 if __name__ == '__main__':

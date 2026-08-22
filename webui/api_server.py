@@ -1,13 +1,13 @@
 """WebUI 原型后端 —— FastAPI,复用项目现有纯函数,暴露 REST 给 SPA 前端。
 
-定位:替代 Streamlit 的"新 UI 方案"原型(用户选 FastAPI + React/Vue)。本原型前端用 Vue3 免构建版
+Stock Web FastAPI API 与 Vue3 SPA 入口。
 (webui/static/index.html),后端这层是真正的 REST,生产换 Vite+React/Vue 时后端不变。
 
 运行:
     cd <项目根>
     uvicorn webui.api_server:app --port 8600 --reload
     # 浏览器开 http://localhost:8600
-本机 .env 是内网 PG(可能不通),试用建议:  USE_POSTGRES=false uvicorn webui.api_server:app --port 8600
+本机调试也需要可访问的 PostgreSQL；不再提供本地数据库降级路径。
 """
 
 from __future__ import annotations

@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -18,16 +19,19 @@ class ManualDependencyQueueTests(unittest.TestCase):
         self.old_initialized = task_control._INITIALIZED
         self.old_task_pg = task_control.USE_POSTGRES
         self.old_db_pg = db_compat.USE_POSTGRES
+        self.old_connect = task_control.db_connect
         task_control._DB_PATH = os.path.join(self.tmp.name, 'jobs.db')
         task_control._INITIALIZED = False
         task_control.USE_POSTGRES = False
         db_compat.USE_POSTGRES = False
+        task_control.db_connect = lambda path, **_kwargs: sqlite3.connect(path)
 
     def tearDown(self):
         task_control._DB_PATH = self.old_db_path
         task_control._INITIALIZED = self.old_initialized
         task_control.USE_POSTGRES = self.old_task_pg
         db_compat.USE_POSTGRES = self.old_db_pg
+        task_control.db_connect = self.old_connect
         self.tmp.cleanup()
 
     @staticmethod
@@ -35,7 +39,7 @@ class ManualDependencyQueueTests(unittest.TestCase):
         return ('upstream',) if name == 'downstream' else ()
 
     def _mark_scheduled(self, name, status):
-        conn = db_compat.connect(task_control._DB_PATH)
+        conn = task_control.db_connect(task_control._DB_PATH)
         now = datetime.now().astimezone().isoformat(timespec='seconds')
         conn.execute('''
             INSERT INTO job_runs(job_name, started_at, finished_at, status, error)

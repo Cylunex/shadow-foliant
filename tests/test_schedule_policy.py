@@ -46,14 +46,13 @@ class SchedulePolicyTests(unittest.TestCase):
         self.assertEqual(REGISTRY['mx_weekend_outlook']['schedule'], '周日 08:00')
         self.assertEqual(REGISTRY['weekend_portfolio']['schedule'], '周日 12:05')
         self.assertEqual(REGISTRY['weekly_db_cleanup']['schedule'], '周日 23:15')
-        self.assertEqual(REGISTRY['pg_backup']['schedule'], '23:00 每日')
         self.assertTrue(REGISTRY['rag_ingest']['schedule'].startswith('20:15 每日'))
 
         source = inspect.getsource(jobs_hub.register_default_jobs)
         for name in ('mx_weekend_outlook', 'weekend_portfolio', 'weekly_db_cleanup',
                      'wf_weekly_backtest', 'ai_eval_weekly'):
             self.assertIn(f"WEEKEND_TIMES['{name}']", source)
-        for name in ('rag_ingest', 'fund_evening', 'daily_pnl_snapshot', 'pg_backup'):
+        for name in ('rag_ingest', 'fund_evening', 'daily_pnl_snapshot'):
             self.assertIn(f"EVENING_TIMES['{name}']", source)
 
 

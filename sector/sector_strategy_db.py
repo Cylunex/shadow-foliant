@@ -6,13 +6,12 @@ import _bootstrap  # noqa: F401  路径引导
 用于存储板块策略历史数据和分析报告
 """
 
-import sqlite3
 from datetime import datetime
 import json
 import pandas as pd
 import logging
 
-# DB 路由（USE_POSTGRES=true 时走 PG，仅迁移分析报告，原始数据缓存保留 SQLite）
+# PostgreSQL runtime storage.
 from db_compat import connect as db_connect, USE_POSTGRES
 
 

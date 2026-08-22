@@ -9,6 +9,7 @@ import pandas as pd
 
 import _bootstrap  # noqa: F401
 from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy
+from analysis.selection_finalizer import finalize_local_selection
 from data.research_store import ResearchStore
 from data.source_contracts import contracts, get_contract
 from data.sources import zzshare
@@ -108,6 +109,28 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(result["provider_list_status"].tolist(), [1])
         self.assertEqual(api.kwargs["list_status"], "L")
 
+    def test_unknown_volume_unit_is_rejected_instead_of_guessed(self):
+        raw = pd.DataFrame({
+            "trade_date": pd.date_range("2026-08-17", periods=3),
+            "open": [10, 10, 10], "high": [11, 11, 11],
+            "low": [9, 9, 9], "close": [10, 10, 10],
+            "vol": [100, 100, 100], "amount": [12_340, 12_340, 12_340],
+        })
+        result = zzshare._standardize(raw, time_col="trade_date", volume_col="vol")
+        self.assertTrue(result["volume"].isna().all())
+        self.assertEqual(result.attrs["quality_status"], "unknown_unit")
+
+    def test_lot_volume_is_normalized_to_shares_only_when_validated(self):
+        raw = pd.DataFrame({
+            "trade_date": pd.date_range("2026-08-17", periods=3),
+            "open": [10, 10, 10], "high": [11, 11, 11],
+            "low": [9, 9, 9], "close": [10, 10, 10],
+            "vol": [100, 200, 300], "amount": [100_000, 200_000, 300_000],
+        })
+        result = zzshare._standardize(raw, time_col="trade_date", volume_col="vol")
+        self.assertEqual(result["volume"].tolist(), [10_000, 20_000, 30_000])
+        self.assertEqual(result.attrs["volume_unit"], "shares")
+
 
 class ResearchStoreAndSelectionTest(unittest.TestCase):
     def setUp(self):
@@ -136,6 +159,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         } for i in range(count)])
         securities.attrs["provenance"] = self._provenance(end.date().isoformat())
         self.store.upsert_securities(securities)
+        self.store.upsert_trade_days(day.date().isoformat() for day in dates)
 
         records = []
         for i in range(count):
@@ -176,7 +200,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             } for i in range(count)])
             frame.attrs["provenance"] = self._provenance(end.date().isoformat())
             self.store.upsert_financial_pit(table, frame, as_of=end.date().isoformat())
-        return end.date().isoformat()
+        return (end + pd.offsets.BDay(1)).date().isoformat()
 
     def test_future_finance_never_enters_pit_store(self):
         frame = pd.DataFrame([{
@@ -187,6 +211,40 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertEqual(self.store.upsert_financial_pit(
             "indicator", frame, as_of="2026-08-21"
         ), 0)
+
+    def test_finance_revisions_are_preserved_and_loaded_point_in_time(self):
+        for as_of, pub_date, roe in (
+            ("2026-08-20", "2026-08-20", 10),
+            ("2026-08-21", "2026-08-21", 12),
+        ):
+            frame = pd.DataFrame([{
+                "code": "600000.SH", "statDate": "2026-06-30",
+                "pubDate": pub_date, "roe": roe,
+            }])
+            frame.attrs["provenance"] = self._provenance(as_of)
+            self.assertEqual(self.store.upsert_financial_pit(
+                "indicator", frame, as_of=as_of
+            ), 1)
+        early = self.store.load_financial_pit("indicator", "2026-08-20")
+        late = self.store.load_financial_pit("indicator", "2026-08-21")
+        self.assertEqual(early.iloc[0]["roe"], 10)
+        self.assertEqual(late.iloc[0]["roe"], 12)
+
+    def test_title_only_event_never_enters_formal_event_store(self):
+        title_only = {
+            "symbol": "600000", "event_type": "earnings",
+            "event_date": "2026-08-20", "direction": -1,
+            "confidence": 1, "materiality": 1, "surprise": -1,
+            "confirmation_status": "title_only", "source": "cninfo",
+        }
+        self.assertEqual(self.store.save_events([title_only]), 0)
+        self.assertTrue(self.store.load_events("2026-08-21").empty)
+        confirmed = {
+            **title_only, "confirmation_status": "confirmed",
+            "document_id": "example-document", "novelty": 1,
+        }
+        self.assertEqual(self.store.save_events([confirmed]), 1)
+        self.assertEqual(len(self.store.load_events("2026-08-21")), 1)
 
     def test_latest_master_is_only_available_through_ingestion_view(self):
         frame = pd.DataFrame([{
@@ -215,7 +273,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
                 {"symbol": "000001", "source_labels": ["问财·小市值"]},
             ],
         )
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "success", result)
         self.assertEqual(len(result["candidates"]), 6)
         self.assertFalse(result["comparison"]["reference_affects_score"])
         self.assertIn("000001", result["comparison"]["reference_only"])
@@ -229,12 +287,12 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         selection_date = self._seed()
         conn = self.store.connect()
         try:
-            conn.execute("UPDATE research_securities SET list_status='1'")
+            conn.execute("UPDATE research_security_snapshots SET list_status='1'")
             conn.commit()
         finally:
             conn.close()
         result = LocalStockSelector(self.store).run(selection_date, persist=False)
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "success", result)
         self.assertGreater(len(result["candidates"]), 0)
 
     def test_diversification_uses_board_buckets_when_industry_is_missing(self):
@@ -275,6 +333,24 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertEqual(result["status"], "incomplete")
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["comparison"]["reference_only"], ["600000"])
+
+    def test_stale_market_snapshot_fails_closed(self):
+        self._seed()
+        self.store.upsert_trade_days(["2026-08-24"])
+        result = LocalStockSelector(self.store).run("2026-08-25", persist=False)
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["metadata"]["reason"], "local market snapshot is stale")
+
+    def test_final_top_five_ignores_llm_and_quote_fields(self):
+        rows = [
+            {"code": "600001", "score": 80, "rank": 2,
+             "debate_verdict": "否决", "change_pct": 9},
+            {"code": "600002", "score": 90, "rank": 1,
+             "debate_verdict": "买入", "change_pct": -2},
+        ]
+        result = finalize_local_selection(rows, limit=2)
+        self.assertEqual([row["code"] for row in result], ["600002", "600001"])
+        self.assertTrue(all(row["ranking_source"] == "local_pit_snapshot" for row in result))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ portfolio positions and trades are intentionally outside this schema.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
@@ -15,11 +16,11 @@ import uuid
 import pandas as pd
 
 import _bootstrap
-from db_compat import USE_POSTGRES, connect as db_connect
+from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def _json(value) -> str:
@@ -56,9 +57,13 @@ def _iso_date(value: object) -> str:
 
 
 class ResearchStore:
-    def __init__(self, path: Optional[str] = None, *, connect_fn: Optional[Callable] = None):
+    def __init__(self, path: Optional[str] = None, *, connect_fn: Optional[Callable] = None,
+                 is_postgres: Optional[bool] = None):
         self.path = str(path or DEFAULT_PATH)
         self._connect_fn = connect_fn or db_connect
+        # Explicit test adapters may use an in-memory database. Production never
+        # guesses the dialect from a global feature flag: the default connector is PG.
+        self._is_postgres = (connect_fn is None) if is_postgres is None else is_postgres
         self.ensure_schema()
 
     def connect(self):
@@ -74,6 +79,19 @@ class ResearchStore:
                 as_of TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
                 status TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
                 quality_status TEXT NOT NULL, detail TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_trade_calendar (
+                trade_date TEXT PRIMARY KEY, provider TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_security_snapshots (
+                snapshot_date TEXT NOT NULL, symbol TEXT NOT NULL, ts_code TEXT NOT NULL,
+                name TEXT, exchange TEXT, market TEXT, industry TEXT, list_status TEXT,
+                list_date TEXT, delist_date TEXT, is_hs TEXT,
+                provider TEXT NOT NULL, origin TEXT NOT NULL, effective_at TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL, schema_version TEXT NOT NULL,
+                quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+                PRIMARY KEY(snapshot_date,symbol)
             )""",
             """CREATE TABLE IF NOT EXISTS research_securities (
                 symbol TEXT PRIMARY KEY, ts_code TEXT NOT NULL, name TEXT,
@@ -114,12 +132,33 @@ class ResearchStore:
                 payload TEXT NOT NULL,
                 PRIMARY KEY(table_name, symbol, as_of)
             )""",
+            """CREATE TABLE IF NOT EXISTS research_financial_facts (
+                table_name TEXT NOT NULL, symbol TEXT NOT NULL, stat_date TEXT NOT NULL,
+                pub_date TEXT NOT NULL, revision_no TEXT NOT NULL, provider TEXT NOT NULL,
+                first_seen_as_of TEXT NOT NULL, origin TEXT NOT NULL,
+                effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+                schema_version TEXT NOT NULL, quality_status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(table_name,symbol,stat_date,pub_date,revision_no,provider)
+            )""",
             """CREATE TABLE IF NOT EXISTS research_events (
                 event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, event_type TEXT NOT NULL,
                 event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
                 direction REAL NOT NULL, confidence REAL NOT NULL,
                 source TEXT NOT NULL, official INTEGER NOT NULL DEFAULT 0,
                 title TEXT, payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_event_records (
+                event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, event_type TEXT NOT NULL,
+                event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
+                direction REAL NOT NULL, confidence REAL NOT NULL, materiality REAL NOT NULL,
+                surprise REAL NOT NULL, novelty REAL NOT NULL,
+                source_family TEXT NOT NULL, source_origin TEXT NOT NULL,
+                document_id TEXT NOT NULL, event_cluster_id TEXT NOT NULL,
+                confirmation_status TEXT NOT NULL, entity_impact TEXT NOT NULL,
+                official INTEGER NOT NULL DEFAULT 0, title TEXT,
+                original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
+                payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
             )""",
             f"""CREATE TABLE IF NOT EXISTS selection_runs (
                 run_id {id_type}, selection_date TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -138,16 +177,63 @@ class ResearchStore:
                 PRIMARY KEY(run_id, symbol, candidate_kind)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
+            "CREATE INDEX IF NOT EXISTS idx_research_security_snapshot ON research_security_snapshots(snapshot_date,symbol)",
+            "CREATE INDEX IF NOT EXISTS idx_research_financial_visible ON research_financial_facts(table_name,first_seen_as_of,pub_date,symbol)",
             "CREATE INDEX IF NOT EXISTS idx_research_finance_asof ON research_financial_pit(as_of, table_name)",
             "CREATE INDEX IF NOT EXISTS idx_research_events_date ON research_events(event_date, symbol)",
+            "CREATE INDEX IF NOT EXISTS idx_research_event_records_date ON research_event_records(event_date,symbol,confirmation_status)",
             "CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at)",
         ]
         try:
             for sql in statements:
                 cur.execute(sql)
+            self._migrate_v1_rows(cur)
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate_v1_rows(self, cur) -> None:
+        """Copy legacy cache rows into immutable V2 facts without deleting rollback data."""
+        if self._is_postgres:
+            cur.execute(
+                """INSERT INTO research_security_snapshots
+                   (snapshot_date,symbol,ts_code,name,exchange,market,industry,list_status,
+                    list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                    schema_version,quality_status,payload)
+                   SELECT as_of,symbol,ts_code,name,exchange,market,industry,list_status,
+                          list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                          '2',quality_status,payload FROM research_securities
+                   ON CONFLICT(snapshot_date,symbol) DO NOTHING"""
+            )
+            cur.execute(
+                """INSERT INTO research_financial_facts
+                   (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
+                    origin,effective_at,retrieved_at,schema_version,quality_status,payload)
+                   SELECT table_name,symbol,COALESCE(NULLIF(stat_date,''),'0001-01-01'),
+                          COALESCE(NULLIF(pub_date,''),as_of),'legacy',provider,as_of,origin,
+                          effective_at,retrieved_at,'2',quality_status,payload
+                   FROM research_financial_pit
+                   ON CONFLICT(table_name,symbol,stat_date,pub_date,revision_no,provider) DO NOTHING"""
+            )
+        else:
+            cur.execute(
+                """INSERT OR IGNORE INTO research_security_snapshots
+                   (snapshot_date,symbol,ts_code,name,exchange,market,industry,list_status,
+                    list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                    schema_version,quality_status,payload)
+                   SELECT as_of,symbol,ts_code,name,exchange,market,industry,list_status,
+                          list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                          '2',quality_status,payload FROM research_securities"""
+            )
+            cur.execute(
+                """INSERT OR IGNORE INTO research_financial_facts
+                   (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
+                    origin,effective_at,retrieved_at,schema_version,quality_status,payload)
+                   SELECT table_name,symbol,COALESCE(NULLIF(stat_date,''),'0001-01-01'),
+                          COALESCE(NULLIF(pub_date,''),as_of),'legacy',provider,as_of,origin,
+                          effective_at,retrieved_at,'2',quality_status,payload
+                   FROM research_financial_pit"""
+            )
 
     def start_sync(self, provider: str, capability: str, as_of: str) -> str:
         run_id = uuid.uuid4().hex
@@ -189,29 +275,31 @@ class ResearchStore:
             symbol = _symbol(record.get("ts_code") or record.get("code") or record.get("symbol"))
             if not symbol:
                 continue
+            snapshot_date = _iso_date(provenance.get("as_of") or date.today().isoformat())
             rows.append((
-                symbol, str(record.get("ts_code") or ""), _plain(record.get("name")),
+                snapshot_date, symbol, str(record.get("ts_code") or ""), _plain(record.get("name")),
                 _plain(record.get("exchange")), _plain(record.get("market")),
                 _plain(record.get("industry")), _plain(record.get("list_status")),
                 _iso_date(record.get("list_date")), _iso_date(record.get("delist_date")),
-                _plain(record.get("is_hs")), provenance.get("as_of", date.today().isoformat()),
-                provenance.get("provider", "unknown"), provenance.get("origin", "provider_api"),
+                _plain(record.get("is_hs")), provenance.get("provider", "unknown"),
+                provenance.get("origin", "provider_api"),
                 provenance.get("effective_at", date.today().isoformat()), now,
                 provenance.get("schema_version", SCHEMA_VERSION),
                 provenance.get("quality_status", "ok"),
                 _json({k: _plain(v) for k, v in record.items()}),
             ))
         self._executemany(
-            """INSERT INTO research_securities
-               (symbol,ts_code,name,exchange,market,industry,list_status,list_date,delist_date,is_hs,
-                as_of,provider,origin,effective_at,retrieved_at,schema_version,quality_status,payload)
+            """INSERT INTO research_security_snapshots
+               (snapshot_date,symbol,ts_code,name,exchange,market,industry,list_status,list_date,
+                delist_date,is_hs,provider,origin,effective_at,retrieved_at,schema_version,
+                quality_status,payload)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(symbol) DO UPDATE SET
+               ON CONFLICT(snapshot_date,symbol) DO UPDATE SET
                 ts_code=excluded.ts_code,name=excluded.name,exchange=excluded.exchange,
                 market=excluded.market,industry=excluded.industry,list_status=excluded.list_status,
                 list_date=excluded.list_date,delist_date=excluded.delist_date,is_hs=excluded.is_hs,
-                as_of=excluded.as_of,provider=excluded.provider,origin=excluded.origin,
-                effective_at=excluded.effective_at,retrieved_at=excluded.retrieved_at,
+                provider=excluded.provider,origin=excluded.origin,effective_at=excluded.effective_at,
+                retrieved_at=excluded.retrieved_at,
                 schema_version=excluded.schema_version,quality_status=excluded.quality_status,
                 payload=excluded.payload""", rows,
         )
@@ -309,23 +397,27 @@ class ResearchStore:
             if table != "valuation" and (not pub_date or pd.Timestamp(pub_date) > cutoff):
                 continue
             stat_date = _iso_date(record.get("statDate") or record.get("stat_date"))
+            if not stat_date:
+                continue
+            payload = _json({k: _plain(v) for k, v in record.items()})
+            revision_no = str(
+                record.get("revision_no") or record.get("revisionNo")
+                or record.get("update_flag") or hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+            )
             rows.append((
-                table, symbol, _iso_date(as_of), stat_date, pub_date,
-                provenance.get("provider", "unknown"), provenance.get("origin", "provider_api"),
-                pub_date or _iso_date(as_of), now, provenance.get("schema_version", SCHEMA_VERSION),
-                provenance.get("quality_status", "ok"),
-                _json({k: _plain(v) for k, v in record.items()}),
+                table, symbol, stat_date, pub_date, revision_no,
+                provenance.get("provider", "unknown"), _iso_date(as_of),
+                provenance.get("origin", "provider_api"), pub_date, now,
+                provenance.get("schema_version", SCHEMA_VERSION),
+                provenance.get("quality_status", "ok"), payload,
             ))
         self._executemany(
-            """INSERT INTO research_financial_pit
-               (table_name,symbol,as_of,stat_date,pub_date,provider,origin,effective_at,
-                retrieved_at,schema_version,quality_status,payload)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(table_name,symbol,as_of) DO UPDATE SET
-                stat_date=excluded.stat_date,pub_date=excluded.pub_date,provider=excluded.provider,
-                origin=excluded.origin,effective_at=excluded.effective_at,
-                retrieved_at=excluded.retrieved_at,schema_version=excluded.schema_version,
-                quality_status=excluded.quality_status,payload=excluded.payload""", rows,
+            """INSERT INTO research_financial_facts
+               (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
+                origin,effective_at,retrieved_at,schema_version,quality_status,payload)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(table_name,symbol,stat_date,pub_date,revision_no,provider) DO UPDATE SET
+                retrieved_at=excluded.retrieved_at,quality_status=excluded.quality_status""", rows,
         )
         return len(rows)
 
@@ -333,6 +425,8 @@ class ResearchStore:
         rows = []
         now = datetime.now().astimezone().isoformat()
         for item in events:
+            if str(item.get("confirmation_status") or "").lower() != "confirmed":
+                continue
             symbol = _symbol(item.get("symbol"))
             effective = _iso_date(item.get("effective_at") or item.get("event_date"))
             if not symbol or not effective:
@@ -346,15 +440,27 @@ class ResearchStore:
                 _iso_date(item.get("event_date") or effective), effective,
                 max(-1.0, min(1.0, float(item.get("direction") or 0))),
                 max(0.0, min(1.0, float(item.get("confidence") or 0))),
-                str(item.get("source") or "unknown"), int(bool(item.get("official"))),
-                str(item.get("title") or "")[:300], _json(item), now,
+                max(0.0, min(1.0, float(item.get("materiality") or 0))),
+                max(-1.0, min(1.0, float(item.get("surprise") or 0))),
+                max(0.0, min(1.0, float(item.get("novelty") or 0))),
+                str(item.get("source_family") or "disclosure"),
+                str(item.get("source_origin") or item.get("source") or "unknown"),
+                str(item.get("document_id") or ""), str(item.get("event_cluster_id") or event_id),
+                "confirmed", str(item.get("entity_impact") or "issuer"),
+                int(bool(item.get("official"))), str(item.get("title") or "")[:300],
+                _json(item.get("original_values") or {}),
+                _json(item.get("normalized_values") or {}), _json(item), now,
             ))
         self._executemany(
-            """INSERT INTO research_events
+            """INSERT INTO research_event_records
                (event_id,symbol,event_type,event_date,effective_at,direction,confidence,
-                source,official,title,payload,retrieved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                materiality,surprise,novelty,source_family,source_origin,document_id,
+                event_cluster_id,confirmation_status,entity_impact,official,title,
+                original_values,normalized_values,payload,retrieved_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(event_id) DO UPDATE SET direction=excluded.direction,
-                confidence=excluded.confidence,payload=excluded.payload,
+                confidence=excluded.confidence,materiality=excluded.materiality,
+                surprise=excluded.surprise,novelty=excluded.novelty,payload=excluded.payload,
                 retrieved_at=excluded.retrieved_at""", rows,
         )
         return len(rows)
@@ -372,6 +478,65 @@ class ResearchStore:
         finally:
             conn.close()
 
+    def upsert_trade_days(self, trade_days: Iterable[str], *, provider: str = "zzshare") -> int:
+        now = datetime.now().astimezone().isoformat()
+        rows = sorted({(_iso_date(day), provider, now) for day in trade_days if _iso_date(day)})
+        self._executemany(
+            """INSERT INTO research_trade_calendar(trade_date,provider,retrieved_at)
+               VALUES (?,?,?) ON CONFLICT(trade_date) DO UPDATE SET
+               provider=excluded.provider,retrieved_at=excluded.retrieved_at""",
+            rows,
+        )
+        return len(rows)
+
+    def expected_market_as_of(self, selection_date: str) -> Optional[str]:
+        """Return the last locally recorded completed trading day before selection."""
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT MAX(trade_date) FROM research_trade_calendar WHERE trade_date<?",
+                (_iso_date(selection_date),),
+            )
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] else None
+        finally:
+            conn.close()
+
+    def stale_trading_days(self, actual: str, expected: str) -> int:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT COUNT(*) FROM research_trade_calendar
+                   WHERE trade_date>? AND trade_date<=?""",
+                (_iso_date(actual), _iso_date(expected)),
+            )
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+
+    def daily_bar_symbol_count(self, trade_date: str, *, adjustment: str = "qfq",
+                               provider: Optional[str] = None) -> int:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            sql = (
+                "SELECT COUNT(DISTINCT symbol) FROM research_daily_bars "
+                "WHERE trade_date=? AND adjustment=? AND close>0 "
+                "AND quality_status NOT IN ('unknown_unit','failed')"
+            )
+            params: List[object] = [_iso_date(trade_date), adjustment]
+            if provider:
+                sql += " AND provider=?"
+                params.append(provider)
+            cur.execute(sql, tuple(params))
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+
     @staticmethod
     def _frame(cur) -> pd.DataFrame:
         rows = cur.fetchall()
@@ -383,9 +548,18 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
+                "SELECT MAX(snapshot_date) FROM research_security_snapshots WHERE snapshot_date<=?",
+                (_iso_date(as_of),),
+            )
+            row = cur.fetchone()
+            snapshot = row[0] if row and row[0] else None
+            if not snapshot:
+                return pd.DataFrame()
+            cur.execute(
                 """SELECT symbol,name,exchange,market,industry,list_status,list_date,quality_status
-                   FROM research_securities WHERE as_of<=? AND (delist_date='' OR delist_date IS NULL OR delist_date>?)""",
-                (as_of, as_of),
+                   FROM research_security_snapshots WHERE snapshot_date=?
+                   AND (delist_date='' OR delist_date IS NULL OR delist_date>?)""",
+                (snapshot, _iso_date(as_of)),
             )
             return self._frame(cur)
         finally:
@@ -400,7 +574,7 @@ class ResearchStore:
         conn = self.connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT MAX(as_of) FROM research_securities")
+            cur.execute("SELECT MAX(snapshot_date) FROM research_security_snapshots")
             row = cur.fetchone()
             latest = row[0] if row and row[0] else None
         finally:
@@ -453,16 +627,19 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                "SELECT MAX(as_of) FROM research_financial_pit WHERE table_name=? AND as_of<=?",
-                (table, as_of),
-            )
-            row = cur.fetchone()
-            if not row or not row[0]:
-                return pd.DataFrame()
-            cur.execute(
-                """SELECT symbol,as_of,stat_date,pub_date,quality_status,payload
-                   FROM research_financial_pit WHERE table_name=? AND as_of=?""",
-                (table, row[0]),
+                """SELECT symbol,first_seen_as_of AS as_of,stat_date,pub_date,revision_no,
+                          quality_status,payload FROM (
+                       SELECT symbol,first_seen_as_of,stat_date,pub_date,revision_no,
+                              quality_status,payload,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY symbol
+                                  ORDER BY stat_date DESC,pub_date DESC,
+                                           first_seen_as_of DESC,retrieved_at DESC
+                              ) AS row_no
+                       FROM research_financial_facts
+                       WHERE table_name=? AND pub_date<=? AND first_seen_as_of<=?
+                   ) visible WHERE row_no=1""",
+                (table, _iso_date(as_of), _iso_date(as_of)),
             )
             frame = self._frame(cur)
             if not frame.empty:
@@ -474,14 +651,19 @@ class ResearchStore:
             conn.close()
 
     def load_events(self, as_of: str, *, lookback_days: int = 120) -> pd.DataFrame:
-        start = (pd.Timestamp(as_of) - pd.Timedelta(days=lookback_days * 2)).date().isoformat()
+        start = (
+            pd.Timestamp(as_of).to_pydatetime()
+            - timedelta(days=int(lookback_days) * 2)
+        ).date().isoformat()
         conn = self.connect()
         try:
             cur = conn.cursor()
             cur.execute(
                 """SELECT symbol,event_type,event_date,effective_at,direction,confidence,
-                          source,official,title FROM research_events
-                   WHERE effective_at>=? AND effective_at<=?""", (start, as_of),
+                          materiality,surprise,novelty,source_origin AS source,official,title
+                   FROM research_event_records
+                   WHERE confirmation_status='confirmed' AND effective_at>=? AND effective_at<=?""",
+                (start, as_of),
             )
             return self._frame(cur)
         finally:
