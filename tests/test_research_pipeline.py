@@ -168,6 +168,18 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             "indicator", frame, as_of="2026-08-21"
         ), 0)
 
+    def test_latest_master_is_only_available_through_ingestion_view(self):
+        frame = pd.DataFrame([{
+            "ts_code": "600000.SH", "name": "样本", "list_status": "L",
+            "list_date": "2010-01-01", "delist_date": "",
+        }])
+        frame.attrs["provenance"] = self._provenance("2026-08-22")
+        self.store.upsert_securities(frame)
+        self.assertTrue(self.store.load_universe("2026-08-21").empty)
+        self.assertEqual(
+            self.store.load_latest_universe()["symbol"].tolist(), ["600000"]
+        )
+
     def test_local_pipeline_is_primary_and_wencai_is_reference_only(self):
         selection_date = self._seed()
         policy = SelectionPolicy(

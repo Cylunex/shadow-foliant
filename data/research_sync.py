@@ -102,7 +102,11 @@ class ResearchSynchronizer:
             primary_rows = self.store.upsert_daily_bars(frame, adjustment="qfq")
             result["providers"]["zzshare"] = primary_rows
 
-            universe = self.store.load_universe(trade_date)
+            # Coverage is an ingestion-health metric, so a weekend/manual sync
+            # compares the requested market day with the newest master snapshot.
+            # Selection itself still uses load_universe(selection_date) and
+            # therefore remains fail-closed against future master data.
+            universe = self.store.load_latest_universe()
             expected = len(universe)
             minimum_ratio = float(os.getenv("RESEARCH_DAILY_MIN_COVERAGE", "0.90"))
             missing: List[str] = []

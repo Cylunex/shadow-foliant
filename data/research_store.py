@@ -391,6 +391,22 @@ class ResearchStore:
         finally:
             conn.close()
 
+    def load_latest_universe(self) -> pd.DataFrame:
+        """Return the newest master snapshot for ingestion coverage checks.
+
+        This is deliberately separate from ``load_universe(as_of)``: selectors
+        remain point-in-time and must never borrow a later security master.
+        """
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(as_of) FROM research_securities")
+            row = cur.fetchone()
+            latest = row[0] if row and row[0] else None
+        finally:
+            conn.close()
+        return self.load_universe(latest) if latest else pd.DataFrame()
+
     def load_daily_panel(self, as_of: str, *, trading_days: int = 500,
                          adjustment: str = "qfq") -> pd.DataFrame:
         conn = self.connect()
