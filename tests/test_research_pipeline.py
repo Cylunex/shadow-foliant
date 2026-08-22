@@ -88,6 +88,26 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(api.calls[1][0], "v3/fundamentals/valuation/2026-08-21")
         self.assertEqual(api.calls[2][0], "v3/fundamentals/indicator/pit/2026-08-21")
 
+    def test_zzshare_security_master_normalizes_numeric_listed_status(self):
+        class Api:
+            def stock_basic(self, **kwargs):
+                self.kwargs = kwargs
+                return pd.DataFrame([{
+                    "ts_code": "600000.SH", "name": "样本", "list_status": 1,
+                }])
+
+        api = Api()
+        zzshare._api = api
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                result = zzshare.get_security_master()
+        finally:
+            zzshare._reset_for_tests()
+        self.assertEqual(result["list_status"].tolist(), ["L"])
+        self.assertEqual(result["provider_list_status"].tolist(), [1])
+        self.assertEqual(api.kwargs["list_status"], "L")
+
 
 class ResearchStoreAndSelectionTest(unittest.TestCase):
     def setUp(self):
@@ -203,6 +223,18 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             self.assertGreaterEqual(candidate["data_coverage"], 0.8)
         latest = self.store.latest_selection()
         self.assertEqual(latest["metadata"]["primary_pipeline"], "local_pit")
+
+    def test_local_pipeline_accepts_pre_normalization_numeric_listed_status(self):
+        selection_date = self._seed()
+        conn = self.store.connect()
+        try:
+            conn.execute("UPDATE research_securities SET list_status='1'")
+            conn.commit()
+        finally:
+            conn.close()
+        result = LocalStockSelector(self.store).run(selection_date, persist=False)
+        self.assertEqual(result["status"], "success")
+        self.assertGreater(len(result["candidates"]), 0)
 
     def test_incomplete_warehouse_does_not_fall_back_to_wencai(self):
         result = LocalStockSelector(self.store).run(

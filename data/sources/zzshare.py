@@ -324,6 +324,12 @@ def get_security_master() -> pd.DataFrame:
     if not code_col:
         return pd.DataFrame()
     out["ts_code"] = out[code_col].map(_ts_code)
+    # stock_basic was requested with list_status="L", but released SDK/API
+    # combinations may encode an active listing as integer/string 1. Preserve
+    # the provider value in the payload and expose one canonical store value.
+    if "list_status" in out.columns:
+        out["provider_list_status"] = out["list_status"]
+    out["list_status"] = "L"
     out = out[out["ts_code"] != ""].drop_duplicates("ts_code", keep="last")
     return _with_provenance(out.reset_index(drop=True), as_of=datetime.now().date().isoformat())
 

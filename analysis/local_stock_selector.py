@@ -233,8 +233,14 @@ class LocalStockSelector:
                     market_as_of: pd.Timestamp) -> pd.DataFrame:
         result = universe.copy()
         names = result.get("name", pd.Series("", index=result.index)).fillna("").astype(str)
-        statuses = result.get("list_status", pd.Series("L", index=result.index)).fillna("L").astype(str)
-        result = result[(statuses == "L") & ~names.str.upper().str.contains(r"(?:^|\*)ST", regex=True)]
+        statuses = (
+            result.get("list_status", pd.Series("L", index=result.index))
+            .fillna("L").astype(str).str.strip().str.upper()
+        )
+        # The normalized store value is L. Keep compatibility with snapshots
+        # ingested before normalization, where zzshare encoded listed as 1.
+        listed = statuses.isin({"L", "1", "LISTED", "ACTIVE", "TRUE"})
+        result = result[listed & ~names.str.upper().str.contains(r"(?:^|\*)ST", regex=True)]
         if os.getenv("EXCLUDE_KCB", "true").lower() not in {"0", "false", "no", "off"}:
             result = result[~result["symbol"].str.startswith(("688", "689"))]
         result = result[result["history_days"] >= self.policy.min_history_days]
