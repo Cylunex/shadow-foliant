@@ -103,6 +103,8 @@ SCHEMA: List[Dict[str, str]] = [
      'help': '兼容 Python 3.10+ 的 TDX 分钟/日线与快照主兜底'},
     {'key': 'ELTDX_HOSTS', 'label': '固定 eltdx 节点', 'group': '数据源', 'type': 'text',
      'help': '可选；逗号分隔，只能保存在受限配置'},
+    {'key': 'ELTDX_PROXY_URL', 'label': 'eltdx 专用代理', 'group': '数据源', 'type': 'secret',
+     'help': '可选 HTTP/SOCKS 代理 URI；只保存在受限配置且不会回显'},
     {'key': 'TDX_USE_EASY_TDX', 'label': '启用 easy-tdx', 'group': '数据源', 'type': 'bool',
      'help': '旧协议兼容末级兜底'},
     {'key': 'TDX_USE_TDX_PYTHON', 'label': '启用 tdx-python', 'group': '数据源', 'type': 'bool',

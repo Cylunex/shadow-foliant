@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Dict, List, Optional
+from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 
@@ -28,6 +29,9 @@ _INTRADAY = {"1m", "5m", "15m", "30m", "60m"}
 _lock = threading.RLock()
 _client = None
 _hard_unavailable = False
+_original_connect_socket = None
+_proxy_patch_signature = None
+_patched_connection_class = None
 
 
 def _enabled() -> bool:
@@ -70,9 +74,101 @@ def available() -> bool:
         return False
     try:
         from eltdx.client import TdxClient  # noqa: F401
+        if os.getenv("ELTDX_PROXY_URL", "").strip():
+            import socks  # noqa: F401
+            _proxy_config()
         return True
     except Exception:
         return False
+
+
+def _proxy_config():
+    """解析仓库外代理配置；返回值只在内存中使用，绝不进入日志。"""
+    value = os.getenv("ELTDX_PROXY_URL", "").strip()
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    defaults = {"http": 8080, "socks4": 1080, "socks4a": 1080,
+                "socks5": 1080, "socks5h": 1080}
+    scheme = parsed.scheme.lower()
+    if scheme not in defaults or not parsed.hostname:
+        raise ValueError("unsupported ELTDX proxy configuration")
+    try:
+        port = parsed.port or defaults[scheme]
+    except ValueError as exc:
+        raise ValueError("invalid ELTDX proxy port") from exc
+    return {
+        "scheme": scheme,
+        "host": parsed.hostname,
+        "port": port,
+        "username": unquote(parsed.username) if parsed.username else None,
+        "password": unquote(parsed.password) if parsed.password else None,
+    }
+
+
+def _install_proxy_connector() -> bool:
+    """只替换 eltdx 连接类的建连方法，不修改进程级 ``socket.socket``。"""
+    global _original_connect_socket, _proxy_patch_signature, _patched_connection_class
+    config = _proxy_config()
+    if config is None:
+        if _original_connect_socket is not None and _patched_connection_class is not None:
+            _patched_connection_class._connect_socket = _original_connect_socket
+            _original_connect_socket = None
+            _proxy_patch_signature = None
+            _patched_connection_class = None
+        return True
+    try:
+        import socks
+        from eltdx.exceptions import ConnectionClosedError
+        from eltdx.transport.connection import TdxConnection
+    except Exception:
+        return False
+
+    signature = tuple(config[key] for key in
+                      ("scheme", "host", "port", "username", "password"))
+    if _proxy_patch_signature == signature:
+        return True
+    if _original_connect_socket is None:
+        _original_connect_socket = TdxConnection._connect_socket
+        _patched_connection_class = TdxConnection
+
+    proxy_types = {
+        "http": socks.HTTP,
+        "socks4": socks.SOCKS4,
+        "socks4a": socks.SOCKS4,
+        "socks5": socks.SOCKS5,
+        "socks5h": socks.SOCKS5,
+    }
+
+    def _connect_socket_via_proxy(connection) -> None:
+        last_error = None
+        for host in connection._hosts:
+            address, raw_port = host.rsplit(":", 1)
+            sock = socks.socksocket()
+            sock.set_proxy(
+                proxy_types[config["scheme"]],
+                config["host"],
+                config["port"],
+                rdns=config["scheme"] in {"http", "socks4a", "socks5h"},
+                username=config["username"],
+                password=config["password"],
+            )
+            sock.settimeout(connection._timeout)
+            try:
+                sock.connect((address, int(raw_port)))
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                continue
+            sock.settimeout(None)
+            connection._socket = sock
+            connection._connected_host = host
+            return
+        raise ConnectionClosedError("unable to connect to any host via proxy") from last_error
+
+    TdxConnection._connect_socket = _connect_socket_via_proxy
+    _proxy_patch_signature = signature
+    return True
 
 
 def _new_client():
@@ -83,6 +179,11 @@ def _new_client():
         from eltdx.client import TdxClient
     except Exception:
         _hard_unavailable = True
+        return None
+    try:
+        if not _install_proxy_connector():
+            return None
+    except (TypeError, ValueError):
         return None
 
     kwargs = {
@@ -234,7 +335,13 @@ def get_quote(symbol: str) -> Optional[dict]:
 
 
 def _reset_for_tests() -> None:
-    global _hard_unavailable
+    global _hard_unavailable, _original_connect_socket, _proxy_patch_signature
+    global _patched_connection_class
     with _lock:
         _drop_client()
         _hard_unavailable = False
+        if _original_connect_socket is not None and _patched_connection_class is not None:
+            _patched_connection_class._connect_socket = _original_connect_socket
+        _original_connect_socket = None
+        _proxy_patch_signature = None
+        _patched_connection_class = None

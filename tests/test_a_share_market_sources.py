@@ -129,6 +129,68 @@ class ElTdxSourceTest(unittest.TestCase):
         self.assertEqual(eltdx._sdk_symbol('000001'), 'sz000001')
         self.assertEqual(eltdx._sdk_symbol('920001'), 'bj920001')
 
+    def test_proxy_config_decodes_credentials_without_exposing_it(self):
+        with patch.dict(os.environ, {
+            'ELTDX_PROXY_URL': 'http://user%40name:p%40ss@proxy.example.com:8080'
+        }):
+            config = eltdx._proxy_config()
+        self.assertEqual(config['scheme'], 'http')
+        self.assertEqual(config['host'], 'proxy.example.com')
+        self.assertEqual(config['port'], 8080)
+        self.assertEqual(config['username'], 'user@name')
+        self.assertEqual(config['password'], 'p@ss')
+
+    def test_proxy_connector_is_scoped_to_eltdx_connection(self):
+        calls = []
+
+        class FakeSocket:
+            def set_proxy(self, *args, **kwargs):
+                calls.append(('proxy', args, kwargs))
+
+            def settimeout(self, value):
+                calls.append(('timeout', value))
+
+            def connect(self, target):
+                calls.append(('connect', target))
+
+            def close(self):
+                calls.append(('close',))
+
+        fake_socks = types.SimpleNamespace(
+            HTTP=1, SOCKS4=2, SOCKS5=3, socksocket=FakeSocket,
+        )
+
+        class FakeConnectionClosedError(Exception):
+            pass
+
+        class FakeTdxConnection:
+            def _connect_socket(self):
+                raise AssertionError('direct connector must be replaced')
+
+        modules = {
+            'socks': fake_socks,
+            'eltdx.exceptions': types.SimpleNamespace(
+                ConnectionClosedError=FakeConnectionClosedError),
+            'eltdx.transport.connection': types.SimpleNamespace(
+                TdxConnection=FakeTdxConnection),
+        }
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, {
+            'ELTDX_PROXY_URL': 'socks5h://proxy.example.com:1080'
+        }):
+            self.assertTrue(eltdx._install_proxy_connector())
+            connection = FakeTdxConnection()
+            connection._hosts = ['example.invalid:7709']
+            connection._timeout = 3.0
+            connection._socket = None
+            connection._connected_host = None
+            connection._connect_socket()
+
+        self.assertIsInstance(connection._socket, FakeSocket)
+        self.assertEqual(connection._connected_host, 'example.invalid:7709')
+        self.assertIn(('connect', ('example.invalid', 7709)), calls)
+        proxy_call = next(item for item in calls if item[0] == 'proxy')
+        self.assertTrue(proxy_call[2]['rdns'])
+
     def test_kline_pages_and_normalizes_volume_to_shares(self):
         calls = []
 

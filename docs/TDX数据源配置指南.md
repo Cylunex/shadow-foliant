@@ -18,6 +18,7 @@ ZZSHARE_TOKEN=
 ZZSHARE_ENABLED=true
 TDX_USE_ELTDX=true
 ELTDX_HOSTS=
+ELTDX_PROXY_URL=
 ELTDX_TIMEOUT=8
 ELTDX_POOL_SIZE=2
 ELTDX_BATCH_SIZE=80
@@ -32,6 +33,7 @@ DATAHUB_INTRADAY_KLINE_TTL_SEC=60
 ```
 
 - `ELTDX_HOSTS` 和 `TDX_PYTHON_ADDRESS` 留空时由 SDK 自动选择；固定节点只写受限生产配置。
+- NAS 直连不稳定时可设置 `ELTDX_PROXY_URL`，支持 `http`、`socks4/socks4a`、`socks5/socks5h`。代理 URI 视为密钥，只写仓库外受限配置；实现只替换 eltdx 的连接方法，不修改进程全局 socket。
 - 设置固定节点时只在服务器受限配置中填写，不提交到仓库。
 - `MARKET_DATA_MAX_BARS` 是一次逻辑请求上限；TDX 每页最多 800 条，适配层自动分页。
 - zzshare 单次分钟请求受其服务配额限制，当前适配层最多请求 1000 条。
