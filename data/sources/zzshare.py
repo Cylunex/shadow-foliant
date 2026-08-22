@@ -104,11 +104,12 @@ def _ts_code(symbol: str) -> str:
 
 def _volume_multiplier(df: pd.DataFrame, volume_col: str) -> Optional[float]:
     """Validate shares/lots from amount ÷ volume ÷ price; never guess unknown units."""
-    if "amount" not in df.columns:
+    amount_col = next((name for name in ("amount", "turnover") if name in df.columns), None)
+    if amount_col is None:
         return None
     try:
         volume = pd.to_numeric(df[volume_col], errors="coerce")
-        amount = pd.to_numeric(df["amount"], errors="coerce")
+        amount = pd.to_numeric(df[amount_col], errors="coerce")
         close = pd.to_numeric(df["close"], errors="coerce")
         valid = (volume > 0) & (amount > 0) & (close > 0)
         if int(valid.sum()) >= 3:
@@ -140,6 +141,8 @@ def _standardize(df: Optional[pd.DataFrame], *, time_col: str, volume_col: str) 
     })
     if "amount" in df.columns:
         out["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    elif "turnover" in df.columns:
+        out["amount"] = pd.to_numeric(df["turnover"], errors="coerce")
     if time_col == "trade_date":
         out["date"] = out["date"].dt.normalize()
     out = (out.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")

@@ -97,6 +97,16 @@ class ZzshareSourceTest(unittest.TestCase):
         out = zzshare._standardize(raw, time_col='trade_date', volume_col='vol')
         self.assertEqual(out['volume'].tolist(), [1000, 2000, 3000])
 
+    def test_market_turnover_field_validates_share_volume(self):
+        raw = pd.DataFrame({
+            'trade_date': ['20260821'] * 3,
+            'ts_code': ['600000.SH', '000001.SZ', '920001.BJ'],
+            'close': [10.0, 20.0, 5.0],
+            'volume': [1000, 2000, 3000],
+            'turnover': [10_000, 40_000, 15_000],
+        })
+        self.assertEqual(zzshare._volume_multiplier(raw, 'volume'), 1.0)
+
     def test_sdk_exception_does_not_log_token_or_response(self):
         class Api:
             def stk_mins(self, **kwargs):

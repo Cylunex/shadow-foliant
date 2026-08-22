@@ -99,7 +99,7 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ("zzshare", "daily_market"): EndpointContract(
         "zzshare", "daily_market", "daily_market_snapshot", "token", 10000, 6000,
         1.0, 1, 20.0, 2, adjustment="raw/qfq/hfq", volume_unit="runtime_validated",
-        amount_unit="provider_native", quota_basis="published",
+        amount_unit="runtime_validated_turnover", quota_basis="published",
         notes="Provider documents 10000 maximum and recommends 6000 for one market day.",
     ),
     ("zzshare", "minute"): EndpointContract(
