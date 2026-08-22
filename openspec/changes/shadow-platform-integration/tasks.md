@@ -10,4 +10,4 @@
 - [x] Update browser navigation for user/admin visibility and logout actions.
 - [x] Update Platform catalog, OIDC example, service auth schema/doctor/docs, and tests.
 - [x] Run security tests, full unit tests, compileall, and shell syntax checks.
-- [ ] Commit, push, preflight production, back up configuration, deploy, and verify.
+- [x] Commit, push, preflight production, back up configuration, deploy, and verify.

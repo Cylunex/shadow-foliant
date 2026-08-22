@@ -13,5 +13,5 @@
 - [x] Persist Wencai separately and add overlap/difference metrics.
 - [x] Add read-only API exposure for latest local selection and source contracts.
 - [x] Complete targeted/full automated verification.
-- [ ] Bootstrap the production warehouse and validate coverage before enabling delivery.
-- [ ] Push and deploy a verified commit in a safe production window.
+- [x] Bootstrap the production warehouse and validate coverage before enabling delivery.
+- [x] Push and deploy a verified commit in a safe production window.

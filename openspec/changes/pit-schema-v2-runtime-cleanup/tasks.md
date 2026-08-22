@@ -12,5 +12,5 @@
 - [x] Remove production SQLite fallbacks, SQLite backup job, Docker and Streamlit.
 - [x] Add CI and focused regression coverage.
 - [x] Run the complete production dependency test suite.
-- [ ] Migrate/bootstrap production V2 data and validate coverage.
-- [ ] Push and deploy a verified commit in a safe window.
+- [x] Migrate/bootstrap production V2 data and validate coverage.
+- [x] Push and deploy a verified commit in a safe window.
