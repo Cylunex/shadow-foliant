@@ -1743,9 +1743,9 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
-    'strategy_prefetch':         1000,   # 盘前预取 5 问财+5 妙想(串行,各套 90s 逐策略硬超时);10×90+开销,给 1000s
+    'strategy_prefetch':         1000,   # 盘前预取 5 条问财外部参考；失败不影响本地主链
     'strategy_prefetch_retry':    360,    # 09:30 只补 4 条问财缓存缺口；4×75s 外层上限，09:45 前必收尾
-    'unified_selection':         1800,   # 综合选股(5大策略+InStock+多因子)+ 红蓝对抗整合(10只LLM)
+    'unified_selection':         1800,   # 本地 PIT 选股 + 红蓝对抗整合(10只LLM)
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
     'portfolio_indicator_snapshot': 1200,
@@ -2386,7 +2386,7 @@ def _run_strategy_scans() -> dict:
     degraded = [name for name, (ok, df, _msg) in results.items()
                 if not ok or df is None or len(df) == 0]
     if degraded:
-        print(f'[unified_selection] 问财层局部降级: {"、".join(degraded)}；继续使用妙想/InStock/多因子',
+        print(f'[unified_selection] 问财参考层局部降级: {"、".join(degraded)}；不影响本地主链',
               flush=True)
     return {'results': results, 'total': total}
 
@@ -3680,6 +3680,30 @@ def task_factor_collection():
         _log_run(job, 'error', error=str(e), started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_research_data_sync():
+    """盘后同步全市场本地研究快照；次日选股只读本地仓。"""
+    job = 'research_data_sync'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from data.research_sync import ResearchSynchronizer
+        syncer = ResearchSynchronizer()
+        master = syncer.sync_master()
+        result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
+        status = 'success' if result.get('quality_status') == 'ok' else 'error'
+        detail = (
+            f"market={result.get('providers', {}).get('zzshare', 0)} "
+            f"coverage={float(result.get('coverage') or 0):.1%} "
+            f"master={master.get('rows', 0)}"
+        )
+        _log_run(job, status, error=None if status == 'success' else detail,
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as e:
+        _log_run(job, 'error', error=f'{type(e).__name__}: research sync failed',
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_weekly_backtest():
     """🔗 工作流 C：周日晚 InStock 10 策略回测 → 推送"最有效策略"周报
 
@@ -4255,17 +4279,15 @@ def _prefetch_wencai_strategies(*, use_cache: bool, log_job: str) -> int:
 
 
 def task_strategy_prefetch():
-    """🏦 盘前预取**5 大问财策略 + 5 条妙想镜像策略**(共 10)→ 写当日缓存,09:45 unified_selection 读暖、
-    不在选股高峰现调外部源(问财熔断/卡死时整层选股不再哑火;妙想是非问财独立源,双源交叉)。
-    **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不告警(09:45 自动 fallback 现调)。
+    """🏦 盘前预取 5 条问财参考策略，09:45 只做本地主链结果对照。
+    **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不影响主选股。
       ① 主力资金(问财，最高优先级，避免前序请求耗尽额度)
-      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)
-      ③ 妙想·主力/低价/小市值/净利/低估值(妙想 selectSecurity,非问财独立源)"""
+      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)"""
     job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    done, total = 0, 10   # 5 问财 + 5 妙想镜像
+    done, total = 0, 5
     # 主力资金曾放在最后，实测前三条普通策略全量分页后低估值/主力连续
     # 403。现在主力优先，所有 TOP 查询均只拉单页。
     # ① 主力资金最高优先级。
@@ -4274,31 +4296,16 @@ def task_strategy_prefetch():
     # ② 4 个普通问财策略：每条只发一次精确问句，成功写 strategy_cache。
     done += _prefetch_wencai_strategies(
         use_cache=False, log_job='strategy_prefetch')
-    # ③ 妙想镜像 5 策略(非问财源,selectSecurity 海选 → strategy_cache 当日缓存)。串行,慢慢来。
-    try:
-        import mx_strategies
-        for name, query, st in mx_strategies.MX_STRATEGIES:
-            try:
-                ok, df, msg = _call_with_hard_timeout(name,
-                    lambda n=name, q=query, s=st: mx_strategies.run_one(n, q, s, use_cache=False), 90)
-                n = len(df) if (ok and df is not None and hasattr(df, 'empty') and not df.empty) else 0
-                if n:
-                    done += 1
-                print(f'[strategy_prefetch] {"✅" if n else "⚠️"} {name} {n} 只 ({str(msg)[:50]})', flush=True)
-            except Exception as e:
-                print(f'[strategy_prefetch] ⚠️ {name} 异常/超时: {type(e).__name__}: {str(e)[:60]}', flush=True)
-    except Exception as e:
-        print(f'[strategy_prefetch] ⚠️ 妙想镜像整体跳过: {type(e).__name__}: {str(e)[:60]}', flush=True)
     _log_run(job, 'success' if done else 'error',
-             error=f'prefetched {done}/{total}' if done else 'all_empty(问财不可达?09:45 现调兜底)',
+             error=f'prefetched {done}/{total}' if done else 'all_empty(问财参考不可达;本地主链继续)',
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
 def task_strategy_prefetch_retry():
     """09:30 软重试：优先补主力资金，再补其余问财缓存缺口。
 
-    这是候选丰富度增强，不是 09:45 综合选股的硬依赖。即便问财持续不可用，
-    unified_selection 仍应使用妙想/InStock/多因子继续运行，不能按依赖失败跳过。
+    这是外部发现参考，不是 09:45 本地选股的依赖。即便问财持续不可用，
+    unified_selection 仍应只使用本地 PIT 主链，不能把参考源提升为候选源。
     60s+75s×4 的理论上限为 360s，不与 09:45 主选股长期重叠。
     """
     job = 'strategy_prefetch_retry'
@@ -4319,182 +4326,66 @@ def task_strategy_prefetch_retry():
 
 
 def task_unified_selection():
-    """整合选股：多源并池产出 TOP15，并从中二次优选最终 TOP5。"""
+    """本地 PIT 主链产出 TOP15；问财只保存为独立参考，不参与评分。"""
     job = 'unified_selection'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
     try:
-        # candidates: code -> {'score': float, 'src': [来源标签]}(2026-06-12 加来源追踪,推送可解释)
-        candidates = {}
-        # 排除科创板(config.EXCLUDE_KCB,默认排除):统一在候选入口拦,覆盖所有源(问财/妙想/InStock/多因子)——
-        # 问财 5 策略 query 本就写"非科创板",但妙想 NL/多因子(沪深300含688)可能漏进 688/689,在此兜底。
-        try:
-            import config as _cfg_kcb
-            _exclude_kcb = bool(getattr(_cfg_kcb, 'EXCLUDE_KCB', True))
-        except Exception:
-            _exclude_kcb = True
-
-        def _candidate_meta(row):
-            """复用选股源已经返回的行业/题材字段，不在盘中补发外部请求。"""
-            if row is None:
-                return {}
-            try:
-                keys = row.index if hasattr(row, 'index') else row.keys()
-            except Exception:
-                return {}
-            out = {}
-            for target, aliases in {
-                    'industry': ('industry', 'sector', '所属行业', '行业', '细分行业'),
-                    'primary_theme': ('theme', 'concept', '题材', '概念', '题材归因'),
-            }.items():
-                for key in aliases:
-                    try:
-                        value = row.get(key) if key in keys else None
-                    except Exception:
-                        value = None
-                    text = str(value).strip() if value is not None else ''
-                    if text and text.lower() not in ('nan', 'none', 'n/a', '未知'):
-                        out[target] = text[:80]
-                        break
-            return out
-
-        def _add(code, pts, src, meta=None):
-            # ⭐ 代码归一成 6 位(2026-07-06 修):问财/妙想返回的代码常带 '.SZ/.SH' 后缀
-            # ('603719.SH'),不归一的话:①同票 '600711' 与 '600711.SH' 被当两只,双源交叉
-            # +2分从未生效;②带后缀进 top_list → quotes/stock_names 全取不到 → 推送里
-            # 非持仓票只有代码没名字没价格(7-6 实锤);③持仓判断/推荐池也错位。
-            import re as _re6
-            s = str(code or '').strip().upper()
-            s = _re6.sub(r'\.(SH|SZ|BJ|SS)$', '', s)
-            s = _re6.sub(r'^(SH|SZ|BJ)', '', s)
-            digits = ''.join(ch for ch in s if ch.isdigit())
-            if len(digits) != 6:   # A股代码恒6位;≠6 的是脏数据(价格/空值),丢弃
-                return
-            code = digits
-            if _exclude_kcb and (code.startswith('688') or code.startswith('689')):
-                return  # 科创板,排除(不入候选池)
-            c = candidates.setdefault(code, {'score': 0.0, 'src': []})
-            c['score'] += pts
-            if src and src not in c['src']:
-                c['src'].append(src)
-            for key, value in (meta or {}).items():
-                if value and not c.get(key):
-                    c[key] = value
-
-        # 1. 5大策略扫描(问财/dataapi) → 初选池
+        # 1. 问财继续并行一段时间，仅作外部发现/对照。它不能加候选、加分、
+        #    满足硬门槛，且本地仓覆盖不足时不得回退成主链。
         strategy_scan = _run_strategy_scans()
+        wencai_reference = []
         for sname, (ok, df, msg) in strategy_scan.get('results', {}).items():
             if ok and df is not None:
                 for _, row in df.iterrows():
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
-                        _add(code, 1.0, _WENCAI_SOURCE_LABELS.get(sname, sname),
-                             _candidate_meta(row))
+                        wencai_reference.append({
+                            'symbol': code,
+                            'source_labels': [_WENCAI_SOURCE_LABELS.get(sname, sname)],
+                        })
 
-        # 1b. 妙想智能选股镜像(非问财冗余源,2026-06-26):5 条妙想查询并池,与问财双源交叉——
-        # 同票被问财源+妙想源都命中 → +2分、命中2 source,排序靠前(下游合并/配额/红蓝照常筛)。
-        # 走 strategy_cache 当日缓存(盘前 strategy_prefetch 已预取);问财熔断时妙想仍出候选,整层不哑火。
-        # 开关 env UNIFIED_MX_STRATEGIES(默认开;设 false/0/no/off 关闭)。
-        if os.getenv('UNIFIED_MX_STRATEGIES', 'true').lower() not in ('false', '0', 'no', 'off'):
-            try:
-                import mx_strategies
-                _mx_hit = 0
-                for sname, (ok, df, msg) in mx_strategies.run_all(use_cache=True).items():
-                    if ok and df is not None:
-                        for _, row in df.iterrows():
-                            code = next((row[c] for c in ['代码', '股票代码', 'code', 'symbol']
-                                         if c in row.index), None)
-                            if code:
-                                _add(str(code).split('.')[0].zfill(6)[-6:], 1.0, sname,
-                                     _candidate_meta(row))
-                                _mx_hit += 1
-                if _mx_hit:
-                    print(f'[unified_selection] 妙想镜像 5 策略并池 {_mx_hit} 条命中', flush=True)
-            except Exception as _mxe:
-                print(f'[unified_selection] 妙想镜像选股跳过(不影响选股): {type(_mxe).__name__}: {str(_mxe)[:60]}')
-
-        # 2. InStock 13 策略扫描（对持仓+候选池批量跑,用基因组进化后的最优参数+组合新策略,按横截面评分加权）
-        strategy_weights = {}  # 提前定义:step2 整体失败时,后面"基因组热度摘要"不至于 NameError
-        try:
-            from instock_strategy_runner import run_batch
-            stock_list = [(c, '') for c in list(candidates.keys())[:30]]
-            instock_results = run_batch(stock_list, evolved=True)
-
-            # 取策略基因组最新横截面评分，作为命中权重
-            try:
-                from analysis.strategy_genome import get_strategy_intelligence
-                intel = get_strategy_intelligence(days=60)
-                for m in intel.get('market', []):
-                    sid = m.get('strategy_id', '')
-                    sc = m.get('score', 50) or 50
-                    strategy_weights[sid] = sc / 100.0  # 0~1 权重
-            except Exception:
-                pass
-
-            for r in instock_results:
-                sym = r.get('symbol', '')
-                matches = r.get('matched', [])
-                if matches:
-                    # 修复:matched 是 [{'id','cn','category'}],原来拿整个 dict 当权重表的 key
-                    # → TypeError 被外层吞掉,InStock 加权从来没生效过
-                    for m in matches:
-                        if not isinstance(m, dict):
-                            continue
-                        mid = m.get('id', '')
-                        base_id = mid.split(':')[0] if mid.startswith('composed:') else mid
-                        _weight = m.get('weight')
-                        if _weight is None:
-                            _weight = strategy_weights.get(base_id, 0.5)
-                        _add(sym, float(_weight), m.get('cn', mid), _candidate_meta(r))
-        except Exception:
-            pass
-
-        # 3. 多因子打分:5 大策略 / InStock / 多因子 平权各 +1, 让 TOP 由"被多个 source 命中"
-        # 主导, 而不是被多因子单一来源垄断(2026-06-16 调权:此前多因子 +2 比 5 大策略 +1 高一倍,
-        # 加上 InStock 基因组初期还没积累 → TOP 15 全是多因子, 失去多策略综合的意义)。
-        try:
-            from multi_factor_screener import screen_index_cached
-            # cache_only:只读盘后(kline_prefetch 尾)焐好的多因子缓存;冷了(盘后失败)就跳过多因子,
-            # **绝不在 09:45 选股高峰现拉全池**(那是当年东财被封 + 雪崩的量源)。
-            # index_code 不显式传 → 继承 DEFAULT_INDEX(默认中证A500),与盘后焐用同一缓存键。
-            mf_result = screen_index_cached(n=25, add_sector_leaders=True,
-                                            workers=1, force=False, ttl=3600, cache_only=True)
-            for item in mf_result.get('top', []):
-                sym = item.get('symbol', '')
-                if sym:
-                    _add(sym, 1.0, '多因子', _candidate_meta(item))
-        except Exception:
-            pass
-
-        # 排序 TOP 15:总分降序, 同分按"命中 source 数"二级排序(被多个策略命中的优先);
-        # **强制 source 多样性**:每个 source 最多 _MAX_PER_SOURCE 只, 防单一来源垄断。
-        # 配额满了就跳过, 取下一只(直到 15 个或候选耗尽)。
-        _MAX_PER_SOURCE = int(os.environ.get('UNIFIED_SELECTION_MAX_PER_SOURCE', '4'))
-        sorted_all = sorted(candidates.items(),
-                            key=lambda x: (-x[1]['score'], -len(x[1].get('src', []))))
-        source_count: Dict[str, int] = {}
-        top_list: List[str] = []
-        skipped_by_quota: List[str] = []
-        for code, info in sorted_all:
-            if len(top_list) >= 15:
-                break
-            srcs = info.get('src', []) or ['-']
-            # 这只所有来源都没达到配额上限, 才入选(任一来源已满 → 跳过)
-            if any(source_count.get(s, 0) >= _MAX_PER_SOURCE for s in srcs):
-                skipped_by_quota.append(code)
+        # 2. 本地 PIT 数据仓主链：基本面/估值 TOP200 → 60日 TOP50 →
+        #    120/250 日风险修正 → 行业分散 → TOP15。
+        from analysis.local_stock_selector import LocalStockSelector
+        local_result = LocalStockSelector().run(
+            datetime.now().strftime('%Y-%m-%d'),
+            wencai_reference=wencai_reference,
+            persist=True,
+        )
+        local_candidates = local_result.get('candidates', [])
+        if not local_candidates:
+            reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
+            raise RuntimeError(f'本地选股未产出: {reason}')
+        candidates = {}
+        top_list = []
+        for item in local_candidates:
+            code = str(item.get('symbol') or '')
+            if not code:
                 continue
             top_list.append(code)
-            for s in srcs:
-                source_count[s] = source_count.get(s, 0) + 1
-        # 配额制可能凑不满 15 只 → 用之前被跳过的高分股按原排序补齐
-        if len(top_list) < 15 and skipped_by_quota:
-            for code in skipped_by_quota:
-                if code in top_list:
-                    continue
-                top_list.append(code)
-                if len(top_list) >= 15:
-                    break
+            candidates[code] = {
+                'score': float(item.get('total_score') or 0),
+                'src': list(item.get('source_labels') or ['本地PIT数据仓']),
+                'industry': item.get('industry'),
+                'state': item.get('state'),
+                'data_coverage': item.get('data_coverage'),
+                'score_components': {
+                    key: item.get(key) for key in (
+                        'fundamental_score', 'technical_60_score', 'industry_score',
+                        'quality_score', 'correction_120', 'correction_250', 'event_correction'
+                    )
+                },
+            }
+        strategy_weights = {}  # 旧基因组摘要不再参与本地主链评分。
+        source_count = {'本地PIT数据仓': len(top_list)}
+        print(
+            f'[unified_selection] 本地主链 {len(top_list)} 只；问财参考 '
+            f'{len(local_result.get("wencai_reference", []))} 只；重合 '
+            f'{len(local_result.get("comparison", {}).get("overlap", []))} 只',
+            flush=True,
+        )
         held_codes = {c for c, _ in _holdings_codes()}
 
         # 批量拉行情（一次性比15次单独调快得多）
@@ -5223,6 +5114,20 @@ def task_announcement_scan():
         try:
             from announcement_scan import run_announcement_scan
             an = run_announcement_scan(codes, days=5, record_signals=True)
+            if an.get('items'):
+                from data.research_store import ResearchStore
+                _direction = {'利好': 1.0, '利空': -1.0, '中性': 0.0}
+                ResearchStore().save_events([{
+                    'symbol': item.get('code'),
+                    'event_type': item.get('type') or 'announcement',
+                    'event_date': item.get('event_date'),
+                    'effective_at': item.get('event_date'),
+                    'direction': _direction.get(item.get('direction'), 0.0),
+                    'confidence': float(item.get('strength') or 1) / 5.0,
+                    'source': item.get('source') or 'cninfo',
+                    'official': bool(item.get('official')),
+                    'title': item.get('summary') or '',
+                } for item in an['items']])
             if an.get('alerts'):
                 bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in an['alerts'])
                 risk_parts.append('【📢 公告利空】\n' + bad)
@@ -5725,8 +5630,8 @@ def register_default_jobs():
     时间表（CST，2026-06-25 大改:监控重构 + 盘后全挪 16:30 后）：
       08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
-      09:15/09:30 strategy_prefetch     — 问财+妙想首取 / 仅补问财缓存缺口
-      09:45 unified_selection           — 整合选股(5策略+InStock13+多因子并池;尾接红蓝对抗+候选池)
+      09:15/09:30 strategy_prefetch     — 问财外部参考首取 / 仅补缓存缺口
+      09:45 unified_selection           — 本地 PIT 选股主链；问财只对照，尾接红蓝复核
       10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
       10:30 mx_selection_review         — unified_selection 成功后过妙想诊断(D:分歧才推) + 急跌兜底
       11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
@@ -5739,6 +5644,7 @@ def register_default_jobs():
       16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(prefetch 成功后提交;次日早盘读它)
       16:48 daily_market_snapshot       — 📷 大盘快照
       16:55 eod_outcomes                — 🎯 盘后后验合并(prefetch 成功后提交:推荐池回填+信号后验)
+      17:10 research_data_sync          — 🗄️ 全市场日线/估值/PIT 财务写本地研究仓
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
@@ -5770,8 +5676,8 @@ def register_default_jobs():
     hub.register('fund_premarket',              '08:55', task_fund_premarket)
 
     # ---- 09:45 整合选股 ----
-    hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 问财+5 妙想入缓存(普通问财逐策略75s硬超时)
-    hub.register('strategy_prefetch_retry',     '09:30', task_strategy_prefetch_retry)  # 只补09:15失败的4条问财缓存；软增强，不阻断09:45其他源
+    hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 条问财外部参考
+    hub.register('strategy_prefetch_retry',     '09:30', task_strategy_prefetch_retry)  # 只补09:15缺口；不阻断本地主链
     hub.register('unified_selection',           '09:45', task_unified_selection)
     # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
     #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
@@ -5796,6 +5702,7 @@ def register_default_jobs():
     hub.register('daily_market_snapshot',       '16:48', task_daily_market_snapshot)
     # A 合并(2026-06-26):eod_outcomes = 原 ai_rec_check(16:35 推荐池回填)+ decision_signal_outcomes(信号后验)
     hub.register('eod_outcomes',                '16:55', task_eod_outcomes)             # 盘后后验合并(读暖缓存)
+    hub.register('research_data_sync',          '17:10', task_research_data_sync)       # 次日选股本地 PIT 数据
     hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
     hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 

@@ -32,7 +32,7 @@ def _parse_date(v) -> Optional[str]:
     return s[:10]
 
 
-def _recent_titles(code: str, days: int, cap: int = 8) -> List[str]:
+def _recent_records(code: str, days: int, cap: int = 8) -> List[dict]:
     try:
         import datahub
         anns = datahub.announcements(code) or []
@@ -45,8 +45,12 @@ def _recent_titles(code: str, days: int, cap: int = 8) -> List[str]:
         if d and d >= cutoff:
             t = str(a.get('title') or '').strip()
             if t:
-                out.append(t)
+                out.append({'title': t, 'date': d, 'type': str(a.get('type') or '')})
     return out[:cap]
+
+
+def _recent_titles(code: str, days: int, cap: int = 8) -> List[str]:
+    return [item['title'] for item in _recent_records(code, days, cap)]
 
 
 def _llm_classify(blocks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -97,15 +101,17 @@ def run_announcement_scan(codes: List[str], days: int = 5, max_llm: int = 40,
     import datahub
     blocks, names = [], {}
     for c in codes:
-        titles = _recent_titles(c, days)
-        if not titles:
+        announcements = _recent_records(c, days)
+        if not announcements:
             continue
         try:
             q = datahub.quote(c)
             names[c] = q.get('name', '') if isinstance(q, dict) else ''
         except Exception:
             names[c] = ''
-        blocks.append({'code': c, 'name': names[c], 'titles': titles})
+        blocks.append({'code': c, 'name': names[c],
+                       'titles': [item['title'] for item in announcements],
+                       'announcements': announcements})
     if not blocks:
         out['ok'] = True
         out['summary'] = '覆盖标的近期无新公告'
@@ -118,7 +124,10 @@ def run_announcement_scan(codes: List[str], days: int = 5, max_llm: int = 40,
         v = cls.get(code)
         if not v or v['strength'] < 2:
             continue
-        it = {'code': code, 'name': names.get(code, ''), **v}
+        event_date = max((item['date'] for item in b.get('announcements', []) if item.get('date')),
+                         default=datetime.now().strftime('%Y-%m-%d'))
+        it = {'code': code, 'name': names.get(code, ''), 'event_date': event_date,
+              'source': 'cninfo', 'official': True, **v}
         items.append(it)
         is_bad = v['direction'] == '利空' and v['strength'] >= 3
         is_good = v['direction'] == '利好' and v['strength'] >= 3

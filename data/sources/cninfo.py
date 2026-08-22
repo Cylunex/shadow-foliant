@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import List
 
 from . import _common as C
+from data.source_contracts import source_call
 
 
 def announcements(code: str, page_size: int = 30) -> List[dict]:
@@ -28,14 +29,16 @@ def announcements(code: str, page_size: int = 30) -> List[dict]:
     headers = {"User-Agent": C.DESKTOP_UA, "Content-Type": "application/x-www-form-urlencoded",
                "Referer": "https://www.cninfo.com.cn/new/disclosure", "Origin": "https://www.cninfo.com.cn"}
     try:
-        d = C.requests_session().post("https://www.cninfo.com.cn/new/hisAnnouncement/query",
-                                      data=payload, headers=headers, timeout=15).json()
+        with source_call("cninfo", "announcements") as contract:
+            d = C.requests_session().post("https://www.cninfo.com.cn/new/hisAnnouncement/query",
+                                          data=payload, headers=headers,
+                                          timeout=contract.timeout_seconds).json()
         return [{"title": it.get("announcementTitle", ""), "type": it.get("announcementTypeName", ""),
                  "date": it.get("announcementTime", ""),
                  "url": f"https://www.cninfo.com.cn/new/disclosure/detail?annoId={it.get('announcementId', '')}"}
                 for it in (d.get("announcements", []) or [])]
     except Exception as e:
-        print(f"[sources.cninfo] 巨潮公告请求失败: {e}")
+        print(f"[sources.cninfo] 巨潮公告请求失败: {type(e).__name__}")
         return []
 
 

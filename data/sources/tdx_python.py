@@ -15,6 +15,8 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from data.source_contracts import get_contract, source_call
+
 
 _CATEGORIES = {
     '1m': 7, '1min': 7,
@@ -231,10 +233,12 @@ def get_kline(symbol: str, frequency: str = 'day', count: int = 800) -> pd.DataF
     if category is None or not code:
         return pd.DataFrame()
     max_bars = _positive_int(os.getenv('MARKET_DATA_MAX_BARS'), 3200)
-    wanted = min(_positive_int(count, 800), max_bars)
-    response = _request({
-        'action': 'kline', 'symbol': code, 'category': category, 'count': wanted,
-    })
+    contract = get_contract('tdx_python', 'bars')
+    wanted = min(_positive_int(count, contract.page_size or 800), max_bars)
+    with source_call('tdx_python', 'bars'):
+        response = _request({
+            'action': 'kline', 'symbol': code, 'category': category, 'count': wanted,
+        })
     rows = response.get('rows', []) if response else []
     if not rows:
         return pd.DataFrame()
@@ -285,8 +289,10 @@ def get_quotes(symbols: List[str]) -> Dict[str, dict]:
     out = {}
     # 通达信报价协议单包容量有限；固定小批量避免大股票池请求整批失败。
     codes = [code for _, code in pairs]
-    for pos in range(0, len(codes), 80):
-        response = _request({'action': 'quotes', 'symbols': codes[pos:pos + 80]})
+    page_size = get_contract('tdx_python', 'quotes').page_size or 80
+    for pos in range(0, len(codes), page_size):
+        with source_call('tdx_python', 'quotes'):
+            response = _request({'action': 'quotes', 'symbols': codes[pos:pos + page_size]})
         rows = response.get('rows', []) if response else []
         for row in rows:
             code = ''.join(ch for ch in str(row.get('code') or '') if ch.isdigit())[-6:]

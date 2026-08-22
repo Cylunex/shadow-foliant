@@ -517,6 +517,75 @@ CREATE TABLE IF NOT EXISTS northbound_flow_daily (
 CREATE INDEX IF NOT EXISTS idx_nb_date_desc ON northbound_flow_daily (trade_date DESC);
 
 
+-- ---------- local point-in-time research warehouse ----------
+CREATE TABLE IF NOT EXISTS research_sync_runs (
+    run_id TEXT PRIMARY KEY, provider TEXT NOT NULL, capability TEXT NOT NULL,
+    as_of TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
+    status TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
+    quality_status TEXT NOT NULL, detail TEXT
+);
+CREATE TABLE IF NOT EXISTS research_securities (
+    symbol TEXT PRIMARY KEY, ts_code TEXT NOT NULL, name TEXT, exchange TEXT,
+    market TEXT, industry TEXT, list_status TEXT, list_date TEXT, delist_date TEXT,
+    is_hs TEXT, as_of TEXT NOT NULL, provider TEXT NOT NULL, origin TEXT NOT NULL,
+    effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_daily_bars (
+    symbol TEXT NOT NULL, trade_date TEXT NOT NULL, adjustment TEXT NOT NULL,
+    open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
+    close DOUBLE PRECISION, volume DOUBLE PRECISION, amount DOUBLE PRECISION,
+    turnover_rate DOUBLE PRECISION, is_paused INTEGER, is_st INTEGER,
+    provider TEXT NOT NULL, origin TEXT NOT NULL, effective_at TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL, unit TEXT NOT NULL, schema_version TEXT NOT NULL,
+    quality_status TEXT NOT NULL, PRIMARY KEY(symbol, trade_date, adjustment)
+);
+CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date);
+CREATE TABLE IF NOT EXISTS research_valuations (
+    symbol TEXT NOT NULL, trade_date TEXT NOT NULL, market_cap DOUBLE PRECISION,
+    circulating_market_cap DOUBLE PRECISION, turnover_ratio DOUBLE PRECISION,
+    pe_ttm DOUBLE PRECISION, pe_lyr DOUBLE PRECISION, pb DOUBLE PRECISION,
+    ps DOUBLE PRECISION, pcf DOUBLE PRECISION, provider TEXT NOT NULL,
+    origin TEXT NOT NULL, effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(symbol, trade_date)
+);
+CREATE TABLE IF NOT EXISTS research_financial_pit (
+    table_name TEXT NOT NULL, symbol TEXT NOT NULL, as_of TEXT NOT NULL,
+    stat_date TEXT, pub_date TEXT, provider TEXT NOT NULL, origin TEXT NOT NULL,
+    effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(table_name, symbol, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_research_finance_asof ON research_financial_pit(as_of, table_name);
+CREATE TABLE IF NOT EXISTS research_events (
+    event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, event_type TEXT NOT NULL,
+    event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
+    direction DOUBLE PRECISION NOT NULL, confidence DOUBLE PRECISION NOT NULL,
+    source TEXT NOT NULL, official INTEGER NOT NULL DEFAULT 0,
+    title TEXT, payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_research_events_date ON research_events(event_date, symbol);
+CREATE TABLE IF NOT EXISTS selection_runs (
+    run_id TEXT PRIMARY KEY, selection_date TEXT NOT NULL, created_at TEXT NOT NULL,
+    status TEXT NOT NULL, primary_source TEXT NOT NULL,
+    universe_count INTEGER NOT NULL, eligible_count INTEGER NOT NULL,
+    final_count INTEGER NOT NULL, coverage DOUBLE PRECISION NOT NULL,
+    reference_source TEXT, comparison TEXT NOT NULL, metadata TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at);
+CREATE TABLE IF NOT EXISTS selection_candidates (
+    run_id TEXT NOT NULL, symbol TEXT NOT NULL, candidate_kind TEXT NOT NULL,
+    rank_pos INTEGER, total_score DOUBLE PRECISION, fundamental_score DOUBLE PRECISION,
+    technical_60_score DOUBLE PRECISION, industry_score DOUBLE PRECISION,
+    quality_score DOUBLE PRECISION, correction_120 DOUBLE PRECISION,
+    correction_250 DOUBLE PRECISION, event_correction DOUBLE PRECISION,
+    data_coverage DOUBLE PRECISION, state TEXT, industry TEXT,
+    reasons TEXT NOT NULL, source_labels TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(run_id, symbol, candidate_kind)
+);
+
+
 -- =============================================================================
 -- 验证查询：列出所有已创建的表
 -- =============================================================================

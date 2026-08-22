@@ -13,6 +13,8 @@ from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 
+from data.source_contracts import get_contract, source_call
+
 
 _FREQUENCIES = {
     "1m": "1m", "1min": "1m",
@@ -260,7 +262,8 @@ def get_kline(symbol: str, frequency: str = "day", count: int = 800) -> pd.DataF
     if freq is None or not code:
         return pd.DataFrame()
     max_bars = _positive_int(os.getenv("MARKET_DATA_MAX_BARS"), 3200)
-    wanted = min(_positive_int(count, 800), max_bars)
+    contract = get_contract("eltdx", "bars")
+    wanted = min(_positive_int(count, contract.page_size or 800), max_bars)
 
     with _lock:
         client = _get_client()
@@ -268,9 +271,11 @@ def get_kline(symbol: str, frequency: str = "day", count: int = 800) -> pd.DataF
             return pd.DataFrame()
         try:
             rows = []
-            for start in range(0, wanted, 800):
-                size = min(800, wanted - start)
-                response = client.get_kline(freq, code, start=start, count=size)
+            page_size = contract.page_size or 800
+            for start in range(0, wanted, page_size):
+                size = min(page_size, wanted - start)
+                with source_call("eltdx", "bars"):
+                    response = client.get_kline(freq, code, start=start, count=size)
                 chunk = list(getattr(response, "items", ()) or ())
                 rows.extend(chunk)
                 if len(chunk) < size:
@@ -313,7 +318,8 @@ def get_quotes(symbols: List[str]) -> Dict[str, dict]:
         if client is None:
             return {}
         try:
-            rows = client.get_quote(codes)
+            with source_call("eltdx", "quotes"):
+                rows = client.get_quote(codes)
             out = {}
             for row in rows or ():
                 code = "".join(ch for ch in str(getattr(row, "code", "")) if ch.isdigit())[-6:]

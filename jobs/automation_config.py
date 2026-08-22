@@ -41,22 +41,22 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '8 维数据(龙虎榜/美股/新闻/北向/题材/FRED/A股大盘/持仓扫描)综合 AI → 开盘策略+持仓建议+昨日收益,4条推送',
     },
     'strategy_prefetch': {
-        'cn': '🏦 选股策略盘前预取(问财+妙想)',
+        'cn': '🏦 问财参考盘前预取',
         'schedule': '09:15 每日(盘前)',
         'category': '数据', 'default': True,
-        'description': '盘前优先用轻量问句预取问财当日主力资金净流入，再串行预取低价擒牛/小市值/净利增长/低估值（均只取单页）+ 5条妙想镜像策略入当日缓存；09:45 综合选股读暖，问财熔断时妙想仍可独立出候选',
+        'description': '串行预取问财主力资金、低价擒牛、小市值、净利增长和低估值（均只取单页）；09:45 仅与本地主链对照，不参与准入或评分',
     },
     'strategy_prefetch_retry': {
         'cn': '🔁 问财策略盘前补取',
         'schedule': '09:30 每日(仅补 09:15 缓存缺口)',
         'category': '数据', 'default': True,
-        'description': '优先补取09:15缺失的问财主力资金，再补其余4条策略；已成功策略直接读缓存、不重复请求。属于软增强，失败不阻断09:45妙想/InStock/多因子选股',
+        'description': '优先补取09:15缺失的问财主力资金，再补其余4条参考策略；失败不阻断09:45本地PIT选股',
     },
     'unified_selection': {
         'cn': '🎯 综合选股 TOP15 + 最终TOP5',
         'schedule': '09:45 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '保留5策略+InStock进化策略+多因子并池的TOP15完整推送；再按规则分、多源共振、红蓝复核和追高风险独立推送最终TOP5，并单独跟踪两层真实战绩',
+        'description': '本地PIT数据仓按基本面/估值、60日核心结构、120/250日风险修正和行业分散产出TOP15；问财只作并行参考，不参与评分；再复核最终TOP5',
     },
     'morning_portfolio': {
         'cn': '☀️ 早盘持仓分析',
@@ -121,6 +121,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'depends_on': ['kline_prefetch'],
         'description': '收盘后采集 OHLCV+技术指标+估值打分因子快照',
+    },
+    'research_data_sync': {
+        'cn': '🗄️ 本地研究数据同步',
+        'schedule': '17:10 每交易日',
+        'category': '数据', 'default': True, 'core': True,
+        'description': '一次拉取全市场复权日线、估值和PIT财务，写本地研究仓；显式执行接口频率、并发、分页和覆盖率限制',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',

@@ -85,6 +85,7 @@ _add(
     "/api/research/industry-reports",
     "/api/signals/outcomes/stats",
     "/api/screen/latest",
+    "/api/research/source-contracts",
     "/api/convertible/screen",
     "/api/screen/strategy/{name}",
     "/api/strategy-genome/scores",

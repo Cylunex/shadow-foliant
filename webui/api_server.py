@@ -2555,12 +2555,22 @@ def agent_cockpit_view(recent_limit: int = 12, compact: bool = False):
 
 @app.get("/api/screen/latest")
 def latest_unified_selection():
-    """最近一次综合 TOP15 与最终 TOP5，只读快照，不触发外部数据请求。"""
+    """最近一次本地主链 TOP15、最终 TOP5 与问财参考对照；不触发外部请求。"""
     try:
         from jobs.task_control import latest_selection_artifact
-        return _ok(latest_selection_artifact())
+        from data.research_store import ResearchStore
+        artifact = latest_selection_artifact() or {}
+        artifact["local_primary"] = ResearchStore().latest_selection()
+        return _ok(artifact)
     except Exception as e:
         return _err(e)
+
+
+@app.get("/api/research/source-contracts")
+def research_source_contracts():
+    """Credential-free provider capabilities and executable request limits."""
+    from data.source_contracts import contracts
+    return _ok(contracts())
 
 
 # ============================ 设置:环境配置(.env) ============================

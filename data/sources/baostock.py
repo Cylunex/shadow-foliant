@@ -16,6 +16,8 @@ import threading
 import time as _time
 from datetime import datetime, timedelta
 
+from data.source_contracts import source_call
+
 _LOCK = threading.Lock()          # 串行化所有 baostock 调用(不可并发连接)
 _BS = None                        # baostock 模块(惰性 import)
 _LOGGED_IN = False
@@ -126,9 +128,10 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
     try:
         try:
             bs = _ensure()
-            rs = bs.query_history_k_data_plus(
-                bscode, "date,open,high,low,close,volume",
-                start_date=start, end_date=end, frequency='d', adjustflag=adjustflag)
+            with source_call("baostock", "daily"):
+                rs = bs.query_history_k_data_plus(
+                    bscode, "date,open,high,low,close,volume",
+                    start_date=start, end_date=end, frequency='d', adjustflag=adjustflag)
             if getattr(rs, 'error_code', '1') != '0':
                 _mark_fail()
                 return pd.DataFrame()
