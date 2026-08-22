@@ -9,4 +9,4 @@
 - [x] Rename data completeness scoring and improve event deduplication semantics.
 - [x] Version schema migrations and remove legacy autostart side effects.
 - [x] Add regression tests and run full verification.
-- [ ] Push and deploy a verified commit in a safe production window.
+- [x] Push and deploy a verified commit in a safe production window.
