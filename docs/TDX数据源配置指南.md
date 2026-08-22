@@ -72,3 +72,6 @@ python scripts/smoke_test_a_share_sources.py
 ```
 
 冒烟脚本只输出可用性、行数、时间范围与字段，不输出 Token、节点、价格或成交数据。
+
+生产发布统一通过 `scripts/deploy.sh`，必须传完整且已推送的 `EXPECTED_COMMIT`。脚本不保存
+生产目录、主机或节点；重启服务还需显式设置 `DEPLOY_RESTART=true`，便于先完成只读预检和备份。
