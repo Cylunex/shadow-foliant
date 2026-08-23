@@ -1,0 +1,10 @@
+version: 1
+cases:
+  - id: formal-before-preview
+    expectation: security research reads formal facts before creating a preview Run
+  - id: preview-never-publishes
+    expectation: selection preview does not replace the latest formal SelectionRun
+  - id: backtest-is-not-forecast
+    expectation: backtest output is not described as guaranteed future performance
+  - id: no-private-finance-tools
+    expectation: the research Profile does not expose portfolio or transaction capabilities

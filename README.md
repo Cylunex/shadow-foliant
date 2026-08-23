@@ -30,6 +30,7 @@ pytest
 
 ## 文档
 
-详细功能与研究口径位于 [docs](docs/) 和 [openspec](openspec/)；项目内示例只使用脱敏数据。
+详细功能与研究口径位于 [docs](docs/) 和 [openspec](openspec/)；Agent 插件边界见
+[docs/SHADOW_PLUGIN_INTEGRATION.md](docs/SHADOW_PLUGIN_INTEGRATION.md)。项目内示例只使用脱敏数据。
 
 > 本项目仅用于个人研究与信息管理，不构成投资建议。

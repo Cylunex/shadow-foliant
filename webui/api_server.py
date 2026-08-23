@@ -20,9 +20,10 @@ _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、
 
 # 路径引导(webui/ 子目录)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import _bootstrap  # noqa: E402
+import _bootstrap  # noqa: E402,F401
 
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import FastAPI, Header, Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
@@ -48,6 +49,19 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _stable_validation_error(request: Request, _exc: RequestValidationError):
+    """Do not echo machine request values or Pydantic internals into Agent responses."""
+    if not request.url.path.startswith("/api/machine/"):
+        return JSONResponse(
+            {"ok": False, "error": "请求参数校验失败"}, status_code=422
+        )
+    return JSONResponse(
+        {"ok": False, "error": {"code": "invalid_request", "message": "request validation failed"}},
+        status_code=422,
+    )
 
 # CORS 收敛(2026-07-17 安全修):原 allow_origins=["*"] 让任意恶意网页可跨源读/写本地 API
 # (POST /api/env 改 .env 外泄 DEEPSEEK key、POST /api/jobs/*/run 触发任务)。SPA 与本 API 同源
@@ -79,6 +93,23 @@ async def _no_store_static(request, call_next):
 
 @app.middleware("http")
 async def _authorize_requests(request: Request, call_next):
+    if request.url.path.startswith("/api/machine/v1/agent/"):
+        try:
+            content_length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            content_length = 0
+        try:
+            maximum = max(4096, min(1048576, int(
+                os.getenv("FOLIANT_AGENT_MAX_REQUEST_BYTES", "65536")
+            )))
+        except ValueError:
+            maximum = 65536
+        if content_length > maximum:
+            return JSONResponse(
+                {"ok": False, "error": {"code": "request_too_large",
+                                          "message": "request body exceeds the configured limit"}},
+                status_code=413,
+            )
     denied = await enforce_request_access(request)
     if denied is not None:
         audit_request(request, denied)
@@ -214,6 +245,38 @@ def _err(msg):
             pass
         return {"ok": False, "error": "服务暂不可用，请稍后重试"}
     return {"ok": False, "error": str(msg)}
+
+
+def _agent_error(error, *, default_status: int = 500):
+    from application.services import ApplicationError
+
+    if isinstance(error, ApplicationError):
+        code, message, status = error.code, error.message, error.status_code
+    else:
+        _log_webui.error("agent_application_failed category=%s", type(error).__name__)
+        code, message, status = "service_unavailable", "service is temporarily unavailable", default_status
+    return JSONResponse(
+        {"ok": False, "error": {"code": code, "message": message}}, status_code=status
+    )
+
+
+def _agent_result(value, *, max_bytes: int = 262144, status_code: int = 200):
+    import json
+
+    rendered = json.dumps(_jsonsafe(value), ensure_ascii=False, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8")
+    if len(rendered) <= max_bytes:
+        return JSONResponse(_jsonsafe(value), status_code=status_code)
+    bounded = {
+        "summary": str((value or {}).get("summary") or "result exceeds inline budget"),
+        "resource_uri": str((value or {}).get("resource_uri") or ""),
+        "status": str((value or {}).get("status") or "complete"),
+        "provenance": (value or {}).get("provenance") or {},
+        "warnings": list((value or {}).get("warnings") or []) + ["inline result was truncated"],
+        "data": None,
+        "continuation": {"resource_uri": str((value or {}).get("resource_uri") or "")},
+    }
+    return JSONResponse(_jsonsafe(bounded), status_code=status_code)
 
 
 def _records(x):
@@ -417,16 +480,209 @@ def machine_runtime_health():
 
 @app.get("/api/machine/agent/cockpit")
 def machine_agent_cockpit(recent_limit: int = 5, compact: bool = True):
-    from jobs.task_control import agent_cockpit
+    """Compatibility view with no portfolio, trades, jobs or private operations data."""
+    from application.runtime import get_application_services
 
-    return _ok(agent_cockpit(recent_limit=recent_limit, compact=compact))
+    del recent_limit, compact
+    try:
+        return _ok({
+            "deprecated": True,
+            "replacement": "/api/machine/v1/agent/market/overview",
+            "market": get_application_services().market.read(),
+        })
+    except Exception as exc:
+        _log_webui.error("legacy_machine_cockpit_failed category=%s", type(exc).__name__)
+        return _err("market overview is temporarily unavailable")
 
 
 @app.get("/api/machine/research/{code}")
 def machine_research_stock(code: str, depth: str = "quick", view: str = "summary"):
-    from mcp_server import research_stock
+    from application.runtime import get_application_services
 
-    return _ok(research_stock(code, depth=depth, view=view))
+    try:
+        result = get_application_services().security_research.compatibility_research(
+            code, depth=depth
+        )
+        return _ok(result)
+    except Exception as exc:
+        _log_webui.error("legacy_machine_research_failed category=%s", type(exc).__name__)
+        return _err("research is temporarily unavailable")
+
+
+class AgentResearchPreviewReq(BaseModel):
+    depth: str = "quick"
+
+
+class AgentSelectionPreviewReq(BaseModel):
+    selection_date: str | None = None
+    decision_mode: str = "preopen"
+
+
+class AgentBacktestPreviewReq(BaseModel):
+    symbols: list[str]
+    strategy: str = "enter"
+    start: str | None = None
+    end: str | None = None
+    hold_days: int = 10
+    stop_pct: float = 8.0
+    target_pct: float = 15.0
+    max_positions: int = 5
+    benchmark: str = "000300"
+
+
+def _agent_actor(request: Request) -> str:
+    return str(getattr(request.state.agent_identity, "agent_id", ""))
+
+
+@app.get("/api/machine/v1/agent/market/overview", operation_id="get_agent_market_overview")
+def agent_market_overview():
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(get_application_services().market.read(), max_bytes=65536)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get("/api/machine/v1/agent/market/data-quality", operation_id="get_agent_data_quality")
+def agent_market_data_quality():
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(get_application_services().data_quality.read(), max_bytes=65536)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/securities/{symbol}/research/latest",
+    operation_id="get_agent_security_research_latest",
+)
+def agent_security_research_latest(symbol: str):
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(
+            get_application_services().security_research.latest_formal(symbol), max_bytes=131072
+        )
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/securities/{symbol}/research-runs",
+    status_code=202,
+    operation_id="create_agent_security_research_run",
+)
+def agent_security_research_create(
+    symbol: str,
+    req: AgentResearchPreviewReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().security_research.create_preview(
+            symbol,
+            depth=req.depth,
+            actor_id=_agent_actor(request),
+            idempotency_key=idempotency_key,
+            request_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=16384, status_code=202)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/selection-runs/latest",
+    operation_id="get_agent_selection_run_latest",
+)
+def agent_selection_latest():
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(get_application_services().selection.latest_formal(), max_bytes=131072)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/selection-runs",
+    status_code=202,
+    operation_id="create_agent_selection_run",
+)
+def agent_selection_create(
+    req: AgentSelectionPreviewReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().selection.create_preview(
+            selection_date=req.selection_date,
+            decision_mode=req.decision_mode,
+            actor_id=_agent_actor(request),
+            idempotency_key=idempotency_key,
+            request_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=16384, status_code=202)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/backtest-runs",
+    status_code=202,
+    operation_id="create_agent_backtest_run",
+)
+def agent_backtest_create(
+    req: AgentBacktestPreviewReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().backtest.create_preview(
+            (req.model_dump(exclude_none=True) if hasattr(req, "model_dump")
+             else req.dict(exclude_none=True)),
+            actor_id=_agent_actor(request),
+            idempotency_key=idempotency_key,
+            request_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=16384, status_code=202)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get("/api/machine/v1/agent/runs/{run_id}", operation_id="get_agent_run")
+def agent_run_status(run_id: str, request: Request):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().run_query.get(run_id, actor_id=_agent_actor(request))
+        return _agent_result(value, max_bytes=32768)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/runs/{run_id}/result",
+    operation_id="get_agent_run_result",
+)
+def agent_run_result(run_id: str, request: Request, offset: int = 0, limit: int = 50):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().run_query.result(
+            run_id, actor_id=_agent_actor(request), offset=offset, limit=limit
+        )
+        return _agent_result(value, max_bytes=262144)
+    except Exception as exc:
+        return _agent_error(exc)
 
 
 # ============================ 股票(首页) ============================
@@ -880,8 +1136,8 @@ class MonitorUpsertReq(BaseModel):
     rating: str = "持有"
     entry_low: float
     entry_high: float
-    take_profit: Optional[float] = None
-    stop_loss: Optional[float] = None
+    take_profit: float | None = None
+    stop_loss: float | None = None
     check_interval: int = 60
     notification_enabled: bool = True
     trading_hours_only: bool = True
@@ -2605,6 +2861,64 @@ def latest_unified_selection():
         return _ok(latest_selection_artifact() or {})
     except Exception as e:
         return _err(e)
+
+
+class StockTradePreviewReq(BaseModel):
+    rows: list[dict] | None = None
+    table: str = ""
+    update_position: bool = True
+
+
+class StockTradeConfirmReq(StockTradePreviewReq):
+    preview_hash: str
+    confirmed: bool = False
+
+
+@app.post("/api/portfolio/trade-records/preview")
+def portfolio_trade_preview(req: StockTradePreviewReq):
+    """Normalize and validate stock trades without changing the portfolio."""
+    from application.runtime import get_application_services
+
+    try:
+        return _ok(get_application_services().trade_entry.preview(
+            rows=req.rows,
+            table=req.table,
+            update_position=req.update_position,
+        ))
+    except Exception as exc:
+        _log_webui.error("trade_preview_failed category=%s", type(exc).__name__)
+        return _err("成交预览暂不可用，请稍后重试")
+
+
+@app.post("/api/portfolio/trade-records")
+def portfolio_trade_create(
+    req: StockTradeConfirmReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    """Record exactly the transaction set the administrator previewed and confirmed."""
+    from application.runtime import get_application_services
+
+    try:
+        identity = request.state.browser_identity
+        return _ok(get_application_services().trade_entry.confirm(
+            actor_id=str(identity.shadow_user_id),
+            idempotency_key=idempotency_key,
+            preview_hash=req.preview_hash,
+            rows=req.rows,
+            table=req.table,
+            update_position=req.update_position,
+            confirmed=req.confirmed,
+        ))
+    except Exception as exc:
+        from application.services import ApplicationError
+
+        if isinstance(exc, ApplicationError):
+            return JSONResponse(
+                {"ok": False, "error": exc.message}, status_code=exc.status_code
+            )
+        _log_webui.error("trade_create_failed category=%s", type(exc).__name__)
+        return _err("成交录入暂不可用，请稍后重试")
 
 
 @app.get("/api/research/source-contracts")

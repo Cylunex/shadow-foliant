@@ -13,7 +13,44 @@ export default {
   template: `
   <div>
     <div class="h1">📋 成交记录</div>
-    <p class="sub">股票买卖成交记录与持仓变动日志。支持筛选与排序。</p>
+    <p class="sub">股票买卖成交记录与持仓变动日志。录入前先预览，确认后才更新成交与持仓。</p>
+    <div class="card" style="margin-bottom:14px">
+      <h3>录入成交</h3>
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:end">
+        <div><label>代码</label><input v-model.trim="entry.code" maxlength="6" placeholder="600519" style="width:105px"/></div>
+        <div><label>名称</label><input v-model.trim="entry.name" placeholder="可选" style="width:120px"/></div>
+        <div><label>方向</label><select v-model="entry.trade_type" style="width:86px"><option>买入</option><option>卖出</option></select></div>
+        <div><label>成交价</label><input type="number" min="0" step="0.0001" v-model.number="entry.price" style="width:110px"/></div>
+        <div><label>数量</label><input type="number" min="1" step="1" v-model.number="entry.quantity" style="width:100px"/></div>
+        <div><label>成交时间</label><input type="datetime-local" v-model="entry.trade_time" style="width:190px"/></div>
+        <div><label>佣金</label><input type="number" min="0" step="0.01" v-model.number="entry.commission" style="width:90px"/></div>
+        <div><label>印花税</label><input type="number" min="0" step="0.01" v-model.number="entry.tax" style="width:90px"/></div>
+        <div><label>备注</label><input v-model.trim="entry.note" maxlength="200" style="width:150px"/></div>
+      </div>
+      <label style="display:flex;gap:6px;align-items:center;margin:10px 0">
+        <input type="checkbox" v-model="entry.update_position" style="width:auto"/> 同步更新股票持仓
+      </label>
+      <details style="margin:8px 0">
+        <summary class="sub" style="cursor:pointer">批量粘贴 Markdown 成交表（填写后优先使用表格）</summary>
+        <textarea v-model="entry.table" rows="5" style="width:100%;margin-top:8px" placeholder="| 成交时间 | 股票代码 | 股票名称 | 成交价 | 成交量 | 交易类型 |"></textarea>
+      </details>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <button :disabled="entry.busy" @click="previewEntry">{{entry.busy?'校验中…':'预览成交'}}</button>
+        <span v-if="entry.message" :class="entry.ok?'pill':'err'">{{entry.message}}</span>
+      </div>
+      <div v-if="entry.preview" style="margin-top:12px">
+        <div class="sub" style="margin-bottom:6px">将录入 {{entry.preview.prepared}} 笔；请核对代码、方向、价格、数量和持仓更新选项。</div>
+        <table v-if="entry.preview.rows&&entry.preview.rows.length">
+          <thead><tr><th>时间</th><th>方向</th><th>代码</th><th>名称</th><th>价格</th><th>数量</th><th>金额</th></tr></thead>
+          <tbody><tr v-for="(x,i) in entry.preview.rows" :key="i">
+            <td>{{x.trade_time||'当前时间'}}</td><td :class="x.trade_type==='买入'?'red':'green'">{{x.trade_type}}</td>
+            <td>{{x.code}}</td><td>{{x.name}}</td><td>{{fmt(x.price)}}</td><td>{{x.quantity}}</td><td>{{money(x.amount)}}</td>
+          </tr></tbody>
+        </table>
+        <div v-if="entry.preview.warnings&&entry.preview.warnings.length" class="sub" style="color:var(--amber);margin-top:6px">{{entry.preview.warnings.join('；')}}</div>
+        <button style="margin-top:10px" :disabled="entry.busy" @click="confirmEntry">确认录入并{{entry.update_position?'更新持仓':'仅记流水'}}</button>
+      </div>
+    </div>
     <div class="row" style="gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
       <input v-model="f.code" placeholder="代码/逗号分隔" style="width:140px"/>
       <select v-model="f.ttype" style="width:90px">
@@ -83,6 +120,50 @@ export default {
     const totalPnl = ref('')
     const realized = ref(null)
     const behavior = ref(null)
+    const entry = reactive({
+      code:'', name:'', trade_type:'买入', price:null, quantity:null, trade_time:'',
+      commission:0, tax:0, note:'', update_position:true, table:'', busy:false,
+      preview:null, idempotency_key:'', message:'', ok:false,
+    })
+
+    function requestBody(){
+      if(entry.table.trim()) return { table:entry.table, rows:null, update_position:entry.update_position }
+      return { rows:[{
+        code:entry.code, name:entry.name, trade_type:entry.trade_type,
+        price:entry.price, quantity:entry.quantity, trade_time:entry.trade_time||null,
+        commission:entry.commission||0, tax:entry.tax||0, note:entry.note||null,
+      }], table:'', update_position:entry.update_position }
+    }
+
+    async function previewEntry(){
+      entry.busy=true; entry.preview=null; entry.message=''; entry.ok=false
+      try{
+        const result = await api('/api/portfolio/trade-records/preview',{
+          method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(requestBody())
+        })
+        if(result.errors&&result.errors.length) throw new Error(result.errors.join('；'))
+        entry.preview=result
+        entry.idempotency_key=(globalThis.crypto&&crypto.randomUUID)?crypto.randomUUID():('trade-'+Date.now()+'-'+Math.random().toString(16).slice(2))
+        entry.ok=true; entry.message='预览已生成，尚未写入'
+      }catch(e){ entry.message=''+e }
+      entry.busy=false
+    }
+
+    async function confirmEntry(){
+      if(!entry.preview) return
+      entry.busy=true; entry.message=''; entry.ok=false
+      try{
+        const body={...requestBody(),preview_hash:entry.preview.preview_hash,confirmed:true}
+        const result=await api('/api/portfolio/trade-records',{
+          method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':entry.idempotency_key},body:JSON.stringify(body)
+        })
+        entry.ok=true
+        entry.message=`已录入 ${result.imported||0} 笔，更新持仓 ${result.positions_updated||0} 笔`
+        entry.preview=null; entry.table=''; entry.price=null; entry.quantity=null; entry.note=''; entry.commission=0; entry.tax=0
+        await load()
+      }catch(e){ entry.message=''+e }
+      entry.busy=false
+    }
 
     async function load(){
       busy.value=true; err.value=''
@@ -105,6 +186,7 @@ export default {
     }
 
     onMounted(load)
-    return { f, rows, busy, err, cols:COLS, sorted, sortBy, arrow, totalPnl, realized, behavior, load, fmt, money, cls }
+    return { f, rows, busy, err, cols:COLS, sorted, sortBy, arrow, totalPnl, realized, behavior,
+      entry, previewEntry, confirmEntry, load, fmt, money, cls }
   }
 }

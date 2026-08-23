@@ -165,6 +165,8 @@ _add(
     "/api/fund/plans/import",
     "/api/fund/plan/{plan_id}/toggle",
     "/api/portfolio/snapshot",
+    "/api/portfolio/trade-records/preview",
+    "/api/portfolio/trade-records",
     "/api/market/north-refresh",
     "/api/reco/dual-horizon",
     "/api/workflow/save",
@@ -193,12 +195,36 @@ _add(
     "/api/machine/runtime-health",
     "/api/machine/agent/cockpit",
     "/api/machine/research/{code}",
+    "/api/machine/v1/agent/market/overview",
+    "/api/machine/v1/agent/market/data-quality",
+    "/api/machine/v1/agent/securities/{symbol}/research/latest",
+    "/api/machine/v1/agent/selection-runs/latest",
+    "/api/machine/v1/agent/runs/{run_id}",
+    "/api/machine/v1/agent/runs/{run_id}/result",
+)
+
+_add(
+    ROUTE_POLICIES,
+    Access.MACHINE,
+    "POST",
+    "/api/machine/v1/agent/securities/{symbol}/research-runs",
+    "/api/machine/v1/agent/selection-runs",
+    "/api/machine/v1/agent/backtest-runs",
 )
 
 MACHINE_SCOPES = {
     ("GET", "/api/machine/runtime-health"): "stock.read",
     ("GET", "/api/machine/agent/cockpit"): "stock.read",
     ("GET", "/api/machine/research/{code}"): "stock.research",
+    ("GET", "/api/machine/v1/agent/market/overview"): "stock.read",
+    ("GET", "/api/machine/v1/agent/market/data-quality"): "stock.read",
+    ("GET", "/api/machine/v1/agent/securities/{symbol}/research/latest"): "stock.research",
+    ("POST", "/api/machine/v1/agent/securities/{symbol}/research-runs"): "stock.research",
+    ("GET", "/api/machine/v1/agent/selection-runs/latest"): "stock.research",
+    ("POST", "/api/machine/v1/agent/selection-runs"): "stock.research",
+    ("POST", "/api/machine/v1/agent/backtest-runs"): "stock.research",
+    ("GET", "/api/machine/v1/agent/runs/{run_id}"): "stock.research",
+    ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "stock.research",
 }
 
 _audit_logger = logging.getLogger("webui.security_audit")

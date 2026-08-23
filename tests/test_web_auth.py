@@ -139,6 +139,9 @@ class WebAuthTests(unittest.TestCase):
         access_control.reset_agent_authenticator()
 
     def tearDown(self):
+        from application.runtime import set_application_services
+
+        set_application_services(None)
         platform_auth.reset_web_auth_service()
         access_control.reset_agent_authenticator()
         self.temp.cleanup()
@@ -461,6 +464,122 @@ class WebAuthTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 403)
             self.assertNotIn("location", response.headers)
+
+    def test_plugin_agent_routes_are_scoped_bounded_and_redacted(self):
+        from webui.api_server import app
+
+        token = "Bearer " + "x" * 40
+
+        class FakeAuthenticator:
+            scopes = frozenset({"stock.read"})
+
+            def authenticate(self, authorization):
+                if authorization != token:
+                    raise ValueError("invalid")
+                return SimpleNamespace(agent_id="foliant-test", scopes=self.scopes)
+
+        authenticator = FakeAuthenticator()
+        access_control._agent_authenticator = authenticator
+        fake_services = SimpleNamespace(
+            market=SimpleNamespace(read=lambda: {
+                "summary": "market closed", "resource_uri": "shadow://foliant/reports/market-example",
+                "status": "complete", "provenance": {}, "warnings": [], "data": {},
+            }),
+            selection=SimpleNamespace(create_preview=lambda **_kwargs: {
+                "run_id": "a" * 32, "status": "queued", "mode": "preview",
+                "kind": "selection", "resource_uri": "shadow://foliant/selection-runs/example",
+                "run_resource_uri": "shadow://foliant/runs/example", "cancellable": True,
+            }),
+        )
+        with patch("application.runtime.get_application_services", return_value=fake_services):
+            with TestClient(app, base_url="https://stock.example.com") as client:
+                missing = client.get("/api/machine/v1/agent/market/overview", follow_redirects=False)
+                self.assertEqual(missing.status_code, 401)
+                self.assertNotIn("location", missing.headers)
+                allowed = client.get(
+                    "/api/machine/v1/agent/market/overview",
+                    headers={"Authorization": token}, follow_redirects=False,
+                )
+                self.assertEqual(allowed.status_code, 200)
+                denied = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={"Authorization": token, "Idempotency-Key": "selection-example"},
+                    json={"selection_date": "2026-08-21"}, follow_redirects=False,
+                )
+                self.assertEqual(denied.status_code, 403)
+                self.assertNotIn("location", denied.headers)
+
+                authenticator.scopes = frozenset({"stock.research"})
+                created = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={"Authorization": token, "Idempotency-Key": "selection-example"},
+                    json={"selection_date": "2026-08-21"}, follow_redirects=False,
+                )
+                self.assertEqual(created.status_code, 202)
+
+                fake_services.market.read = lambda: (_ for _ in ()).throw(
+                    RuntimeError("Bearer secret prompt holding SELECT /private/example")
+                )
+                authenticator.scopes = frozenset({"stock.read"})
+                with self.assertLogs("webui", level="ERROR") as captured:
+                    failed = client.get(
+                        "/api/machine/v1/agent/market/overview",
+                        headers={"Authorization": token},
+                    )
+                self.assertEqual(failed.status_code, 500)
+                rendered = "\n".join(captured.output)
+                self.assertIn("category=RuntimeError", rendered)
+                for private in ("Bearer secret", "prompt", "holding", "SELECT", "/private/example"):
+                    self.assertNotIn(private, rendered)
+
+    def test_trade_entry_is_admin_only_preview_then_confirm(self):
+        from webui.api_server import app
+
+        calls = []
+        fake_trade = SimpleNamespace(
+            preview=lambda **kwargs: calls.append(("preview", kwargs)) or {
+                "status": "ready", "preview_hash": "preview-example", "rows": kwargs["rows"]
+            },
+            confirm=lambda **kwargs: calls.append(("confirm", kwargs)) or {
+                "status": "success", "imported": 1, "positions_updated": 1
+            },
+        )
+        fake_services = SimpleNamespace(trade_entry=fake_trade)
+        row = {
+            "code": "600519", "name": "Example Stock", "trade_type": "买入",
+            "quantity": 100, "price": 100.0, "trade_time": "2026-08-21 10:00:00",
+        }
+        with patch("application.runtime.get_application_services", return_value=fake_services):
+            with TestClient(app, base_url="https://stock.example.com") as client:
+                user = self.service.store.upsert_identity(self._claims())
+                user_session = self.service.store.create_session(user, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, user_session.session_token)
+                denied = client.post(
+                    "/api/portfolio/trade-records/preview", json={"rows": [row]},
+                    headers={"Origin": "https://stock.example.com"},
+                )
+                self.assertEqual(denied.status_code, 403)
+
+                admin = self.service.store.upsert_identity(self._claims(
+                    sub="admin-sub", groups=["stock-users", "stock-admins"]
+                ))
+                admin_session = self.service.store.create_session(admin, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, admin_session.session_token)
+                preview = client.post(
+                    "/api/portfolio/trade-records/preview", json={"rows": [row]},
+                    headers={"Origin": "https://stock.example.com"},
+                )
+                self.assertEqual(preview.status_code, 200)
+                confirmed = client.post(
+                    "/api/portfolio/trade-records",
+                    json={"rows": [row], "preview_hash": "preview-example", "confirmed": True},
+                    headers={
+                        "Origin": "https://stock.example.com",
+                        "Idempotency-Key": "trade-entry-example",
+                    },
+                )
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertEqual([item[0] for item in calls], ["preview", "confirm"])
 
     def test_access_log_filter_removes_callback_and_financial_query_values(self):
         record = logging.LogRecord(

@@ -168,6 +168,32 @@ class StockAnalysisDatabasePG:
                 result[_k] = str(_v)
         return result
 
+    def get_latest_record_by_symbol(self, symbol):
+        """Return one persisted formal research snapshot without prompt or raw agent transcripts."""
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(
+                """SELECT id, symbol, stock_name, analysis_date, period,
+                          stock_info, final_decision, created_at
+                   FROM analysis_records
+                   WHERE symbol = %s
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                (str(symbol),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            for key, value in tuple(result.items()):
+                if isinstance(value, datetime):
+                    result[key] = value.astimezone().isoformat(timespec="seconds")
+            return result
+        finally:
+            cur.close()
+            conn.close()
+
     def delete_record(self, record_id):
         conn = get_conn()
         cur = conn.cursor()

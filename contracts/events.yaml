@@ -1,0 +1,18 @@
+version: 1
+events:
+  - id: foliant.selection.completed
+    producer: foliant
+    data_classification: internal
+    payload: metadata-only
+  - id: foliant.backtest.completed
+    producer: foliant
+    data_classification: internal
+    payload: metadata-only
+  - id: foliant.research-report.ready
+    producer: foliant
+    data_classification: internal
+    payload: metadata-only
+  - id: foliant.data-quality.degraded
+    producer: foliant
+    data_classification: internal
+    payload: metadata-only

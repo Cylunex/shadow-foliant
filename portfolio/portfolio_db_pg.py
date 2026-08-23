@@ -377,7 +377,14 @@ class PortfolioDBPG:
         name = t.get('name') or t.get('股票名称') or t.get('股票简称')
         raw = str(t.get('trade_type') or t.get('方向') or t.get('direction') or '买入').strip()
         ttype = '卖出' if raw in SELL else '买入'
-        qty = int(float(qty)); price = float(price)
+        try:
+            qty_num = float(qty)
+            qty = int(qty_num)
+            price = float(price)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if qty_num != qty or qty <= 0 or price <= 0:
+            return None
         amount = t.get('amount') or t.get('金额')
         amount = float(amount) if amount not in (None, '') else round(qty * price, 2)
         tt = t.get('trade_time') or t.get('成交时间') or t.get('日期') or t.get('date')
@@ -422,16 +429,17 @@ class PortfolioDBPG:
                     # ⚠️ 每行套 SAVEPOINT(2026-07-17 修):单行 INSERT 失败(典型:trade_time
                     # '2026/6/31' 之类 ::timestamptz cast 不了)会把整个事务打进 aborted 态 →
                     # 后续行全抛 InFailedSqlTransaction、批末 commit 被 PG 当 ROLLBACK 静默执行,
-                    # 此前"成功"的行全丢、返回的 imported 计数是假的;而持仓更新走独立连接已即时
-                    # commit —— 持仓改了流水没了。SAVEPOINT 把坏行隔离,好行真正落库。
+                    # 持仓更新与流水必须复用本连接并处在同一个 SAVEPOINT 中；否则流水失败
+                    # 时持仓可能已经被另一连接提交，形成不可恢复的不一致。
                     cur.execute('SAVEPOINT _tr')
                     # 先按时序更新持仓,拿到这笔成交后的持仓快照(数量/成本/增减)
                     pos_q = pos_c = delta = None
+                    position_changed = False
                     if update_position:
-                        st = self._apply_trade_to_position(n)
+                        st = self._apply_trade_to_position(n, cur=cur)
                         if st is not None:
                             pos_q, pos_c, delta = st
-                            pos_updated += 1
+                            position_changed = True
                     # 卖出时顺手算已实现盈亏 = (卖价-成本快照)×数量-佣金-印花税(2026-06-12)
                     pl = None
                     if n['ttype'] == '卖出' and pos_c is not None:
@@ -444,18 +452,25 @@ class PortfolioDBPG:
                     cur.execute("""
                         INSERT INTO trade_records
                             (stock_code, stock_name, trade_type, quantity, price, amount,
-                             pos_quantity, pos_cost_price, delta_qty, trade_time, extra, profit_loss)
+                             pos_quantity, pos_cost_price, delta_qty, trade_time, source,
+                             note, commission, tax, extra, profit_loss)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                COALESCE(%s::timestamptz, NOW()), %s, %s)
+                                COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s, %s)
                     """, (n['code'], n['name'], n['ttype'], n['qty'], n['price'], n['amount'],
-                          pos_q, pos_c, delta, n['tt'], json.dumps(n['extra'], ensure_ascii=False), pl))
+                          pos_q, pos_c, delta, n['tt'], n['extra'].get('source'),
+                          n['extra'].get('note'), n['extra'].get('commission'),
+                          n['extra'].get('tax'), json.dumps(n['extra'], ensure_ascii=False), pl))
+                    cur.execute('RELEASE SAVEPOINT _tr')
                     imported += 1
+                    if position_changed:
+                        pos_updated += 1
                 except Exception as e:
                     failed += 1
                     if len(errors) < 5:
-                        errors.append(str(e))
+                        errors.append(f"trade_row_failed:{type(e).__name__}")
                     try:
                         cur.execute('ROLLBACK TO SAVEPOINT _tr')   # 回滚坏行,保住已成功的行
+                        cur.execute('RELEASE SAVEPOINT _tr')
                     except Exception:
                         pass
             conn.commit()
@@ -468,10 +483,24 @@ class PortfolioDBPG:
         return {'imported': imported, 'failed': failed,
                 'positions_updated': pos_updated, 'errors': errors}
 
-    def _apply_trade_to_position(self, n: Dict):
+    def _apply_trade_to_position(self, n: Dict, *, cur=None):
         """把一笔已标准化的成交应用到持仓:买入加权加仓,卖出减仓。
-        返回 (pos_quantity, pos_cost_price, delta_qty) = 成交后持仓快照;未改动持仓返回 None。"""
-        existing = self.get_stock_by_code(n['code'])
+        返回 (pos_quantity, pos_cost_price, delta_qty) = 成交后持仓快照;未改动持仓返回 None。
+        ``cur`` 存在时持仓和成交流水在同一事务内提交或回滚。
+        """
+        if cur is None:
+            existing = self.get_stock_by_code(n['code'])
+        else:
+            cur.execute(
+                """SELECT id,code,name,cost_price,quantity,note,auto_monitor
+                   FROM portfolio_stocks WHERE code=%s FOR UPDATE""",
+                (n['code'],),
+            )
+            row = cur.fetchone()
+            existing = None if not row else {
+                'id': row[0], 'code': row[1], 'name': row[2], 'cost_price': row[3],
+                'quantity': row[4], 'note': row[5], 'auto_monitor': row[6],
+            }
         qty, price, tt = n['qty'], n['price'], n['tt']
         if n['ttype'] == '买入':
             if existing:
@@ -479,20 +508,43 @@ class PortfolioDBPG:
                 old_c = existing.get('cost_price')
                 new_q = old_q + qty
                 new_c = round((old_q * float(old_c) + qty * price) / new_q, 4) if (old_c and old_q) else price
-                self.update_stock(existing['id'], cost_price=new_c, quantity=new_q,
-                                  source='import_trades', trade_time=tt, log_change=False)
+                if cur is None:
+                    self.update_stock(existing['id'], cost_price=new_c, quantity=new_q,
+                                      source='import_trades', trade_time=tt, log_change=False)
+                else:
+                    cur.execute(
+                        """UPDATE portfolio_stocks SET cost_price=%s,quantity=%s,
+                           updated_at=%s WHERE id=%s""",
+                        (new_c, new_q, datetime.now(), existing['id']),
+                    )
                 return (new_q, new_c, new_q - old_q)
             else:
-                self.add_stock(n['code'], n['name'] or n['code'], cost_price=price,
-                               quantity=qty, source='import_trades', trade_time=tt, log_change=False)
+                if cur is None:
+                    self.add_stock(n['code'], n['name'] or n['code'], cost_price=price,
+                                   quantity=qty, source='import_trades', trade_time=tt,
+                                   log_change=False)
+                else:
+                    cur.execute(
+                        """INSERT INTO portfolio_stocks
+                           (code,name,cost_price,quantity,note,auto_monitor,created_at,updated_at)
+                           VALUES (%s,%s,%s,%s,'',TRUE,%s,%s)""",
+                        (n['code'], n['name'] or n['code'], price, qty,
+                         datetime.now(), datetime.now()),
+                    )
                 return (qty, price, qty)
         else:  # 卖出
             if existing:
                 old_q = existing.get('quantity') or 0
                 old_c = existing.get('cost_price')
                 new_q = max(0, old_q - qty)
-                self.update_stock(existing['id'], quantity=new_q,
-                                  source='import_trades', trade_time=tt, log_change=False)
+                if cur is None:
+                    self.update_stock(existing['id'], quantity=new_q,
+                                      source='import_trades', trade_time=tt, log_change=False)
+                else:
+                    cur.execute(
+                        "UPDATE portfolio_stocks SET quantity=%s,updated_at=%s WHERE id=%s",
+                        (new_q, datetime.now(), existing['id']),
+                    )
                 return (new_q, (float(old_c) if old_c else None), new_q - old_q)
             return None  # 未持有该股的卖出,只记流水不动持仓(pos_* 留空)
 

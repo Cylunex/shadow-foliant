@@ -702,6 +702,58 @@ INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('4-manifest-dependency-lock', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
+-- Runtime-neutral Agent preview Runs.  These rows never replace formal research/selection facts.
+CREATE TABLE IF NOT EXISTS foliant_runs (
+    run_id TEXT PRIMARY KEY,
+    actor_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    request_payload TEXT NOT NULL,
+    request_id TEXT,
+    status TEXT NOT NULL,
+    cancellable INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    resource_uri TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    result_payload TEXT,
+    provenance TEXT NOT NULL DEFAULT '{}',
+    warnings TEXT NOT NULL DEFAULT '[]',
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    failed_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(actor_id, capability, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_foliant_runs_status ON foliant_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_foliant_runs_actor ON foliant_runs(actor_id, created_at);
+CREATE TABLE IF NOT EXISTS foliant_domain_outbox (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    resource_uri TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(run_id, event_type)
+);
+CREATE INDEX IF NOT EXISTS idx_foliant_outbox_pending
+    ON foliant_domain_outbox(published_at, created_at);
+CREATE TABLE IF NOT EXISTS foliant_write_idempotency (
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    response_payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(actor_id, action, idempotency_key)
+);
+
 
 -- =============================================================================
 -- 验证查询：列出所有已创建的表

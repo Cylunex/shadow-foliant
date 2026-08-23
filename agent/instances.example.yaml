@@ -1,0 +1,10 @@
+version: 1
+instances:
+  foliant-example:
+    plugin_id: shadow-foliant
+    plugin_version: 0.1.0
+    environment: test
+    base_url_env: SHADOW_FOLIANT_BASE_URL
+    credential_env: SHADOW_FOLIANT_AGENT_TOKEN
+    health_path: /healthz
+    enabled: true

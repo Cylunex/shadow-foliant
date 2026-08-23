@@ -212,13 +212,29 @@ def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
         if given_amount is not None and abs(given_amount - expected_amount) > 0.05:
             warnings.append(f"第 {item['_row']} 行成交额 {given_amount:g} 与价×量 {expected_amount:g} 不符，已按价×量补正")
         item['amount'] = expected_amount
+        optional_invalid = False
         for target, aliases in {
             'note': ('note', '备注'), 'commission': ('commission', '佣金'),
             'tax': ('tax', '印花税'),
         }.items():
             value = _pick(item['_input'], *aliases)
             if value not in (None, ''):
-                item[target] = value
+                if target in {'commission', 'tax'}:
+                    parsed = _number(value)
+                    if parsed is None or parsed < 0:
+                        errors.append(f"第 {item['_row']} 行{target}必须是非负数")
+                        optional_invalid = True
+                    else:
+                        item[target] = round(parsed, 4)
+                else:
+                    note = _clean_text(value)
+                    if len(note) > 500:
+                        errors.append(f"第 {item['_row']} 行备注不能超过 500 字符")
+                        optional_invalid = True
+                    else:
+                        item[target] = note
+        if optional_invalid:
+            continue
         item['source'] = _pick(item['_input'], 'source') or 'mcp:import_trades'
         item.pop('_input', None)
         item.pop('_row', None)

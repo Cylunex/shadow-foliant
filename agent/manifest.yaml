@@ -1,0 +1,213 @@
+version: 2
+app_id: foliant
+package_version: 0.1.0
+skills:
+  - id: foliant-security-research
+    path: skills/foliant-security-research/SKILL.md
+    summary: 读取正式证券研究事实，在缺失时创建可追踪且不发布的研究预览
+    capabilities:
+      - foliant.market.read
+      - foliant.security-research.read
+      - foliant.security-research.preview
+      - foliant.run.read
+    invocation: { model: true, user: true }
+  - id: foliant-selection-audit
+    path: skills/foliant-selection-audit/SKILL.md
+    summary: 审计正式选股的来源、完整性和集中度，必要时建立不发布的选股预览
+    capabilities:
+      - foliant.market.read
+      - foliant.selection.read
+      - foliant.selection.preview
+      - foliant.run.read
+    invocation: { model: true, user: true }
+  - id: foliant-backtest-review
+    path: skills/foliant-backtest-review/SKILL.md
+    summary: 建立并复核有费用、滑点和时间边界的回测预览
+    capabilities:
+      - foliant.backtest.preview
+      - foliant.run.read
+    invocation: { model: true, user: true }
+capabilities:
+  - id: foliant.market.read
+    summary: 读取 A 股市场会话、交易日和研究数据质量摘要
+    audience: foliant
+    scopes: [stock.read]
+    tools:
+      - name: foliant.market.overview
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_market_overview
+        exposure: always
+        result_mode: summary
+        max_result_bytes: 65536
+        max_model_chars: 5000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
+      - name: foliant.market.data-quality
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_data_quality
+        exposure: on-demand
+        result_mode: summary
+        max_result_bytes: 65536
+        max_model_chars: 5000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
+    effect: read
+    data_classification: internal
+    risk_level: L0
+    confirmation: none
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: false
+  - id: foliant.security-research.read
+    summary: 读取一个证券已有的正式研究快照及其来源边界
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.security-research.latest
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_security_research_latest
+        exposure: on-demand
+        result_mode: summary
+        max_result_bytes: 131072
+        max_model_chars: 12000
+        timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
+    effect: read
+    data_classification: internal
+    risk_level: L0
+    confirmation: none
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: false
+  - id: foliant.security-research.preview
+    summary: 创建不写正式信号或研究快照的证券研究预览 Run
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.security-research.preview
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: create_agent_security_research_run
+        exposure: on-demand
+        result_mode: reference
+        max_result_bytes: 16384
+        max_model_chars: 2000
+        timeout_ms: 10000
+        concurrency_safe: false
+        retry_policy: idempotent
+    effect: draft
+    data_classification: internal
+    risk_level: L1
+    confirmation: notify
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: true
+  - id: foliant.selection.read
+    summary: 读取最近正式 SelectionRun 和 manifest 绑定的候选摘要
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.selection.latest
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_selection_run_latest
+        exposure: on-demand
+        result_mode: summary
+        max_result_bytes: 131072
+        max_model_chars: 12000
+        timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
+    effect: read
+    data_classification: internal
+    risk_level: L0
+    confirmation: none
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: false
+  - id: foliant.selection.preview
+    summary: 创建不替换最近正式选股结果的 Selection Preview Run
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.selection.preview
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: create_agent_selection_run
+        exposure: on-demand
+        result_mode: reference
+        max_result_bytes: 16384
+        max_model_chars: 2000
+        timeout_ms: 10000
+        concurrency_safe: false
+        retry_policy: idempotent
+    effect: draft
+    data_classification: internal
+    risk_level: L1
+    confirmation: notify
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: true
+  - id: foliant.backtest.preview
+    summary: 创建有时间、费用和基准边界的异步回测预览 Run
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.backtest.preview
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: create_agent_backtest_run
+        exposure: on-demand
+        result_mode: reference
+        max_result_bytes: 16384
+        max_model_chars: 2000
+        timeout_ms: 10000
+        concurrency_safe: false
+        retry_policy: idempotent
+    effect: draft
+    data_classification: internal
+    risk_level: L1
+    confirmation: notify
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: true
+  - id: foliant.run.read
+    summary: 查询当前 Agent 创建的 preview Run 状态和有界结果
+    audience: foliant
+    scopes: [stock.research]
+    tools:
+      - name: foliant.run.get
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_run
+        exposure: on-demand
+        result_mode: summary
+        max_result_bytes: 32768
+        max_model_chars: 4000
+        timeout_ms: 8000
+        concurrency_safe: true
+        retry_policy: idempotent
+      - name: foliant.run.result
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_run_result
+        exposure: on-demand
+        result_mode: summary
+        max_result_bytes: 262144
+        max_model_chars: 16000
+        timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
+    effect: read
+    data_classification: internal
+    risk_level: L0
+    confirmation: none
+    reversible: true
+    resource_grant_required: false
+    idempotency_required: false

@@ -131,102 +131,20 @@ def stock_context(code: str, groups: Optional[List[str]] = None) -> Dict[str, An
 @mcp.tool()
 def research_stock(code: str, depth: str = 'quick',
                    view: str = 'summary') -> Dict[str, Any]:
-    """Agent 高层个股研究入口，统一返回质量元数据。
-    depth:quick=基础/技术/资金/风险，deep=再加基本面/缠论/筹码/情绪；
-    view:summary 会移除 K线明细和截断新闻，full 保留完整 context。"""
-    import copy
-    from agent_contract import envelope, context_quality, context_warnings
-    from agent_tool_groups import collect
-    code = ''.join(ch for ch in str(code or '') if ch.isdigit())[-6:]
-    if len(code) != 6:
-        return envelope(None, status='failed', warnings=['code 必须是 6 位 A 股代码'])
-    groups = ['base', 'kline_technical', 'fund_flow', 'risk']
-    if depth == 'deep':
-        groups += ['fundamentals', 'chan_theory', 'chipset', 'sentiment']
-    elif depth != 'quick':
-        return envelope(None, status='failed', warnings=['depth 仅支持 quick/deep'])
-    context = collect(groups, code)
-    warnings = context_warnings(context)
-    quality = context_quality(context)
-    if quality.get('core_degraded'):
-        warnings.append(quality['guardrails']['reason'])
+    """Compatibility adapter for the shared SecurityResearchService.
+
+    The historical ``full`` flag is retained as an input alias, but the shared service always
+    enforces a bounded model-safe result.  New runtime integrations use the Agent HTTP API.
+    """
+    if view not in {'summary', 'full'}:
+        return {'status': 'failed', 'warnings': ['view 仅支持 summary/full']}
+    from application.runtime import get_application_services
     try:
-        from analysis.market_structure import build_market_structure
-        market_structure = build_market_structure(context, code)
-    except Exception as exc:
-        market_structure = {'status': 'missing', 'limitations': [
-            f'市场结构生成失败:{type(exc).__name__}']}
-    if view == 'summary':
-        context = copy.deepcopy(context)
-        technical = context.get('kline_technical')
-        if isinstance(technical, dict):
-            technical.pop('df_tail', None)
-        sentiment = context.get('sentiment')
-        news = sentiment.get('news') if isinstance(sentiment, dict) else None
-        if isinstance(news, list):
-            sentiment['news'] = news[:5]
-    elif view != 'full':
-        return envelope(None, status='failed', warnings=['view 仅支持 summary/full'])
-    try:
-        from decision_signal import get_latest_active
-        signal = get_latest_active(code)
-    except Exception as exc:
-        signal = None
-        warnings.append(f'decision_signal: {exc}')
-    try:
-        from decision_signal import list_transitions
-        transitions = list_transitions(code=code, material_only=True, days=90, limit=5)
-    except Exception as exc:
-        transitions = []
-        warnings.append(f'decision_signal_transitions: {exc}')
-    try:
-        from ai_recommendation_monitor import list_active
-        recommendations = list_active(symbol=code, limit=20)
-    except Exception as exc:
-        recommendations = []
-        warnings.append(f'ai_recommendations: {exc}')
-    try:
-        from analysis.market_add_signal import build as build_market_action
-        market_action = build_market_action()
-    except Exception as exc:
-        market_action = {'action': 'unknown', 'action_cn': '数据不足·默认持有'}
-        warnings.append(f'market_action: {exc}')
-    try:
-        base = context.get('base') if isinstance(context, dict) else {}
-        info = base.get('info') if isinstance(base, dict) else {}
-        from analysis.trade_plan import build_for_code
-        trade_plan = build_for_code(
-            code,
-            name=str((info or {}).get('name') or ''),
-            market_signal=market_action,
-            latest_signal=signal,
+        return get_application_services().security_research.compatibility_research(
+            code, depth=depth
         )
     except Exception as exc:
-        trade_plan = {'available': False, 'action': 'watch', 'action_cn': '观望',
-                      'blockers': [f'交易计划生成失败: {type(exc).__name__}']}
-        warnings.append(f'trade_plan: {exc}')
-    return envelope(
-        {
-            'code': code,
-            'depth': depth,
-            'context': context,
-            'latest_decision_signal': signal,
-            'recent_signal_transitions': transitions,
-            'active_recommendations': recommendations,
-            'market_action': market_action,
-            'market_structure': market_structure,
-            'trade_plan': trade_plan,
-        },
-        status=('degraded' if quality.get('level') == 'low'
-                else 'partial' if warnings else 'success'),
-        warnings=warnings,
-        sources=groups + ['decision_signals', 'decision_signal_events', 'ai_recommendations',
-                          'market_action', 'market_structure', 'trade_plan'],
-        data_quality=quality,
-        stages=quality.get('stages') or [],
-        decision_guardrails=quality.get('guardrails') or {},
-        view=view,
-    )
+        return {'status': 'failed', 'warnings': [getattr(exc, 'message', 'research failed')]}
 
 
 # =========================== 选股 ===========================
@@ -398,9 +316,11 @@ def import_trades(rows: Optional[List[Dict[str, Any]]] = None, update_position: 
     amount?,trade_time?,note?,commission?,tax?}]` 继续可用。默认按代码+时间+方向+数量+价格
     幂等跳过重复成交；名称不能唯一解析或关键字段错误时整批不写。`dry_run=true` 仅返回补齐预览。
     """
-    from portfolio.trade_import_service import import_trade_records
-    return import_trade_records(rows=rows, table=table, update_position=update_position,
-                                dry_run=dry_run, skip_existing=skip_existing)
+    from application.runtime import get_application_services
+    return get_application_services().trade_entry.compatibility_import(
+        rows=rows, table=table, update_position=update_position,
+        dry_run=dry_run, skip_existing=skip_existing,
+    )
 
 
 @mcp.tool()
@@ -933,9 +853,10 @@ def list_tasks() -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
 def trigger_task(task_name: str, idempotency_key: str = '') -> Dict[str, Any]:
-    """异步触发指定定时任务，立即返回 run_id；用 task_run_status 查询结果。
+    """Deprecated internal compatibility helper; it is no longer registered as an MCP Tool.
+
+    异步触发指定定时任务，立即返回 run_id；用 task_run_status 查询结果。
     idempotency_key 可由 Agent 为一次意图生成，重试时复用可避免重复执行。
     task_name 来自 list_tasks 返回的 name 字段。
     常用: morning_strategy(晨间报告,含昨日收益+持仓买卖提示), unified_selection(综合选股),
@@ -968,8 +889,8 @@ def task_runs(task_name: str = '', limit: int = 30) -> Dict[str, Any]:
 @mcp.tool()
 def latest_selection() -> Dict[str, Any]:
     """读取最近一次综合选股 TOP15 及二次优选 final_picks/final_rows；不现算、不拉源。"""
-    from jobs.task_control import latest_selection_artifact
-    return latest_selection_artifact()
+    from application.runtime import get_application_services
+    return get_application_services().selection.latest_formal()
 
 
 @mcp.tool()

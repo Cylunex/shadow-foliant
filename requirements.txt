@@ -43,3 +43,4 @@ uvicorn>=0.27
 redis>=5.0
 
 # Shadow SDK 从 shadow-platform 仓库构建 wheel 后安装到同一 venv；不在此写私有 Git URL/Token。
+shadow-platform>=0.6,<1

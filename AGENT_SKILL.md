@@ -5,6 +5,11 @@ description: A股多智能体分析平台的 Agent 技能文档。提供个股�
 
 # shadow-foliant · Agent 技能文档
 
+> **迁移期兼容说明**：本文件不再是 Shadow Runtime 的能力入口。稳定能力以
+> `agent/manifest.yaml`、`contracts/agent.openapi.yaml` 和 `agent/skills/*` 为准。
+> 此处列出的低层 MCP 工具只供本地 stdio 兼容，不能据此推断远程权限；通用
+> `trigger_task` 不再对新 Runtime 暴露。
+
 > 给 Agent(OpenClaw/Claude 等)调用本项目能力用。
 > 配套 MCP 服务见文末「MCP 适配」。所有代码靠 `_bootstrap` 加路径,入口先 `import _bootstrap`。
 

@@ -1,0 +1,30 @@
+version: 1
+permissions:
+  - capability: foliant.market.read
+    audience: foliant
+    scopes: [stock.read]
+    resource_grant: none
+  - capability: foliant.security-research.read
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: none
+  - capability: foliant.security-research.preview
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: none
+  - capability: foliant.selection.read
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: none
+  - capability: foliant.selection.preview
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: none
+  - capability: foliant.backtest.preview
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: none
+  - capability: foliant.run.read
+    audience: foliant
+    scopes: [stock.research]
+    resource_grant: creator-agent-only

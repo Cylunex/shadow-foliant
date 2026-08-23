@@ -1,0 +1,22 @@
+version: 1
+resources:
+  - type: foliant-security-research
+    uri_template: shadow://foliant/securities/{symbol}/research/{run_id}
+    owner: foliant
+    resource_grant_required: false
+  - type: foliant-selection-run
+    uri_template: shadow://foliant/selection-runs/{run_id}
+    owner: foliant
+    resource_grant_required: false
+  - type: foliant-backtest
+    uri_template: shadow://foliant/backtests/{run_id}
+    owner: foliant
+    resource_grant_required: false
+  - type: foliant-run
+    uri_template: shadow://foliant/runs/{run_id}
+    owner: foliant
+    resource_grant_required: false
+  - type: foliant-report
+    uri_template: shadow://foliant/reports/{report_id}
+    owner: foliant
+    resource_grant_required: false

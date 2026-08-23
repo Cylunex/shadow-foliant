@@ -1,0 +1,27 @@
+version: 1
+id: shadow-finance-research
+runtime:
+  kind: dsh
+  distribution_version: 0.1.1-rc.2
+  tools_api_version: 0.1.1-rc.2
+plugins:
+  - plugin_id: shadow-foliant
+    instance_id: foliant-example
+    capabilities:
+      - foliant.market.read
+      - foliant.security-research.read
+      - foliant.security-research.preview
+      - foliant.selection.read
+      - foliant.selection.preview
+      - foliant.backtest.preview
+      - foliant.run.read
+policy:
+  preauthorized_capabilities:
+    - foliant.market.read
+    - foliant.security-research.read
+    - foliant.selection.read
+    - foliant.run.read
+  allow_elevated: false
+budgets:
+  max_tool_catalog_chars: 30000
+  max_skill_catalog_chars: 12000

@@ -1,0 +1,23 @@
+version: 1
+confirmations:
+  - capability: foliant.market.read
+    mode: none
+    receipt_required: false
+  - capability: foliant.security-research.read
+    mode: none
+    receipt_required: false
+  - capability: foliant.security-research.preview
+    mode: notify
+    receipt_required: false
+  - capability: foliant.selection.read
+    mode: none
+    receipt_required: false
+  - capability: foliant.selection.preview
+    mode: notify
+    receipt_required: false
+  - capability: foliant.backtest.preview
+    mode: notify
+    receipt_required: false
+  - capability: foliant.run.read
+    mode: none
+    receipt_required: false
