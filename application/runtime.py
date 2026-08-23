@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 from application.run_repository import RunRepository
@@ -18,8 +19,10 @@ from application.services import (
 
 
 class ApplicationServices:
-    def __init__(self, repository: RunRepository | None = None, *, recover: bool = True) -> None:
-        self.runs = repository or RunRepository()
+    def __init__(self, repository: RunRepository | None = None, *, recover: bool = False) -> None:
+        self.runs = repository or RunRepository(
+            ensure_schema=os.getenv("FOLIANT_RUNTIME_DDL", "false").lower() == "true"
+        )
         self.coordinator = RunCoordinator(self.runs, recover=recover)
         self.market = MarketOverviewService()
         self.data_quality = DataQualityService()

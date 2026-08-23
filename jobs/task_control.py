@@ -771,7 +771,7 @@ def latest_selection_artifact() -> Dict[str, Any]:
     from agent_contract import envelope
     from data.research_store import ResearchStore
 
-    formal = ResearchStore(ensure_schema=False).latest_selection()
+    formal = ResearchStore(ensure_schema=False).latest_formal_selection()
     if not formal:
         return envelope(
             {'picks': [], 'rows': [], 'final_picks': [], 'final_rows': []},

@@ -409,11 +409,24 @@ class WebAuthTests(unittest.TestCase):
                 "financial_coverage": 0.90,
             },
         ):
+            token = "Bearer " + "x" * 40
+
+            class ReadyAuthenticator:
+                def authenticate(self, authorization):
+                    if authorization != token:
+                        raise ValueError("invalid")
+                    return SimpleNamespace(
+                        agent_id="health-probe", owner_app="foliant", audience="foliant",
+                        scopes=frozenset({"stock.read"}), capabilities=frozenset(),
+                    )
+
+            access_control._agent_authenticator = ReadyAuthenticator()
             with TestClient(app, base_url="https://stock.example.com") as client:
-                ready = client.get("/readyz")
+                self.assertEqual(client.get("/readyz").status_code, 401)
+                ready = client.get("/readyz", headers={"Authorization": token})
                 self.assertEqual(ready.status_code, 200)
                 self.assertTrue(ready.json()["ready"])
-                research = client.get("/research-readyz")
+                research = client.get("/research-readyz", headers={"Authorization": token})
                 self.assertEqual(research.status_code, 200)
                 self.assertTrue(research.json()["ready"])
 
@@ -479,6 +492,17 @@ class WebAuthTests(unittest.TestCase):
                 return SimpleNamespace(agent_id="foliant-test", scopes=self.scopes)
 
         authenticator = FakeAuthenticator()
+        capabilities = {
+            "foliant.market.read", "foliant.security-research.read",
+            "foliant.security-research.preview", "foliant.selection.read",
+            "foliant.selection.preview", "foliant.backtest.preview", "foliant.run.read",
+        }
+        authenticator.authenticate = lambda authorization: (
+            SimpleNamespace(
+                agent_id="foliant-test", owner_app="foliant", audience="foliant",
+                scopes=authenticator.scopes, capabilities=frozenset(capabilities),
+            ) if authorization == token else (_ for _ in ()).throw(ValueError("invalid"))
+        )
         access_control._agent_authenticator = authenticator
         fake_services = SimpleNamespace(
             market=SimpleNamespace(read=lambda: {
@@ -510,12 +534,45 @@ class WebAuthTests(unittest.TestCase):
                 self.assertNotIn("location", denied.headers)
 
                 authenticator.scopes = frozenset({"stock.research"})
+                capabilities.remove("foliant.selection.preview")
+                capability_denied = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={"Authorization": token, "Idempotency-Key": "selection-capability"},
+                    json={"selection_date": "2026-08-21"}, follow_redirects=False,
+                )
+                self.assertEqual(capability_denied.status_code, 403)
+                self.assertNotIn("location", capability_denied.headers)
+                capabilities.add("foliant.selection.preview")
                 created = client.post(
                     "/api/machine/v1/agent/selection-runs",
                     headers={"Authorization": token, "Idempotency-Key": "selection-example"},
                     json={"selection_date": "2026-08-21"}, follow_redirects=False,
                 )
                 self.assertEqual(created.status_code, 202)
+                unknown = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={"Authorization": token, "Idempotency-Key": "selection-extra"},
+                    json={"selection_date": "2026-08-21", "unexpected": True},
+                )
+                self.assertEqual(unknown.status_code, 422)
+                wrong_type = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={
+                        "Authorization": token, "Idempotency-Key": "selection-content-type",
+                        "Content-Type": "text/plain",
+                    },
+                    content=b"{}",
+                )
+                self.assertEqual(wrong_type.status_code, 415)
+                oversized = client.post(
+                    "/api/machine/v1/agent/selection-runs",
+                    headers={
+                        "Authorization": token, "Idempotency-Key": "selection-oversized",
+                        "Content-Type": "application/json",
+                    },
+                    content=(chunk for chunk in (b'{"padding":"', b"x" * (2 * 1024 * 1024), b'"}')),
+                )
+                self.assertEqual(oversized.status_code, 413)
 
                 fake_services.market.read = lambda: (_ for _ in ()).throw(
                     RuntimeError("Bearer secret prompt holding SELECT /private/example")

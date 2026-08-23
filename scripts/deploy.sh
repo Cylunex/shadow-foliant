@@ -59,13 +59,32 @@ if [[ ! -x "$python_bin" ]]; then
   exit 7
 fi
 
+platform_wheel="${SHADOW_PLATFORM_WHEEL:?SHADOW_PLATFORM_WHEEL is required}"
+platform_wheel_sha256="${SHADOW_PLATFORM_WHEEL_SHA256:?SHADOW_PLATFORM_WHEEL_SHA256 is required}"
+if [[ ! -r "$platform_wheel" ]]; then
+  echo "configured Shadow Platform wheel is not readable" >&2
+  exit 7
+fi
+actual_platform_wheel_sha256="$(sha256sum "$platform_wheel" | awk '{print $1}')"
+if [[ "$actual_platform_wheel_sha256" != "$platform_wheel_sha256" ]]; then
+  echo "Shadow Platform wheel SHA-256 mismatch" >&2
+  exit 7
+fi
+"$python_bin" -m pip install "$platform_wheel"
 "$python_bin" -m pip install -r "$validation_dir/requirements.txt"
 (
   cd "$validation_dir"
   "$python_bin" -m compileall -q \
     -x '(^|[\\/])(venv2?|\.venv|\.git|node_modules)([\\/]|$)' .
   find scripts -type f -name '*.sh' -exec bash -n {} +
-  "$python_bin" -m pytest -q
+  if [[ -n "${FOLIANT_TEST_TARGETS:-}" ]]; then
+    read -r -a test_targets <<< "$FOLIANT_TEST_TARGETS"
+    "$python_bin" -m pytest -q "${test_targets[@]}"
+  elif [[ "${FOLIANT_SKIP_TESTS:-false}" == "true" ]]; then
+    echo "pytest skipped by explicit deployment policy"
+  else
+    "$python_bin" -m pytest -q
+  fi
 )
 
 if command -v psql >/dev/null 2>&1; then
@@ -112,7 +131,14 @@ trap rollback ERR
 supervisorctl restart stock-webui stock-jobs-hub
 supervisorctl status stock-webui stock-jobs-hub
 curl --fail --silent --show-error "$health_base/healthz" >/dev/null
-ready_payload="$(curl --fail --silent --show-error "$health_base/readyz")"
+ready_headers=()
+ready_bearer_file="${FOLIANT_READY_BEARER_FILE:?FOLIANT_READY_BEARER_FILE is required}"
+if [[ ! -r "$ready_bearer_file" ]]; then
+  echo "configured readiness Bearer file is not readable" >&2
+  false
+fi
+ready_headers=(-H "Authorization: Bearer $(<"$ready_bearer_file")")
+ready_payload="$(curl --fail --silent --show-error "${ready_headers[@]}" "$health_base/readyz")"
 if [[ "$ready_payload" != *"$EXPECTED_COMMIT"* ]]; then
   echo "runtime revision does not match EXPECTED_COMMIT" >&2
   false
@@ -120,7 +146,7 @@ fi
 # Research readiness may legitimately be degraded while a fresh bootstrap is in
 # progress, but both protected contracts must respond with valid JSON semantics.
 for path in data-readyz selection-readyz; do
-  payload="$(curl --silent --show-error "$health_base/$path")"
+  payload="$(curl --silent --show-error "${ready_headers[@]}" "$health_base/$path")"
   if [[ "$payload" != *'"ready"'* || "$payload" != *'"checks"'* ]]; then
     echo "$path did not return a readiness contract" >&2
     false

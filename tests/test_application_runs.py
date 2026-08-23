@@ -130,7 +130,14 @@ def test_run_query_is_creator_scoped_and_large_list_is_paginated(repository) -> 
 
     page = query.result(created["run_id"], actor_id="agent-owner", limit=25)
     assert len(page["data"]["items"]) == 25
-    assert page["continuation"]["offset"] == 25
+    assert page["continuation"] == {
+        "field": "items", "offset": 0, "next_offset": 25, "limit": 25, "total": 120,
+    }
+    tail = query.result(
+        created["run_id"], actor_id="agent-owner", offset=50, limit=100
+    )
+    assert tail["data"]["items"] == list(range(50, 120))
+    assert tail["continuation"]["next_offset"] is None
 
 
 def test_cancelled_queue_and_stale_restart_recovery(repository) -> None:
@@ -194,8 +201,8 @@ def test_formal_selection_read_performs_no_write_or_reanalysis() -> None:
         def __init__(self):
             self.calls = []
 
-        def latest_selection(self):
-            self.calls.append("latest_selection")
+        def latest_formal_selection(self):
+            self.calls.append("latest_formal_selection")
 
         def __getattr__(self, name):
             raise AssertionError(f"read path attempted unexpected operation: {name}")
@@ -203,7 +210,57 @@ def test_formal_selection_read_performs_no_write_or_reanalysis() -> None:
     store = ReadOnlyStore()
     result = SelectionRunService(store=store).latest_formal()
     assert result["status"] == "missing"
-    assert store.calls == ["latest_selection"]
+    assert store.calls == ["latest_formal_selection"]
+
+
+def test_durable_worker_lease_reclaims_once_then_fails_after_attempt_budget(repository) -> None:
+    created = repository.create_or_get(
+        actor_id="agent-owner", capability="foliant.selection.preview",
+        run_kind="selection", idempotency_key="durable-lease-example",
+        request_payload={"selection_date": "2026-08-21", "decision_mode": "postclose"},
+        resource_uri_factory=lambda run_id: f"shadow://foliant/selection-runs/{run_id}",
+        max_active=2, max_attempts=2,
+    ).run
+    first = repository.claim_next("worker-one", lease_seconds=30)
+    assert first["run_id"] == created["run_id"]
+    assert first["attempt"] == 1
+    with repository.connect() as conn:
+        conn.execute(
+            "UPDATE foliant_runs SET lease_until=? WHERE run_id=?",
+            ("2000-01-01T00:00:00+00:00", created["run_id"]),
+        )
+        conn.commit()
+    second = repository.claim_next("worker-two", lease_seconds=30)
+    assert second["run_id"] == created["run_id"]
+    assert second["attempt"] == 2
+    with repository.connect() as conn:
+        conn.execute(
+            "UPDATE foliant_runs SET lease_until=? WHERE run_id=?",
+            ("2000-01-01T00:00:00+00:00", created["run_id"]),
+        )
+        conn.commit()
+    assert repository.claim_next("worker-three", lease_seconds=30) is None
+    assert repository.get(created["run_id"])["error_code"] == "worker_lease_expired"
+
+
+def test_quota_check_and_create_share_one_repository_transaction(repository) -> None:
+    repository.create_or_get(
+        actor_id="agent-owner", capability="foliant.selection.preview",
+        run_kind="selection", idempotency_key="quota-first-example",
+        request_payload={"selection_date": "2026-08-21"},
+        resource_uri_factory=lambda run_id: f"shadow://foliant/selection-runs/{run_id}",
+        max_active=1,
+    )
+    from application.run_repository import RunQuotaExceeded
+
+    with pytest.raises(RunQuotaExceeded):
+        repository.create_or_get(
+            actor_id="agent-owner", capability="foliant.backtest.preview",
+            run_kind="backtest", idempotency_key="quota-second-example",
+            request_payload={"symbols": ["600519"]},
+            resource_uri_factory=lambda run_id: f"shadow://foliant/backtests/{run_id}",
+            max_active=1,
+        )
 
 
 def test_terminal_failure_cannot_be_overwritten_by_late_completion(repository) -> None:

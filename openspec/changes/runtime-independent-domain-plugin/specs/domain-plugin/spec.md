@@ -22,6 +22,33 @@ NOT replace or mutate a formal research or selection artifact.
 - **THEN** a persistent preview Run is created and can be queried after restart
 - **AND** the latest formal SelectionRun is unchanged
 
+### Scenario: Web or worker restarts
+
+- **WHEN** the Web process exits after creating a queued Run
+- **THEN** the jobs-hub worker can claim and execute the persisted canonical request
+- **AND WHEN** a worker lease expires
+- **THEN** another worker retries within the attempt budget without accepting a late stale result
+
+## Requirement: Machine authorization includes a capability grant
+
+Every versioned Agent route MUST validate audience, coarse scope and its exact `foliant.*`
+capability grant in the local Agent registry.
+
+### Scenario: Scope without capability
+
+- **WHEN** an Agent has `stock.research` but lacks `foliant.selection.preview`
+- **THEN** selection preview returns JSON 403 without a browser redirect
+
+## Requirement: Runtime receives usable bounded results
+
+Reference results MUST preserve Run identity and status. Structured results MUST expose only the
+bounded `model_payload` plus provenance, warnings and continuation metadata.
+
+### Scenario: Preview result retrieval
+
+- **WHEN** a Runtime creates and later reads a completed preview Run
+- **THEN** it can retain the `run_id`, observe status and consume bounded result data
+
 ## Requirement: Machine creation is idempotent
 
 Run creation MUST require an idempotency key scoped to the authenticated Agent and capability.

@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).parents[1]
-PLATFORM_ROOT = ROOT.parent / "shadow-platform"
-PLATFORM_CONTRACTS_MODULE = PLATFORM_ROOT / "shadow_sdk" / "plugin_contracts.py"
-if PLATFORM_CONTRACTS_MODULE.is_file() and str(PLATFORM_ROOT) not in sys.path:
+PLATFORM_SOURCE_ROOT = os.getenv("SHADOW_PLATFORM_SOURCE_ROOT", "").strip()
+if PLATFORM_SOURCE_ROOT:
+    PLATFORM_ROOT = Path(PLATFORM_SOURCE_ROOT).resolve()
+    if not (PLATFORM_ROOT / "shadow_sdk" / "plugin_contracts.py").is_file():
+        raise RuntimeError("SHADOW_PLATFORM_SOURCE_ROOT is not a Platform source checkout")
     sys.path.insert(0, str(PLATFORM_ROOT))
-elif not PLATFORM_CONTRACTS_MODULE.is_file():
+    PLATFORM_DISTRIBUTION_VERSION = None
+else:
     import shadow_sdk
 
-    # Production installs the Platform SDK as a wheel and may have an older
-    # sibling checkout. Resolve schemas from the installed package instead of
-    # letting that unrelated checkout shadow the deployed SDK.
+    # Default to the installed wheel even when an adjacent checkout exists.
     PLATFORM_ROOT = Path(shadow_sdk.__file__).resolve().parent
+    PLATFORM_DISTRIBUTION_VERSION = distribution_version("shadow-platform")
 
 
 def _application_routes(app) -> dict[tuple[str, str], str | None]:
@@ -40,6 +44,8 @@ def test_plugin_definition_manifest_and_project_versions_match() -> None:
 
     assert plugin.plugin_id == "shadow-foliant"
     assert plugin.version == version == plugin.agent_manifest["package_version"]
+    if PLATFORM_DISTRIBUTION_VERSION is not None:
+        assert PLATFORM_DISTRIBUTION_VERSION == "0.7.1"
     assert plugin.definition["spec"]["compatibility"]["dsh"] == {
         "distribution": ">=0.1.1-rc.2 <0.2.0",
         "tools_api": ">=0.1.1-rc.2 <0.2.0",
@@ -57,6 +63,30 @@ def test_agent_openapi_routes_and_operation_ids_match_fastapi() -> None:
                 continue
             assert (path, method.upper()) in actual
             assert actual[(path, method.upper())] == operation["operationId"]
+
+
+def test_static_agent_request_contract_matches_fastapi_constraints() -> None:
+    from webui.api_server import app
+
+    generated = app.openapi()["components"]["schemas"]
+    static = yaml.safe_load(
+        (ROOT / "contracts" / "agent.openapi.yaml").read_text("utf-8")
+    )["components"]["schemas"]
+    pairs = {
+        "AgentResearchPreviewReq": "ResearchPreviewCreate",
+        "AgentSelectionPreviewReq": "SelectionPreviewCreate",
+        "AgentBacktestPreviewReq": "BacktestPreviewCreate",
+    }
+    for generated_name, static_name in pairs.items():
+        assert generated[generated_name]["additionalProperties"] is False
+        assert static[static_name]["additionalProperties"] is False
+    generated_backtest = generated["AgentBacktestPreviewReq"]["properties"]
+    static_backtest = static["BacktestPreviewCreate"]["properties"]
+    for field in ("hold_days", "stop_pct", "target_pct", "max_positions"):
+        assert generated_backtest[field]["minimum"] == static_backtest[field]["minimum"]
+        assert generated_backtest[field]["maximum"] == static_backtest[field]["maximum"]
+    assert generated_backtest["symbols"]["minItems"] == static_backtest["symbols"]["minItems"]
+    assert generated_backtest["symbols"]["maxItems"] == static_backtest["symbols"]["maxItems"]
 
 
 def test_research_profile_is_explicit_and_has_no_private_finance_capability() -> None:

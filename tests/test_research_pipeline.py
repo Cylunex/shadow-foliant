@@ -292,6 +292,22 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         }
         self.assertEqual(self.store.save_events([confirmed]), 1)
         self.assertEqual(len(self.store.load_events("2026-08-21")), 1)
+        first_dataset = self.store.event_dataset_id("2026-08-21")
+        corrected = {**confirmed, "direction": 0.75, "payload_revision": 2}
+        self.assertEqual(self.store.save_events([corrected]), 1)
+        second_dataset = self.store.event_dataset_id("2026-08-21")
+        self.assertNotEqual(first_dataset, second_dataset)
+        loaded = self.store.load_events("2026-08-21")
+        self.assertEqual(float(loaded.iloc[0]["direction"]), 0.75)
+        conn = self.store.connect()
+        try:
+            revisions = conn.execute(
+                "SELECT COUNT(*) FROM research_event_revisions WHERE event_id=?",
+                (next(iter(conn.execute("SELECT event_id FROM research_event_records")))[0],),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(revisions, 2)
 
     def test_latest_master_is_only_available_through_ingestion_view(self):
         frame = pd.DataFrame([{
@@ -329,6 +345,29 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             self.assertGreaterEqual(candidate["data_coverage"], 0.8)
         latest = self.store.latest_selection()
         self.assertEqual(latest["metadata"]["primary_pipeline"], "local_pit")
+        self.assertEqual(
+            self.store.latest_formal_selection()["run_id"], latest["run_id"]
+        )
+        verification = self.store.verify_selection_artifacts(latest["run_id"])
+        self.assertTrue(verification["exact_match"], verification)
+        replay = self.store.replay_selection(latest["metadata"]["manifest_id"])
+        self.assertTrue(replay["exact_match"], replay)
+        conn = self.store.connect()
+        try:
+            conn.execute(
+                """INSERT INTO selection_runs
+                   (run_id,selection_date,created_at,status,primary_source,universe_count,
+                    eligible_count,final_count,coverage,reference_source,comparison,metadata,
+                    publication_status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("failed-newer", selection_date, "9999-01-01T00:00:00+08:00", "error",
+                 "local_pit", 0, 0, 0, 0, None, "{}", "{}", "unpublished"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(self.store.latest_selection_attempt()["run_id"], "failed-newer")
+        self.assertEqual(self.store.latest_formal_selection()["run_id"], latest["run_id"])
 
     def test_local_pipeline_accepts_pre_normalization_numeric_listed_status(self):
         selection_date = self._seed()

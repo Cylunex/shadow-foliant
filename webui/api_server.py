@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from typing import Annotated, Literal
 
 _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、对外回通用文案
 
@@ -22,12 +23,12 @@ _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: E402,F401
 
-from fastapi import FastAPI, Header, Request  # noqa: E402
+from fastapi import FastAPI, Header, Query, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator  # noqa: E402
 from webui.access_control import (  # noqa: E402
     audit_request,
     enforce_request_access,
@@ -110,6 +111,26 @@ async def _authorize_requests(request: Request, call_next):
                                           "message": "request body exceeds the configured limit"}},
                 status_code=413,
             )
+        if request.method.upper() in {"POST", "PUT", "PATCH"}:
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                return JSONResponse(
+                    {"ok": False, "error": {"code": "unsupported_media_type",
+                                              "message": "application/json is required"}},
+                    status_code=415,
+                )
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > maximum:
+                    return JSONResponse(
+                        {"ok": False, "error": {"code": "request_too_large",
+                                                  "message": "request body exceeds the configured limit"}},
+                        status_code=413,
+                    )
+                chunks.append(chunk)
+            request._body = b"".join(chunks)  # Starlette replays the bounded body downstream.
     denied = await enforce_request_access(request)
     if denied is not None:
         audit_request(request, denied)
@@ -509,25 +530,39 @@ def machine_research_stock(code: str, depth: str = "quick", view: str = "summary
         return _err("research is temporarily unavailable")
 
 
-class AgentResearchPreviewReq(BaseModel):
-    depth: str = "quick"
+AShareSymbol = Annotated[str, StringConstraints(pattern=r"^[0-9]{6}$")]
+ISODate = Annotated[str, StringConstraints(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")]
 
 
-class AgentSelectionPreviewReq(BaseModel):
-    selection_date: str | None = None
-    decision_mode: str = "preopen"
+class StrictAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class AgentBacktestPreviewReq(BaseModel):
-    symbols: list[str]
-    strategy: str = "enter"
-    start: str | None = None
-    end: str | None = None
-    hold_days: int = 10
-    stop_pct: float = 8.0
-    target_pct: float = 15.0
-    max_positions: int = 5
-    benchmark: str = "000300"
+class AgentResearchPreviewReq(StrictAgentRequest):
+    depth: Literal["quick", "deep"] = "quick"
+
+
+class AgentSelectionPreviewReq(StrictAgentRequest):
+    selection_date: ISODate | None = None
+    decision_mode: Literal["preopen", "postclose", "historical_close"] = "preopen"
+
+
+class AgentBacktestPreviewReq(StrictAgentRequest):
+    symbols: list[AShareSymbol] = Field(min_length=1, max_length=20)
+    strategy: Annotated[str, StringConstraints(min_length=1, max_length=80)] = "enter"
+    start: ISODate | None = None
+    end: ISODate | None = None
+    hold_days: int = Field(default=10, ge=1, le=250)
+    stop_pct: float = Field(default=8.0, ge=0, le=100)
+    target_pct: float = Field(default=15.0, ge=0, le=500)
+    max_positions: int = Field(default=5, ge=1, le=20)
+    benchmark: AShareSymbol = "000300"
+
+    @model_validator(mode="after")
+    def _unique_symbols(self):
+        if len(self.symbols) != len(set(self.symbols)):
+            raise ValueError("symbols must not contain duplicates")
+        return self
 
 
 def _agent_actor(request: Request) -> str:
@@ -673,7 +708,12 @@ def agent_run_status(run_id: str, request: Request):
     "/api/machine/v1/agent/runs/{run_id}/result",
     operation_id="get_agent_run_result",
 )
-def agent_run_result(run_id: str, request: Request, offset: int = 0, limit: int = 50):
+def agent_run_result(
+    run_id: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+):
     from application.runtime import get_application_services
 
     try:

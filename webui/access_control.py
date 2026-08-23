@@ -227,6 +227,20 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "stock.research",
 }
 
+MACHINE_CAPABILITIES = {
+    ("GET", "/api/machine/v1/agent/market/overview"): "foliant.market.read",
+    ("GET", "/api/machine/v1/agent/market/data-quality"): "foliant.market.read",
+    ("GET", "/api/machine/v1/agent/securities/{symbol}/research/latest"):
+        "foliant.security-research.read",
+    ("POST", "/api/machine/v1/agent/securities/{symbol}/research-runs"):
+        "foliant.security-research.preview",
+    ("GET", "/api/machine/v1/agent/selection-runs/latest"): "foliant.selection.read",
+    ("POST", "/api/machine/v1/agent/selection-runs"): "foliant.selection.preview",
+    ("POST", "/api/machine/v1/agent/backtest-runs"): "foliant.backtest.preview",
+    ("GET", "/api/machine/v1/agent/runs/{run_id}"): "foliant.run.read",
+    ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "foliant.run.read",
+}
+
 _audit_logger = logging.getLogger("webui.security_audit")
 _agent_authenticator: Any = None
 _agent_auth_lock = threading.Lock()
@@ -283,11 +297,11 @@ async def enforce_request_access(request: Request) -> Response | None:
     if access is Access.PUBLIC:
         return None
     if access is Access.READY:
-        if _is_loopback(request):
-            return None
         return _authenticate_machine(request, "stock.read")
     if access is Access.MACHINE:
-        return _authenticate_machine(request, MACHINE_SCOPES[key])
+        return _authenticate_machine(
+            request, MACHINE_SCOPES[key], MACHINE_CAPABILITIES.get(key)
+        )
 
     try:
         service = get_web_auth_service()
@@ -335,6 +349,7 @@ def audit_request(request: Request, response: Response) -> None:
         "owner_app": getattr(agent, "owner_app", ""),
         "audience": getattr(agent, "audience", ""),
         "scope": getattr(request.state, "required_scope", ""),
+        "capability": getattr(request.state, "required_capability", ""),
         "result": "allowed" if response.status_code < 400 else "rejected",
         "status_code": int(response.status_code),
     }
@@ -346,7 +361,8 @@ def reset_agent_authenticator() -> None:
     _agent_authenticator = None
 
 
-def _authenticate_machine(request: Request, required_scope: str) -> Response | None:
+def _authenticate_machine(request: Request, required_scope: str,
+                          required_capability: str | None = None) -> Response | None:
     authorization = request.headers.get("Authorization", "")
     if not authorization:
         return _json_error(401, "agent Bearer required")
@@ -357,8 +373,13 @@ def _authenticate_machine(request: Request, required_scope: str) -> Response | N
         return _json_error(401, "invalid agent Bearer")
     if required_scope not in identity.scopes:
         return _json_error(403, "agent scope is insufficient")
+    if required_capability and required_capability not in getattr(
+        identity, "capabilities", frozenset()
+    ):
+        return _json_error(403, "agent capability is insufficient")
     request.state.agent_identity = identity
     request.state.required_scope = required_scope
+    request.state.required_capability = required_capability or ""
     return None
 
 

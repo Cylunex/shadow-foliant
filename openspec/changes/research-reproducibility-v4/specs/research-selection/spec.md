@@ -42,6 +42,25 @@ TOP15 and TOP5 MUST be append-only, hash-addressed artifacts bound to an immutab
 - WHEN quotes, holdings, AI review, or external references change
 - THEN the formal artifact payload and hash remain unchanged
 
+#### Scenario: provider revises historical input
+
+- GIVEN a formal Manifest references older market, valuation and event revisions
+- WHEN a provider later corrects canonical data
+- THEN Replay reads the immutable referenced observations and revisions visible at the decision cutoff
+- AND reports exact artifact hash match or an explicit mismatch
+
+### Formal publication
+
+A formal reader MUST return only a successful published run with a Manifest and both TOP15 and TOP5
+artifacts. Diagnostic attempts MUST remain separately queryable.
+
+#### Scenario: failed newer attempt
+
+- GIVEN a published formal result exists
+- AND a newer selection attempt fails or remains incomplete
+- WHEN the latest formal result is requested
+- THEN the older complete published result remains authoritative
+
 ### Fail-closed diversification
 
 Unknown or insufficient pairwise correlation MUST NOT be represented as a low numeric correlation.

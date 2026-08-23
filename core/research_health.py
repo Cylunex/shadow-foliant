@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from core.decision_context import DecisionContext
+from core.decision_context import A_SHARE_TIMEZONE, DecisionContext
 from data.research_store import ResearchStore
 
 
@@ -16,7 +16,7 @@ def _ratio(numerator: int, denominator: int) -> float:
 
 
 def _default_mode(selection_date: str) -> str:
-    now = datetime.now().astimezone()
+    now = datetime.now(A_SHARE_TIMEZONE)
     if selection_date != now.date().isoformat():
         return "preopen"
     return "postclose" if now.time() >= time(16, 0) else "preopen"

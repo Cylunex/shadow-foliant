@@ -9,8 +9,10 @@ The forward selector has a local deterministic ranking boundary, but several inp
 - Introduce one explicit decision context for universe, market, valuation, financial, and event reads.
 - Stage and validate security-master snapshots before publishing them.
 - Preserve provider observations and bind formal runs to immutable input manifests and versioned policies.
+- Preserve event revisions and provide manifest-bound loaders plus exact artifact replay verification.
 - Require provider-effective valuation dates and aligned financial statement periods.
 - Make formal TOP15/TOP5 artifacts append-only and authoritative.
+- Publish formal results explicitly so failed or incomplete attempts cannot hide the last valid result.
 - Fail closed on unknown net assets, policy relaxation, and insufficient correlation data.
 - Align factor evaluation and benchmark comparisons by real trading dates.
 - Separate data readiness from selection readiness and strengthen deployment verification.
@@ -22,4 +24,3 @@ The forward selector has a local deterministic ranking boundary, but several inp
 - Existing Web response keys may remain as display aliases, but formal consumers MUST read the authoritative artifact.
 - Strict historical replay remains unavailable before the recorded PIT boundary.
 - Repository examples remain fictional and contain no production infrastructure.
-

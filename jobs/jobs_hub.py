@@ -5729,16 +5729,46 @@ def serve_forever():
     """独立运行模式：注册任务并保持主线程运行
     供 watchdog 或 entrypoint 直接启动，不依赖 Web 进程
     """
+    import signal
     import time
+
+    def _shutdown(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _shutdown)
     register_default_jobs()
     print(f'[jobs_hub] 🚀 独立模式启动, {len(hub.list_jobs())} jobs 已注册', flush=True)
     hub.start()
+    run_worker = None
+    outbox_publisher = None
+    if os.getenv('FOLIANT_RUN_WORKER_ENABLED', 'true').lower() == 'true':
+        from application.run_worker import FoliantRunWorker
+
+        run_worker = FoliantRunWorker()
+        run_worker.start()
+        print('[jobs_hub] durable Foliant Run worker started', flush=True)
+    from application.event_sink import configured_http_publisher
+
+    publish_event = configured_http_publisher()
+    if publish_event is not None:
+        from application.outbox import OutboxPublisher
+        from application.run_repository import RunRepository
+
+        outbox_publisher = OutboxPublisher(
+            RunRepository(ensure_schema=False), publish_event
+        )
+        outbox_publisher.start()
+        print('[jobs_hub] Foliant domain event publisher started', flush=True)
     # 主线程保持存活
     try:
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
         print('[jobs_hub] 收到退出信号', flush=True)
+        if run_worker is not None:
+            run_worker.stop()
+        if outbox_publisher is not None:
+            outbox_publisher.stop()
         hub.stop()
     except BaseException as e:
         # SystemExit / C 扩展异常等 BaseException 子类: 不静默吞, 打 traceback 后
@@ -5746,6 +5776,10 @@ def serve_forever():
         import traceback
         print(f'[jobs_hub] 主线程异常退出: {type(e).__name__}: {e}', flush=True)
         traceback.print_exc()
+        if run_worker is not None:
+            run_worker.stop()
+        if outbox_publisher is not None:
+            outbox_publisher.stop()
         raise
 
 

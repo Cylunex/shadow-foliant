@@ -19,13 +19,21 @@ research, selection and backtest creation produces a separate `foliant_runs` row
 hashes, lifecycle timestamps, bounded summary/result JSON, stable failure categories and provenance.
 An outbox event is inserted in the same transaction that completes a Run.
 
+The Web process only enqueues. The jobs-hub claims Runs with PostgreSQL `SKIP LOCKED`, renews a
+lease, and runs each payload in a terminable child process. Expired leases are retried within a fixed
+attempt budget. Completion and failure require the current worker identity, preventing an expired
+worker from overwriting the owner of a newer lease. Outbox publishers use the same claim/lease rule.
+
 ## Machine trust boundary
 
-Each route has one explicit capability scope and audience `foliant`.  Request bodies cannot select
+Each route has one explicit capability grant, a coarse scope and audience `foliant`.  Request bodies cannot select
 an owner or portfolio.  Creation requires `Idempotency-Key`; the same key and request hash reuses the
 Run, while a different hash conflicts.  Errors are stable JSON classifications and omit exception
 text, prompts, SQL and paths.  Request/result budgets, timeouts and per-agent active-Run quotas are
 enforced server-side.
+
+DSH result rendering preserves Run identity/status for reference responses and consumes Foliant's
+bounded `model_payload` for structured results. Browser sessions and Agent tokens remain disjoint.
 
 ## Transaction entry
 

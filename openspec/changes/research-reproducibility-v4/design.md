@@ -18,6 +18,12 @@ Financial statements are selected around the latest common statement period. Cro
 
 Formal runs store a canonical policy document and hash, code revision, dependency-specification hash, schema version, and immutable dataset identifiers in an input manifest. TOP15 and TOP5 are append-only artifacts with payload hashes. Display, AI review, and external references are separate append-only attachments and cannot change formal ranking.
 
+Market and valuation Replay reads immutable observations by Dataset ID. Event corrections read the
+latest append-only event revision visible at the recorded cutoff and hash revision IDs plus content
+hashes. Financial Replay uses `first_seen_at` visibility. Formal publication is atomic with Manifest,
+TOP15 and TOP5 creation; `latest_formal_selection` ignores every failed, incomplete or unpublished
+attempt. The dependency hash includes the resolved Python minor version and installed distributions.
+
 ## Runtime and release
 
 `/readyz` reports operational dependencies and revision. `/data-readyz` evaluates data for an explicit decision context. `/selection-readyz` requires a matching successful formal artifact. `/research-readyz` remains a compatibility aggregate.

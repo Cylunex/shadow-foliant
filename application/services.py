@@ -9,14 +9,15 @@ from __future__ import annotations
 import copy
 import math
 import os
-import threading
+import re
 from collections.abc import Callable, Mapping
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor
 from datetime import datetime, timedelta
 from typing import Any
 
 import _bootstrap  # noqa: F401
 from application.results import (
+    bounded_model_payload,
     clean_json,
     now_iso,
     payload_hash,
@@ -24,7 +25,11 @@ from application.results import (
     stable_failure,
     tool_result,
 )
-from application.run_repository import IdempotencyConflict, RunRepository
+from application.run_repository import (
+    IdempotencyConflict,
+    RunQuotaExceeded,
+    RunRepository,
+)
 from core.decision_context import code_revision
 
 
@@ -37,8 +42,8 @@ class ApplicationError(ValueError):
 
 
 def normalize_symbol(value: Any) -> str:
-    digits = "".join(ch for ch in str(value or "") if ch.isdigit())[-6:]
-    if len(digits) != 6:
+    digits = str(value or "").strip()
+    if re.fullmatch(r"[0-9]{6}", digits) is None:
         raise ApplicationError("invalid_symbol", "symbol must be a 6 digit A-share code")
     return digits
 
@@ -98,11 +103,9 @@ class RunCoordinator:
     def __init__(self, repository: RunRepository, *, executor: Executor | None = None,
                  max_active_per_actor: int | None = None, recover: bool = False) -> None:
         self.repository = repository
-        self.executor = executor or ThreadPoolExecutor(
-            max_workers=_bounded_int(os.getenv("FOLIANT_AGENT_RUN_WORKERS"), minimum=1,
-                                     maximum=8, default=2),
-            thread_name_prefix="foliant-preview",
-        )
+        # Production only persists Runs here. The jobs-hub owns durable execution.
+        # An injected executor remains as a deterministic unit-test seam.
+        self.executor = executor
         self.max_active_per_actor = max_active_per_actor or _bounded_int(
             os.getenv("FOLIANT_AGENT_ACTIVE_RUN_LIMIT"), minimum=1, maximum=10, default=2
         )
@@ -140,10 +143,6 @@ class RunCoordinator:
                     status_code=409,
                 )
             return _public_run(existing)
-        if self.repository.count_active(actor_id) >= self.max_active_per_actor:
-            raise ApplicationError(
-                "run_quota_exceeded", "active preview Run quota exceeded", status_code=429
-            )
         try:
             created = self.repository.create_or_get(
                 actor_id=actor_id,
@@ -153,10 +152,14 @@ class RunCoordinator:
                 request_payload=request_payload,
                 request_id=request_id,
                 resource_uri_factory=resource_uri_factory,
+                max_active=self.max_active_per_actor,
+                timeout_seconds=max(30, min(7200, int(run_timeout_seconds))),
             )
         except IdempotencyConflict as exc:
             raise ApplicationError("idempotency_conflict", str(exc), status_code=409) from exc
-        if created.created:
+        except RunQuotaExceeded as exc:
+            raise ApplicationError("run_quota_exceeded", str(exc), status_code=429) from exc
+        if created.created and self.executor is not None:
             self.executor.submit(
                 self._execute, created.run["run_id"], event_type, runner,
                 max(30, min(7200, int(run_timeout_seconds))),
@@ -167,18 +170,11 @@ class RunCoordinator:
                  runner: Callable[[str], dict[str, Any]], timeout_seconds: int) -> None:
         if not self.repository.mark_running(run_id):
             return
-        timeout = threading.Timer(
-            timeout_seconds, self.repository.fail, args=(run_id, "execution_timeout")
-        )
-        timeout.daemon = True
-        timeout.start()
         try:
             result = runner(run_id)
             self.repository.complete(run_id, result, event_type=event_type)
         except Exception as exc:  # noqa: BLE001 - every Run must reach a stable terminal state
             self.repository.fail(run_id, stable_failure(exc))
-        finally:
-            timeout.cancel()
 
 
 class MarketOverviewService:
@@ -320,6 +316,13 @@ class SecurityResearchService:
             provenance_value=prov,
             warnings=warnings,
             data={"symbol": symbol, "period": record.get("period"), "facts": stock_info},
+            model_payload={
+                "symbol": symbol,
+                "period": record.get("period"),
+                "rating": rating,
+                "facts": stock_info,
+                "analysis": final_decision,
+            },
             derived_analysis=final_decision,
         )
 
@@ -418,6 +421,12 @@ class SecurityResearchService:
             provenance_value=prov,
             warnings=warnings,
             data=data,
+            model_payload={
+                "symbol": symbol,
+                "depth": depth,
+                "data_quality": quality,
+                "facts": rendered,
+            },
         )
 
 
@@ -437,7 +446,7 @@ class SelectionRunService:
         return ResearchStore()
 
     def latest_formal(self) -> dict[str, Any]:
-        latest = self._research_store().latest_selection()
+        latest = self._research_store().latest_formal_selection()
         if not latest:
             return tool_result(
                 summary="No formal SelectionRun exists.",
@@ -473,6 +482,12 @@ class SelectionRunService:
             provenance_value=prov,
             warnings=warnings,
             data={
+                "selection_date": latest.get("selection_date"),
+                "candidates": candidates[:15],
+                "comparison": latest.get("comparison") or {},
+                "formal": True,
+            },
+            model_payload={
                 "selection_date": latest.get("selection_date"),
                 "candidates": candidates[:15],
                 "comparison": latest.get("comparison") or {},
@@ -545,6 +560,12 @@ class SelectionRunService:
                 "formal": False,
                 "candidates": candidates,
                 "metadata": metadata,
+                "input_manifest": input_manifest,
+            },
+            model_payload={
+                "selection_date": selection_date,
+                "formal": False,
+                "candidates": candidates[:15],
                 "input_manifest": input_manifest,
             },
         )
@@ -657,6 +678,13 @@ class BacktestRunService:
             provenance_value=prov,
             warnings=warnings,
             data={"formal": False, "request": request, "result": result},
+            model_payload={
+                "formal": False,
+                "request": request,
+                "summary": summary,
+                "trades": (result.get("trades") or [])[:50],
+                "equity_curve": (result.get("equity_curve") or [])[:120],
+            },
         )
 
 
@@ -687,13 +715,26 @@ class ResearchRunQueryService:
         container = data.get("result") if isinstance(data, dict) and isinstance(data.get("result"), dict) else data
         for key in ("candidates", "trades", "equity_curve", "per_stock", "items"):
             values = container.get(key) if isinstance(container, dict) else None
-            if isinstance(values, list) and len(values) > limit:
+            if isinstance(values, list):
+                total = len(values)
                 container[key] = values[offset:offset + limit]
-                if offset + limit < len(values):
-                    continuation = {"offset": offset + limit, "limit": limit, "field": key}
+                continuation = {
+                    "field": key,
+                    "offset": offset,
+                    "next_offset": offset + limit if offset + limit < total else None,
+                    "limit": limit,
+                    "total": total,
+                }
                 break
-        if continuation:
+        if continuation is not None:
             result["continuation"] = continuation
+        if isinstance(result, dict):
+            result["model_payload"] = bounded_model_payload({
+                "status": result.get("status"),
+                "provenance": result.get("provenance") or {},
+                "warnings": result.get("warnings") or [],
+                "data": result.get("data"),
+            })
         return clean_json(result)
 
     def cancel(self, run_id: str, *, actor_id: str) -> bool:

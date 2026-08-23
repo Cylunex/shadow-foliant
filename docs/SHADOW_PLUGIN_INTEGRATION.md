@@ -53,14 +53,14 @@ delegated actor、固定 portfolio grant 以及 `ConfirmationReceipt` 签发、�
 ## Run 与来源
 
 `foliant_runs` 只保存 `mode=preview` 的研究、选股和回测。状态为
-`queued | running | complete | failed | cancelled`；超过恢复租期的遗留运行会收敛为可查询的
-`worker_restarted` 失败，调用方用新幂等键显式重试。执行超时会先收敛为
-`execution_timeout`，晚到结果不能覆盖终态或产生事件。完成结果和 Outbox 事件在同一事务提交。
-首版 research Profile 不暴露取消工具，因此执行阶段明确返回 `cancellable=false`；preview
-本身不会发布正式状态，可直接丢弃。`cancelled` 保留给 Foliant 内部队列治理。
+`queued | running | complete | failed | cancelled`。Web 只在原子配额事务中创建 Run；
+`stock-jobs-hub` 中的独立 Worker 使用 `SKIP LOCKED`、lease、heartbeat 和 attempt 领取任务。
+Worker 或 Web 重启后，过期 lease 会在重试预算内重新入队；每次执行位于可终止子进程，超时和
+取消会终止子进程，旧 Worker 也不能覆盖新 lease 的终态。完成结果和 Outbox 事件在同一事务提交。
 
-`application.outbox.OutboxPublisher` 通过注入的发布适配器在后台投递元数据事件；失败只增加
-尝试次数且不记录正文，成功后标记 `published_at`。具体消息总线和凭据属于仓库外运行配置，
+`application.outbox.OutboxPublisher` 通过注入的发布适配器在后台投递元数据事件；事件先按
+`event_id` 领取 lease，失败只增加尝试次数且不记录正文，成功后标记 `published_at`，超过预算
+进入 dead letter。具体消息总线和凭据属于仓库外运行配置，
 未配置发布适配器时事件安全保留在 Outbox，不会假装已经交付。
 
 每个结果包含 `decision_at`、`market_as_of`、`financial_cutoff_at`、
@@ -68,11 +68,19 @@ delegated actor、固定 portfolio grant 以及 `ConfirmationReceipt` 签发、�
 旧正式研究缺失某项时返回 warning，不用当前值伪造历史来源。LLM 派生内容只能放在
 `derived_analysis`。
 
+正式选股只读取 `publication_status=published` 且同时存在 Manifest、TOP15 和 TOP5 的结果；
+最近失败尝试只用于诊断。行情和估值 Replay 按 Manifest 中的 immutable dataset ID 读取
+observation，事件按当时可见的 append-only revision set 读取，财务事实按 `first_seen_at` 截止。
+`ResearchStore.replay_selection()` 会重建 TOP15/TOP5 并逐项比较 Artifact Hash；canonical 表仅用于
+普通最新数据读取，不能作为正式 Replay 输入。
+
 ## 合同与本地验证
 
 示例只使用 `https://stock.example.com` 和环境变量名。插件版本来自 `VERSION`，必须与
-Definition 和 Manifest 相同。Platform Python 包约束为 `>=0.6,<1`，DSH distribution 与
+Definition 和 Manifest 相同。Platform Python 包精确固定为 `0.7.1`，DSH distribution 与
 Tools API 精确 Profile 基线都是 `0.1.1-rc.2`。
+生产 Release 通过仓库外 `SHADOW_PLATFORM_WHEEL` 注入该 wheel，并在安装前校验
+`SHADOW_PLATFORM_WHEEL_SHA256`；路径和摘要不写入仓库。
 
 ```bash
 shadow-plugin-validate .

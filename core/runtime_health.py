@@ -71,6 +71,7 @@ def _database_check() -> Dict[str, Any]:
         required = {
             'manual_task_runs', 'research_schema_migrations',
             'selection_runs', 'selection_artifacts', 'selection_input_manifests',
+            'research_event_revisions', 'foliant_runs', 'foliant_domain_outbox',
         }
         cur.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -79,6 +80,8 @@ def _database_check() -> Dict[str, Any]:
         present = {str(row[0]) for row in cur.fetchall()}
         missing = sorted(required - present)
         migration = None
+        expected_migration = '5-event-revisions-and-publication'
+        migration_ready = False
         if 'research_schema_migrations' in present:
             cur.execute(
                 "SELECT version FROM research_schema_migrations "
@@ -86,10 +89,16 @@ def _database_check() -> Dict[str, Any]:
             )
             row = cur.fetchone()
             migration = str(row[0]) if row else None
-        return {'ok': not missing and bool(migration), 'backend': 'postgresql',
+            cur.execute(
+                "SELECT 1 FROM research_schema_migrations WHERE version=?",
+                (expected_migration,),
+            )
+            migration_ready = cur.fetchone() is not None
+        return {'ok': not missing and migration_ready, 'backend': 'postgresql',
                 'schema_initialized': not missing,
                 'missing_required_table_count': len(missing),
-                'research_migration': migration}
+                'research_migration': migration,
+                'required_research_migration': expected_migration}
     except Exception as exc:
         return {
             'ok': False,

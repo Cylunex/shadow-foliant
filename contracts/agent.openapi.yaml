@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.1.0
+  version: 0.1.1
 servers:
   - url: https://stock.example.com
 security:
@@ -207,6 +207,7 @@ components:
           type: array
           items: { type: string, maxLength: 500 }
         data: {}
+        model_payload: {}
         continuation: { type: object, additionalProperties: true }
         derived_analysis: {}
     RunReference:

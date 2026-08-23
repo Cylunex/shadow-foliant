@@ -571,8 +571,13 @@ CREATE TABLE IF NOT EXISTS selection_runs (
     status TEXT NOT NULL, primary_source TEXT NOT NULL,
     universe_count INTEGER NOT NULL, eligible_count INTEGER NOT NULL,
     final_count INTEGER NOT NULL, coverage DOUBLE PRECISION NOT NULL,
-    reference_source TEXT, comparison TEXT NOT NULL, metadata TEXT NOT NULL
+    reference_source TEXT, comparison TEXT NOT NULL, metadata TEXT NOT NULL,
+    publication_status TEXT NOT NULL DEFAULT 'unpublished', published_at TEXT,
+    supersedes_run_id TEXT
 );
+ALTER TABLE selection_runs ADD COLUMN IF NOT EXISTS publication_status TEXT NOT NULL DEFAULT 'unpublished';
+ALTER TABLE selection_runs ADD COLUMN IF NOT EXISTS published_at TEXT;
+ALTER TABLE selection_runs ADD COLUMN IF NOT EXISTS supersedes_run_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at);
 CREATE TABLE IF NOT EXISTS selection_candidates (
     run_id TEXT NOT NULL, symbol TEXT NOT NULL, candidate_kind TEXT NOT NULL,
@@ -662,6 +667,36 @@ CREATE TABLE IF NOT EXISTS research_event_records (
     original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
     payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_event_revisions (
+    revision_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+    supersedes_revision_id TEXT, symbol TEXT NOT NULL, event_type TEXT NOT NULL,
+    event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
+    direction DOUBLE PRECISION NOT NULL, confidence DOUBLE PRECISION NOT NULL,
+    materiality DOUBLE PRECISION NOT NULL, surprise DOUBLE PRECISION NOT NULL,
+    novelty DOUBLE PRECISION NOT NULL, source_family TEXT NOT NULL,
+    source_origin TEXT NOT NULL, document_id TEXT NOT NULL,
+    event_cluster_id TEXT NOT NULL, confirmation_status TEXT NOT NULL,
+    entity_impact TEXT NOT NULL, official INTEGER NOT NULL DEFAULT 0, title TEXT,
+    original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
+    payload TEXT NOT NULL, first_seen_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    UNIQUE(event_id,content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_research_event_revisions_visible
+    ON research_event_revisions(event_id,retrieved_at);
+INSERT INTO research_event_revisions
+    (revision_id,event_id,content_hash,supersedes_revision_id,symbol,event_type,event_date,
+     effective_at,direction,confidence,materiality,surprise,novelty,source_family,
+     source_origin,document_id,event_cluster_id,confirmation_status,entity_impact,official,
+     title,original_values,normalized_values,payload,first_seen_at,retrieved_at)
+SELECT md5(event_id || ':' || retrieved_at || ':' || payload),event_id,
+       md5(symbol || ':' || event_type || ':' || direction::TEXT || ':' || confidence::TEXT
+           || ':' || materiality::TEXT || ':' || surprise::TEXT || ':' || novelty::TEXT
+           || ':' || payload),NULL,symbol,event_type,event_date,effective_at,direction,
+       confidence,materiality,surprise,novelty,source_family,source_origin,document_id,
+       event_cluster_id,confirmation_status,entity_impact,official,title,original_values,
+       normalized_values,payload,retrieved_at,retrieved_at
+FROM research_event_records
+ON CONFLICT(event_id,content_hash) DO NOTHING;
 ALTER TABLE research_daily_bars ADD COLUMN IF NOT EXISTS dataset_id TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS requested_as_of TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS provider_effective_as_of TEXT;
@@ -701,6 +736,16 @@ ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('4-manifest-dependency-lock', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
+UPDATE selection_runs SET publication_status='published',published_at=created_at
+WHERE status='success' AND publication_status='unpublished'
+  AND EXISTS (SELECT 1 FROM selection_input_manifests m WHERE m.run_id=selection_runs.run_id)
+  AND EXISTS (SELECT 1 FROM selection_artifacts a
+              WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top15')
+  AND EXISTS (SELECT 1 FROM selection_artifacts a
+              WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top5');
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('5-event-revisions-and-publication', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
 
 -- Runtime-neutral Agent preview Runs.  These rows never replace formal research/selection facts.
 CREATE TABLE IF NOT EXISTS foliant_runs (
@@ -726,11 +771,27 @@ CREATE TABLE IF NOT EXISTS foliant_runs (
     started_at TEXT,
     completed_at TEXT,
     failed_at TEXT,
+    worker_id TEXT,
+    lease_until TEXT,
+    heartbeat_at TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    next_attempt_at TEXT,
+    timeout_seconds INTEGER NOT NULL DEFAULT 1800,
     updated_at TEXT NOT NULL,
     UNIQUE(actor_id, capability, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_foliant_runs_status ON foliant_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_foliant_runs_actor ON foliant_runs(actor_id, created_at);
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS lease_until TEXT;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS heartbeat_at TEXT;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 2;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
+ALTER TABLE foliant_runs ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 1800;
+CREATE INDEX IF NOT EXISTS idx_foliant_runs_claim
+    ON foliant_runs(status, next_attempt_at, created_at);
 CREATE TABLE IF NOT EXISTS foliant_domain_outbox (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -740,8 +801,16 @@ CREATE TABLE IF NOT EXISTS foliant_domain_outbox (
     created_at TEXT NOT NULL,
     published_at TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_by TEXT,
+    lease_until TEXT,
+    last_error TEXT,
+    dead_letter_at TEXT,
     UNIQUE(run_id, event_type)
 );
+ALTER TABLE foliant_domain_outbox ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE foliant_domain_outbox ADD COLUMN IF NOT EXISTS lease_until TEXT;
+ALTER TABLE foliant_domain_outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE foliant_domain_outbox ADD COLUMN IF NOT EXISTS dead_letter_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_foliant_outbox_pending
     ON foliant_domain_outbox(published_at, created_at);
 CREATE TABLE IF NOT EXISTS foliant_write_idempotency (

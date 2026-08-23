@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -21,19 +24,25 @@ class OutboxPublisher:
         self.repository = repository
         self.publish = publish
         self.interval_seconds = max(0.5, float(interval_seconds))
+        self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def publish_once(self, *, limit: int = 50) -> int:
         published = 0
-        for event in self.repository.pending_outbox(limit=limit):
+        for _ in range(max(1, min(200, int(limit)))):
+            event = self.repository.claim_outbox(self.worker_id)
+            if not event:
+                break
             try:
                 self.publish(event["event_type"], event["payload"])
             except Exception as exc:  # noqa: BLE001 - adapter failures remain retryable
-                self.repository.record_outbox_failure(event["event_id"])
+                self.repository.record_outbox_failure(
+                    event["event_id"], type(exc).__name__, self.worker_id
+                )
                 _log.warning("domain_event_publish_failed category=%s", type(exc).__name__)
                 continue
-            if self.repository.mark_outbox_published(event["event_id"]):
+            if self.repository.mark_outbox_published(event["event_id"], self.worker_id):
                 published += 1
         return published
 

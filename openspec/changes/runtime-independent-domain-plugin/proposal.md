@@ -13,6 +13,9 @@ domain import service already exists.
 - Add narrow Agent HTTP contracts for market, formal research/selection reads and preview Runs.
 - Persist preview Runs, idempotency records, bounded results and domain outbox events separately from
   formal research and selection artifacts.
+- Execute preview Runs through a lease-based jobs-hub worker and publish outbox metadata through a
+  separately configured claim/lease adapter.
+- Enforce exact capability grants in addition to the Agent audience and coarse scope.
 - Add the `shadow-foliant` plugin definition, capabilities, contracts and three focused Skills.
 - Add an administrator-only Web flow to preview and confirm stock trade entry.
 - Keep transaction entry and all private portfolio data out of the ordinary

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 import uuid
@@ -20,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 
 def _json(value) -> str:
@@ -58,13 +59,16 @@ def _iso_date(value: object) -> str:
 
 class ResearchStore:
     def __init__(self, path: Optional[str] = None, *, connect_fn: Optional[Callable] = None,
-                 is_postgres: Optional[bool] = None, ensure_schema: bool = True):
+                 is_postgres: Optional[bool] = None, ensure_schema: Optional[bool] = None):
         self.path = str(path or DEFAULT_PATH)
         self._connect_fn = connect_fn or db_connect
         # Explicit test adapters may use an in-memory database. Production never
         # guesses the dialect from a global feature flag: the default connector is PG.
         self._is_postgres = (connect_fn is None) if is_postgres is None else is_postgres
-        if ensure_schema:
+        should_ensure = (
+            connect_fn is not None or os.getenv("FOLIANT_RUNTIME_DDL", "false").lower() == "true"
+        ) if ensure_schema is None else bool(ensure_schema)
+        if should_ensure:
             self.ensure_schema()
 
     def connect(self):
@@ -211,12 +215,29 @@ class ResearchStore:
                 original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
                 payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
             )""",
+            """CREATE TABLE IF NOT EXISTS research_event_revisions (
+                revision_id TEXT PRIMARY KEY, event_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL, supersedes_revision_id TEXT,
+                symbol TEXT NOT NULL, event_type TEXT NOT NULL,
+                event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
+                direction REAL NOT NULL, confidence REAL NOT NULL, materiality REAL NOT NULL,
+                surprise REAL NOT NULL, novelty REAL NOT NULL,
+                source_family TEXT NOT NULL, source_origin TEXT NOT NULL,
+                document_id TEXT NOT NULL, event_cluster_id TEXT NOT NULL,
+                confirmation_status TEXT NOT NULL, entity_impact TEXT NOT NULL,
+                official INTEGER NOT NULL DEFAULT 0, title TEXT,
+                original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
+                payload TEXT NOT NULL, first_seen_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+                UNIQUE(event_id,content_hash)
+            )""",
             f"""CREATE TABLE IF NOT EXISTS selection_runs (
                 run_id {id_type}, selection_date TEXT NOT NULL, created_at TEXT NOT NULL,
                 status TEXT NOT NULL, primary_source TEXT NOT NULL,
                 universe_count INTEGER NOT NULL, eligible_count INTEGER NOT NULL,
                 final_count INTEGER NOT NULL, coverage REAL NOT NULL,
-                reference_source TEXT, comparison TEXT NOT NULL, metadata TEXT NOT NULL
+                reference_source TEXT, comparison TEXT NOT NULL, metadata TEXT NOT NULL,
+                publication_status TEXT NOT NULL DEFAULT 'unpublished', published_at TEXT,
+                supersedes_run_id TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS selection_candidates (
                 run_id TEXT NOT NULL, symbol TEXT NOT NULL, candidate_kind TEXT NOT NULL,
@@ -253,6 +274,7 @@ class ResearchStore:
             "CREATE INDEX IF NOT EXISTS idx_research_finance_asof ON research_financial_pit(as_of, table_name)",
             "CREATE INDEX IF NOT EXISTS idx_research_events_date ON research_events(event_date, symbol)",
             "CREATE INDEX IF NOT EXISTS idx_research_event_records_date ON research_event_records(event_date,symbol,confirmation_status)",
+            "CREATE INDEX IF NOT EXISTS idx_research_event_revisions_visible ON research_event_revisions(event_id,retrieved_at)",
             "CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at)",
         ]
         try:
@@ -304,6 +326,32 @@ class ResearchStore:
             cur.execute(
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
+            )
+        version = "5-event-revisions-and-publication"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(
+                cur, "selection_runs", "publication_status",
+                "TEXT NOT NULL DEFAULT 'unpublished'",
+            )
+            self._add_column(cur, "selection_runs", "published_at", "TEXT")
+            self._add_column(cur, "selection_runs", "supersedes_run_id", "TEXT")
+            now = datetime.now().astimezone().isoformat()
+            cur.execute(
+                """UPDATE selection_runs SET publication_status='published',published_at=created_at
+                   WHERE status='success' AND publication_status='unpublished'
+                     AND EXISTS (SELECT 1 FROM selection_input_manifests m
+                                 WHERE m.run_id=selection_runs.run_id)
+                     AND EXISTS (SELECT 1 FROM selection_artifacts a
+                                 WHERE a.run_id=selection_runs.run_id
+                                   AND a.artifact_type='formal_top15')
+                     AND EXISTS (SELECT 1 FROM selection_artifacts a
+                                 WHERE a.run_id=selection_runs.run_id
+                                   AND a.artifact_type='formal_top5')"""
+            )
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, now),
             )
 
     def _add_column(self, cur, table: str, column: str, definition: str) -> None:
@@ -731,7 +779,7 @@ class ResearchStore:
         return len(rows)
 
     def save_events(self, events: Iterable[dict]) -> int:
-        rows = []
+        rows: list[tuple] = []
         now = datetime.now().astimezone().isoformat()
         for item in events:
             if str(item.get("confirmation_status") or "").lower() != "confirmed":
@@ -760,18 +808,72 @@ class ResearchStore:
                 _json(item.get("original_values") or {}),
                 _json(item.get("normalized_values") or {}), _json(item), now,
             ))
-        self._executemany(
-            """INSERT INTO research_event_records
-               (event_id,symbol,event_type,event_date,effective_at,direction,confidence,
-                materiality,surprise,novelty,source_family,source_origin,document_id,
-                event_cluster_id,confirmation_status,entity_impact,official,title,
-                original_values,normalized_values,payload,retrieved_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(event_id) DO UPDATE SET direction=excluded.direction,
-                confidence=excluded.confidence,materiality=excluded.materiality,
-                surprise=excluded.surprise,novelty=excluded.novelty,payload=excluded.payload,
-                retrieved_at=excluded.retrieved_at""", rows,
-        )
+        if not rows:
+            return 0
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            for row in rows:
+                event_id = str(row[0])
+                content = {
+                    "symbol": row[1], "event_type": row[2], "event_date": row[3],
+                    "effective_at": row[4], "direction": row[5], "confidence": row[6],
+                    "materiality": row[7], "surprise": row[8], "novelty": row[9],
+                    "source_family": row[10], "source_origin": row[11],
+                    "document_id": row[12], "event_cluster_id": row[13],
+                    "confirmation_status": row[14], "entity_impact": row[15],
+                    "official": row[16], "title": row[17],
+                    "original_values": json.loads(row[18]),
+                    "normalized_values": json.loads(row[19]), "payload": json.loads(row[20]),
+                }
+                content_hash = hashlib.sha256(_json(content).encode("utf-8")).hexdigest()
+                revision_id = hashlib.sha256(
+                    f"{event_id}:{content_hash}".encode("utf-8")
+                ).hexdigest()
+                cur.execute(
+                    """SELECT revision_id FROM research_event_revisions
+                       WHERE event_id=? ORDER BY first_seen_at DESC LIMIT 1""",
+                    (event_id,),
+                )
+                previous = cur.fetchone()
+                supersedes = str(previous[0]) if previous and previous[0] else None
+                cur.execute(
+                    """INSERT INTO research_event_revisions
+                       (revision_id,event_id,content_hash,supersedes_revision_id,symbol,event_type,
+                        event_date,effective_at,direction,confidence,materiality,surprise,novelty,
+                        source_family,source_origin,document_id,event_cluster_id,
+                        confirmation_status,entity_impact,official,title,original_values,
+                        normalized_values,payload,first_seen_at,retrieved_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(event_id,content_hash) DO NOTHING""",
+                    (revision_id, event_id, content_hash, supersedes, *row[1:-1], now, row[-1]),
+                )
+                cur.execute(
+                    """INSERT INTO research_event_records
+                       (event_id,symbol,event_type,event_date,effective_at,direction,confidence,
+                        materiality,surprise,novelty,source_family,source_origin,document_id,
+                        event_cluster_id,confirmation_status,entity_impact,official,title,
+                        original_values,normalized_values,payload,retrieved_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(event_id) DO UPDATE SET direction=excluded.direction,
+                        confidence=excluded.confidence,materiality=excluded.materiality,
+                        surprise=excluded.surprise,novelty=excluded.novelty,
+                        source_family=excluded.source_family,
+                        source_origin=excluded.source_origin,document_id=excluded.document_id,
+                        event_cluster_id=excluded.event_cluster_id,
+                        confirmation_status=excluded.confirmation_status,
+                        entity_impact=excluded.entity_impact,official=excluded.official,
+                        title=excluded.title,original_values=excluded.original_values,
+                        normalized_values=excluded.normalized_values,payload=excluded.payload,
+                        retrieved_at=excluded.retrieved_at""",
+                    row,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         return len(rows)
 
     def _executemany(self, sql: str, rows: Sequence[tuple]) -> None:
@@ -1198,11 +1300,19 @@ class ResearchStore:
             cur = conn.cursor()
             cur.execute(
                 """SELECT symbol,event_type,event_date,effective_at,direction,confidence,
-                          materiality,surprise,novelty,source_family,
-                          source_origin AS source,event_cluster_id,entity_impact,official,title
-                   FROM research_event_records
-                   WHERE confirmation_status='confirmed' AND effective_at>=? AND effective_at<=?
-                     AND (? IS NULL OR retrieved_at<=?)""",
+                          materiality,surprise,novelty,source_family,source_origin AS source,
+                          event_cluster_id,entity_impact,official,title FROM (
+                       SELECT symbol,event_type,event_date,effective_at,direction,confidence,
+                              materiality,surprise,novelty,source_family,source_origin,
+                              event_cluster_id,entity_impact,official,title,
+                              confirmation_status,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY event_id ORDER BY retrieved_at DESC,revision_id DESC
+                              ) AS row_no
+                       FROM research_event_revisions
+                       WHERE effective_at>=? AND effective_at<=?
+                         AND (? IS NULL OR retrieved_at<=?)
+                   ) visible WHERE row_no=1 AND confirmation_status='confirmed'""",
                 (start, as_of, cutoff_at, cutoff_at),
             )
             return self._frame(cur)
@@ -1214,16 +1324,306 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT event_id FROM research_event_records
-                   WHERE confirmation_status='confirmed' AND effective_at<=?
-                     AND (? IS NULL OR retrieved_at<=?)
-                   ORDER BY event_id""",
+                """SELECT revision_id,content_hash FROM (
+                       SELECT revision_id,content_hash,event_id,confirmation_status,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY event_id ORDER BY retrieved_at DESC,revision_id DESC
+                              ) AS row_no
+                       FROM research_event_revisions
+                       WHERE effective_at<=? AND (? IS NULL OR retrieved_at<=?)
+                   ) visible WHERE row_no=1 AND confirmation_status='confirmed'
+                   ORDER BY revision_id""",
                 (_iso_date(as_of), cutoff_at, cutoff_at),
             )
-            payload = "\n".join(str(row[0]) for row in cur.fetchall())
+            payload = "\n".join(f"{row[0]}:{row[1]}" for row in cur.fetchall())
             return hashlib.sha256(payload.encode("utf-8")).hexdigest()
         finally:
             conn.close()
+
+    def load_selection_manifest(self, manifest_id: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT manifest_id,run_id,decision_context,universe_snapshot_id,
+                          market_dataset_ids,valuation_dataset_ids,financial_revision_set_id,
+                          event_dataset_id,policy_version,policy_hash,policy_payload,
+                          code_revision,dependency_lock_hash,schema_version,created_at
+                   FROM selection_input_manifests WHERE manifest_id=?""",
+                (str(manifest_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            keys = (
+                "manifest_id", "run_id", "decision_context", "universe_snapshot_id",
+                "market_dataset_ids", "valuation_dataset_ids", "financial_revision_set_id",
+                "event_dataset_id", "policy_version", "policy_hash", "policy",
+                "code_revision", "dependency_lock_hash", "schema_version", "created_at",
+            )
+            value = dict(zip(keys, row))
+            for key, fallback in (
+                ("decision_context", {}), ("market_dataset_ids", []),
+                ("valuation_dataset_ids", []), ("policy", {}),
+            ):
+                if not isinstance(value[key], (dict, list)):
+                    value[key] = json.loads(value[key] or _json(fallback))
+            return value
+        finally:
+            conn.close()
+
+    def load_universe_from_manifest(self, manifest_id: str) -> pd.DataFrame:
+        manifest = self.load_selection_manifest(manifest_id)
+        if not manifest:
+            return pd.DataFrame()
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT symbol,name,exchange,market,industry,list_status,list_date,quality_status
+                   FROM research_security_master_rows WHERE snapshot_id=?""",
+                (manifest["universe_snapshot_id"],),
+            )
+            frame = self._frame(cur)
+            frame.attrs["snapshot_id"] = manifest["universe_snapshot_id"]
+            return frame
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _observation_frame(rows: Sequence[tuple], *, kind: str) -> pd.DataFrame:
+        values = []
+        for row in rows:
+            payload = row[-1] if isinstance(row[-1], dict) else json.loads(row[-1] or "{}")
+            if kind == "market":
+                values.append({
+                    "symbol": row[0], "trade_date": row[1],
+                    "open": payload.get("open"), "high": payload.get("high"),
+                    "low": payload.get("low"), "close": payload.get("close"),
+                    "volume": payload.get("volume", payload.get("vol")),
+                    "amount": payload.get("turnover", payload.get("amount")),
+                    "turnover_rate": payload.get("turnover_rate"),
+                    "is_paused": int(bool(payload.get("is_paused", False))),
+                    "is_st": int(bool(payload.get("is_st", False))),
+                    "provider": row[2], "quality_status": row[3], "dataset_id": row[4],
+                })
+            else:
+                values.append({
+                    "symbol": row[0], "trade_date": row[1],
+                    "market_cap": payload.get("market_cap"),
+                    "circulating_market_cap": payload.get("circulating_market_cap"),
+                    "turnover_ratio": payload.get("turnover_ratio"),
+                    "pe_ttm": payload.get("pe_ratio", payload.get("pe_ttm")),
+                    "pe_lyr": payload.get("pe_ratio_lyr", payload.get("pe_lyr")),
+                    "pb": payload.get("pb_ratio", payload.get("pb")),
+                    "ps": payload.get("ps_ratio", payload.get("ps")),
+                    "pcf": payload.get("pcf_ratio", payload.get("pcf")),
+                    "quality_status": row[3], "requested_as_of": row[2],
+                    "provider_effective_as_of": row[1], "dataset_id": row[4],
+                })
+        return pd.DataFrame(values)
+
+    def load_daily_panel_from_manifest(self, manifest_id: str) -> pd.DataFrame:
+        manifest = self.load_selection_manifest(manifest_id)
+        ids = list((manifest or {}).get("market_dataset_ids") or [])
+        if not ids:
+            return pd.DataFrame()
+        placeholders = ",".join("?" for _ in ids)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT o.symbol,o.trade_date,o.provider,b.quality_status,o.dataset_id,o.payload
+                   FROM research_market_observations o JOIN research_dataset_batches b
+                     ON b.dataset_id=o.dataset_id
+                   WHERE o.dataset_id IN (""" + placeholders + ") ORDER BY o.symbol,o.trade_date",
+                tuple(ids),
+            )
+            return self._observation_frame(cur.fetchall(), kind="market")
+        finally:
+            conn.close()
+
+    def load_valuations_from_manifest(self, manifest_id: str) -> pd.DataFrame:
+        manifest = self.load_selection_manifest(manifest_id)
+        ids = list((manifest or {}).get("valuation_dataset_ids") or [])
+        if not ids:
+            return pd.DataFrame()
+        placeholders = ",".join("?" for _ in ids)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT o.symbol,o.provider_effective_as_of,o.requested_as_of,
+                          b.quality_status,o.dataset_id,o.payload
+                   FROM research_valuation_observations o JOIN research_dataset_batches b
+                     ON b.dataset_id=o.dataset_id
+                   WHERE o.dataset_id IN (""" + placeholders + ") ORDER BY o.symbol",
+                tuple(ids),
+            )
+            return self._observation_frame(cur.fetchall(), kind="valuation")
+        finally:
+            conn.close()
+
+    def load_financial_facts_from_manifest(self, manifest_id: str) -> dict[str, pd.DataFrame]:
+        manifest = self.load_selection_manifest(manifest_id)
+        if not manifest:
+            return {}
+        context = manifest["decision_context"]
+        selection_date = str(context["selection_date"])
+        cutoff_at = str(context["financial_cutoff_at"])
+        return {
+            table: self.load_financial_history(table, selection_date, cutoff_at=cutoff_at)
+            for table in ("indicator", "income", "balance", "cash_flow")
+        }
+
+    def load_events_from_manifest(self, manifest_id: str) -> pd.DataFrame:
+        manifest = self.load_selection_manifest(manifest_id)
+        if not manifest:
+            return pd.DataFrame()
+        context = manifest["decision_context"]
+        frame = self.load_events(
+            str(context["selection_date"]), cutoff_at=str(context["event_cutoff_at"])
+        )
+        actual = self.event_dataset_id(
+            str(context["selection_date"]), cutoff_at=str(context["event_cutoff_at"])
+        )
+        if actual != manifest["event_dataset_id"]:
+            raise ValueError("event revision set no longer matches the manifest")
+        return frame
+
+    def verify_selection_artifacts(self, run_id: str) -> dict:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT artifact_type,payload_hash,payload FROM selection_artifacts
+                   WHERE run_id=? ORDER BY artifact_type""",
+                (str(run_id),),
+            )
+            artifacts = []
+            for artifact_type, expected, payload in cur.fetchall():
+                normalized = payload if isinstance(payload, str) else _json(payload)
+                actual = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                artifacts.append({
+                    "artifact_type": artifact_type, "expected_hash": expected,
+                    "actual_hash": actual, "exact_match": actual == expected,
+                })
+            return {
+                "run_id": str(run_id), "exact_match": bool(artifacts)
+                and all(item["exact_match"] for item in artifacts), "artifacts": artifacts,
+            }
+        finally:
+            conn.close()
+
+    def replay_selection(self, manifest_id: str) -> dict:
+        """Recompute a formal selection from immutable manifest inputs and compare artifacts."""
+        manifest = self.load_selection_manifest(manifest_id)
+        if not manifest:
+            raise ValueError("selection manifest was not found")
+        base = self
+
+        class ManifestStore(ResearchStore):
+            def __init__(self) -> None:
+                pass
+
+            def connect(self):
+                return base.connect()
+
+            def load_universe(self, _as_of, *, cutoff_at=None):
+                return base.load_universe_from_manifest(manifest_id)
+
+            def load_daily_panel(self, _as_of, *, trading_days=500, adjustment="qfq"):
+                frame = base.load_daily_panel_from_manifest(manifest_id)
+                if frame.empty:
+                    return frame
+                dates = sorted(frame["trade_date"].astype(str).unique())[-int(trading_days):]
+                return frame[frame["trade_date"].astype(str).isin(dates)].copy()
+
+            def load_valuations(self, _as_of, *, exact=False):
+                return base.load_valuations_from_manifest(manifest_id)
+
+            def latest_valuation_as_of(self, _as_of):
+                frame = base.load_valuations_from_manifest(manifest_id)
+                return None if frame.empty else str(frame["trade_date"].max())
+
+            def load_events(self, _as_of, *, lookback_days=120, cutoff_at=None):
+                return base.load_events_from_manifest(manifest_id)
+
+            def event_dataset_id(self, _as_of, *, cutoff_at=None):
+                return str(manifest["event_dataset_id"])
+
+            def pit_coverage(self, _as_of):
+                value = base.pit_coverage(str(manifest["decision_context"]["universe_cutoff"]))
+                value["historical_pit_available"] = True
+                return value
+
+            def calendar_consensus(self, _as_of, *, inclusive=False):
+                frame = base.load_daily_panel_from_manifest(manifest_id)
+                latest = None if frame.empty else str(frame["trade_date"].max())[:10]
+                return {"ready": bool(latest), "latest_confirmed_open_date": latest}
+
+        from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy
+        from analysis.selection_finalizer import finalize_local_selection
+
+        context = manifest["decision_context"]
+        selector = LocalStockSelector(
+            store=ManifestStore(), policy=SelectionPolicy(**dict(manifest["policy"]))
+        )
+        replay = selector.run(
+            str(context["selection_date"]),
+            data_cutoff=str(context["market_cutoff"]),
+            decision_at=str(context["decision_at"]),
+            decision_mode=str(context["mode"]),
+            wencai_reference=None,
+            persist=False,
+        )
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT metadata FROM selection_runs WHERE run_id=?", (manifest["run_id"],))
+            row = cur.fetchone()
+            metadata = json.loads(row[0] or "{}") if row and not isinstance(row[0], dict) else (
+                dict(row[0]) if row else {}
+            )
+            cur.execute(
+                """SELECT artifact_type,payload_hash FROM selection_artifacts
+                   WHERE run_id=? AND artifact_type IN ('formal_top15','formal_top5')""",
+                (manifest["run_id"],),
+            )
+            expected = {str(item[0]): str(item[1]) for item in cur.fetchall()}
+        finally:
+            conn.close()
+        identity = {
+            "run_id": manifest["run_id"], "snapshot_id": metadata.get("snapshot_id"),
+            "selection_date": context["selection_date"],
+            "market_as_of": metadata.get("market_as_of"),
+            "valuation_as_of": metadata.get("valuation_as_of"),
+            "financial_as_of": metadata.get("financial_as_of"),
+            "rule_version": metadata.get("rule_version"),
+            "policy_hash": manifest["policy_hash"], "manifest_id": manifest_id,
+        }
+        formal15 = finalize_local_selection(
+            [{**item, **identity, "rank": rank} for rank, item in enumerate(
+                replay.get("candidates") or [], 1
+            )],
+            limit=15,
+        )
+        actual = {
+            "formal_top15": hashlib.sha256(_json(formal15).encode("utf-8")).hexdigest(),
+            "formal_top5": hashlib.sha256(_json(formal15[:5]).encode("utf-8")).hexdigest(),
+        }
+        comparisons = {
+            kind: {"expected_hash": expected.get(kind), "actual_hash": digest,
+                   "exact_match": expected.get(kind) == digest}
+            for kind, digest in actual.items()
+        }
+        return {
+            "manifest_id": manifest_id, "run_id": manifest["run_id"],
+            "replay_status": replay.get("status"),
+            "exact_match": replay.get("status") == "success"
+            and all(item["exact_match"] for item in comparisons.values()),
+            "artifacts": comparisons,
+        }
 
     def save_selection(self, run: dict, primary: Sequence[dict], reference: Sequence[dict]) -> str:
         run_id = str(run.get("run_id") or uuid.uuid4().hex)
@@ -1253,16 +1653,28 @@ class ResearchStore:
                 raise ValueError("successful selection requires a formal TOP5 artifact")
         conn = self.connect()
         try:
+            created_at = datetime.now().astimezone().isoformat()
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT run_id FROM selection_runs WHERE publication_status='published'
+                   ORDER BY published_at DESC,created_at DESC LIMIT 1"""
+            )
+            previous = cur.fetchone()
+            supersedes_run_id = str(previous[0]) if previous and previous[0] else None
+            publication_status = "published" if formal_top15 else "unpublished"
             conn.execute(
                 """INSERT INTO selection_runs
                    (run_id,selection_date,created_at,status,primary_source,universe_count,
-                    eligible_count,final_count,coverage,reference_source,comparison,metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (run_id, run["selection_date"], datetime.now().astimezone().isoformat(),
+                    eligible_count,final_count,coverage,reference_source,comparison,metadata,
+                    publication_status,published_at,supersedes_run_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (run_id, run["selection_date"], created_at,
                  run.get("status", "success"), "local_pit", int(run.get("universe_count", 0)),
                  int(run.get("eligible_count", 0)), len(primary), float(run.get("coverage", 0)),
                  "wencai" if reference else None, _json(run.get("comparison", {})),
-                 _json(metadata)),
+                 _json(metadata), publication_status,
+                 created_at if formal_top15 else None,
+                 supersedes_run_id if formal_top15 else None),
             )
             rows = []
             for kind, candidates in (("diagnostic", primary), ("wencai_reference", reference)):
@@ -1411,11 +1823,15 @@ class ResearchStore:
         finally:
             conn.close()
 
-    def latest_selection(self) -> Optional[dict]:
+    def _latest_selection_where(self, where_sql: str = "", params: Sequence[object] = ()) -> Optional[dict]:
         conn = self.connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT run_id,selection_date,status,comparison,metadata FROM selection_runs ORDER BY created_at DESC LIMIT 1")
+            cur.execute(
+                "SELECT run_id,selection_date,status,comparison,metadata "
+                f"FROM selection_runs {where_sql} ORDER BY created_at DESC LIMIT 1",
+                tuple(params),
+            )
             row = cur.fetchone()
             if not row:
                 return None
@@ -1439,3 +1855,32 @@ class ResearchStore:
             }
         finally:
             conn.close()
+
+    def latest_selection_attempt(self) -> Optional[dict]:
+        """Return the newest attempt, including failed or incomplete diagnostic runs."""
+
+        return self._latest_selection_where()
+
+    def latest_formal_selection(self) -> Optional[dict]:
+        """Return only a successful, manifest-bound and fully published formal result."""
+
+        return self._latest_selection_where(
+            """WHERE status='success' AND publication_status='published'
+               AND EXISTS (
+                   SELECT 1 FROM selection_input_manifests m
+                   WHERE m.run_id=selection_runs.run_id
+               )
+               AND EXISTS (
+                   SELECT 1 FROM selection_artifacts a
+                   WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top15'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM selection_artifacts a
+                   WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top5'
+               )"""
+        )
+
+    def latest_selection(self) -> Optional[dict]:
+        """Backward-compatible diagnostic alias; formal readers must call the explicit method."""
+
+        return self.latest_selection_attempt()
