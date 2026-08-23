@@ -9,8 +9,16 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 PLATFORM_ROOT = ROOT.parent / "shadow-platform"
-if str(PLATFORM_ROOT) not in sys.path:
+PLATFORM_CONTRACTS_MODULE = PLATFORM_ROOT / "shadow_sdk" / "plugin_contracts.py"
+if PLATFORM_CONTRACTS_MODULE.is_file() and str(PLATFORM_ROOT) not in sys.path:
     sys.path.insert(0, str(PLATFORM_ROOT))
+elif not PLATFORM_CONTRACTS_MODULE.is_file():
+    import shadow_sdk
+
+    # Production installs the Platform SDK as a wheel and may have an older
+    # sibling checkout. Resolve schemas from the installed package instead of
+    # letting that unrelated checkout shadow the deployed SDK.
+    PLATFORM_ROOT = Path(shadow_sdk.__file__).resolve().parent
 
 
 def _application_routes(app) -> dict[tuple[str, str], str | None]:
