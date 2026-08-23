@@ -585,6 +585,123 @@ CREATE TABLE IF NOT EXISTS selection_candidates (
     PRIMARY KEY(run_id, symbol, candidate_kind)
 );
 
+-- Reproducible research schema (V4).  Canonical tables remain fast read models;
+-- observations, manifests and artifacts are append-only audit inputs/outputs.
+CREATE TABLE IF NOT EXISTS research_schema_migrations (
+    version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_trade_calendar (
+    trade_date TEXT PRIMARY KEY, provider TEXT NOT NULL, retrieved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_trade_calendar_evidence (
+    trade_date TEXT NOT NULL, provider TEXT NOT NULL, is_open INTEGER NOT NULL,
+    retrieved_at TEXT NOT NULL, PRIMARY KEY(trade_date, provider)
+);
+CREATE TABLE IF NOT EXISTS research_calendar_fetch_runs (
+    fetch_id TEXT PRIMARY KEY, provider TEXT NOT NULL, range_start TEXT NOT NULL,
+    range_end TEXT NOT NULL, retrieved_at TEXT NOT NULL, row_count INTEGER NOT NULL,
+    open_count INTEGER NOT NULL, closed_count INTEGER NOT NULL,
+    quality_status TEXT NOT NULL, detail TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_master_snapshot_runs (
+    snapshot_id TEXT PRIMARY KEY, snapshot_date TEXT NOT NULL, provider TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL, observed_count INTEGER NOT NULL,
+    expected_min_count INTEGER NOT NULL, exchange_counts TEXT NOT NULL,
+    previous_snapshot_id TEXT, quality_status TEXT NOT NULL, published_at TEXT,
+    detail TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_security_master_rows (
+    snapshot_id TEXT NOT NULL, symbol TEXT NOT NULL, ts_code TEXT NOT NULL,
+    name TEXT, exchange TEXT, market TEXT, industry TEXT, list_status TEXT,
+    list_date TEXT, delist_date TEXT, is_hs TEXT, provider TEXT NOT NULL,
+    origin TEXT NOT NULL, effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(snapshot_id, symbol)
+);
+CREATE TABLE IF NOT EXISTS research_dataset_batches (
+    dataset_id TEXT PRIMARY KEY, capability TEXT NOT NULL, provider TEXT NOT NULL,
+    effective_as_of TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL,
+    row_count INTEGER NOT NULL, payload_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_market_observations (
+    observation_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, symbol TEXT NOT NULL,
+    trade_date TEXT NOT NULL, adjustment TEXT NOT NULL, provider TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_valuation_observations (
+    observation_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, symbol TEXT NOT NULL,
+    requested_as_of TEXT NOT NULL, provider_effective_as_of TEXT NOT NULL,
+    provider TEXT NOT NULL, retrieved_at TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_security_snapshots (
+    snapshot_date TEXT NOT NULL, symbol TEXT NOT NULL, ts_code TEXT NOT NULL,
+    name TEXT, exchange TEXT, market TEXT, industry TEXT, list_status TEXT,
+    list_date TEXT, delist_date TEXT, is_hs TEXT, provider TEXT NOT NULL,
+    origin TEXT NOT NULL, effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(snapshot_date, symbol)
+);
+CREATE TABLE IF NOT EXISTS research_financial_facts (
+    table_name TEXT NOT NULL, symbol TEXT NOT NULL, stat_date TEXT NOT NULL,
+    pub_date TEXT NOT NULL, revision_no TEXT NOT NULL, provider TEXT NOT NULL,
+    first_seen_as_of TEXT NOT NULL, first_seen_at TEXT, origin TEXT NOT NULL,
+    effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(table_name, symbol, stat_date, pub_date, revision_no, provider)
+);
+CREATE TABLE IF NOT EXISTS research_event_records (
+    event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, event_type TEXT NOT NULL,
+    event_date TEXT NOT NULL, effective_at TEXT NOT NULL,
+    direction DOUBLE PRECISION NOT NULL, confidence DOUBLE PRECISION NOT NULL,
+    materiality DOUBLE PRECISION NOT NULL, surprise DOUBLE PRECISION NOT NULL,
+    novelty DOUBLE PRECISION NOT NULL, source_family TEXT NOT NULL,
+    source_origin TEXT NOT NULL, document_id TEXT NOT NULL,
+    event_cluster_id TEXT NOT NULL, confirmation_status TEXT NOT NULL,
+    entity_impact TEXT NOT NULL, official INTEGER NOT NULL DEFAULT 0, title TEXT,
+    original_values TEXT NOT NULL, normalized_values TEXT NOT NULL,
+    payload TEXT NOT NULL, retrieved_at TEXT NOT NULL
+);
+ALTER TABLE research_daily_bars ADD COLUMN IF NOT EXISTS dataset_id TEXT;
+ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS requested_as_of TEXT;
+ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS provider_effective_as_of TEXT;
+ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS dataset_id TEXT;
+ALTER TABLE research_financial_facts ADD COLUMN IF NOT EXISTS first_seen_at TEXT;
+CREATE TABLE IF NOT EXISTS selection_input_manifests (
+    manifest_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE,
+    decision_context TEXT NOT NULL, universe_snapshot_id TEXT NOT NULL,
+    market_dataset_ids TEXT NOT NULL, valuation_dataset_ids TEXT NOT NULL,
+    financial_revision_set_id TEXT NOT NULL, event_dataset_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
+    policy_payload TEXT NOT NULL, code_revision TEXT NOT NULL,
+    dependency_lock_hash TEXT, schema_version TEXT NOT NULL, created_at TEXT NOT NULL
+);
+ALTER TABLE selection_input_manifests
+    ADD COLUMN IF NOT EXISTS dependency_lock_hash TEXT;
+CREATE TABLE IF NOT EXISTS selection_artifacts (
+    artifact_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, artifact_type TEXT NOT NULL,
+    parent_snapshot_id TEXT, rule_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
+    payload_hash TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(run_id, artifact_type)
+);
+CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence
+    ON research_trade_calendar_evidence(trade_date, is_open);
+CREATE INDEX IF NOT EXISTS idx_research_calendar_fetch
+    ON research_calendar_fetch_runs(provider, range_end, quality_status);
+CREATE INDEX IF NOT EXISTS idx_research_master_published
+    ON research_master_snapshot_runs(snapshot_date, published_at);
+CREATE INDEX IF NOT EXISTS idx_research_financial_visible
+    ON research_financial_facts(table_name, first_seen_as_of, pub_date, symbol);
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('4-reproducible-inputs', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('4-financial-availability-time', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('4-manifest-dependency-lock', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+
 
 -- =============================================================================
 -- 验证查询：列出所有已创建的表

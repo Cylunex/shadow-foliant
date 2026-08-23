@@ -269,6 +269,32 @@ def research_readyz():
     return JSONResponse(payload, status_code=status)
 
 
+@app.get("/data-readyz")
+def research_data_readyz():
+    """Protected readiness of inputs for the current decision context."""
+    from core.research_health import data_snapshot
+    try:
+        payload = data_snapshot()
+    except Exception as exc:
+        payload = {"service": "shadow-foliant-research", "kind": "data",
+                   "status": "degraded", "ready": False,
+                   "checks": {"warehouse": False}, "error_type": type(exc).__name__}
+    return JSONResponse(payload, status_code=200 if payload.get("ready") else 503)
+
+
+@app.get("/selection-readyz")
+def formal_selection_readyz():
+    """Protected readiness of the latest manifest-bound formal selection."""
+    from core.research_health import selection_snapshot
+    try:
+        payload = selection_snapshot()
+    except Exception as exc:
+        payload = {"service": "shadow-foliant-research", "kind": "selection",
+                   "status": "degraded", "ready": False,
+                   "checks": {"warehouse": False}, "error_type": type(exc).__name__}
+    return JSONResponse(payload, status_code=200 if payload.get("ready") else 503)
+
+
 @app.get("/auth/login")
 def auth_login(return_to: str = "/"):
     try:
@@ -2576,10 +2602,7 @@ def latest_unified_selection():
     """最近一次本地主链 TOP15、最终 TOP5 与问财参考对照；不触发外部请求。"""
     try:
         from jobs.task_control import latest_selection_artifact
-        from data.research_store import ResearchStore
-        artifact = latest_selection_artifact() or {}
-        artifact["local_primary"] = ResearchStore().latest_selection()
-        return _ok(artifact)
+        return _ok(latest_selection_artifact() or {})
     except Exception as e:
         return _err(e)
 

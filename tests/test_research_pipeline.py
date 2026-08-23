@@ -184,10 +184,14 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         open_days = {day.date().isoformat() for day in dates}
         open_days.add(selection_date)
         for provider in ("fixture-calendar-a", "fixture-calendar-b"):
-            self.store.upsert_calendar_evidence(
-                ((day.date().isoformat(), day.date().isoformat() in open_days)
-                 for day in calendar_days),
-                provider=provider,
+            evidence = [
+                (day.date().isoformat(), day.date().isoformat() in open_days)
+                for day in calendar_days
+            ]
+            self.store.upsert_calendar_evidence(evidence, provider=provider)
+            self.store.record_calendar_fetch(
+                provider, calendar_days.min().date().isoformat(), selection_date,
+                evidence, quality_status="ok",
             )
         self.store.upsert_trade_days(sorted(open_days), provider="fixture-consensus")
 
@@ -244,8 +248,11 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
 
     def test_calendar_sync_persists_independent_open_closed_evidence(self):
         syncer = ResearchSynchronizer(self.store)
-        with patch("data.research_sync.zzshare.get_trade_days", return_value=["2026-08-21"]), \
-                patch("data.research_sync.baostock.trade_days", return_value=["2026-08-21"]):
+        evidence = [
+            ("2026-08-20", True), ("2026-08-21", True), ("2026-08-22", False),
+        ]
+        with patch("data.research_sync.zzshare.get_trade_calendar_evidence", return_value=evidence), \
+                patch("data.research_sync.baostock.trade_calendar_evidence", return_value=evidence):
             result = syncer.sync_calendar("2026-08-20", "2026-08-22")
         self.assertEqual(result["quality_status"], "ok")
         consensus = self.store.calendar_consensus("2026-08-22")
@@ -327,7 +334,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         selection_date = self._seed()
         conn = self.store.connect()
         try:
-            conn.execute("UPDATE research_security_snapshots SET list_status='1'")
+            conn.execute("UPDATE research_security_master_rows SET list_status='1'")
             conn.commit()
         finally:
             conn.close()
@@ -341,7 +348,10 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         rng = np.random.default_rng(7)
         frame = pd.DataFrame([{
             "symbol": symbol, "industry": "未分类", "market": "",
-            "return_vector_60": rng.normal(0, 0.01, 60), "total_score": 100 - pos,
+            "return_series_60": pd.Series(
+                rng.normal(0, 0.01, 60),
+                index=pd.bdate_range("2026-05-01", periods=60),
+            ), "total_score": 100 - pos,
         } for pos, symbol in enumerate([
             "600001", "600002", "600003", "000001", "000002", "000003",
             "300001", "300002", "300003",
@@ -383,6 +393,10 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         for provider in ("fixture-calendar-a", "fixture-calendar-b"):
             self.store.upsert_calendar_evidence(
                 [("2026-08-25", False)], provider=provider
+            )
+            self.store.record_calendar_fetch(
+                provider, "2026-08-25", "2026-08-25", [("2026-08-25", False)],
+                quality_status="ok",
             )
         result = LocalStockSelector(self.store).run("2026-08-25", persist=False)
         self.assertEqual(result["status"], "incomplete")
@@ -437,10 +451,17 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertNotIn("symbols", readiness)
 
     def test_final_top_five_ignores_llm_and_quote_fields(self):
+        formal = {
+            "run_id": "run", "snapshot_id": "snapshot",
+            "selection_date": "2026-08-24", "market_as_of": "2026-08-21",
+            "valuation_as_of": "2026-08-21", "financial_as_of": "2026-08-24",
+            "rule_version": "local-pit-v4", "policy_hash": "policy",
+            "manifest_id": "manifest",
+        }
         rows = [
-            {"code": "600001", "score": 80, "rank": 2,
+            {**formal, "code": "600001", "score": 80, "rank": 2,
              "debate_verdict": "否决", "change_pct": 9},
-            {"code": "600002", "score": 90, "rank": 1,
+            {**formal, "code": "600002", "score": 90, "rank": 1,
              "debate_verdict": "买入", "change_pct": -2},
         ]
         result = finalize_local_selection(rows, limit=2)

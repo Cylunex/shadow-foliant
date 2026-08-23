@@ -207,6 +207,14 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
         )
         if not code or score is None:
             continue
+        required = (
+            "run_id", "snapshot_id", "selection_date", "market_as_of",
+            "valuation_as_of", "financial_as_of", "rule_version",
+            "policy_hash", "manifest_id",
+        )
+        missing = [key for key in required if not source.get(key)]
+        if missing:
+            raise ValueError(f"formal selection row missing: {','.join(missing)}")
         row = {
             "run_id": source.get("run_id"),
             "snapshot_id": source.get("snapshot_id"),
@@ -214,6 +222,7 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "market_as_of": source.get("market_as_of"),
             "valuation_as_of": source.get("valuation_as_of"),
             "financial_as_of": source.get("financial_as_of"),
+            "manifest_id": source.get("manifest_id"),
             "code": code,
             "symbol": code,
             "rank": int(source.get("rank") or 9999),
@@ -223,7 +232,8 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "data_quality": _number(
                 source.get("data_quality", source.get("data_coverage"))
             ),
-            "rule_version": source.get("rule_version") or "local-pit-v3",
+            "rule_version": source.get("rule_version"),
+            "policy_hash": source.get("policy_hash"),
             "final_score": round(score, 4),
             "final_reason": "本地PIT总分确定性排序",
             "ranking_source": "local_pit_snapshot",

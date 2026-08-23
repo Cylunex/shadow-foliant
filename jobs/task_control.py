@@ -762,36 +762,61 @@ def effective_task_run(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def latest_selection_artifact() -> Dict[str, Any]:
-    """读取综合选股最近产物；含原 picks/rows 与二次优选 final_picks/final_rows。"""
+    """Read the single authoritative formal selection and optional display overlay.
+
+    ``selection_artifacts`` is the source of truth.  The legacy indicator snapshot
+    is consulted only for presentation fields and can never supply or reorder the
+    formal candidates.
+    """
     from agent_contract import envelope
-    _init_db()
-    try:
-        conn = db_connect(_DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT snapshot_date, indicators, created_at
-            FROM indicator_snapshots
-            WHERE symbol = '_last_selection'
-            ORDER BY snapshot_date DESC LIMIT 1
-        ''')
-        row = cur.fetchone()
-        conn.close()
-    except Exception as exc:
+    from data.research_store import ResearchStore
+
+    formal = ResearchStore(ensure_schema=False).latest_selection()
+    if not formal:
         return envelope(
-            None, status='failed', warnings=[str(exc)],
-            sources=['indicator_snapshots'], artifact_type='unified_selection')
-    if not row:
-        return envelope(
-            {'picks': []}, status='missing', warnings=['尚无综合选股快照'],
-            sources=['indicator_snapshots'], artifact_type='unified_selection',
+            {'picks': [], 'rows': [], 'final_picks': [], 'final_rows': []},
+            status='missing', warnings=['尚无正式综合选股产物'],
+            sources=['selection_artifacts'], artifact_type='unified_selection',
             as_of=None)
-    payload = _decode_result(row[1])
-    picks = payload.get('picks', []) if isinstance(payload, dict) else []
-    data = dict(payload) if isinstance(payload, dict) else {}
-    data['picks'] = [str(code) for code in picks if code]
-    snapshot_date = str(row[0])
+
+    artifacts = formal.get('artifacts') or {}
+    top15 = (artifacts.get('formal_top15') or {}).get('payload') or []
+    top5 = (artifacts.get('formal_top5') or {}).get('payload') or []
+    overlay = (artifacts.get('display_overlay') or {}).get('payload') or {}
+    external = (artifacts.get('external_reference') or {}).get('payload') or {}
+    ai_review = (artifacts.get('ai_review') or {}).get('payload') or {}
+    metadata = formal.get('metadata') or {}
+
+    data = {
+        'run_id': formal.get('run_id'),
+        'snapshot_id': metadata.get('snapshot_id'),
+        'manifest_id': metadata.get('manifest_id'),
+        'rule_version': metadata.get('rule_version'),
+        'policy_hash': metadata.get('policy_hash'),
+        'selection_date': formal.get('selection_date'),
+        'market_as_of': metadata.get('market_as_of'),
+        'picks': [str(row.get('symbol')) for row in top15 if row.get('symbol')],
+        'rows': top15,
+        'final_picks': [str(row.get('symbol')) for row in top5 if row.get('symbol')],
+        'final_rows': top5,
+        'display_overlay': overlay,
+        'external_reference': external,
+        'ai_review': ai_review,
+        'artifacts': {
+            name: {
+                key: value for key, value in artifact.items() if key != 'payload'
+            }
+            for name, artifact in artifacts.items()
+        },
+    }
+
+    warnings = []
+    required = ('formal_top15', 'formal_top5')
+    missing = [name for name in required if name not in artifacts]
+    if missing:
+        warnings.append('正式产物不完整: ' + ','.join(missing))
+    snapshot_date = str(formal.get('selection_date') or '')
     today_date = datetime.now().astimezone().date()
-    today = today_date.isoformat()
     expected_weekend_snapshot = False
     try:
         snapshot_day = datetime.strptime(snapshot_date[:10], '%Y-%m-%d').date()
@@ -800,16 +825,17 @@ def latest_selection_artifact() -> Dict[str, Any]:
                                      and 1 <= (today_date - snapshot_day).days <= 2)
     except Exception:
         pass
-    warnings = [] if snapshot_date == today or expected_weekend_snapshot else [
-        f'最近快照来自 {snapshot_date}，不是今天']
+    if snapshot_date != today_date.isoformat() and not expected_weekend_snapshot:
+        warnings.append(f'最近正式产物来自 {snapshot_date}，不是今天')
     return envelope(
         data,
-        status='success' if not warnings else 'stale',
+        status=('success' if not warnings else
+                'failed' if missing else 'stale'),
         warnings=warnings,
-        sources=['indicator_snapshots'],
+        sources=['selection_runs', 'selection_artifacts', 'selection_input_manifests'],
         artifact_type='unified_selection',
         snapshot_date=snapshot_date,
-        as_of=str(row[2]) if row[2] is not None else snapshot_date,
+        as_of=metadata.get('decision_at') or snapshot_date,
     )
 
 

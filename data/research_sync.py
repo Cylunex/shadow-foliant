@@ -12,6 +12,41 @@ from data.research_store import ResearchStore
 from data.sources import baostock, zzshare
 
 
+def _calendar_chunks(start_date: str, end_date: str, *, days: int = 92):
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(end, cursor + timedelta(days=max(7, int(days)) - 1))
+        yield cursor.isoformat(), chunk_end.isoformat()
+        cursor = chunk_end + timedelta(days=1)
+
+
+def _calendar_chunk_quality(evidence, start_date: str, end_date: str) -> tuple[str, dict]:
+    normalized = sorted({(str(day), bool(state)) for day, state in evidence})
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    opens = [pd.Timestamp(day).date() for day, state in normalized if state]
+    weekdays = len(pd.bdate_range(start, end))
+    reasons = []
+    if not normalized or not opens:
+        reasons.append("empty_calendar_chunk")
+    if any(pd.Timestamp(day).date() < start or pd.Timestamp(day).date() > end
+           for day, _ in normalized):
+        reasons.append("calendar_row_outside_requested_range")
+    if weekdays >= 10 and len(opens) < max(3, int(weekdays * 0.45)):
+        reasons.append("implausible_open_day_density")
+    if opens:
+        if (opens[0] - start).days > 10:
+            reasons.append("leading_calendar_gap")
+        if (end - opens[-1]).days > 10:
+            reasons.append("trailing_calendar_gap")
+    return ("ok" if not reasons else "incomplete", {
+        "reasons": reasons, "row_count": len(normalized), "open_count": len(opens),
+        "weekday_count": weekdays,
+    })
+
+
 def _flag(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "st", "停牌"}
@@ -80,11 +115,22 @@ class ResearchSynchronizer:
         run_id = self.store.start_sync("zzshare", "security_master", as_of)
         try:
             frame = zzshare.get_security_master()
-            rows = self.store.upsert_securities(frame)
-            quality = "ok" if rows >= int(os.getenv("RESEARCH_MIN_UNIVERSE_ROWS", "3000")) else "incomplete"
-            self.store.finish_sync(run_id, status="success" if rows else "error",
-                                   row_count=rows, quality_status=quality)
-            return {"rows": rows, "quality_status": quality}
+            published = self.store.publish_security_master(
+                frame, minimum_rows=int(os.getenv("RESEARCH_MIN_UNIVERSE_ROWS", "3000"))
+            )
+            rows = int(published["rows"])
+            quality = str(published["quality_status"])
+            self.store.finish_sync(
+                run_id, status="success" if published["published"] else "error",
+                row_count=rows, quality_status=quality,
+                detail={
+                    "snapshot_id": published["snapshot_id"],
+                    "published": published["published"],
+                    "reasons": published["reasons"],
+                    "exchange_counts": published["exchange_counts"],
+                },
+            )
+            return published
         except Exception as exc:
             self.store.finish_sync(run_id, status="error", row_count=0, quality_status="failed",
                                    detail={"error_type": type(exc).__name__})
@@ -96,31 +142,51 @@ class ResearchSynchronizer:
         end = pd.Timestamp(end_date).date().isoformat()
         run_id = self.store.start_sync("consensus", "trade_calendar", end)
         try:
-            primary = set(zzshare.get_trade_days(start, end))
-            validator = set(baostock.trade_days(start, end))
+            provider_evidence = {"zzshare": [], "baostock": []}
+            incomplete_chunks = []
+            for chunk_start, chunk_end in _calendar_chunks(start, end):
+                chunks = {
+                    "zzshare": zzshare.get_trade_calendar_evidence(chunk_start, chunk_end),
+                    "baostock": baostock.trade_calendar_evidence(chunk_start, chunk_end),
+                }
+                for provider, evidence in chunks.items():
+                    quality, chunk_detail = _calendar_chunk_quality(
+                        evidence, chunk_start, chunk_end
+                    )
+                    self.store.record_calendar_fetch(
+                        provider, chunk_start, chunk_end, evidence,
+                        quality_status=quality, detail=chunk_detail,
+                    )
+                    if quality == "ok":
+                        self.store.replace_calendar_evidence(
+                            evidence, provider=provider,
+                            start_date=chunk_start, end_date=chunk_end,
+                        )
+                        provider_evidence[provider].extend(evidence)
+                    else:
+                        incomplete_chunks.append({
+                            "provider": provider, "start": chunk_start, "end": chunk_end,
+                            **chunk_detail,
+                        })
+            primary = {day for day, state in provider_evidence["zzshare"] if state}
+            validator = {day for day, state in provider_evidence["baostock"] if state}
             if not primary or not validator:
                 raise RuntimeError("independent trade calendar source unavailable")
-            calendar_days = [
-                day.date().isoformat() for day in pd.date_range(start=start, end=end, freq="D")
-            ]
-            self.store.upsert_calendar_evidence(
-                ((day, day in primary) for day in calendar_days), provider="zzshare"
-            )
-            self.store.upsert_calendar_evidence(
-                ((day, day in validator) for day in calendar_days), provider="baostock"
-            )
             confirmed = sorted(primary & validator)
             disagreements = sorted(primary ^ validator)
             self.store.upsert_trade_days(confirmed, provider="zzshare+baostock")
-            quality = "ok" if not disagreements else "incomplete"
+            quality = "ok" if not disagreements and not incomplete_chunks else "incomplete"
             detail = {
                 "provider_count": 2,
                 "confirmed_open_days": len(confirmed),
                 "disagreement_count": len(disagreements),
                 "coverage_through_date": end,
+                "incomplete_chunk_count": len(incomplete_chunks),
             }
             self.store.finish_sync(
-                run_id, status="success", row_count=len(calendar_days) * 2,
+                run_id, status="success", row_count=sum(
+                    len(value) for value in provider_evidence.values()
+                ),
                 quality_status=quality, detail=detail,
             )
             return {**detail, "quality_status": quality, "trade_days": confirmed}
@@ -185,10 +251,24 @@ class ResearchSynchronizer:
             usable_rows = self.store.daily_bar_symbol_count(trade_date, adjustment="qfq")
             primary_coverage = primary_rows / expected if expected else 0.0
             usable_coverage = usable_rows / expected if expected else 0.0
-            quality = "ok" if expected and usable_coverage >= minimum_ratio else "incomplete"
+            valuation_coverage = int(result["valuation_rows"]) / expected if expected else 0.0
+            minimum_valuation = max(
+                0.70, float(os.getenv("RESEARCH_DAILY_MIN_VALUATION_COVERAGE", "0.70"))
+            )
+            primary_quality = str(frame.attrs.get("provenance", {}).get("quality_status") or "unknown")
+            valuation_quality = str(valuation.attrs.get("provenance", {}).get("quality_status") or "unknown")
+            quality = "ok" if (
+                expected and usable_coverage >= minimum_ratio
+                and valuation_coverage >= minimum_valuation
+                and primary_quality not in {"failed", "unknown_unit", "possibly_truncated"}
+                and valuation_quality == "ok"
+            ) else "incomplete"
             result["expected"] = expected
             result["primary_coverage"] = round(primary_coverage, 6)
             result["usable_qfq_coverage"] = round(usable_coverage, 6)
+            result["valuation_coverage"] = round(valuation_coverage, 6)
+            result["market_quality_status"] = primary_quality
+            result["valuation_quality_status"] = valuation_quality
             result["fallback_repaired_count"] = fallback_rows
             result["coverage"] = result["usable_qfq_coverage"]
             result["quality_status"] = quality
@@ -199,6 +279,9 @@ class ResearchSynchronizer:
                                    row_count=total_rows, quality_status=quality,
                                    detail={"primary_coverage": result["primary_coverage"],
                                            "usable_qfq_coverage": result["usable_qfq_coverage"],
+                                           "valuation_coverage": result["valuation_coverage"],
+                                           "market_quality_status": primary_quality,
+                                           "valuation_quality_status": valuation_quality,
                                            "fallback_repaired_count": fallback_rows})
             return result
         except Exception as exc:
@@ -219,7 +302,11 @@ class ResearchSynchronizer:
             raise RuntimeError("insufficient trading calendar for research bootstrap")
         completed = 0
         incomplete = 0
+        skipped = 0
         for trade_day in calendar:
+            if self.store.completed_sync("daily_market", trade_day):
+                skipped += 1
+                continue
             result = self.sync_day(
                 trade_day, fundamentals=False, fallback=False, refresh_calendar=False
             )
@@ -230,5 +317,6 @@ class ResearchSynchronizer:
         )
         return {
             "requested_days": len(calendar), "completed_days": completed,
+            "skipped_complete_days": skipped,
             "incomplete_days": incomplete, "latest": latest,
         }

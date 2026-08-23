@@ -21,6 +21,16 @@ _STARTED_MONOTONIC = time.monotonic()
 
 def _git_revision() -> str:
     """不启动子进程读取当前提交；在模块加载时固化可识别旧进程。"""
+    configured = os.getenv('APP_REVISION', '').strip()
+    if configured:
+        return configured
+    try:
+        with open(os.path.join(_bootstrap.ROOT, '.release-revision'), encoding='utf-8') as handle:
+            release_revision = handle.read().strip()
+        if release_revision:
+            return release_revision
+    except OSError:
+        pass
     git_dir = os.path.join(_bootstrap.ROOT, '.git')
     try:
         with open(os.path.join(git_dir, 'HEAD'), encoding='utf-8') as handle:
@@ -43,7 +53,7 @@ def _git_revision() -> str:
                         return revision
     except (OSError, ValueError):
         pass
-    return os.getenv('APP_REVISION', '').strip() or 'unknown'
+    return 'unknown'
 
 
 _REVISION = _git_revision()
@@ -58,7 +68,28 @@ def _database_check() -> Dict[str, Any]:
         cur = conn.cursor()
         cur.execute('SELECT 1')
         cur.fetchone()
-        return {'ok': True, 'backend': 'postgresql'}
+        required = {
+            'manual_task_runs', 'research_schema_migrations',
+            'selection_runs', 'selection_artifacts', 'selection_input_manifests',
+        }
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema=current_schema()"
+        )
+        present = {str(row[0]) for row in cur.fetchall()}
+        missing = sorted(required - present)
+        migration = None
+        if 'research_schema_migrations' in present:
+            cur.execute(
+                "SELECT version FROM research_schema_migrations "
+                "ORDER BY applied_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            migration = str(row[0]) if row else None
+        return {'ok': not missing and bool(migration), 'backend': 'postgresql',
+                'schema_initialized': not missing,
+                'missing_required_table_count': len(missing),
+                'research_migration': migration}
     except Exception as exc:
         return {
             'ok': False,
@@ -74,7 +105,7 @@ def _database_check() -> Dict[str, Any]:
 
 
 def _queue_check() -> Dict[str, Any]:
-    """队列表不存在代表尚未使用，不把全新安装误判为故障。"""
+    """Queue schema is mandatory in a production-ready installation."""
     from db_compat import connect
 
     conn = None
@@ -94,7 +125,7 @@ def _queue_check() -> Dict[str, Any]:
     except Exception as exc:
         message = str(exc).lower()
         if 'no such table' in message or 'does not exist' in message:
-            return {'ok': True, 'initialized': False, 'queued': 0, 'running': 0}
+            return {'ok': False, 'initialized': False, 'queued': 0, 'running': 0}
         return {'ok': False, 'error_type': type(exc).__name__}
     finally:
         if conn is not None:
@@ -124,7 +155,12 @@ def _configuration_flags() -> Dict[str, bool]:
 def snapshot() -> Dict[str, Any]:
     database = _database_check()
     queue = _queue_check() if database.get('ok') else {'ok': False, 'skipped': True}
-    ready = bool(database.get('ok') and queue.get('ok'))
+    expected_revision = os.getenv('EXPECTED_COMMIT', '').strip()
+    revision_ok = bool(
+        _REVISION != 'unknown'
+        and (not expected_revision or _REVISION == expected_revision)
+    )
+    ready = bool(database.get('ok') and queue.get('ok') and revision_ok)
     return {
         'service': 'shadow-foliant',
         'status': 'ready' if ready else 'degraded',
@@ -133,6 +169,11 @@ def snapshot() -> Dict[str, Any]:
         'started_at': _STARTED_AT,
         'uptime_seconds': max(0, int(time.monotonic() - _STARTED_MONOTONIC)),
         'python': platform.python_version(),
-        'checks': {'database': database, 'manual_queue': queue},
+        'checks': {
+            'database': database, 'manual_queue': queue,
+            'revision': {'ok': revision_ok, 'matches_expected': (
+                None if not expected_revision else _REVISION == expected_revision
+            )},
+        },
         'features': _configuration_flags(),
     }

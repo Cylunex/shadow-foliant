@@ -344,8 +344,12 @@ def get_security_master() -> pd.DataFrame:
     return _with_provenance(out.reset_index(drop=True), as_of=datetime.now().date().isoformat())
 
 
-def get_trade_days(start_date: str, end_date: str) -> List[str]:
-    """Return normalized A-share trading dates within an inclusive range."""
+def get_trade_calendar_evidence(start_date: str, end_date: str) -> List[tuple[str, bool]]:
+    """Return only provider-explicit open/closed calendar observations.
+
+    Absence is deliberately not converted into a closed day. Some released API
+    variants return open days only, while others include an ``is_open`` column.
+    """
     api = _get_api()
     if api is None:
         return []
@@ -357,23 +361,39 @@ def get_trade_days(start_date: str, end_date: str) -> List[str]:
     )
     if frame.empty:
         return []
-    candidates = []
+    date_column = next(
+        (column for column in ("trade_date", "date", "day", "cal_date", "value")
+         if column in frame.columns),
+        None,
+    )
+    if not date_column and len(frame.columns) == 1:
+        date_column = str(frame.columns[0])
+    if not date_column:
+        return []
     open_column = next(
         (column for column in ("is_open", "is_trading_day", "open") if column in frame.columns),
         None,
     )
-    if open_column:
-        opened = frame[open_column].astype(str).str.strip().str.lower().isin(
-            {"1", "true", "yes", "y", "open", "交易"}
-        )
-        frame = frame[opened].copy()
-    for column in ("trade_date", "date", "day", "cal_date", "value"):
-        if column in frame.columns:
-            candidates.extend(frame[column].tolist())
-    if not candidates and len(frame.columns) == 1:
-        candidates.extend(frame.iloc[:, 0].tolist())
-    out = {_iso for value in candidates if (_iso := _normalize_date(value))}
-    return sorted(out)
+    rows: dict[str, bool] = {}
+    for _, item in frame.iterrows():
+        day = _normalize_date(item.get(date_column))
+        if not day:
+            continue
+        if open_column:
+            raw = str(item.get(open_column, "")).strip().lower()
+            if raw in {"1", "true", "yes", "y", "open", "交易"}:
+                rows[day] = True
+            elif raw in {"0", "false", "no", "n", "closed", "休市"}:
+                rows[day] = False
+        else:
+            rows[day] = True
+    return sorted(rows.items())
+
+
+def get_trade_days(start_date: str, end_date: str) -> List[str]:
+    """Compatibility view containing provider-explicit open days only."""
+    return [day for day, is_open in get_trade_calendar_evidence(start_date, end_date)
+            if is_open]
 
 
 def _normalize_date(value: object) -> str:
@@ -437,7 +457,27 @@ def get_valuation(trade_date: str) -> pd.DataFrame:
             query_kwargs={},
         )
     )
-    return _with_provenance(df, as_of=day, unit="provider_documented")
+    if df.empty:
+        return _with_provenance(df, as_of=day, unit="provider_documented")
+    out = df.copy()
+    effective_column = next(
+        (column for column in (
+            "trade_date", "tradeDate", "date", "as_of", "effective_date",
+        ) if column in out.columns),
+        None,
+    )
+    if effective_column:
+        out["provider_effective_as_of"] = out[effective_column].map(_normalize_date)
+        valid = out["provider_effective_as_of"].eq(day)
+        out = out[valid].copy()
+        quality = "ok" if not out.empty else "effective_date_mismatch"
+    else:
+        out["provider_effective_as_of"] = ""
+        quality = "unknown_effective_date"
+    return _with_provenance(
+        out.reset_index(drop=True), as_of=day, unit="provider_documented",
+        quality_status=quality,
+    )
 
 
 _FINANCE_TABLES = {"valuation", "indicator", "income", "balance", "cash_flow"}

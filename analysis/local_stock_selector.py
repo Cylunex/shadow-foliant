@@ -6,8 +6,9 @@ candidate, change a score, satisfy a hard gate or rescue an incomplete local run
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from data.research_store import ResearchStore
+from core.decision_context import DecisionContext, dependency_lock_hash
 
 
 def _number(value) -> Optional[float]:
@@ -86,6 +88,28 @@ def _max_drawdown(values: np.ndarray) -> float:
     return float(np.min(values / peaks - 1.0)) if len(values) else -1.0
 
 
+def _price_limit_ratio(symbol: str, name: str, trade_date: object) -> float:
+    label = str(name or "").upper()
+    code = "".join(ch for ch in str(symbol or "") if ch.isdigit())[-6:]
+    day = pd.Timestamp(trade_date).date()
+    if "ST" in label:
+        return 0.05
+    if code.startswith(("4", "8", "92")):
+        return 0.30
+    if code.startswith(("688", "689")):
+        return 0.20
+    if code.startswith(("300", "301")) and day >= date(2020, 8, 24):
+        return 0.20
+    return 0.10
+
+
+def _limit_price(previous_close: float, ratio: float) -> float:
+    return float(
+        (Decimal(str(previous_close)) * (Decimal("1") + Decimal(str(ratio))))
+        .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+
+
 def _normalize_reference(items: Optional[Iterable[object]]) -> List[dict]:
     output: Dict[str, dict] = {}
     for item in items or ():
@@ -109,6 +133,7 @@ def _normalize_reference(items: Optional[Iterable[object]]) -> List[dict]:
 
 @dataclass(frozen=True)
 class SelectionPolicy:
+    version: str = "local-pit-v4"
     fundamental_top_n: int = 200
     technical_top_n: int = 50
     diversified_top_n: int = 20
@@ -127,39 +152,65 @@ class SelectionPolicy:
 
     @classmethod
     def from_env(cls) -> "SelectionPolicy":
+        base = cls()
         return cls(
             fundamental_top_n=max(20, int(os.getenv("LOCAL_SELECTION_FUNDAMENTAL_TOP_N", "200"))),
             technical_top_n=max(10, int(os.getenv("LOCAL_SELECTION_TECHNICAL_TOP_N", "50"))),
             diversified_top_n=max(5, int(os.getenv("LOCAL_SELECTION_DIVERSIFIED_TOP_N", "20"))),
             final_n=max(5, min(15, int(os.getenv("LOCAL_SELECTION_FINAL_N", "15")))),
-            min_history_days=max(61, int(os.getenv("LOCAL_SELECTION_MIN_HISTORY_DAYS", "70"))),
-            preferred_history_days=max(320, int(os.getenv("LOCAL_SELECTION_PREFERRED_HISTORY_DAYS", "400"))),
-            max_per_industry=max(1, int(os.getenv("LOCAL_SELECTION_MAX_PER_INDUSTRY", "3"))),
-            max_pairwise_correlation=_bounded(
+            min_history_days=max(base.min_history_days, int(
+                os.getenv("LOCAL_SELECTION_MIN_HISTORY_DAYS", "70")
+            )),
+            preferred_history_days=max(base.preferred_history_days, int(
+                os.getenv("LOCAL_SELECTION_PREFERRED_HISTORY_DAYS", "400")
+            )),
+            max_per_industry=min(base.max_per_industry, max(
+                1, int(os.getenv("LOCAL_SELECTION_MAX_PER_INDUSTRY", "3"))
+            )),
+            max_pairwise_correlation=min(base.max_pairwise_correlation, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MAX_PAIRWISE_CORRELATION", "0.90")), 0.5, 1.0
-            ),
-            min_warehouse_coverage=_bounded(
+            )),
+            min_warehouse_coverage=max(base.min_warehouse_coverage, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MIN_WAREHOUSE_COVERAGE", "0.80")), 0.1, 1.0
-            ),
-            min_financial_universe_coverage=_bounded(
+            )),
+            min_financial_universe_coverage=max(base.min_financial_universe_coverage, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MIN_FINANCIAL_COVERAGE", "0.70")), 0.1, 1.0
-            ),
+            )),
             min_stock_fundamental_metrics=max(
-                1, min(6, int(os.getenv("LOCAL_SELECTION_MIN_FUNDAMENTAL_METRICS", "4")))
+                base.min_stock_fundamental_metrics,
+                min(6, int(os.getenv("LOCAL_SELECTION_MIN_FUNDAMENTAL_METRICS", "4")))
             ),
-            min_valuation_coverage=_bounded(
+            min_valuation_coverage=max(base.min_valuation_coverage, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MIN_VALUATION_COVERAGE", "0.70")), 0.1, 1.0
-            ),
+            )),
             min_listing_trading_days=max(
-                60, int(os.getenv("LOCAL_SELECTION_MIN_LISTING_TRADING_DAYS", "70"))
+                base.min_listing_trading_days,
+                int(os.getenv("LOCAL_SELECTION_MIN_LISTING_TRADING_DAYS", "70"))
             ),
             min_average_amount_20=max(
-                0.0, float(os.getenv("LOCAL_SELECTION_MIN_AVERAGE_AMOUNT_20", "20000000"))
+                base.min_average_amount_20,
+                float(os.getenv("LOCAL_SELECTION_MIN_AVERAGE_AMOUNT_20", "20000000"))
             ),
             min_correlation_days=max(
-                20, min(60, int(os.getenv("LOCAL_SELECTION_MIN_CORRELATION_DAYS", "40")))
+                base.min_correlation_days,
+                min(60, int(os.getenv("LOCAL_SELECTION_MIN_CORRELATION_DAYS", "40")))
             ),
         )
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    @property
+    def policy_hash(self) -> str:
+        payload = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class CorrelationResult:
+    status: str
+    value: Optional[float]
+    overlap_days: int
 
 
 class LocalStockSelector:
@@ -167,29 +218,47 @@ class LocalStockSelector:
                  policy: Optional[SelectionPolicy] = None):
         self.store = store or ResearchStore()
         self.policy = policy or SelectionPolicy.from_env()
+        self._last_correlation_matrix: List[dict] = []
 
     def run(self, selection_date: Optional[str] = None,
             *, data_cutoff: Optional[str] = None,
+            decision_at: Optional[object] = None,
+            decision_mode: str = "preopen",
             wencai_reference: Optional[Iterable[object]] = None,
             persist: bool = True) -> dict:
         selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
-        cutoff = pd.Timestamp(data_cutoff).date().isoformat() if data_cutoff else selection_date
-        inclusive_cutoff = data_cutoff is not None
+        try:
+            context = DecisionContext.build(
+                selection_date,
+                data_cutoff=data_cutoff,
+                decision_at=decision_at,
+                mode=decision_mode,
+                policy_version=self.policy.version,
+                policy_hash=self.policy.policy_hash,
+            )
+        except ValueError as exc:
+            return self._failed(
+                selection_date, f"invalid_decision_context:{exc}", 0, [], persist
+            )
+        cutoff = context.market_cutoff
         reference = _normalize_reference(wencai_reference)
-        pit = self.store.pit_coverage(selection_date)
+        pit = self.store.pit_coverage(context.universe_cutoff)
         if pit.get("pit_coverage_start_date") and not pit.get("historical_pit_available"):
             return self._failed(
                 selection_date, "historical_pit_unavailable", 0, reference, persist,
-                metadata={**pit, "data_cutoff": cutoff},
+                metadata={**pit, "decision_context": context.as_dict()},
             )
-        universe = self.store.load_universe(selection_date)
+        universe = self.store.load_universe(
+            context.universe_cutoff, cutoff_at=context.decision_at
+        )
+        universe_snapshot_id = str(universe.attrs.get("snapshot_id") or "")
         panel = self.store.load_daily_panel(
             cutoff, trading_days=self.policy.preferred_history_days + 20
         )
         if universe.empty or panel.empty:
             return self._failed(
                 selection_date, "local warehouse is empty", len(universe), reference, persist,
-                metadata={**pit, "data_cutoff": cutoff},
+                metadata={**pit, "decision_context": context.as_dict()},
             )
         pit_universe_count = int(len(universe.drop_duplicates("symbol")))
 
@@ -204,12 +273,14 @@ class LocalStockSelector:
                 pit_universe_count, reference, persist,
                 metadata={**pit, "data_cutoff": cutoff},
             )
-        calendar = self.store.calendar_consensus(cutoff, inclusive=inclusive_cutoff)
+        calendar = self.store.calendar_consensus(
+            cutoff, inclusive=context.market_cutoff_inclusive
+        )
         expected_market_as_of = calendar.get("latest_confirmed_open_date")
         if not calendar.get("ready") or not expected_market_as_of:
             return self._failed(
                 selection_date, "trade calendar consensus unavailable", pit_universe_count,
-                reference, persist, metadata={**pit, "data_cutoff": cutoff,
+                reference, persist, metadata={**pit, "decision_context": context.as_dict(),
                                               "calendar_consensus": calendar},
             )
         market_as_of = panel["trade_date"].max()
@@ -222,7 +293,7 @@ class LocalStockSelector:
                     "market_as_of": actual_market_as_of,
                     "expected_market_as_of": expected_market_as_of,
                     "stale_trading_days": stale_days,
-                    "data_cutoff": cutoff,
+                    "decision_context": context.as_dict(),
                     "calendar_consensus": calendar,
                     **pit,
                 },
@@ -246,7 +317,7 @@ class LocalStockSelector:
                           "stale_trading_days": stale_days,
                           "primary_coverage": primary_coverage,
                           "usable_qfq_coverage": coverage,
-                          "data_cutoff": cutoff,
+                          "decision_context": context.as_dict(),
                           "calendar_consensus": calendar,
                           **pit}
             )
@@ -255,7 +326,8 @@ class LocalStockSelector:
         if universe.empty:
             return self._failed(
                 selection_date, "no securities passed local hard gates", pit_universe_count,
-                reference, persist, coverage=coverage, metadata={**pit, "data_cutoff": cutoff},
+                reference, persist, coverage=coverage,
+                metadata={**pit, "decision_context": context.as_dict()},
             )
 
         features = self._build_features(universe, panel, market_as_of)
@@ -263,7 +335,8 @@ class LocalStockSelector:
         if features.empty:
             return self._failed(
                 selection_date, "no securities passed liquidity gates", pit_universe_count,
-                reference, persist, coverage=coverage, metadata={**pit, "data_cutoff": cutoff},
+                reference, persist, coverage=coverage,
+                metadata={**pit, "decision_context": context.as_dict()},
             )
         breadth_frame = features.copy()
         latest_valuation_as_of = self.store.latest_valuation_as_of(actual_market_as_of)
@@ -286,12 +359,16 @@ class LocalStockSelector:
                     "valuation_as_of": latest_valuation_as_of,
                     "valuation_coverage": round(valuation_coverage, 6),
                     "valuation_stale_trading_days": valuation_stale_days,
-                    "data_cutoff": cutoff,
+                    "decision_context": context.as_dict(),
                     "calendar_consensus": calendar,
                     **pit,
                 },
             )
-        fundamentals = self._fundamentals(selection_date)
+        financial_cutoff = context.financial_cutoff_at[:10]
+        fundamentals = self._fundamentals(context)
+        financial_revision_set_id = str(
+            fundamentals.attrs.get("revision_set_id") or hashlib.sha256(b"").hexdigest()
+        )
         frame = features
         if not valuations.empty and "symbol" in valuations.columns:
             frame = frame.merge(valuations, on="symbol", how="left", suffixes=("", "_valuation"))
@@ -313,14 +390,14 @@ class LocalStockSelector:
                     "valuation_coverage": round(valuation_coverage, 6),
                     "valuation_stale_trading_days": valuation_stale_days,
                     "financial_coverage": financial_coverage,
-                    "data_cutoff": cutoff,
+                    "decision_context": context.as_dict(),
                     "calendar_consensus": calendar,
                     **pit,
                 },
             )
         non_negative_equity = frame.get(
-            "net_assets_positive", pd.Series(True, index=frame.index)
-        ).fillna(True).astype(bool)
+            "net_assets_positive", pd.Series(False, index=frame.index)
+        ).fillna(False).astype(bool)
         frame = frame[qualified & non_negative_equity].copy()
         fundamental_pool = frame.sort_values(
             ["fundamental_score", "fundamental_coverage", "history_coverage"], ascending=False
@@ -331,10 +408,10 @@ class LocalStockSelector:
             ["technical_60_score", "fundamental_score"], ascending=False
         ).head(self.policy.technical_top_n).copy()
         technical_pool = self._score_industry_and_quality(technical_pool, breadth_frame)
-        technical_pool = self._apply_events(technical_pool, selection_date)
+        technical_pool = self._apply_events(technical_pool, context)
         technical_pool["total_score"] = (
             technical_pool["fundamental_score"] + technical_pool["technical_60_score"]
-            + technical_pool["industry_score"] + technical_pool["data_quality_score"]
+            + technical_pool["industry_score"]
             + technical_pool["correction_120"] + technical_pool["correction_250"]
             + technical_pool["event_correction"]
         )
@@ -348,13 +425,44 @@ class LocalStockSelector:
         industry_coverage = float(
             (industry_values.ne("") & industry_values.ne("未分类")).mean()
         ) if len(frame) else 0.0
-        rule_version = "local-pit-v3"
+        rule_version = self.policy.version
+        market_dataset_ids = sorted({
+            str(value) for value in panel.get("dataset_id", pd.Series(dtype=str)).dropna()
+            if str(value).strip()
+        })
+        valuation_dataset_ids = sorted({
+            str(value) for value in valuations.get("dataset_id", pd.Series(dtype=str)).dropna()
+            if str(value).strip()
+        })
+        input_manifest = {
+            "decision_context": context.as_dict(),
+            "universe_snapshot_id": universe_snapshot_id,
+            "market_dataset_ids": market_dataset_ids,
+            "valuation_dataset_ids": valuation_dataset_ids,
+            "financial_revision_set_id": financial_revision_set_id,
+            "event_dataset_id": self.store.event_dataset_id(
+                context.selection_date, cutoff_at=context.event_cutoff_at
+            ),
+            "policy_version": self.policy.version,
+            "policy_hash": self.policy.policy_hash,
+            "policy": self.policy.as_dict(),
+            "code_revision": context.code_revision,
+            "dependency_lock_hash": dependency_lock_hash(),
+        }
+        manifest_id = hashlib.sha256(json.dumps(
+            input_manifest, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
+        input_manifest["manifest_id"] = manifest_id
         snapshot_payload = json.dumps({
             "selection_date": selection_date,
             "market_as_of": actual_market_as_of,
             "valuation_as_of": latest_valuation_as_of,
             "financial_as_of": pit.get("financial_pit_end_date"),
             "rule_version": rule_version,
+            "policy_hash": self.policy.policy_hash,
+            "decision_context": context.as_dict(),
+            "manifest_id": manifest_id,
             "candidates": candidates,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         snapshot_id = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
@@ -377,9 +485,14 @@ class LocalStockSelector:
                 "financial_coverage": round(financial_coverage, 6),
                 "financial_as_of": pit.get("financial_pit_end_date"),
                 "data_cutoff": cutoff,
+                "decision_context": context.as_dict(),
                 "calendar_consensus": calendar,
                 "snapshot_id": snapshot_id,
                 "rule_version": rule_version,
+                "policy_hash": self.policy.policy_hash,
+                "policy": self.policy.as_dict(),
+                "universe_snapshot_id": universe_snapshot_id,
+                "manifest_id": manifest_id,
                 **pit,
                 "period_semantics": "trading_days",
                 "primary_pipeline": "local_pit",
@@ -389,11 +502,13 @@ class LocalStockSelector:
                     "industry" if industry_coverage >= 0.95 else "industry_with_board_fallback"
                 ),
                 "max_pairwise_correlation": self.policy.max_pairwise_correlation,
+                "correlation_matrix": self._last_correlation_matrix,
                 "stage_counts": {
                     "fundamental": len(fundamental_pool), "technical": len(technical_pool),
                     "diversified": len(diversified), "final": len(candidates),
                 },
             },
+            "input_manifest": input_manifest,
         }
         if persist:
             run["run_id"] = self.store.save_selection(run, candidates, reference)
@@ -435,6 +550,25 @@ class LocalStockSelector:
             self.policy.min_history_days, self.policy.min_listing_trading_days
         )
         result = result[result["history_days"] >= minimum_history]
+        calendar = pd.to_datetime(
+            self.store.trade_days_through(market_as_of.date().isoformat()), errors="coerce"
+        ).dropna().sort_values()
+        listed = pd.to_datetime(result.get("list_date"), errors="coerce")
+        if len(calendar):
+            calendar_values = calendar.to_numpy(dtype="datetime64[ns]")
+            listed_days = []
+            for value in listed:
+                if pd.isna(value):
+                    listed_days.append(0)
+                    continue
+                position = int(np.searchsorted(calendar_values, np.datetime64(value), side="left"))
+                listed_days.append(max(0, len(calendar_values) - position))
+            result["listed_trading_days"] = listed_days
+        else:
+            result["listed_trading_days"] = 0
+        result = result[
+            result["listed_trading_days"] >= self.policy.min_listing_trading_days
+        ]
         latest = panel[panel["trade_date"] == market_as_of].set_index("symbol")
         result["latest_volume"] = result["symbol"].map(latest["volume"])
         result["latest_close"] = result["symbol"].map(latest["close"])
@@ -446,32 +580,66 @@ class LocalStockSelector:
             & (result["latest_st"] == 0)
         ].copy()
 
-    def _fundamentals(self, selection_date: str) -> pd.DataFrame:
+    def _fundamentals(self, context: DecisionContext) -> pd.DataFrame:
+        selection_date = context.selection_date
         tables = {}
         for table in ("indicator", "income", "balance", "cash_flow"):
-            frame = self.store.load_financial_pit(table, selection_date)
+            frame = self.store.load_financial_history(
+                table, selection_date, cutoff_at=context.financial_cutoff_at
+            )
             if frame.empty:
                 continue
             if "pub_date" in frame.columns:
                 published = pd.to_datetime(frame["pub_date"], errors="coerce")
                 frame = frame[published.notna() & (published <= pd.Timestamp(selection_date))]
-            frame = frame.drop_duplicates("symbol", keep="last").set_index("symbol")
+            frame = frame.sort_values(["symbol", "stat_date", "pub_date"])
             tables[table] = frame
-        symbols = sorted(set().union(*(set(frame.index) for frame in tables.values()))) if tables else []
+        symbols = sorted(set().union(*(
+            set(frame["symbol"].astype(str)) for frame in tables.values()
+        ))) if tables else []
         records = []
+        revision_keys = []
         for symbol in symbols:
-            record = {"symbol": symbol}
+            periods = []
+            for table in ("indicator", "income", "balance", "cash_flow"):
+                frame = tables.get(table)
+                if frame is None:
+                    periods.append(set())
+                else:
+                    periods.append(set(
+                        frame.loc[frame["symbol"].astype(str) == symbol, "stat_date"].dropna().astype(str)
+                    ))
+            common_periods = set.intersection(*periods) if periods and all(periods) else set()
+            anchor = max(common_periods) if common_periods else None
+            record = {
+                "symbol": symbol, "anchor_stat_date": anchor,
+                "statement_period_mismatch": not bool(anchor),
+            }
+            selected_periods = []
             for table, frame in tables.items():
-                if symbol not in frame.index:
+                available = frame[frame["symbol"].astype(str) == symbol]
+                if available.empty:
                     continue
-                row = frame.loc[symbol]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[-1]
+                if anchor:
+                    aligned = available[available["stat_date"].astype(str) == anchor]
+                    row = aligned.iloc[-1]
+                else:
+                    row = available.sort_values(["stat_date", "pub_date"]).iloc[-1]
+                selected_periods.append(str(row.get("stat_date") or ""))
+                revision_keys.append(
+                    f"{table}:{symbol}:{row.get('stat_date')}:{row.get('revision_no')}:{row.get('provider')}"
+                )
                 for key, value in row.items():
                     if key not in {"symbol", "as_of", "quality_status"}:
                         record[f"{table}_{key}"] = value
+            if len(set(period for period in selected_periods if period)) > 1:
+                record["statement_period_mismatch"] = True
             records.append(record)
-        return pd.DataFrame(records) if records else pd.DataFrame(columns=["symbol"])
+        result = pd.DataFrame(records) if records else pd.DataFrame(columns=["symbol"])
+        result.attrs["revision_set_id"] = hashlib.sha256(
+            "\n".join(sorted(revision_keys)).encode("utf-8")
+        ).hexdigest()
+        return result
 
     def _build_features(self, universe: pd.DataFrame, panel: pd.DataFrame,
                         market_as_of: pd.Timestamp) -> pd.DataFrame:
@@ -492,6 +660,12 @@ class LocalStockSelector:
             ma60 = float(np.mean(closes[-60:]))
             low60, high60 = float(np.min(closes[-60:])), float(np.max(closes[-60:]))
             industry = str(meta.loc[symbol].get("industry") or "未分类")
+            limit_ratio = _price_limit_ratio(
+                symbol, str(meta.loc[symbol].get("name") or ""), market_as_of
+            )
+            upper_limit = _limit_price(closes[-2], limit_ratio) if len(closes) >= 2 else None
+            latest_high = _number(bars.iloc[-1].get("high"))
+            latest_low = _number(bars.iloc[-1].get("low"))
             rows.append({
                 "symbol": symbol, "name": meta.loc[symbol].get("name"), "industry": industry,
                 "market": meta.loc[symbol].get("market"),
@@ -511,11 +685,9 @@ class LocalStockSelector:
                     bars.get("is_paused", pd.Series(0, index=bars.index)), errors="coerce"
                 ).fillna(0).tail(20).astype(bool).sum()),
                 "one_price_up": bool(
-                    len(bars) >= 2
-                    and _number(bars.iloc[-1].get("high")) is not None
-                    and _number(bars.iloc[-1].get("low")) is not None
-                    and abs(float(bars.iloc[-1]["high"]) - float(bars.iloc[-1]["low"])) < 1e-9
-                    and closes[-1] / closes[-2] - 1.0 >= 0.08
+                    upper_limit is not None and latest_high is not None and latest_low is not None
+                    and abs(latest_high - latest_low) < 0.0051
+                    and abs(closes[-1] - upper_limit) < 0.0051
                 ),
                 "return_series_60": return_series,
                 "correction_120": self._medium_correction(closes),
@@ -610,6 +782,10 @@ class LocalStockSelector:
         ocf = values(("cash_flow_net_operate_cash_flow", "cash_flow_net_operating_cash_flow"))
         profit = values(("income_np_parent_company_owners", "income_net_profit"))
         cash_quality = ocf / profit.abs().replace(0, np.nan)
+        mismatch = out.get(
+            "statement_period_mismatch", pd.Series(True, index=out.index)
+        ).fillna(True).astype(bool)
+        cash_quality = cash_quality.where(~mismatch)
         pe = pd.to_numeric(out["pe_ttm"], errors="coerce") if "pe_ttm" in out else pd.Series(np.nan, index=out.index)
         pb = pd.to_numeric(out["pb"], errors="coerce") if "pb" in out else pd.Series(np.nan, index=out.index)
         pe = pe.where(pe > 0)
@@ -701,9 +877,12 @@ class LocalStockSelector:
         out["quality_score"] = out["data_quality_score"]
         return out
 
-    def _apply_events(self, frame: pd.DataFrame, selection_date: str) -> pd.DataFrame:
+    def _apply_events(self, frame: pd.DataFrame, context: DecisionContext) -> pd.DataFrame:
+        selection_date = context.selection_date
         out = frame.copy()
-        events = self.store.load_events(selection_date)
+        events = self.store.load_events(
+            selection_date, cutoff_at=context.event_cutoff_at
+        )
         out["event_correction"] = 0.0
         if events.empty:
             return out
@@ -759,19 +938,35 @@ class LocalStockSelector:
 
     def _diversify(self, frame: pd.DataFrame) -> pd.DataFrame:
         rows, counts = [], {}
+        matrix = []
         for _, row in frame.iterrows():
             industry = str(row.get("industry") or "").strip()
             bucket = (f"industry:{industry}" if industry and industry != "未分类"
                       else self._board_bucket(row))
             if counts.get(bucket, 0) >= self.policy.max_per_industry:
                 continue
-            if any(self._correlation(row, selected) >= self.policy.max_pairwise_correlation
-                   for selected in rows):
+            rejected = False
+            for selected in rows:
+                result = self._correlation(row, selected)
+                matrix.append({
+                    "left": str(row.get("symbol") or ""),
+                    "right": str(selected.get("symbol") or ""),
+                    "status": result.status, "value": result.value,
+                    "overlap_days": result.overlap_days,
+                })
+                if result.status != "known" or (
+                    result.value is not None
+                    and result.value >= self.policy.max_pairwise_correlation
+                ):
+                    rejected = True
+                    break
+            if rejected:
                 continue
             rows.append(row)
             counts[bucket] = counts.get(bucket, 0) + 1
             if len(rows) >= self.policy.diversified_top_n:
                 break
+        self._last_correlation_matrix = matrix
         return pd.DataFrame(rows, columns=frame.columns)
 
     @staticmethod
@@ -792,19 +987,21 @@ class LocalStockSelector:
             board = "沪市主板"
         return f"board:{board}"
 
-    def _correlation(self, left: pd.Series, right: pd.Series) -> float:
+    def _correlation(self, left: pd.Series, right: pd.Series) -> CorrelationResult:
         a = left.get("return_series_60")
         b = right.get("return_series_60")
         if not isinstance(a, pd.Series) or not isinstance(b, pd.Series):
-            return -1.0
+            return CorrelationResult("insufficient", None, 0)
         aligned = pd.concat(
             [pd.to_numeric(a, errors="coerce"), pd.to_numeric(b, errors="coerce")],
             axis=1, join="inner",
         ).dropna()
         if len(aligned) < self.policy.min_correlation_days:
-            return -1.0
+            return CorrelationResult("insufficient", None, len(aligned))
         corr = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
-        return corr if math.isfinite(corr) else -1.0
+        if not math.isfinite(corr):
+            return CorrelationResult("invalid", None, len(aligned))
+        return CorrelationResult("known", corr, len(aligned))
 
     @staticmethod
     def _records(frame: pd.DataFrame) -> List[dict]:

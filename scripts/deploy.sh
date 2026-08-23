@@ -23,8 +23,8 @@ if [[ "$remote_commit" != "$EXPECTED_COMMIT" ]]; then
   exit 4
 fi
 
-current_commit="$(git rev-parse HEAD)"
-if ! git merge-base --is-ancestor "$current_commit" "$EXPECTED_COMMIT"; then
+previous_commit="$(git rev-parse HEAD)"
+if ! git merge-base --is-ancestor "$previous_commit" "$EXPECTED_COMMIT"; then
   echo "deployment is not a fast-forward from the current commit" >&2
   exit 5
 fi
@@ -35,24 +35,96 @@ if [[ "$(git rev-parse HEAD)" != "$EXPECTED_COMMIT" ]]; then
   exit 6
 fi
 
-venv_dir="${FOLIANT_VENV:-$repo_dir/venv2}"
+release_root="${FOLIANT_RELEASE_ROOT:-}"
+if [[ -n "$release_root" ]]; then
+  release_dir="$release_root/$EXPECTED_COMMIT"
+  venv_dir="$release_dir/venv"
+  mkdir -p "$release_dir"
+  if [[ ! -f "$release_dir/.source-ready" ]]; then
+    git archive "$EXPECTED_COMMIT" | tar -x -C "$release_dir"
+    printf '%s\n' "$EXPECTED_COMMIT" > "$release_dir/.release-revision"
+    touch "$release_dir/.source-ready"
+  fi
+  if [[ ! -x "$venv_dir/bin/python" ]]; then
+    python3 -m venv "$venv_dir"
+  fi
+  validation_dir="$release_dir"
+else
+  venv_dir="${FOLIANT_VENV:-$repo_dir/venv2}"
+  validation_dir="$repo_dir"
+fi
 python_bin="$venv_dir/bin/python"
 if [[ ! -x "$python_bin" ]]; then
   echo "configured Foliant Python is not executable" >&2
   exit 7
 fi
 
-"$python_bin" -m pip install -r requirements.txt
-"$python_bin" -m compileall -q \
-  -x '(^|[\\/])(venv2?|\.git|node_modules)([\\/]|$)' .
-find scripts -type f -name '*.sh' -exec bash -n {} +
+"$python_bin" -m pip install -r "$validation_dir/requirements.txt"
+(
+  cd "$validation_dir"
+  "$python_bin" -m compileall -q \
+    -x '(^|[\\/])(venv2?|\.venv|\.git|node_modules)([\\/]|$)' .
+  find scripts -type f -name '*.sh' -exec bash -n {} +
+  "$python_bin" -m pytest -q
+)
+
+if command -v psql >/dev/null 2>&1; then
+  psql -X -v ON_ERROR_STOP=1 --single-transaction \
+    -c "SELECT pg_advisory_xact_lock(1936482714)" \
+    -f "$validation_dir/scripts/init_postgres.sql"
+else
+  echo "psql is required for explicit schema migration" >&2
+  exit 8
+fi
 
 if [[ "${DEPLOY_RESTART:-false}" != "true" ]]; then
   echo "validated commit $EXPECTED_COMMIT; restart skipped"
   exit 0
 fi
 
-supervisorctl restart stock-webui
-supervisorctl restart stock-jobs-hub
+health_base="${FOLIANT_HEALTH_BASE_URL:?FOLIANT_HEALTH_BASE_URL is required when restarting}"
+if [[ -z "$release_root" ]]; then
+  echo "safe restart requires FOLIANT_RELEASE_ROOT and a commit-specific venv" >&2
+  exit 9
+fi
+app_link="${FOLIANT_CURRENT_LINK:?FOLIANT_CURRENT_LINK is required for release activation}"
+if [[ -e "$app_link" && ! -L "$app_link" ]]; then
+  echo "FOLIANT_CURRENT_LINK must be a symlink managed by this deploy script" >&2
+  exit 10
+fi
+previous_link="$(readlink "$app_link" 2>/dev/null || true)"
+ln -sfn "$release_dir" "$app_link"
+
+rolled_back=false
+rollback() {
+  if [[ "$rolled_back" == "true" ]]; then
+    return
+  fi
+  rolled_back=true
+  echo "deployment verification failed; restoring previous release" >&2
+  if [[ -n "${previous_link:-}" ]]; then
+    ln -sfn "$previous_link" "$app_link"
+  fi
+  supervisorctl restart stock-webui stock-jobs-hub >/dev/null 2>&1 || true
+}
+trap rollback ERR
+
+supervisorctl restart stock-webui stock-jobs-hub
 supervisorctl status stock-webui stock-jobs-hub
+curl --fail --silent --show-error "$health_base/healthz" >/dev/null
+ready_payload="$(curl --fail --silent --show-error "$health_base/readyz")"
+if [[ "$ready_payload" != *"$EXPECTED_COMMIT"* ]]; then
+  echo "runtime revision does not match EXPECTED_COMMIT" >&2
+  false
+fi
+# Research readiness may legitimately be degraded while a fresh bootstrap is in
+# progress, but both protected contracts must respond with valid JSON semantics.
+for path in data-readyz selection-readyz; do
+  payload="$(curl --silent --show-error "$health_base/$path")"
+  if [[ "$payload" != *'"ready"'* || "$payload" != *'"checks"'* ]]; then
+    echo "$path did not return a readiness contract" >&2
+    false
+  fi
+done
+trap - ERR
 echo "deployed commit $EXPECTED_COMMIT"

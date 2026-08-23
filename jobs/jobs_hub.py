@@ -4415,8 +4415,8 @@ def task_unified_selection():
             w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
             body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
 
-        # 正式产物与显示 overlay 分离。旧 rows/final_rows 保持展示兼容，但
-        # local_primary_top15/deterministic_top5 只能含本地快照字段。
+        # 正式产物与显示 overlay 分离。权威 TOP15/TOP5 只从追加式 artifact 读取；
+        # 当日 indicator snapshot 仅保存展示兼容字段和 artifact 引用。
         artifact_rows = []
         local_formal_rows = []
         deterministic_rows = []
@@ -4444,6 +4444,8 @@ def task_unified_selection():
                     'technical_state': cinfo.get('state'),
                     'data_quality': cinfo.get('data_coverage'),
                     'rule_version': local_result.get('metadata', {}).get('rule_version'),
+                    'policy_hash': local_result.get('metadata', {}).get('policy_hash'),
+                    'manifest_id': local_result.get('metadata', {}).get('manifest_id'),
                 })
                 artifact_rows.append({
                     'rank': rank,
@@ -4466,9 +4468,14 @@ def task_unified_selection():
                     'local_state': cinfo.get('state'),
                     'data_coverage': cinfo.get('data_coverage'),
                 })
-            from analysis.selection_finalizer import finalize_local_selection
-            local_formal_rows = finalize_local_selection(local_formal_rows, limit=15)
-            deterministic_rows = local_formal_rows[:5]
+            persisted = selector.store.latest_selection() or {}
+            if str(persisted.get('run_id') or '') != str(local_result.get('run_id') or ''):
+                raise RuntimeError('formal selection artifact does not match local run')
+            artifacts = persisted.get('artifacts') or {}
+            local_formal_rows = (artifacts.get('formal_top15') or {}).get('payload') or []
+            deterministic_rows = (artifacts.get('formal_top5') or {}).get('payload') or []
+            if not local_formal_rows or not deterministic_rows:
+                raise RuntimeError('formal TOP15/TOP5 artifact is unavailable')
             overlay_by_code = {row['code']: row for row in artifact_rows}
             final_rows = [
                 {**overlay_by_code.get(row['code'], {}), **row}
@@ -4479,8 +4486,9 @@ def task_unified_selection():
                 'rows': artifact_rows,
                 'final_picks': [row['code'] for row in deterministic_rows],
                 'final_rows': final_rows,
-                'local_primary_top15': local_formal_rows,
-                'deterministic_top5': deterministic_rows,
+                'formal_run_id': local_result.get('run_id'),
+                'formal_top15_artifact_id': (artifacts.get('formal_top15') or {}).get('artifact_id'),
+                'formal_top5_artifact_id': (artifacts.get('formal_top5') or {}).get('artifact_id'),
                 'display_overlay': artifact_rows,
                 'ai_review': list(debate_map.values()),
                 'external_reference': local_result.get('comparison', {}),
@@ -4488,6 +4496,17 @@ def task_unified_selection():
                 'vetoed': _vetoed,
                 'source_breakdown': source_count,
             })
+            for artifact_type, payload in (
+                ('display_overlay', artifact_rows),
+                ('ai_review', list(debate_map.values())),
+            ):
+                try:
+                    selector.store.save_selection_artifact(
+                        local_result.get('run_id'), artifact_type, payload
+                    )
+                except Exception as _attachment_error:
+                    print(f'[unified_selection] {artifact_type} 附件保存失败: '
+                          f'{type(_attachment_error).__name__}')
         except Exception as _fe:
             print(f'[unified_selection] 最终TOP5生成/保存失败(不影响TOP15): '
                   f'{type(_fe).__name__}: {str(_fe)[:80]}')
@@ -5065,8 +5084,8 @@ def task_announcement_scan():
                 } for item in confirmed_events])
             if an.get('alerts'):
                 bad = '\n'.join(f"🟢{a['name']} {a['code']}[{a['type']}] {a['summary']}" for a in an['alerts'])
-                risk_parts.append('【📢 公告利空】\n' + bad)
-                summ.append(f"公告利空{len(an['alerts'])}")
+                risk_parts.append('【📢 公告标题风险初筛（待正文确认）】\n' + bad)
+                summ.append(f"公告标题待核风险{len(an['alerts'])}")
             elif an.get('ok') and an.get('text'):
                 info_parts.append('【📢 公告事件】\n' + an['text'])
         except Exception as e:
@@ -5084,7 +5103,7 @@ def task_announcement_scan():
         try:
             from notification_router import send
             if risk_parts:
-                body = '⚠️ 盘后风险预警 — 解禁/公告利空优先看\n\n' + '\n\n'.join(risk_parts)
+                body = '⚠️ 盘后风险预警 — 解禁/公告标题待核风险优先看\n\n' + '\n\n'.join(risk_parts)
                 if info_parts:
                     body += '\n\n——以下中性参考——\n\n' + '\n\n'.join(info_parts)
                 send('alert', '⚠️ 盘后风险预警', body)

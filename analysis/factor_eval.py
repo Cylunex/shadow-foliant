@@ -134,26 +134,57 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     uni = universe or DEFAULT_UNIVERSE
     rebalance = rebalance or horizon   # 非重叠:步长≥持有期,消除样本重叠对 IR 的高估
 
-    # 1) 每只取一次 K线,算所有因子序列 + 未来收益序列(close[t+h]/close[t]-1)
+    # 1) Build a real date-indexed panel.  Positional alignment is invalid when a
+    # stock is suspended, newly listed, or has a repaired/missing provider row.
     panel = {}
     for code in uni:
         try:
-            df = _normalize_df(datahub.kline(code, period, adjust='qfq'))  # 因子用前复权
-            if df is None or len(df) < 120:
+            df = _normalize_df(datahub.kline(code, period, adjust='qfq'))
+            if df is None or len(df) < 120 or 'date' not in df.columns:
                 continue
+            df = df.copy()
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = (df.dropna(subset=['date']).sort_values('date')
+                    .drop_duplicates('date', keep='last').reset_index(drop=True))
+            if len(df) < 120:
+                continue
+            dates = pd.Index(df['date'].dt.strftime('%Y-%m-%d'), name='trade_date')
             close = df["close"].astype(float).reset_index(drop=True)
             fwd = close.shift(-horizon) / close - 1
             fac = compute(df.reset_index(drop=True), keys)
             if fac:
-                panel[code] = {"fwd": fwd, "factors": fac, "n": len(close)}
+                # A zero-volume row is not a valid rebalance observation.  A
+                # one-price bar is also excluded because it is normally not
+                # executable at a daily close signal.
+                volume = pd.to_numeric(df.get('volume'), errors='coerce')
+                one_price = pd.Series(False, index=df.index)
+                if {'high', 'low'}.issubset(df.columns):
+                    high = pd.to_numeric(df['high'], errors='coerce')
+                    low = pd.to_numeric(df['low'], errors='coerce')
+                    one_price = (high.sub(low).abs() <= 0.001)
+                tradable = volume.gt(0) & ~one_price
+                panel[code] = {
+                    "fwd": pd.Series(fwd.values, index=dates),
+                    "factors": {
+                        name: pd.Series(series.reset_index(drop=True).values, index=dates)
+                        for name, series in fac.items()
+                    },
+                    "tradable": pd.Series(tradable.values, index=dates),
+                }
         except Exception:
             continue
     if len(panel) < 5:
         return {"error": f"有效股池过小({len(panel)}),无法评估", "factors": []}
 
-    # 2) 选调仓点(各股长度可能不同 → 用最短长度的网格,留出 horizon)
-    min_len = min(p["n"] for p in panel.values())
-    points = list(range(60, min_len - horizon, rebalance))
+    # 2) Select one market-date grid.  Dates are eligible only when a genuine
+    # cross-section exists; each stock is looked up by that exact date below.
+    date_counts: Dict[str, int] = {}
+    for item in panel.values():
+        valid = item['fwd'].notna() & item['tradable'].fillna(False)
+        for trade_date in item['fwd'].index[valid]:
+            date_counts[str(trade_date)] = date_counts.get(str(trade_date), 0) + 1
+    common_dates = sorted(day for day, count in date_counts.items() if count >= MIN_CROSS)
+    points = common_dates[60::rebalance]
     if len(points) < 5:
         return {"error": "历史调仓点不足", "factors": []}
 
@@ -162,14 +193,16 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     for key in keys:
         name, cat, direction, _ = FACTORS[key]
         ics, ricks, period_ranks = [], [], []
-        for t in points:
+        for trade_date in points:
             fvals, rets = [], []
             for code, p in panel.items():
                 fser = p["factors"].get(key)
-                if fser is None or t >= len(fser):
+                if (fser is None or trade_date not in fser.index
+                        or trade_date not in p['fwd'].index
+                        or not bool(p['tradable'].get(trade_date, False))):
                     continue
-                fv = fser.iloc[t]
-                rv = p["fwd"].iloc[t]
+                fv = fser.loc[trade_date]
+                rv = p["fwd"].loc[trade_date]
                 if pd.notna(fv) and pd.notna(rv):
                     fvals.append(float(fv)); rets.append(float(rv))
             if len(fvals) >= MIN_CROSS:
@@ -219,6 +252,7 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     results.sort(key=lambda r: (r["fdr_significant"], abs(r["ic_ir"])), reverse=True)
     return {"factors": results, "horizon": horizon, "rebalance": rebalance,
             "universe_n": len(panel), "n_points": len(points), "period": period,
+            "alignment": "trade_date",
             "neutralized": False, "fdr_q": FDR_Q, "n_perm": n_perm}
 
 

@@ -9,34 +9,26 @@ PostgreSQL 数据库适配模块 — 取代原有的 SQLite database.py + longhu
 """
 
 import json
-import os
 from datetime import datetime
-
-# 确保 .env 环境变量已加载
-try:
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-except ImportError:
-    pass
 
 import psycopg2
 import psycopg2.extras
 import pandas as pd
+from database_settings import DatabaseSettings
 
 # ==================== 配置 ====================
 
+_SETTINGS = DatabaseSettings.from_env()
 DB_CONFIG = {
-    "host": os.getenv("PG_HOST", "127.0.0.1"),
-    "port": int(os.getenv("PG_PORT", "55432")),
-    "dbname": os.getenv("PG_DATABASE", "aiagents_stock"),
-    "user": os.getenv("PG_USER", "aiagents_stock"),
-    "password": os.getenv("PG_PASSWORD", "changeme"),
+    "host": _SETTINGS.host, "port": _SETTINGS.port,
+    "dbname": _SETTINGS.dbname, "user": _SETTINGS.user,
+    "password": _SETTINGS.password,
 }
 
 
 def get_conn():
     """获取数据库连接"""
-    return psycopg2.connect(**DB_CONFIG)
+    return psycopg2.connect(**DatabaseSettings.from_env().connect_kwargs())
 
 
 # ==================== 分析记录模块 (原 database.py) ====================

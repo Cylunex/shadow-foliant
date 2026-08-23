@@ -19,13 +19,7 @@ surface needed while legacy modules are converted to native PostgreSQL SQL:
 
 from __future__ import annotations
 
-import os
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from database_settings import DatabaseSettings
 
 USE_POSTGRES = True
 
@@ -35,18 +29,54 @@ try:
 except ImportError:
     _psycopg2 = None
 
+_SETTINGS = DatabaseSettings.from_env()
 PG_CONFIG = {
-    'host': os.getenv('PG_HOST', '127.0.0.1'),
-    'port': int(os.getenv('PG_PORT', '5432')) if os.getenv('PG_PORT') else 5432,
-    'dbname': os.getenv('PG_DATABASE', ''),
-    'user': os.getenv('PG_USER', ''),
-    'password': os.getenv('PG_PASSWORD', ''),
+    'host': _SETTINGS.host, 'port': _SETTINGS.port,
+    'dbname': _SETTINGS.dbname, 'user': _SETTINGS.user,
+    'password': _SETTINGS.password,
 }
 
 
 def _convert_placeholders(sql: str) -> str:
-    """? → %s（PG）。同时处理 SQLite→PG 常见差异：datetime() 函数。"""
-    sql = sql.replace('?', '%s')
+    """Convert qmark parameters without touching quoted text/comments/JSON ``?``."""
+    output = []
+    index = 0
+    state = "code"
+    while index < len(sql):
+        char = sql[index]
+        pair = sql[index:index + 2]
+        if state == "code":
+            if pair == "--":
+                state = "line_comment"; output.append(pair); index += 2; continue
+            if pair == "/*":
+                state = "block_comment"; output.append(pair); index += 2; continue
+            if char == "'":
+                state = "single"; output.append(char); index += 1; continue
+            if char == '"':
+                state = "double"; output.append(char); index += 1; continue
+            if char == '?':
+                before = sql[:index].rstrip()[-1:] or ""
+                after = sql[index + 1:].lstrip()[:1]
+                # PostgreSQL JSON existence operator: payload ? 'field'.
+                is_json_operator = bool(before and (before.isalnum() or before in ")]_\"")
+                                        and after in {"'", '"'})
+                output.append('?' if is_json_operator else '%s')
+                index += 1; continue
+        elif state == "single" and char == "'":
+            if index + 1 < len(sql) and sql[index + 1] == "'":
+                output.append("''"); index += 2; continue
+            state = "code"
+        elif state == "double" and char == '"':
+            if index + 1 < len(sql) and sql[index + 1] == '"':
+                output.append('""'); index += 2; continue
+            state = "code"
+        elif state == "line_comment" and char in "\r\n":
+            state = "code"
+        elif state == "block_comment" and pair == "*/":
+            output.append(pair); index += 2; state = "code"; continue
+        output.append(char)
+        index += 1
+    sql = ''.join(output)
     # SQLite datetime(column) → PG: column (timestamptz 可直接比较)
     sql = sql.replace('datetime(triggered_at)', 'triggered_at')
     # SQLite datetime('now', '-X minutes') → PG: NOW() - INTERVAL
@@ -75,17 +105,18 @@ class _PGCursor:
     def __init__(self, real_cur):
         self._cur = real_cur
         self._lastrowid = None
+        self._inserted = False
 
     def execute(self, sql, params=()):
         sql = _convert_placeholders(sql)
         self._cur.execute(sql, params)
-        # 模拟 SQLite lastrowid：INSERT 后取 lastval()。
-        # ⚠️ 坑：对无序列的表(如 TEXT 主键的 fund_holdings)lastval() 会报错,
-        #   而 PG 里任一语句报错会**污染整个事务**,导致后续语句全部
-        #   "current transaction is aborted"。这曾让 PG 模式下 fund_db.add_transaction
-        #   (先 INSERT 无序列的 holdings,再 INSERT 流水)整体失败。
-        #   用 SAVEPOINT 隔离 lastval() 的失败:失败则回滚到存点,不波及外层事务。
-        if sql.strip().upper().startswith('INSERT'):
+        self._inserted = sql.lstrip().upper().startswith('INSERT')
+        self._lastrowid = None
+        return self
+
+    def _load_lastrowid(self):
+        """Query lastval lazily only for the few legacy callers that request it."""
+        if self._inserted and self._lastrowid is None:
             try:
                 self._cur.execute('SAVEPOINT _lastval_sp')
                 self._cur.execute('SELECT lastval()')
@@ -95,9 +126,9 @@ class _PGCursor:
                 self._lastrowid = None
                 try:
                     self._cur.execute('ROLLBACK TO SAVEPOINT _lastval_sp')
+                    self._cur.execute('RELEASE SAVEPOINT _lastval_sp')
                 except Exception:
                     pass
-        return self
 
     def executemany(self, sql, params_seq):
         self._cur.executemany(_convert_placeholders(sql), params_seq)
@@ -114,6 +145,7 @@ class _PGCursor:
 
     @property
     def lastrowid(self):
+        self._load_lastrowid()
         return self._lastrowid
 
     @property

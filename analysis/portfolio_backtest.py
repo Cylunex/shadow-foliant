@@ -69,6 +69,7 @@ def _load_stock(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         'high': norm['high'].to_numpy(dtype='float64'),
         'low': norm['low'].to_numpy(dtype='float64'),
         'close': norm['close'].to_numpy(dtype='float64'),
+        'volume': norm['volume'].to_numpy(dtype='float64'),
         'pchg': norm['p_change'].to_numpy(dtype='float64') if 'p_change' in norm.columns
                 else np.zeros(len(dates)),
         '_norm': norm,
@@ -146,30 +147,33 @@ def _curve_metrics(dates: List[str], equity: np.ndarray,
     }
 
 
-_BENCH_CACHE: Dict[str, Tuple[float, Dict[str, float]]] = {}   # code -> (ts, date->close);1h TTL
+_BENCH_CACHE: Dict[str, Tuple[float, Dict[str, float]]] = {}   # range key -> (ts, date->close)
 
 
-def _benchmark_series(code: str) -> Dict[str, float]:
+def _benchmark_series(code: str, start: str, end: str) -> Dict[str, float]:
     """取基准指数 date->close。优先 akshare 指数日线，失败回退 datahub.kline。空则返回 {}。
     进程内 1h 缓存:同一基准被多次回测复用,免每次重抓(单次抓取约 0.9s)。"""
     import time as _t
-    ent = _BENCH_CACHE.get(code)
+    cache_key = f"{code}:{start}:{end}"
+    ent = _BENCH_CACHE.get(cache_key)
     if ent and _t.time() - ent[0] < 3600:
         return ent[1]
-    series = _benchmark_series_fetch(code)
+    series = _benchmark_series_fetch(code, start, end)
     if series:
-        _BENCH_CACHE[code] = (_t.time(), series)
+        _BENCH_CACHE[cache_key] = (_t.time(), series)
     return series
 
 
-def _benchmark_series_fetch(code: str) -> Dict[str, float]:
+def _benchmark_series_fetch(code: str, start: str, end: str) -> Dict[str, float]:
     # 1) 首选 datahub.index_kline(指数专用域:baostock 全历史 + akshare 指数接口,磁盘缓存)。
     #    ⚠️ 别再用 datahub.kline():那是个股链,000300 等指数代码在 6 个个股源上全链必败,
     #    每次基准取数给 kline 域全部源各记一次连败 → 污染健康度/触发 baostock 熔断,
     #    严重时全源熔断黑掉所有个股 K线 120s(2026-07-17 修,详见 datahub.index_kline)。
     try:
         import datahub
-        df = datahub.index_kline(code, '3y')
+        span_days = max(366, (pd.Timestamp(end) - pd.Timestamp(start)).days + 90)
+        period = f"{max(2, int(np.ceil(span_days / 365.25)))}y"
+        df = datahub.index_kline(code, period)
         norm = _normalize_df(df)
         if norm is not None and len(norm):
             return dict(zip(norm['date'], norm['close'].astype('float64')))
@@ -192,7 +196,9 @@ def _benchmark_series_fetch(code: str) -> Dict[str, float]:
 def _benchmark_compare(bench_code: str, dates: List[str],
                        initial_cash: float) -> Optional[Dict[str, Any]]:
     """把基准对齐到回测日历(前向填充缺口)，归一到 initial_cash 算同口径指标。"""
-    series = _benchmark_series(bench_code)
+    if not dates:
+        return None
+    series = _benchmark_series(bench_code, dates[0], dates[-1])
     if not series:
         return None
     aligned, last = [], None
@@ -364,6 +370,21 @@ def portfolio_backtest(
         pos = bisect.bisect_right(ds, d) - 1
         return float(sd['close'][pos]) if pos >= 0 else None
 
+    def _one_price_limit(sym: str, d: str, *, upper: bool) -> bool:
+        """Conservative daily-bar executability check for A-share price limits."""
+        from analysis.local_stock_selector import _limit_price, _price_limit_ratio
+        sd = data[sym]
+        i = sd['idx'].get(d)
+        if i is None or i <= 0 or float(sd['volume'][i]) <= 0:
+            return True
+        high, low = float(sd['high'][i]), float(sd['low'][i])
+        if abs(high - low) > 0.001:
+            return False
+        previous = float(sd['close'][i - 1])
+        ratio = _price_limit_ratio(sym, names.get(sym, ''), d)
+        boundary = _limit_price(previous, ratio if upper else -ratio)
+        return high >= boundary - 0.001 if upper else low <= boundary + 0.001
+
     for d in calendar:
         # —— (a) 先卖:逐持仓查止损/止盈/到期 ——
         for sym in list(positions.keys()):
@@ -375,20 +396,23 @@ def portfolio_backtest(
             bars_held = i - pos['entry_idx']
             if bars_held <= 0:
                 continue   # 建仓当日不在同日卖(entry=open,卖出最早次根)
+            open_d = float(sd['open'][i])
             low_d, high_d, close_d = float(sd['low'][i]), float(sd['high'][i]), float(sd['close'][i])
             stop, target = pos['stop'], pos['target']
             stop_hit = stop is not None and low_d <= stop
             tp_hit = target is not None and high_d >= target
             reason, raw_exit = None, None
             if stop_hit and tp_hit:
-                reason, raw_exit = 'ambiguous', stop     # 同根无法判先后,保守取止损
+                reason, raw_exit = 'ambiguous', min(open_d, stop)
             elif stop_hit:
-                reason, raw_exit = 'stop', stop
+                reason, raw_exit = 'stop', min(open_d, stop)
             elif tp_hit:
                 reason, raw_exit = 'target', target
             elif bars_held >= hold_days:
                 reason, raw_exit = 'expiry', close_d
             if reason is None:
+                continue
+            if float(sd['volume'][i]) <= 0 or _one_price_limit(sym, d, upper=False):
                 continue
             exit_px = raw_exit * (1 - slippage_pct)       # 卖出滑点让利
             gross = exit_px * pos['shares']
@@ -429,7 +453,9 @@ def portfolio_backtest(
                         weights = np.full(len(cands), 1.0 / max_positions)
                     for (sym, td, strength), w in zip(cands, weights):
                         open_d = float(data[sym]['open'][data[sym]['idx'][d]])
-                        if open_d <= 0:
+                        bar_i = data[sym]['idx'][d]
+                        if (open_d <= 0 or float(data[sym]['volume'][bar_i]) <= 0
+                                or _one_price_limit(sym, d, upper=True)):
                             continue
                         entry_px = open_d * (1 + slippage_pct)       # 买入滑点
                         budget = min(equity_now * w if allocation == 'signal'
@@ -463,12 +489,14 @@ def portfolio_backtest(
         equity_vals.append(equity)
         invested_ratios.append(holdings_val / equity if equity > 0 else 0.0)
 
-    # ── 4) 收尾:回测末日按最后 close 强制平仓(未实现→已实现,口径干净) ──
+    # ── 4) Close only executable positions; otherwise retain mark-to-market. ──
     last_d = calendar[-1]
     for sym in list(positions.keys()):
         pos = positions[sym]
         px = _last_close(sym, last_d)
-        if px is None:
+        last_i = data[sym]['idx'].get(last_d)
+        if (px is None or last_i is None or float(data[sym]['volume'][last_i]) <= 0
+                or _one_price_limit(sym, last_d, upper=False)):
             continue
         exit_px = px * (1 - slippage_pct)
         gross = exit_px * pos['shares']
@@ -485,9 +513,14 @@ def portfolio_backtest(
             'pnl': round(gross - fee - pos['cost_basis'], 2),
         })
         del positions[sym]
-    # 末日权益用平仓后的现金更新
+    open_position_value = sum(
+        (_last_close(sym, last_d) or 0.0) * pos['shares']
+        for sym, pos in positions.items()
+    )
+    # End equity includes positions that could not be executed; they are not
+    # mislabeled as realized final-close trades.
     if equity_vals:
-        equity_vals[-1] = cash
+        equity_vals[-1] = cash + open_position_value
 
     # ── 5) 指标 ──
     equity_arr = np.array(equity_vals, dtype='float64')
@@ -495,6 +528,8 @@ def portfolio_backtest(
     summary['final_equity'] = round(float(equity_arr[-1]), 2)
     summary['initial_cash'] = initial_cash
     summary['avg_exposure_pct'] = round(float(np.mean(invested_ratios)) * 100, 1) if invested_ratios else 0.0
+    summary['open_position_count'] = len(positions)
+    summary['open_position_value'] = round(open_position_value, 2)
 
     rets = [t['ret_pct'] for t in trades]
     if rets:

@@ -99,8 +99,8 @@ def index_kline(code: str, period: str = "3y", interval: str = "1d"):
     return kline(code, period, interval, 'raw', bs_code=bs)
 
 
-def trade_days(start_date: str, end_date: str):
-    """Return BaoStock-confirmed open dates for independent calendar consensus."""
+def trade_calendar_evidence(start_date: str, end_date: str):
+    """Return BaoStock-explicit open and closed calendar observations."""
     try:
         import pandas as pd
     except Exception:
@@ -129,9 +129,23 @@ def trade_days(start_date: str, end_date: str):
         return []
     frame = pd.DataFrame(rows, columns=["calendar_date", "is_trading_day"])
     dates = pd.to_datetime(frame["calendar_date"], errors="coerce")
-    opened = frame["is_trading_day"].astype(str).str.strip().isin({"1", "true", "True"})
+    states = frame["is_trading_day"].astype(str).str.strip().str.lower()
     _mark_ok()
-    return sorted(d.date().isoformat() for d in dates[opened].dropna())
+    rows = []
+    for day, state in zip(dates, states):
+        if pd.isna(day):
+            continue
+        if state in {"1", "true", "yes", "y"}:
+            rows.append((day.date().isoformat(), True))
+        elif state in {"0", "false", "no", "n"}:
+            rows.append((day.date().isoformat(), False))
+    return sorted(rows)
+
+
+def trade_days(start_date: str, end_date: str):
+    """Compatibility view containing BaoStock-confirmed open dates."""
+    return [day for day, is_open in trade_calendar_evidence(start_date, end_date)
+            if is_open]
 
 
 def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw",

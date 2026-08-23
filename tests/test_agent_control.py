@@ -304,7 +304,7 @@ class AsyncTaskControlTests(unittest.TestCase):
         self.assertEqual(row['result']['return_value']['value'], 42)
         self.assertEqual(calls, ['called'])
 
-    def test_latest_selection_reports_stale_snapshot(self):
+    def test_legacy_selection_snapshot_is_not_authoritative(self):
         task_control._init_db()
         conn = task_control.db_connect(task_control._DB_PATH)
         conn.execute('''
@@ -314,10 +314,12 @@ class AsyncTaskControlTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        artifact = task_control.latest_selection_artifact()
+        with mock.patch("data.research_store.ResearchStore") as store_type:
+            store_type.return_value.latest_selection.return_value = None
+            artifact = task_control.latest_selection_artifact()
 
-        self.assertEqual(artifact['status'], 'stale')
-        self.assertEqual(artifact['data']['picks'], ['600519'])
+        self.assertEqual(artifact['status'], 'missing')
+        self.assertEqual(artifact['data']['picks'], [])
         self.assertTrue(artifact['meta']['warnings'])
 
     def test_stale_worker_is_requeued_then_interrupted_after_retry_limit(self):
