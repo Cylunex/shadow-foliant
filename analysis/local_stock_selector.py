@@ -550,22 +550,12 @@ class LocalStockSelector:
             self.policy.min_history_days, self.policy.min_listing_trading_days
         )
         result = result[result["history_days"] >= minimum_history]
-        calendar = pd.to_datetime(
-            self.store.trade_days_through(market_as_of.date().isoformat()), errors="coerce"
-        ).dropna().sort_values()
-        listed = pd.to_datetime(result.get("list_date"), errors="coerce")
-        if len(calendar):
-            calendar_values = calendar.to_numpy(dtype="datetime64[ns]")
-            listed_days = []
-            for value in listed:
-                if pd.isna(value):
-                    listed_days.append(0)
-                    continue
-                position = int(np.searchsorted(calendar_values, np.datetime64(value), side="left"))
-                listed_days.append(max(0, len(calendar_values) - position))
-            result["listed_trading_days"] = listed_days
-        else:
-            result["listed_trading_days"] = 0
+        # 有效复权日线本身就是“已经交易了多少天”的直接证据。证券主表的
+        # list_date 在部分供应商/历史快照中允许为空，而交易日历也可能只保留
+        # 近期共识窗口；用两者反推上市天数会把拥有完整历史的老股误判为新股。
+        # 前面的 max(min_history_days, min_listing_trading_days) 已确保此处只能
+        # 放行具有足够真实交易历史的证券，list_date 继续作为展示元数据保留。
+        result["listed_trading_days"] = result["history_days"]
         result = result[
             result["listed_trading_days"] >= self.policy.min_listing_trading_days
         ]

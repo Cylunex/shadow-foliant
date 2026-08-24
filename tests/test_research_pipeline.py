@@ -466,6 +466,18 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertEqual(result["status"], "success", result)
         self.assertGreater(len(result["candidates"]), 0)
 
+    def test_local_pipeline_uses_observed_history_when_list_date_is_missing(self):
+        selection_date = self._seed()
+        conn = self.store.connect()
+        try:
+            conn.execute("UPDATE research_security_master_rows SET list_date=NULL")
+            conn.commit()
+        finally:
+            conn.close()
+        result = LocalStockSelector(self.store).run(selection_date, persist=False)
+        self.assertEqual(result["status"], "success", result)
+        self.assertGreater(len(result["candidates"]), 0)
+
     def test_diversification_uses_board_buckets_when_industry_is_missing(self):
         policy = SelectionPolicy(max_per_industry=2, max_pairwise_correlation=1.0)
         selector = LocalStockSelector(self.store, policy)
