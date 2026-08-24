@@ -315,13 +315,16 @@ class ResearchStore:
         if not cur.fetchone():
             self._add_column(cur, "research_financial_facts", "first_seen_at", "TEXT")
             cur.execute(
-                "UPDATE research_financial_facts SET first_seen_at=retrieved_at "
-                "WHERE first_seen_at IS NULL OR first_seen_at=''"
-            )
-            cur.execute(
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
             )
+        # Some early PostgreSQL bootstrap scripts recorded the migration marker
+        # after adding the column but before backfilling it. Keep this repair
+        # unconditional and idempotent so those rows regain an honest PIT time.
+        cur.execute(
+            "UPDATE research_financial_facts SET first_seen_at=retrieved_at "
+            "WHERE first_seen_at IS NULL OR first_seen_at=''"
+        )
         version = "4-manifest-dependency-lock"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
@@ -845,7 +848,10 @@ class ResearchStore:
                 first_seen_at,origin,effective_at,retrieved_at,schema_version,quality_status,payload)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(table_name,symbol,stat_date,pub_date,revision_no,provider) DO UPDATE SET
-                retrieved_at=excluded.retrieved_at,quality_status=excluded.quality_status""", rows,
+                first_seen_at=COALESCE(NULLIF(research_financial_facts.first_seen_at,''),
+                                       excluded.first_seen_at),
+                retrieved_at=excluded.retrieved_at,
+                quality_status=excluded.quality_status""", rows,
         )
         return len(rows)
 

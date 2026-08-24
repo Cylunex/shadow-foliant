@@ -702,6 +702,8 @@ ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS requested_as_of TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS provider_effective_as_of TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS dataset_id TEXT;
 ALTER TABLE research_financial_facts ADD COLUMN IF NOT EXISTS first_seen_at TEXT;
+UPDATE research_financial_facts SET first_seen_at=retrieved_at
+WHERE first_seen_at IS NULL OR first_seen_at='';
 CREATE TABLE IF NOT EXISTS selection_input_manifests (
     manifest_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE,
     decision_context TEXT NOT NULL, universe_snapshot_id TEXT NOT NULL,

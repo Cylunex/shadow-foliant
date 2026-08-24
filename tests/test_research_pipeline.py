@@ -226,6 +226,25 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         universe = self.store.load_universe('2026-08-22')
         self.assertEqual(universe['symbol'].tolist(), ['600000'])
 
+    def test_financial_upsert_repairs_missing_first_seen_timestamp(self):
+        frame = pd.DataFrame([{
+            'code': '600000.SH', 'statDate': '2026-06-30',
+            'pubDate': '2026-08-20', 'roe': 12.5,
+        }])
+        frame.attrs['provenance'] = self._provenance('2026-08-21')
+        self.store.upsert_financial_pit('indicator', frame, as_of='2026-08-21')
+        conn = self.store.connect()
+        try:
+            conn.execute('UPDATE research_financial_facts SET first_seen_at=NULL')
+            conn.commit()
+        finally:
+            conn.close()
+        self.store.upsert_financial_pit('indicator', frame, as_of='2026-08-21')
+        visible = self.store.load_financial_pit(
+            'indicator', '2026-08-21', cutoff_at='2026-08-21T18:00:00+08:00'
+        )
+        self.assertEqual(visible['symbol'].tolist(), ['600000'])
+
     @staticmethod
     def _provenance(as_of):
         return {
