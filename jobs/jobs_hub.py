@@ -3620,7 +3620,8 @@ def task_research_data_sync():
         detail = (
             f"market={result.get('providers', {}).get('zzshare', 0)} "
             f"coverage={float(result.get('coverage') or 0):.1%} "
-            f"master={master.get('rows', 0)}"
+            f"master={master.get('rows', 0)} "
+            f"fund_flow={result.get('fund_flow_rows', 0)}"
         )
         _log_run(job, status, error=None if status == 'success' else detail,
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -4263,6 +4264,15 @@ def task_unified_selection():
         if not local_candidates:
             reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
             raise RuntimeError(f'本地选股未产出: {reason}')
+        local_strategy_reference = local_result.get('local_strategy_reference') or {}
+        local_strategy_hits = {}
+        for strategy_name, strategy_result in (
+            local_strategy_reference.get('strategies') or {}
+        ).items():
+            for row in strategy_result.get('rows') or []:
+                code = str(row.get('symbol') or '')
+                if code:
+                    local_strategy_hits.setdefault(code, []).append(f'本地·{strategy_name}')
 
         # 2. 问财继续保留一段时间，仅作外部发现/对照。独立短截止时间结束后，
         #    参考结果附着到已存在的本地 run，不重新计算正式分数。
@@ -4304,7 +4314,8 @@ def task_unified_selection():
             top_list.append(code)
             candidates[code] = {
                 'score': float(item.get('total_score') or 0),
-                'src': list(item.get('source_labels') or ['本地PIT数据仓']),
+                'src': list(item.get('source_labels') or ['本地PIT数据仓'])
+                       + local_strategy_hits.get(code, []),
                 'industry': item.get('industry'),
                 'state': item.get('state'),
                 'data_coverage': item.get('data_coverage'),
@@ -4397,6 +4408,21 @@ def task_unified_selection():
             debate_s = _debate_tag.get(_dv['verdict'], '') if _dv else '-'
 
             body += f'| {i} | {arrow}{held} {code} {name} | ¥{price_s} | {pct_s} | {pe_s} | {score} | {debate_s} | {src_s} |\n'
+
+        local_lines = []
+        for strategy_name, strategy_result in (
+            local_strategy_reference.get('strategies') or {}
+        ).items():
+            rows = strategy_result.get('rows') or []
+            if rows:
+                names = '、'.join(
+                    str(row.get('name') or row.get('symbol') or '') for row in rows
+                )
+                local_lines.append(f'{strategy_name}:{names}')
+            elif strategy_result.get('status') == 'unavailable':
+                local_lines.append(f'{strategy_name}:数据暂缺')
+        if local_lines:
+            body += '\n\n🧭 本地策略参考（不改正式排名）\n' + '\n'.join(local_lines)
 
         # 红蓝对抗速览(结论先行):被否决的直接点名"避开"
         if debate_map:
@@ -4493,6 +4519,7 @@ def task_unified_selection():
                 'display_overlay': artifact_rows,
                 'ai_review': list(debate_map.values()),
                 'external_reference': local_result.get('comparison', {}),
+                'local_strategy_reference': local_strategy_reference,
                 'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                 'vetoed': _vetoed,
                 'source_breakdown': source_count,

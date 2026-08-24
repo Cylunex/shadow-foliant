@@ -375,6 +375,10 @@ class LocalStockSelector:
         if not fundamentals.empty and "symbol" in fundamentals.columns:
             frame = frame.merge(fundamentals, on="symbol", how="left")
         frame = self._score_fundamentals(frame)
+        from analysis.local_reference_strategies import LocalReferenceStrategyEngine
+        local_strategy_reference = LocalReferenceStrategyEngine(self.store).run(
+            frame, market_as_of=actual_market_as_of
+        )
         qualified = frame["fundamental_metric_count"] >= self.policy.min_stock_fundamental_metrics
         financial_coverage = float(qualified.mean()) if len(frame) else 0.0
         if financial_coverage < self.policy.min_financial_universe_coverage:
@@ -512,7 +516,13 @@ class LocalStockSelector:
         }
         if persist:
             run["run_id"] = self.store.save_selection(run, candidates, reference)
-        return {**run, "candidates": candidates, "wencai_reference": reference}
+            self.store.save_selection_artifact(
+                run["run_id"], "local_strategy_reference", local_strategy_reference
+            )
+        return {
+            **run, "candidates": candidates, "wencai_reference": reference,
+            "local_strategy_reference": local_strategy_reference,
+        }
 
     def _failed(self, selection_date: str, reason: str, universe_count: int,
                 reference: List[dict], persist: bool, *, coverage: float = 0.0,
@@ -766,6 +776,12 @@ class LocalStockSelector:
         roe = values(("indicator_roe", "indicator_roe_weighted", "indicator_roe_ttm"))
         growth = values(("indicator_net_profit_growth", "indicator_inc_net_profit_year_on_year",
                          "income_net_profit_growth", "income_np_parent_company_owners_yoy"))
+        revenue_growth = values((
+            "indicator_revenue_growth", "indicator_inc_revenue_year_on_year",
+            "indicator_or_yoy", "indicator_total_revenue_yoy",
+            "income_revenue_growth", "income_revenue_yoy",
+            "income_operating_revenue_yoy", "income_total_revenue_yoy",
+        ))
         liabilities = values(("balance_total_liability", "balance_total_liabilities"))
         assets = values(("balance_total_assets", "balance_asset_total"))
         debt = liabilities / assets.replace(0, np.nan)
@@ -781,6 +797,9 @@ class LocalStockSelector:
         pb = pd.to_numeric(out["pb"], errors="coerce") if "pb" in out else pd.Series(np.nan, index=out.index)
         pe = pe.where(pe > 0)
         pb = pb.where(pb > 0)
+        out["net_profit_growth_pct"] = growth
+        out["revenue_growth_pct"] = revenue_growth
+        out["debt_ratio"] = debt
         industries = out.get("industry", pd.Series("", index=out.index))
         known_equity = assets.notna() & liabilities.notna()
         out["net_assets_positive"] = pd.Series(pd.NA, index=out.index, dtype="boolean")

@@ -139,6 +139,62 @@ def sector_fund_flow(sector_type: str = "industry", top_n: int = 50) -> list:
     return rows
 
 
+def stock_fund_flow_rank(trade_date: str) -> pd.DataFrame:
+    """Whole-market *real* main-force flow, normalized for local PIT ingestion.
+
+    AkShare exposes Eastmoney's completed-day ranking without a historical date
+    parameter.  Callers therefore run this only after the close and stamp the
+    requested trading day.  Missing/renamed net-flow columns fail closed: volume
+    or turnover is never substituted for main-force money flow.
+    """
+    try:
+        import akshare as ak
+    except Exception:
+        return pd.DataFrame()
+    try:
+        C.throttle("akshare")
+        try:
+            frame = C.ak_safe(
+                ak.stock_individual_fund_flow_rank, timeout=30, indicator="今日"
+            )
+        except TypeError:
+            frame = C.ak_safe(ak.stock_individual_fund_flow_rank, timeout=30)
+    except Exception as exc:
+        print(f"[sources.akshare] 个股主力资金排名失败: {type(exc).__name__}")
+        return pd.DataFrame()
+    if frame is None or getattr(frame, "empty", True):
+        return pd.DataFrame()
+    required = ("代码", "今日主力净流入-净额")
+    if not all(column in frame.columns for column in required):
+        print(f"[sources.akshare] 个股主力资金字段缺失: {list(frame.columns)[:10]}")
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "symbol": frame["代码"].astype(str).str.extract(r"(\d{6})", expand=False),
+        "name": frame.get("名称", ""),
+        "trade_date": str(trade_date),
+        "close": pd.to_numeric(frame.get("最新价"), errors="coerce"),
+        "change_pct": pd.to_numeric(frame.get("今日涨跌幅"), errors="coerce"),
+        "main_net_inflow": pd.to_numeric(
+            frame["今日主力净流入-净额"], errors="coerce"
+        ),
+        "main_net_inflow_ratio": pd.to_numeric(
+            frame.get("今日主力净流入-净占比"), errors="coerce"
+        ),
+    })
+    out = out[
+        out["symbol"].notna() & out["main_net_inflow"].notna()
+    ].drop_duplicates("symbol", keep="first").reset_index(drop=True)
+    out.attrs["provenance"] = {
+        "provider": "akshare_eastmoney",
+        "origin": "eastmoney_fund_flow_rank",
+        "effective_at": str(trade_date),
+        "retrieved_at": datetime.now().astimezone().isoformat(),
+        "schema_version": "1",
+        "quality_status": "ok" if len(out) >= 1000 else "incomplete",
+    }
+    return out
+
+
 def sector_spot() -> list:
     """行业板块快照(同花顺 stock_board_industry_summary_ths,真非东财)→ [{板块,涨跌幅,领涨}](涨幅降序)。
     列对不齐/空/异常 → []。⚠️ 该接口底层 read_html 抓页面表,偶发 'No tables found' 不稳 → 仅作末位兜底。"""

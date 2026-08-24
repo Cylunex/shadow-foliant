@@ -54,6 +54,20 @@ export default {
           <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.score)}}</td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td><td><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'—'}}</span></td><td style="text-align:left">{{(r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
         </table></div><div v-else class="empty-state">尚无综合选股快照。</div>
       </section>
+      <section class="card">
+        <div class="section-head"><div><h2>本地策略参考</h2><p>同一 PIT 快照独立计算，仅显示共振，不改变正式排名</p></div><span class="pill">local-reference-v1</span></div>
+        <div v-if="localStrategies.length" class="dashboard-grid">
+          <article v-for="item in localStrategies" :key="item.name" class="card" style="box-shadow:none">
+            <div class="section-head"><h3>{{item.name}}</h3><span class="badge" :class="strategyStatusClass(item.status)">{{strategyStatusText(item.status)}}</span></div>
+            <div v-if="item.rows.length" style="display:flex;flex-wrap:wrap;gap:8px">
+              <button v-for="r in item.rows" :key="r.symbol" class="ghost" @click="openStock(r.symbol)">{{r.symbol}} {{r.name||''}}</button>
+            </div>
+            <div v-else class="empty-state" style="min-height:64px">{{item.reason||'当前快照无命中'}}</div>
+            <p v-if="item.reason&&item.rows.length" class="sub" style="margin:10px 0 0">{{item.reason}}</p>
+          </article>
+        </div>
+        <div v-else class="empty-state">旧快照尚无本地策略附件；下次综合选股后自动生成。</div>
+      </section>
     </div>
 
     <!-- 多因子 -->
@@ -136,6 +150,7 @@ export default {
     const latest = reactive({ status:'missing', data:null, meta:null, loading:false, err:'' })
     const latestFinal = computed(()=>latest.data?.final_rows||[])
     const latestRows = computed(()=>latest.data?.rows||[])
+    const localStrategies = computed(()=>Object.entries(latest.data?.local_strategy_reference?.strategies||{}).map(([name,value])=>({name,rows:value.rows||[],...value})))
     async function loadLatest(){
       latest.loading=true;latest.err=''
       try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{}}
@@ -143,6 +158,8 @@ export default {
     }
     const statusCn=v=>({success:'今日可用',stale:'快照已过期',missing:'尚无快照',failed:'读取失败'}[v]||v||'未知')
     const debateClass=v=>String(v||'').includes('否决')?'danger':String(v||'').includes('谨慎')?'warning':'success'
+    const strategyStatusText=v=>({ready:'完整',degraded:'降级',unavailable:'待数据',empty:'无命中'}[v]||v||'未知')
+    const strategyStatusClass=v=>v==='ready'?'success':v==='degraded'?'warning':v==='unavailable'?'danger':'info'
     const signed=v=>v==null?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`
     function openStock(code){if(code){try{sessionStorage.setItem('sf-stock-code',code)}catch(e){};location.hash='stock'}}
     const s = reactive({ index:'000300', n:15, style:'balanced', res:null, err:'', loading:false })
@@ -183,7 +200,8 @@ export default {
       catch(e){ w.err=''+e }finally{ w.loading=false }
     }
     onMounted(loadLatest)
-    return { tab, latest, latestFinal, latestRows, loadLatest, statusCn, debateClass, signed, openStock,
+    return { tab, latest, latestFinal, latestRows, localStrategies, loadLatest, statusCn, debateClass,
+             strategyStatusText, strategyStatusClass, signed, openStock,
              s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,
              idx:INDEXES, styles:STYLES, strats:STRATS, runMf, setStyle, runWc,
              rp, recipes:RECIPES, rpCount, runRecipe, rpHoldings, rpHs300,

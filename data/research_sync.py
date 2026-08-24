@@ -11,7 +11,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 from data.research_store import ResearchStore
-from data.sources import baostock, zzshare
+from data.sources import akshare, baostock, zzshare
 
 
 _CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -299,6 +299,13 @@ class ResearchSynchronizer:
 
             valuation = zzshare.get_valuation(trade_date)
             result["valuation_rows"] = self.store.upsert_valuations(valuation, as_of=trade_date)
+            # This is an optional local-reference dataset.  Failure does not poison
+            # the formal selector; the "主力资金" local strategy simply reports
+            # unavailable rather than inventing a volume/turnover proxy.
+            fund_flow = akshare.stock_fund_flow_rank(trade_date)
+            result["fund_flow_rows"] = self.store.upsert_fund_flow_daily(
+                fund_flow, trade_date=trade_date
+            )
             result["finance_rows"] = {}
             if fundamentals:
                 for table in ("indicator", "income", "balance", "cash_flow"):

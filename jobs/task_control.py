@@ -784,6 +784,9 @@ def latest_selection_artifact() -> Dict[str, Any]:
     top5 = (artifacts.get('formal_top5') or {}).get('payload') or []
     overlay = (artifacts.get('display_overlay') or {}).get('payload') or {}
     external = (artifacts.get('external_reference') or {}).get('payload') or {}
+    local_strategy_reference = (
+        (artifacts.get('local_strategy_reference') or {}).get('payload') or {}
+    )
     ai_review = (artifacts.get('ai_review') or {}).get('payload') or {}
     metadata = formal.get('metadata') or {}
 
@@ -801,6 +804,7 @@ def latest_selection_artifact() -> Dict[str, Any]:
         'final_rows': top5,
         'display_overlay': overlay,
         'external_reference': external,
+        'local_strategy_reference': local_strategy_reference,
         'ai_review': ai_review,
         'artifacts': {
             name: {

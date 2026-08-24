@@ -545,11 +545,23 @@ CREATE TABLE IF NOT EXISTS research_valuations (
     symbol TEXT NOT NULL, trade_date TEXT NOT NULL, market_cap DOUBLE PRECISION,
     circulating_market_cap DOUBLE PRECISION, turnover_ratio DOUBLE PRECISION,
     pe_ttm DOUBLE PRECISION, pe_lyr DOUBLE PRECISION, pb DOUBLE PRECISION,
-    ps DOUBLE PRECISION, pcf DOUBLE PRECISION, provider TEXT NOT NULL,
+    ps DOUBLE PRECISION, pcf DOUBLE PRECISION, dividend_yield DOUBLE PRECISION,
+    provider TEXT NOT NULL,
     origin TEXT NOT NULL, effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
     schema_version TEXT NOT NULL, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
     PRIMARY KEY(symbol, trade_date)
 );
+CREATE TABLE IF NOT EXISTS research_fund_flow_daily (
+    symbol TEXT NOT NULL, trade_date TEXT NOT NULL, name TEXT,
+    close DOUBLE PRECISION, change_pct DOUBLE PRECISION,
+    main_net_inflow DOUBLE PRECISION, main_net_inflow_ratio DOUBLE PRECISION,
+    provider TEXT NOT NULL, origin TEXT NOT NULL, effective_at TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL, schema_version TEXT NOT NULL,
+    quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY(symbol, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_research_fund_flow_date
+    ON research_fund_flow_daily(trade_date, main_net_inflow DESC);
 CREATE TABLE IF NOT EXISTS research_financial_pit (
     table_name TEXT NOT NULL, symbol TEXT NOT NULL, as_of TEXT NOT NULL,
     stat_date TEXT, pub_date TEXT, provider TEXT NOT NULL, origin TEXT NOT NULL,
@@ -701,6 +713,7 @@ ALTER TABLE research_daily_bars ADD COLUMN IF NOT EXISTS dataset_id TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS requested_as_of TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS provider_effective_as_of TEXT;
 ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS dataset_id TEXT;
+ALTER TABLE research_valuations ADD COLUMN IF NOT EXISTS dividend_yield DOUBLE PRECISION;
 ALTER TABLE research_financial_facts ADD COLUMN IF NOT EXISTS first_seen_at TEXT;
 UPDATE research_financial_facts SET first_seen_at=retrieved_at
 WHERE first_seen_at IS NULL OR first_seen_at='';

@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 
 def _json(value) -> str:
@@ -174,11 +174,21 @@ class ResearchStore:
                 symbol TEXT NOT NULL, trade_date TEXT NOT NULL,
                 market_cap REAL, circulating_market_cap REAL,
                 turnover_ratio REAL, pe_ttm REAL, pe_lyr REAL, pb REAL, ps REAL, pcf REAL,
+                dividend_yield REAL,
                 provider TEXT NOT NULL, origin TEXT NOT NULL,
                 effective_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
                 schema_version TEXT NOT NULL, quality_status TEXT NOT NULL,
                 requested_as_of TEXT, provider_effective_as_of TEXT, dataset_id TEXT,
                 payload TEXT NOT NULL,
+                PRIMARY KEY(symbol, trade_date)
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_fund_flow_daily (
+                symbol TEXT NOT NULL, trade_date TEXT NOT NULL, name TEXT,
+                close REAL, change_pct REAL, main_net_inflow REAL,
+                main_net_inflow_ratio REAL, provider TEXT NOT NULL,
+                origin TEXT NOT NULL, effective_at TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL, schema_version TEXT NOT NULL,
+                quality_status TEXT NOT NULL, payload TEXT NOT NULL,
                 PRIMARY KEY(symbol, trade_date)
             )""",
             """CREATE TABLE IF NOT EXISTS research_financial_pit (
@@ -269,6 +279,7 @@ class ResearchStore:
                 UNIQUE(run_id,artifact_type)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
+            "CREATE INDEX IF NOT EXISTS idx_research_fund_flow_date ON research_fund_flow_daily(trade_date,main_net_inflow)",
             "CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence ON research_trade_calendar_evidence(trade_date,is_open)",
             "CREATE INDEX IF NOT EXISTS idx_research_calendar_fetch ON research_calendar_fetch_runs(provider,range_end,quality_status)",
             "CREATE INDEX IF NOT EXISTS idx_research_master_published ON research_master_snapshot_runs(snapshot_date,published_at)",
@@ -314,6 +325,14 @@ class ResearchStore:
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
             self._add_column(cur, "research_financial_facts", "first_seen_at", "TEXT")
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, datetime.now().astimezone().isoformat()),
+            )
+        version = "6-local-reference-strategies"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "research_valuations", "dividend_yield", "REAL")
             cur.execute(
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
@@ -749,6 +768,9 @@ class ResearchStore:
                 _plain(record.get("pe_ratio_lyr")), _plain(record.get("pb_ratio", record.get("pb"))),
                 _plain(record.get("ps_ratio", record.get("ps"))),
                 _plain(record.get("pcf_ratio", record.get("pcf"))),
+                _plain(next((record.get(key) for key in (
+                    "dividend_yield", "dividend_yield_ratio", "dv_ratio", "dividend_ratio",
+                ) if record.get(key) is not None), None)),
                 provenance.get("provider", "unknown"), provenance.get("origin", "provider_api"),
                 provider_effective, now, provenance.get("schema_version", SCHEMA_VERSION),
                 provenance.get("quality_status", "ok"),
@@ -792,13 +814,14 @@ class ResearchStore:
             cur.executemany(
             """INSERT INTO research_valuations
                (symbol,trade_date,market_cap,circulating_market_cap,turnover_ratio,pe_ttm,pe_lyr,
-                pb,ps,pcf,provider,origin,effective_at,retrieved_at,schema_version,quality_status,
+                pb,ps,pcf,dividend_yield,provider,origin,effective_at,retrieved_at,schema_version,quality_status,
                 requested_as_of,provider_effective_as_of,dataset_id,payload)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(symbol,trade_date) DO UPDATE SET
                 market_cap=excluded.market_cap,circulating_market_cap=excluded.circulating_market_cap,
                 turnover_ratio=excluded.turnover_ratio,pe_ttm=excluded.pe_ttm,pe_lyr=excluded.pe_lyr,
-                pb=excluded.pb,ps=excluded.ps,pcf=excluded.pcf,provider=excluded.provider,
+                pb=excluded.pb,ps=excluded.ps,pcf=excluded.pcf,
+                dividend_yield=excluded.dividend_yield,provider=excluded.provider,
                 origin=excluded.origin,effective_at=excluded.effective_at,
                 retrieved_at=excluded.retrieved_at,schema_version=excluded.schema_version,
                 quality_status=excluded.quality_status,requested_as_of=excluded.requested_as_of,
@@ -853,6 +876,58 @@ class ResearchStore:
                 retrieved_at=excluded.retrieved_at,
                 quality_status=excluded.quality_status""", rows,
         )
+        return len(rows)
+
+    def upsert_fund_flow_daily(self, df: pd.DataFrame, *, trade_date: str) -> int:
+        """Persist verified whole-market main-force flow for one completed trading day."""
+        if df is None or df.empty:
+            return 0
+        effective_date = _iso_date(trade_date)
+        provenance = df.attrs.get("provenance", {})
+        now = provenance.get("retrieved_at") or datetime.now().astimezone().isoformat()
+        rows = []
+        for record in df.to_dict("records"):
+            symbol = _symbol(record.get("symbol") or record.get("code"))
+            row_date = _iso_date(record.get("trade_date") or effective_date)
+            if not symbol or row_date != effective_date:
+                continue
+            rows.append((
+                symbol, effective_date, _plain(record.get("name")),
+                _plain(record.get("close")), _plain(record.get("change_pct")),
+                _plain(record.get("main_net_inflow")),
+                _plain(record.get("main_net_inflow_ratio")),
+                provenance.get("provider", "unknown"),
+                provenance.get("origin", "provider_api"), effective_date, now,
+                provenance.get("schema_version", SCHEMA_VERSION),
+                provenance.get("quality_status", "ok"),
+                _json({key: _plain(value) for key, value in record.items()}),
+            ))
+        if not rows:
+            return 0
+        conn = self.connect()
+        try:
+            conn.cursor().executemany(
+                """INSERT INTO research_fund_flow_daily
+                   (symbol,trade_date,name,close,change_pct,main_net_inflow,
+                    main_net_inflow_ratio,provider,origin,effective_at,retrieved_at,
+                    schema_version,quality_status,payload)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(symbol,trade_date) DO UPDATE SET
+                    name=excluded.name,close=excluded.close,change_pct=excluded.change_pct,
+                    main_net_inflow=excluded.main_net_inflow,
+                    main_net_inflow_ratio=excluded.main_net_inflow_ratio,
+                    provider=excluded.provider,origin=excluded.origin,
+                    effective_at=excluded.effective_at,retrieved_at=excluded.retrieved_at,
+                    schema_version=excluded.schema_version,
+                    quality_status=excluded.quality_status,payload=excluded.payload""",
+                rows,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         return len(rows)
 
     def save_events(self, events: Iterable[dict]) -> int:
@@ -1249,10 +1324,39 @@ class ResearchStore:
                 return pd.DataFrame()
             cur.execute(
                 """SELECT symbol,trade_date,market_cap,circulating_market_cap,turnover_ratio,
-                          pe_ttm,pe_lyr,pb,ps,pcf,quality_status,requested_as_of,
+                          pe_ttm,pe_lyr,pb,ps,pcf,dividend_yield,quality_status,requested_as_of,
                           provider_effective_as_of,dataset_id
                    FROM research_valuations WHERE trade_date=?
                    AND quality_status NOT IN ('failed','unknown_unit')""", (valuation_date,),
+            )
+            return self._frame(cur)
+        finally:
+            conn.close()
+
+    def load_fund_flow_daily(self, as_of: str, *, exact: bool = False) -> pd.DataFrame:
+        """Load only a completed, locally persisted main-force flow snapshot."""
+        cutoff = _iso_date(as_of)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            if exact:
+                flow_date = cutoff
+            else:
+                cur.execute(
+                    """SELECT MAX(trade_date) FROM research_fund_flow_daily
+                       WHERE trade_date<=? AND quality_status NOT IN ('failed','unknown')""",
+                    (cutoff,),
+                )
+                row = cur.fetchone()
+                flow_date = str(row[0]) if row and row[0] else ""
+            if not flow_date:
+                return pd.DataFrame()
+            cur.execute(
+                """SELECT symbol,trade_date,name,close,change_pct,main_net_inflow,
+                          main_net_inflow_ratio,provider,quality_status,retrieved_at
+                   FROM research_fund_flow_daily WHERE trade_date=?
+                   AND quality_status NOT IN ('failed','unknown')""",
+                (flow_date,),
             )
             return self._frame(cur)
         finally:
@@ -1495,6 +1599,9 @@ class ResearchStore:
                     "pb": payload.get("pb_ratio", payload.get("pb")),
                     "ps": payload.get("ps_ratio", payload.get("ps")),
                     "pcf": payload.get("pcf_ratio", payload.get("pcf")),
+                    "dividend_yield": next((payload.get(key) for key in (
+                        "dividend_yield", "dividend_yield_ratio", "dv_ratio", "dividend_ratio",
+                    ) if payload.get(key) is not None), None),
                     "quality_status": row[3], "requested_as_of": row[2],
                     "provider_effective_as_of": row[1], "dataset_id": row[4],
                 })
