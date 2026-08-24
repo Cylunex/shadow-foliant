@@ -282,6 +282,13 @@ class ScheduledDependencyTests(unittest.TestCase):
 
 
 class FactorCollectorDateTests(unittest.TestCase):
+    def test_score_helper_resolves_to_project_scripts_package(self):
+        from scripts.daily_signal_scan import _calc_stock_scores
+
+        self.assertTrue(callable(_calc_stock_scores))
+        self.assertIn('shadow-foliant/scripts/daily_signal_scan.py',
+                      _calc_stock_scores.__code__.co_filename)
+
     def test_snapshot_date_does_not_double_apply_cst_offset(self):
         local_time = datetime(2026, 7, 29, 17, 13)
         self.assertEqual(_snapshot_date(local_time), '2026-07-29')

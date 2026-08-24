@@ -3661,17 +3661,21 @@ def task_research_data_sync():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    stage = 'initialization'
     try:
         from data.research_sync import ResearchSynchronizer
         syncer = ResearchSynchronizer()
+        stage = 'security_master'
         master = syncer.sync_master()
+        stage = 'daily_market'
         result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
         status = 'success' if result.get('quality_status') == 'ok' else 'error'
         detail = (
             f"market={result.get('providers', {}).get('zzshare', 0)} "
             f"coverage={float(result.get('coverage') or 0):.1%} "
             f"master={master.get('rows', 0)} "
-            f"fund_flow={result.get('fund_flow_rows', 0)}"
+            f"fund_flow={result.get('fund_flow_rows', 0)} "
+            f"calendar={result.get('calendar_quality_status') or 'unknown'}"
         )
         if status == 'success':
             try:
@@ -3684,7 +3688,7 @@ def task_research_data_sync():
         _log_run(job, status, error=None if status == 'success' else detail,
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
-        _log_run(job, 'error', error=f'{type(e).__name__}: research sync failed',
+        _log_run(job, 'error', error=f'{type(e).__name__}: {stage} failed',
                  started_at=started, finished_at=datetime.now().isoformat())
 
 

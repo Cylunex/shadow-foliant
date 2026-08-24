@@ -51,6 +51,33 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(failures['zzshare'], 'source_timeout')
         self.assertEqual(evidence['baostock'], [('2026-08-21', True)])
 
+    def test_daily_sync_uses_complete_same_day_calendar_cache_on_transient_failure(self):
+        class Store:
+            def calendar_consensus(self, cutoff, *, inclusive=False):
+                self.called = (cutoff, inclusive)
+                return {
+                    'ready': True, 'coverage_through_date': '2026-08-24',
+                    'latest_confirmed_open_date': '2026-08-24',
+                }
+
+        store = Store()
+        syncer = ResearchSynchronizer(store=store)
+        with patch.object(syncer, 'sync_calendar', side_effect=RuntimeError('transient')):
+            result = syncer.refresh_calendar_for_day('2026-08-24')
+        self.assertEqual(result['quality_status'], 'cached')
+        self.assertEqual(result['refresh_error_type'], 'RuntimeError')
+        self.assertEqual(store.called, ('2026-08-24', True))
+
+    def test_daily_sync_rejects_stale_calendar_cache(self):
+        class Store:
+            def calendar_consensus(self, *_args, **_kwargs):
+                return {'ready': True, 'coverage_through_date': '2026-08-21'}
+
+        syncer = ResearchSynchronizer(store=Store())
+        with patch.object(syncer, 'sync_calendar', side_effect=RuntimeError('transient')):
+            with self.assertRaisesRegex(RuntimeError, 'same-day consensus cache'):
+                syncer.refresh_calendar_for_day('2026-08-24')
+
     def test_published_and_operational_limits_are_explicit(self):
         matrix = contracts()
         self.assertEqual(matrix["zzshare"]["daily_symbol"]["hard_max_rows"], 1000)

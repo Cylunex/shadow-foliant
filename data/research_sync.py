@@ -256,16 +256,36 @@ class ResearchSynchronizer:
             )
             raise
 
+    def refresh_calendar_for_day(self, trade_date: str) -> dict:
+        """Refresh calendar evidence, falling back only to complete same-day cache."""
+        day = pd.Timestamp(trade_date).date()
+        try:
+            return self.sync_calendar(
+                (day - timedelta(days=14)).isoformat(), day.isoformat()
+            )
+        except Exception as exc:
+            cached = self.store.calendar_consensus(day.isoformat(), inclusive=True)
+            if (cached.get("ready")
+                    and str(cached.get("coverage_through_date") or "") >= day.isoformat()):
+                return {
+                    **cached, "quality_status": "cached",
+                    "refresh_error_type": type(exc).__name__,
+                }
+            raise RuntimeError(
+                "trade calendar refresh failed and same-day consensus cache is unavailable"
+            ) from exc
+
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
                  fallback: bool = True, refresh_calendar: bool = True) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()
+        calendar_result = {}
         if refresh_calendar:
-            day = pd.Timestamp(trade_date).date()
-            self.sync_calendar(
-                (day - timedelta(days=14)).isoformat(), (day + timedelta(days=1)).isoformat()
-            )
+            calendar_result = self.refresh_calendar_for_day(trade_date)
         run_id = self.store.start_sync("zzshare", "daily_market", trade_date)
-        result: Dict[str, object] = {"trade_date": trade_date, "providers": {}}
+        result: Dict[str, object] = {
+            "trade_date": trade_date, "providers": {},
+            "calendar_quality_status": calendar_result.get("quality_status"),
+        }
         try:
             frame = _normalize_market_bars(zzshare.get_market_daily(trade_date), trade_date)
             self.store.upsert_daily_bars(frame, adjustment="qfq")
