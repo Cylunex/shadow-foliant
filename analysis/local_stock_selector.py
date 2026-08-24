@@ -773,8 +773,9 @@ class LocalStockSelector:
         profit = values(("income_np_parent_company_owners", "income_net_profit"))
         cash_quality = ocf / profit.abs().replace(0, np.nan)
         mismatch = out.get(
-            "statement_period_mismatch", pd.Series(True, index=out.index)
-        ).fillna(True).astype(bool)
+            "statement_period_mismatch",
+            pd.Series(True, index=out.index, dtype="boolean"),
+        ).astype("boolean").fillna(True).astype(bool)
         cash_quality = cash_quality.where(~mismatch)
         pe = pd.to_numeric(out["pe_ttm"], errors="coerce") if "pe_ttm" in out else pd.Series(np.nan, index=out.index)
         pb = pd.to_numeric(out["pb"], errors="coerce") if "pb" in out else pd.Series(np.nan, index=out.index)
