@@ -785,10 +785,46 @@ def latest_selection_artifact() -> Dict[str, Any]:
     overlay = (artifacts.get('display_overlay') or {}).get('payload') or {}
     external = (artifacts.get('external_reference') or {}).get('payload') or {}
     local_strategy_reference = (
-        (artifacts.get('local_strategy_reference') or {}).get('payload') or {}
+        (artifacts.get('local_strategy_nominations') or {}).get('payload')
+        or (artifacts.get('local_strategy_reference') or {}).get('payload') or {}
+    )
+    genome_nominations = (
+        (artifacts.get('genome_nominations') or {}).get('payload') or {}
+    )
+    fusion_policy = (artifacts.get('fusion_policy') or {}).get('payload') or {}
+    wencai_strategy_runs = (
+        (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
+    )
+    miaoxiang_review = (
+        (artifacts.get('miaoxiang_review') or {}).get('payload') or {}
     )
     ai_review = (artifacts.get('ai_review') or {}).get('payload') or {}
     metadata = formal.get('metadata') or {}
+    overlay_rows = overlay if isinstance(overlay, list) else []
+    review_rows = ai_review if isinstance(ai_review, list) else []
+    overlay_by_code = {
+        str(row.get('code') or row.get('symbol') or ''): row
+        for row in overlay_rows if isinstance(row, dict)
+    }
+    review_by_code = {
+        str(row.get('code') or row.get('symbol') or ''): row
+        for row in review_rows if isinstance(row, dict)
+    }
+
+    def decorate(rows):
+        decorated = []
+        for formal_row in rows:
+            code = str(formal_row.get('code') or formal_row.get('symbol') or '')
+            # Formal membership/rank fields win over optional display attachments.
+            decorated.append({
+                **overlay_by_code.get(code, {}),
+                **review_by_code.get(code, {}),
+                **formal_row,
+            })
+        return decorated
+
+    top15_display = decorate(top15)
+    top5_display = decorate(top5)
 
     data = {
         'run_id': formal.get('run_id'),
@@ -799,12 +835,18 @@ def latest_selection_artifact() -> Dict[str, Any]:
         'selection_date': formal.get('selection_date'),
         'market_as_of': metadata.get('market_as_of'),
         'picks': [str(row.get('symbol')) for row in top15 if row.get('symbol')],
-        'rows': top15,
+        'rows': top15_display,
         'final_picks': [str(row.get('symbol')) for row in top5 if row.get('symbol')],
-        'final_rows': top5,
+        'final_rows': top5_display,
         'display_overlay': overlay,
         'external_reference': external,
         'local_strategy_reference': local_strategy_reference,
+        'local_strategy_nominations': local_strategy_reference,
+        'genome_nominations': genome_nominations,
+        'fusion_policy': fusion_policy,
+        'lane_counts': metadata.get('lane_counts') or {},
+        'wencai_strategy_runs': wencai_strategy_runs,
+        'miaoxiang_review': miaoxiang_review,
         'ai_review': ai_review,
         'artifacts': {
             name: {

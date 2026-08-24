@@ -724,15 +724,55 @@ CREATE TABLE IF NOT EXISTS selection_input_manifests (
     financial_revision_set_id TEXT NOT NULL, event_dataset_id TEXT NOT NULL,
     policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
     policy_payload TEXT NOT NULL, code_revision TEXT NOT NULL,
-    dependency_lock_hash TEXT, schema_version TEXT NOT NULL, created_at TEXT NOT NULL
+    dependency_lock_hash TEXT, strategy_snapshot TEXT,
+    schema_version TEXT NOT NULL, created_at TEXT NOT NULL
 );
 ALTER TABLE selection_input_manifests
     ADD COLUMN IF NOT EXISTS dependency_lock_hash TEXT;
+ALTER TABLE selection_input_manifests
+    ADD COLUMN IF NOT EXISTS strategy_snapshot TEXT;
 CREATE TABLE IF NOT EXISTS selection_artifacts (
     artifact_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, artifact_type TEXT NOT NULL,
     parent_snapshot_id TEXT, rule_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
     payload_hash TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL,
     UNIQUE(run_id, artifact_type)
+);
+CREATE TABLE IF NOT EXISTS selection_strategy_runs (
+    strategy_run_id TEXT PRIMARY KEY, selection_run_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+    lane TEXT NOT NULL, status TEXT NOT NULL, data_as_of TEXT,
+    input_snapshot_id TEXT, policy_version TEXT NOT NULL,
+    metadata TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(selection_run_id,strategy_id,strategy_version)
+);
+CREATE TABLE IF NOT EXISTS selection_candidate_nominations (
+    nomination_id TEXT PRIMARY KEY, selection_run_id TEXT NOT NULL,
+    strategy_run_id TEXT NOT NULL, symbol TEXT NOT NULL, lane TEXT NOT NULL,
+    strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+    lane_rank INTEGER NOT NULL, lane_score_raw DOUBLE PRECISION,
+    priority_weight DOUBLE PRECISION NOT NULL, eligibility TEXT NOT NULL,
+    evidence TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(selection_run_id,strategy_id,strategy_version,symbol)
+);
+CREATE TABLE IF NOT EXISTS selection_candidate_outcomes (
+    nomination_id TEXT NOT NULL, horizon_days INTEGER NOT NULL,
+    entry_date TEXT, entry_price DOUBLE PRECISION, exit_date TEXT,
+    exit_price DOUBLE PRECISION, return_pct DOUBLE PRECISION,
+    benchmark_return_pct DOUBLE PRECISION, max_drawdown_pct DOUBLE PRECISION,
+    outcome_status TEXT NOT NULL, evaluated_at TEXT NOT NULL,
+    PRIMARY KEY(nomination_id,horizon_days)
+);
+CREATE TABLE IF NOT EXISTS strategy_policy_versions (
+    policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
+    state TEXT NOT NULL, effective_from TEXT NOT NULL,
+    payload TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY(policy_version,policy_hash)
+);
+CREATE TABLE IF NOT EXISTS strategy_adjustment_proposals (
+    proposal_id TEXT PRIMARY KEY, base_policy_hash TEXT NOT NULL,
+    evidence_snapshot_id TEXT NOT NULL, proposal TEXT NOT NULL,
+    validation_status TEXT NOT NULL, validation_reason TEXT,
+    applied_policy_hash TEXT, created_at TEXT NOT NULL, applied_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence
     ON research_trade_calendar_evidence(trade_date, is_open);
@@ -742,6 +782,10 @@ CREATE INDEX IF NOT EXISTS idx_research_master_published
     ON research_master_snapshot_runs(snapshot_date, published_at);
 CREATE INDEX IF NOT EXISTS idx_research_financial_visible
     ON research_financial_facts(table_name, first_seen_as_of, pub_date, symbol);
+CREATE INDEX IF NOT EXISTS idx_selection_nominations_symbol
+    ON selection_candidate_nominations(symbol,created_at);
+CREATE INDEX IF NOT EXISTS idx_selection_strategy_runs
+    ON selection_strategy_runs(strategy_id,created_at);
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('4-reproducible-inputs', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
@@ -760,6 +804,9 @@ WHERE status='success' AND publication_status='unpublished'
               WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top5');
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('5-event-revisions-and-publication', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('7-local-fusion', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

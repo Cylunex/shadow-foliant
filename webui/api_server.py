@@ -2895,7 +2895,7 @@ def agent_cockpit_view(recent_limit: int = 12, compact: bool = False):
 
 @app.get("/api/screen/latest")
 def latest_unified_selection():
-    """最近一次本地主链 TOP15、最终 TOP5 与问财参考对照；不触发外部请求。"""
+    """最近一次本地融合 TOP15、最终 TOP5 与外部参考；不触发外部请求。"""
     try:
         from jobs.task_control import latest_selection_artifact
         return _ok(latest_selection_artifact() or {})

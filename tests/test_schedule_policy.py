@@ -17,7 +17,11 @@ from jobs.schedule_policy import (
 
 class SchedulePolicyTests(unittest.TestCase):
     def test_weekend_llm_jobs_do_not_overlap_blackout_windows(self):
-        durations = {'mx_weekend_outlook': 10, 'weekend_portfolio': 90}
+        durations = {
+            'mx_weekend_outlook': 10,
+            'weekend_portfolio': 90,
+            'strategy_policy_weekly': 10,
+        }
         for name in WEEKEND_LLM_JOBS:
             start = minute_of_day(WEEKEND_TIMES[name][1])
             for blocked_start, blocked_end in WEEKEND_LLM_BLACKOUTS:

@@ -55,7 +55,7 @@ STRATEGIES: Dict[str, Dict[str, Any]] = {
 
 _COLUMN_MAP = {
     'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
-    'Date': 'date',
+    'Date': 'date', 'trade_date': 'date',
     '日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low',
     '成交量': 'volume', '涨跌幅': 'p_change',
 }
@@ -114,7 +114,8 @@ def _live_genome_set() -> Dict[str, Any]:
 def run_one(symbol: str, df: pd.DataFrame, name: str = '',
             date: Optional[datetime] = None,
             strategies: Optional[List[str]] = None,
-            evolved: bool = False) -> Dict[str, Any]:
+            evolved: bool = False,
+            live_set: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """对单只股票跑全部 13 套（或指定子集）策略
 
     Args:
@@ -125,6 +126,7 @@ def run_one(symbol: str, df: pd.DataFrame, name: str = '',
         strategies: 指定策略 id 子集，None=全部 13 套
         evolved: True 时用策略基因组进化出的最优参数跑 13 套,并附加达标的组合新策略
                  (基因组不可用时自动回退默认参数,行为不变)
+        live_set: 可选的不可变部署快照；正式选股回放时用它锁定变体版本。
 
     Returns:
         {symbol, name, total_strategies, matched: [{id, cn, category}], errors}
@@ -138,7 +140,9 @@ def run_one(symbol: str, df: pd.DataFrame, name: str = '',
 
     code_name = (norm['date'].iloc[-1] if 'date' in norm.columns else None, name)
 
-    live = _live_genome_set() if evolved else {'base': {}, 'composed': []}
+    live = ((live_set or {'base': {}, 'base_meta': {}, 'composed': []})
+            if evolved and live_set is not None
+            else (_live_genome_set() if evolved else {'base': {}, 'composed': []}))
 
     target = list(strategies) if strategies else list(STRATEGIES.keys())
     matched: List[Dict[str, str]] = []

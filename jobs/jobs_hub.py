@@ -1115,6 +1115,43 @@ def task_ai_eval_weekly():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def task_strategy_policy_weekly():
+    """周日 21:00：一次 LLM 提案 + 确定性控制器，调整本地多赛道使用政策。"""
+    job = 'strategy_policy_weekly'
+    started = datetime.now().isoformat()
+    try:
+        from automation_config import is_enabled
+        if not is_enabled(job):
+            _log_run(job, 'skipped', error='disabled', started_at=started,
+                     finished_at=datetime.now().isoformat())
+            return
+        from schedule_policy import weekend_llm_allowed
+        if not weekend_llm_allowed(estimated_minutes=10):
+            _log_run(job, 'skipped', error='weekend LLM blackout', started_at=started,
+                     finished_at=datetime.now().isoformat())
+            return
+    except Exception:
+        pass
+    try:
+        from strategy_policy_controller import run_weekly_committee
+        result = run_weekly_committee()
+        status = str(result.get('status') or 'unknown')
+        reason = str(result.get('reason') or '')
+        if status in {'applied', 'rejected'}:
+            try:
+                from notification_router import send
+                title = '本地选股策略政策已更新' if status == 'applied' else '本地选股策略提案被拒绝'
+                send('archive', title, f'状态:{status}\n{reason or "详见策略政策记录"}')
+            except Exception:
+                pass
+        _log_run(job, 'success' if status not in {'llm_unavailable', 'invalid_llm_json'} else 'error',
+                 error=f'status={status} {reason}'[:500], started_at=started,
+                 finished_at=datetime.now().isoformat(), notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=str(exc), started_at=started,
+                 finished_at=datetime.now().isoformat(), notify=False)
+
+
 def task_eod_outcomes():
     """🎯 盘后后验合并(16:55)—— 合 ai_rec_check + decision_signal_outcomes 为一个任务:
     收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
@@ -1154,10 +1191,18 @@ def task_eod_outcomes():
     except Exception as e:
         fails += 1
         parts.append(f"signal_err={type(e).__name__}:{str(e)[:50]}")
-    # 两段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
+    # ③ 本地多赛道候选后验：按次日开盘入场，更新1/3/5/10/20交易日结果。
+    try:
+        from research_store import ResearchStore
+        r = ResearchStore().update_selection_candidate_outcomes()
+        parts.append(f"selection: updated={r.get('updated')} pending={r.get('pending')}")
+    except Exception as e:
+        fails += 1
+        parts.append(f"selection_err={type(e).__name__}:{str(e)[:50]}")
+    # 三段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
     # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
     # 单段失败仍记 success(两段隔离是有意设计,另一段照常工作)。
-    _log_run(job, 'error' if fails >= 2 else 'success', error=' | '.join(parts),
+    _log_run(job, 'error' if fails >= 3 else 'success', error=' | '.join(parts),
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
@@ -1661,6 +1706,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     # 慢任务的专属超时(秒)
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
+    'strategy_policy_weekly':     600,   # 一次有界 LLM + 策略政策校验
     'factor_collection':         1200,
     'kline_prefetch':            2700,   # 焐 raw+qfq 两套 K线 + 因子/海选;源况差实测 K线段 33min(7-2),
                                          # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
@@ -4242,7 +4288,7 @@ def task_strategy_prefetch_retry():
 
 
 def task_unified_selection():
-    """本地 PIT 主链产出 TOP15；问财只保存为独立参考，不参与评分。"""
+    """本地 PIT/五策略/技术基因组产出 TOP15；外部源只作参考。"""
     job = 'unified_selection'
     if _skip_if_not_trading(job):
         return
@@ -4265,14 +4311,6 @@ def task_unified_selection():
             reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
             raise RuntimeError(f'本地选股未产出: {reason}')
         local_strategy_reference = local_result.get('local_strategy_reference') or {}
-        local_strategy_hits = {}
-        for strategy_name, strategy_result in (
-            local_strategy_reference.get('strategies') or {}
-        ).items():
-            for row in strategy_result.get('rows') or []:
-                code = str(row.get('symbol') or '')
-                if code:
-                    local_strategy_hits.setdefault(code, []).append(f'本地·{strategy_name}')
 
         # 2. 问财继续保留一段时间，仅作外部发现/对照。独立短截止时间结束后，
         #    参考结果附着到已存在的本地 run，不重新计算正式分数。
@@ -4285,15 +4323,29 @@ def task_unified_selection():
                   f'{type(_wre).__name__}')
             strategy_scan = {'results': {}}
         wencai_reference = []
+        wencai_strategy_runs = {
+            'version': 'wencai-reference-v2',
+            'executed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'strategies': {},
+            'reference_affects_membership': False,
+        }
         for sname, (ok, df, msg) in strategy_scan.get('results', {}).items():
+            strategy_picks = []
             if ok and df is not None:
                 for _, row in df.iterrows():
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
-                        wencai_reference.append({
+                        pick = {
                             'symbol': code,
                             'source_labels': [_WENCAI_SOURCE_LABELS.get(sname, sname)],
-                        })
+                        }
+                        wencai_reference.append(pick)
+                        strategy_picks.append(pick)
+            wencai_strategy_runs['strategies'][sname] = {
+                'status': 'ready' if ok else 'failed',
+                'message': str(msg or '')[:300],
+                'picks': _normalize_reference(strategy_picks),
+            }
         wencai_reference = _normalize_reference(wencai_reference)
         comparison = selector._comparison(local_candidates, wencai_reference)
         local_result['wencai_reference'] = wencai_reference
@@ -4301,6 +4353,9 @@ def task_unified_selection():
         try:
             selector.store.attach_selection_reference(
                 local_result.get('run_id'), wencai_reference, comparison
+            )
+            selector.store.save_selection_artifact(
+                local_result.get('run_id'), 'wencai_strategy_runs', wencai_strategy_runs
             )
         except Exception as _are:
             print(f'[unified_selection] 问财参考保存失败(不影响本地主链): '
@@ -4314,11 +4369,15 @@ def task_unified_selection():
             top_list.append(code)
             candidates[code] = {
                 'score': float(item.get('total_score') or 0),
-                'src': list(item.get('source_labels') or ['本地PIT数据仓'])
-                       + local_strategy_hits.get(code, []),
+                'src': list(item.get('source_labels') or ['本地PIT']),
                 'industry': item.get('industry'),
                 'state': item.get('state'),
                 'data_coverage': item.get('data_coverage'),
+                'assigned_lane': item.get('assigned_lane'),
+                'primary_strategy': item.get('primary_strategy'),
+                'primary_strategy_name': item.get('primary_strategy_name'),
+                'lane_rank': item.get('lane_rank'),
+                'supporting_nominations': item.get('supporting_nominations') or [],
                 'score_components': {
                     key: item.get(key) for key in (
                         'fundamental_score', 'technical_60_score', 'industry_score',
@@ -4326,10 +4385,9 @@ def task_unified_selection():
                     )
                 },
             }
-        strategy_weights = {}  # 旧基因组摘要不再参与本地主链评分。
-        source_count = {'本地PIT数据仓': len(top_list)}
+        source_count = dict(local_result.get('metadata', {}).get('lane_counts') or {})
         print(
-            f'[unified_selection] 本地主链 {len(top_list)} 只；问财参考 '
+            f'[unified_selection] 本地融合 {len(top_list)} 只{source_count}；问财参考 '
             f'{len(local_result.get("wencai_reference", []))} 只；重合 '
             f'{len(local_result.get("comparison", {}).get("overlap", []))} 只',
             flush=True,
@@ -4379,7 +4437,7 @@ def task_unified_selection():
             _nr = sum(1 for v in debate_map.values() if v.get('verdict') == '否决')
             body += f'结论:红蓝复核 🔴可买{_nb}只 · 🟡观望{_nw}只 · 🟢避开{_nr}只(详见表格与文末)\n'
         body += '\n'
-        body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 分 | 红蓝 | 来源 |\n'
+        body += '| # | 代码 名称 | 价格 | 涨跌 | PE | 赛道分 | 红蓝 | 本地提名 |\n'
         body += '|:-:|:---------|:---:|:---:|:---:|:-:|:--:|:----|\n'
         _debate_tag = {'买入': '🔴可买', '谨慎': '🟡观望', '否决': '🟢避开'}
         for i, code in enumerate(top_list, 1):
@@ -4422,7 +4480,7 @@ def task_unified_selection():
             elif strategy_result.get('status') == 'unavailable':
                 local_lines.append(f'{strategy_name}:数据暂缺')
         if local_lines:
-            body += '\n\n🧭 本地策略参考（不改正式排名）\n' + '\n'.join(local_lines)
+            body += '\n\n🧭 本地策略提名（参与正式候选，受赛道配额约束）\n' + '\n'.join(local_lines)
 
         # 红蓝对抗速览(结论先行):被否决的直接点名"避开"
         if debate_map:
@@ -4435,12 +4493,6 @@ def task_unified_selection():
 
         # 红蓝对抗是独立 AI review，不得修改本地正式候选或后验样本。
         _vetoed = []
-
-        # 附：策略基因组热度摘要
-        if strategy_weights:
-            ranked_weights = sorted(strategy_weights.items(), key=lambda x: -x[1])[:5]
-            w_lines = ' · '.join(f'{k} x{w:.2f}' for k, w in ranked_weights)
-            body += f'\n\n📊 策略评分加权（高分命中权重高）：\n{w_lines}'
 
         # 正式产物与显示 overlay 分离。权威 TOP15/TOP5 只从追加式 artifact 读取；
         # 当日 indicator snapshot 仅保存展示兼容字段和 artifact 引用。
@@ -4473,6 +4525,11 @@ def task_unified_selection():
                     'rule_version': local_result.get('metadata', {}).get('rule_version'),
                     'policy_hash': local_result.get('metadata', {}).get('policy_hash'),
                     'manifest_id': local_result.get('metadata', {}).get('manifest_id'),
+                    'assigned_lane': cinfo.get('assigned_lane'),
+                    'primary_strategy': cinfo.get('primary_strategy'),
+                    'primary_strategy_name': cinfo.get('primary_strategy_name'),
+                    'lane_rank': cinfo.get('lane_rank'),
+                    'supporting_nominations': cinfo.get('supporting_nominations') or [],
                 })
                 artifact_rows.append({
                     'rank': rank,
@@ -4480,6 +4537,11 @@ def task_unified_selection():
                     'name': q.get('name') or name_map.get(code) or code,
                     'score': round(float(cinfo.get('score') or 0), 2),
                     'sources': cinfo.get('src') or [],
+                    'assigned_lane': cinfo.get('assigned_lane'),
+                    'primary_strategy': cinfo.get('primary_strategy'),
+                    'primary_strategy_name': cinfo.get('primary_strategy_name'),
+                    'lane_rank': cinfo.get('lane_rank'),
+                    'supporting_nominations': cinfo.get('supporting_nominations') or [],
                     'held': code in held_codes,
                     'price': _safe_float(q.get('price')),
                     'change_pct': _safe_float(q.get('change_pct')),
@@ -5211,7 +5273,7 @@ def task_mx_selection_review():
         except Exception:
             name_map = {}
 
-        agree, watch, avoid, detail = [], [], [], []
+        agree, watch, avoid, detail, review_rows = [], [], [], [], []
         for code in top_list[:10]:
             nm = name_map.get(code) or code
             try:
@@ -5225,8 +5287,31 @@ def task_mx_selection_review():
                     verdict, bucket = '⚠️ 观望', watch
                 bucket.append(f'{nm} {code}')
                 detail.append(f'{nm} {code}: {verdict}')
+                review_rows.append({
+                    'symbol': code, 'name': nm, 'verdict': verdict,
+                    'summary': str(result)[:500], 'reference_affects_membership': False,
+                })
             except Exception:
                 detail.append(f'{nm} {code}: ⚠️ 诊断失败')
+                review_rows.append({
+                    'symbol': code, 'name': nm, 'verdict': '诊断失败',
+                    'reference_affects_membership': False,
+                })
+
+        try:
+            from research_store import ResearchStore
+            formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+            if formal.get('run_id'):
+                ResearchStore(ensure_schema=False).save_selection_artifact(
+                    formal['run_id'], 'miaoxiang_review', {
+                        'version': 'miaoxiang-reference-v1',
+                        'executed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                        'rows': review_rows,
+                        'reference_affects_membership': False,
+                    }
+                )
+        except Exception as artifact_error:
+            print(f'[mx_selection_review] 妙想参考附件保存跳过: {type(artifact_error).__name__}')
 
         # D: 只在"妙想与综合选股分歧"时才推 —— 妙想对 unified 选中的票判❌规避才算实质分歧;
         # 全是买入/观望则不打扰(意见仍记 job_runs 可查)。env MX_REVIEW_ALWAYS_PUSH=true 恢复每日推。
@@ -5755,6 +5840,17 @@ def register_default_jobs():
         })
     except Exception as e:
         print(f'[jobs_hub] ai_eval_weekly 注册失败: {e}')
+
+    try:
+        wrapped = hub._wrap('strategy_policy_weekly', task_strategy_policy_weekly)
+        job = schedule.every().sunday.at(
+            WEEKEND_TIMES['strategy_policy_weekly'][1]
+        ).do(wrapped)
+        hub._registered.append({
+            'name': 'strategy_policy_weekly', 'when': 'sun 21:00 CST', 'job': job,
+        })
+    except Exception as e:
+        print(f'[jobs_hub] strategy_policy_weekly 注册失败: {e}')
 
 
 def serve_forever():

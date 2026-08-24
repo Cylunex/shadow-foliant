@@ -426,10 +426,15 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertFalse(result["comparison"]["reference_affects_score"])
         self.assertIn("000001", result["comparison"]["reference_only"])
         for candidate in result["candidates"]:
-            self.assertEqual(candidate["source_labels"], ["本地PIT数据仓"])
+            self.assertTrue(candidate["source_labels"])
+            self.assertTrue(all("问财" not in label for label in candidate["source_labels"]))
+            self.assertIn(candidate["assigned_lane"], {"core", "satellite", "timing"})
             self.assertGreaterEqual(candidate["data_coverage"], 0.8)
         latest = self.store.latest_selection()
-        self.assertEqual(latest["metadata"]["primary_pipeline"], "local_pit")
+        self.assertEqual(latest["metadata"]["primary_pipeline"], "local_fusion")
+        self.assertEqual(sum(latest["metadata"]["lane_counts"].values()), 6)
+        self.assertLessEqual(latest["metadata"]["lane_counts"]["satellite"], 5)
+        self.assertLessEqual(latest["metadata"]["lane_counts"]["timing"], 2)
         self.assertEqual(
             self.store.latest_formal_selection()["run_id"], latest["run_id"]
         )

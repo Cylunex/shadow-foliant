@@ -1,7 +1,8 @@
-"""Deterministic local equivalents of the five legacy Wencai reference screens.
+"""Five deterministic local PIT candidate producers.
 
-These screens are attachments only.  They may explain resonance around a formal
-candidate, but must never alter the local-pit formal score or rank.
+Each strategy runs on the same eligible-universe snapshot as the core PIT model.
+Scores are comparable only inside one strategy.  The fusion finalizer consumes
+their nominations through bounded lane quotas; it never adds the scores together.
 """
 
 from __future__ import annotations
@@ -14,7 +15,20 @@ import pandas as pd
 from data.research_store import ResearchStore
 
 
-STRATEGY_RULE_VERSION = "local-reference-v1"
+STRATEGY_RULE_VERSION = "local-satellite-v2"
+
+STRATEGY_CONFIG = {
+    "主力资金": {"strategy_id": "local_main_force_v2", "priority_weight": 1.0,
+                 "family": "capital_flow"},
+    "低价擒牛": {"strategy_id": "local_low_price_bull_v2", "priority_weight": 1.0,
+                 "family": "growth_smallcap"},
+    "低估值": {"strategy_id": "local_value_v2", "priority_weight": 1.0,
+                "family": "valuation"},
+    "小市值": {"strategy_id": "local_small_cap_v2", "priority_weight": 0.70,
+                "family": "growth_smallcap"},
+    "净利增长": {"strategy_id": "local_profit_growth_v2", "priority_weight": 0.50,
+                 "family": "growth_smallcap"},
+}
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -39,6 +53,24 @@ def _market_cap_yi(values: pd.Series) -> pd.Series:
 def _eligible_board(symbols: pd.Series) -> pd.Series:
     codes = symbols.fillna("").astype(str)
     return ~codes.str.startswith(("300", "301", "688", "689"))
+
+
+def _rank(values: pd.Series, *, higher_is_better: bool = True) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    valid = numeric.notna()
+    out = pd.Series(0.0, index=values.index, dtype=float)
+    if valid.any():
+        ranked = numeric[valid].rank(method="average", pct=True)
+        out.loc[valid] = ranked if higher_is_better else 1.0 - ranked + 1.0 / valid.sum()
+    return out.clip(0.0, 1.0)
+
+
+def _balanced_liquidity(values: pd.Series) -> pd.Series:
+    """Prefer liquid names without rewarding the very largest turnover tails."""
+    numeric = pd.to_numeric(values, errors="coerce").where(lambda value: value > 0)
+    logged = np.log10(numeric)
+    centre = logged.median()
+    return _rank((logged - centre).abs(), higher_is_better=False)
 
 
 def _records(frame: pd.DataFrame, metrics: Iterable[str], top_n: int) -> list[dict]:
@@ -73,7 +105,7 @@ def _result(rows: list[dict], rules: list[str], *, status: Optional[str] = None,
 
 
 class LocalReferenceStrategyEngine:
-    """Build independent, fail-closed local reference screens from one PIT frame."""
+    """Build independent, fail-closed local nominations from one PIT frame."""
 
     def __init__(self, store: ResearchStore, *, top_n: int = 5):
         self.store = store
@@ -92,23 +124,54 @@ class LocalReferenceStrategyEngine:
         base["pb"] = _numeric(base, "pb")
         base["dividend_yield"] = _numeric(base, "dividend_yield")
         base["average_amount_20"] = _numeric(base, "average_amount_20")
+        base["fundamental_score"] = _numeric(base, "fundamental_score")
+        base["technical_60_score"] = _numeric(base, "technical_60_score")
+        base["max_drawdown_60"] = _numeric(base, "max_drawdown_60")
         board_ok = _eligible_board(base["symbol"])
 
         low_price = base[
             board_ok & (_numeric(base, "close") < 10)
             & (base["net_profit_growth_pct"] >= 100)
-        ].sort_values(["average_amount_20", "symbol"], ascending=[True, True])
+        ].copy()
+        low_price["lane_score"] = 100 * (
+            _rank(low_price["net_profit_growth_pct"]) * 0.30
+            + _rank(low_price["revenue_growth_pct"]) * 0.15
+            + _rank(low_price["pe_ttm"], higher_is_better=False) * 0.15
+            + _rank(low_price["technical_60_score"]) * 0.20
+            + _balanced_liquidity(low_price["average_amount_20"]) * 0.10
+            + _rank(low_price["max_drawdown_60"]) * 0.10
+        )
+        low_price = low_price.sort_values(["lane_score", "symbol"], ascending=[False, True])
 
         small_cap = base[
             board_ok & (base["market_cap_yi"] > 0) & (base["market_cap_yi"] <= 50)
             & (base["revenue_growth_pct"] >= 10)
             & (base["net_profit_growth_pct"] >= 100)
-        ].sort_values(["market_cap_yi", "symbol"], ascending=[True, True])
+        ].copy()
+        small_cap["lane_score"] = 100 * (
+            _rank(small_cap["market_cap_yi"], higher_is_better=False) * 0.30
+            + _rank(small_cap["net_profit_growth_pct"]) * 0.20
+            + _rank(small_cap["revenue_growth_pct"]) * 0.15
+            + _rank(small_cap["fundamental_score"]) * 0.15
+            + _rank(small_cap["technical_60_score"]) * 0.10
+            + _balanced_liquidity(small_cap["average_amount_20"]) * 0.10
+        )
+        small_cap = small_cap.sort_values(["lane_score", "symbol"], ascending=[False, True])
 
         profit_growth = base[
             board_ok & base["symbol"].astype(str).str.startswith(("000", "001", "002", "003"))
             & (base["net_profit_growth_pct"] >= 10)
-        ].sort_values(["average_amount_20", "symbol"], ascending=[True, True])
+        ].copy()
+        profit_growth["lane_score"] = 100 * (
+            _rank(profit_growth["net_profit_growth_pct"]) * 0.35
+            + _rank(profit_growth["revenue_growth_pct"]) * 0.20
+            + _rank(profit_growth["fundamental_score"]) * 0.25
+            + _rank(profit_growth["technical_60_score"]) * 0.10
+            + _balanced_liquidity(profit_growth["average_amount_20"]) * 0.10
+        )
+        profit_growth = profit_growth.sort_values(
+            ["lane_score", "symbol"], ascending=[False, True]
+        )
 
         dividend_available = base["dividend_yield"].notna().mean() >= 0.50
         value_mask = (
@@ -118,32 +181,47 @@ class LocalReferenceStrategyEngine:
         )
         if dividend_available:
             value_mask &= base["dividend_yield"].ge(1)
-        value = base[value_mask].sort_values(
-            ["circulating_market_cap_yi", "market_cap_yi", "symbol"],
-            ascending=[True, True, True], na_position="last",
+        value = base[value_mask].copy()
+        value["lane_score"] = 100 * (
+            _rank(value["pe_ttm"], higher_is_better=False) * 0.25
+            + _rank(value["pb"], higher_is_better=False) * 0.20
+            + _rank(value["debt_ratio"], higher_is_better=False) * 0.15
+            + _rank(value["fundamental_score"]) * 0.20
+            + _rank(value["technical_60_score"]) * 0.10
+            + (_rank(value["dividend_yield"]) * 0.10 if dividend_available
+               else _rank(value["max_drawdown_60"]) * 0.10)
         )
+        value = value.sort_values(["lane_score", "symbol"], ascending=[False, True])
 
         strategies = {
             "低价擒牛": _result(
-                _records(low_price, ("close", "net_profit_growth_pct", "average_amount_20"), self.top_n),
-                ["股价<10元", "净利润同比增长>=100%", "非ST/创业板/科创板", "20日均成交额升序"],
+                _records(low_price, ("lane_score", "close", "net_profit_growth_pct",
+                                     "revenue_growth_pct", "technical_60_score",
+                                     "average_amount_20"), self.top_n),
+                ["股价<10元", "净利润同比增长>=100%", "统一可投资门槛",
+                 "增长/估值/趋势/回撤综合排序"],
                 data_as_of=market_as_of,
             ),
             "小市值": _result(
                 _records(small_cap, (
-                    "market_cap_yi", "revenue_growth_pct", "net_profit_growth_pct"
+                    "lane_score", "market_cap_yi", "revenue_growth_pct",
+                    "net_profit_growth_pct", "technical_60_score"
                 ), self.top_n),
-                ["总市值<=50亿元", "营收同比增长>=10%", "净利润同比增长>=100%", "非ST/创业板/科创板"],
+                ["总市值<=50亿元", "营收同比增长>=10%", "净利润同比增长>=100%",
+                 "统一可投资门槛", "市值/成长/质量/趋势综合排序"],
                 data_as_of=market_as_of,
             ),
             "净利增长": _result(
-                _records(profit_growth, ("net_profit_growth_pct", "average_amount_20"), self.top_n),
-                ["净利润同比增长>=10%", "深圳主板", "非ST/创业板/科创板", "20日均成交额升序"],
+                _records(profit_growth, ("lane_score", "net_profit_growth_pct",
+                                         "revenue_growth_pct", "fundamental_score",
+                                         "technical_60_score"), self.top_n),
+                ["净利润同比增长>=10%", "深圳主板", "统一可投资门槛",
+                 "增长持续性/质量/趋势综合排序"],
                 data_as_of=market_as_of,
             ),
             "低估值": _result(
                 _records(value, (
-                    "pe_ttm", "pb", "dividend_yield", "debt_ratio",
+                    "lane_score", "pe_ttm", "pb", "dividend_yield", "debt_ratio",
                     "circulating_market_cap_yi",
                 ), self.top_n),
                 (["0<PE<=20", "0<PB<=1.5"]
@@ -160,6 +238,9 @@ class LocalReferenceStrategyEngine:
             "rule_version": STRATEGY_RULE_VERSION,
             "market_as_of": market_as_of,
             "reference_affects_score": False,
+            "candidate_affects_membership": True,
+            "max_nominations_per_strategy": self.top_n,
+            "strategy_config": STRATEGY_CONFIG,
             "strategies": strategies,
         }
 
@@ -172,7 +253,7 @@ class LocalReferenceStrategyEngine:
                 reason="该交易日尚无本地真实资金流快照；未使用成交量代理",
                 data_as_of=market_as_of,
             )
-        eligible = base[["symbol", "name", "market_cap_yi"]].drop_duplicates("symbol")
+        eligible = base.drop_duplicates("symbol")
         joined = flow.merge(eligible, on="symbol", how="inner", suffixes=("_flow", ""))
         joined["main_net_inflow"] = _numeric(joined, "main_net_inflow")
         joined["main_net_inflow_ratio"] = _numeric(joined, "main_net_inflow_ratio")
@@ -180,13 +261,21 @@ class LocalReferenceStrategyEngine:
             joined["main_net_inflow"].gt(0)
             & joined["market_cap_yi"].between(50, 5000, inclusive="both")
             & ~joined["symbol"].astype(str).str.startswith(("688", "689"))
-        ].sort_values(["main_net_inflow", "symbol"], ascending=[False, True])
+        ].copy()
+        joined["lane_score"] = 100 * (
+            _rank(joined["main_net_inflow_ratio"]) * 0.40
+            + _rank(joined["main_net_inflow"]) * 0.25
+            + _rank(joined["technical_60_score"]) * 0.15
+            + _rank(joined["fundamental_score"]) * 0.15
+            + _rank(joined["max_drawdown_60"]) * 0.05
+        )
+        joined = joined.sort_values(["lane_score", "symbol"], ascending=[False, True])
         if "name" not in joined and "name_flow" in joined:
             joined["name"] = joined["name_flow"]
         incomplete = not flow["quality_status"].astype(str).eq("ok").all()
         return _result(
             _records(joined, (
-                "main_net_inflow", "main_net_inflow_ratio", "market_cap_yi",
+                "lane_score", "main_net_inflow", "main_net_inflow_ratio", "market_cap_yi",
                 "close", "change_pct",
             ), self.top_n),
             rules, status="degraded" if incomplete else None,

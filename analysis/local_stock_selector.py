@@ -6,7 +6,7 @@ candidate, change a score, satisfy a hard gate or rescue an incomplete local run
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
@@ -133,14 +133,15 @@ def _normalize_reference(items: Optional[Iterable[object]]) -> List[dict]:
 
 @dataclass(frozen=True)
 class SelectionPolicy:
-    version: str = "local-pit-v4"
+    version: str = "local-fusion-v1"
+    core_rule_version: str = "local-pit-v4"
     fundamental_top_n: int = 200
     technical_top_n: int = 50
     diversified_top_n: int = 20
     final_n: int = 15
     min_history_days: int = 70
     preferred_history_days: int = 400
-    max_per_industry: int = 3
+    max_per_industry: int = 5
     max_pairwise_correlation: float = 0.90
     min_warehouse_coverage: float = 0.80
     min_financial_universe_coverage: float = 0.70
@@ -149,6 +150,21 @@ class SelectionPolicy:
     min_listing_trading_days: int = 70
     min_average_amount_20: float = 20_000_000.0
     min_correlation_days: int = 40
+    top15_core_floor: int = 8
+    top15_satellite_cap: int = 5
+    top15_timing_cap: int = 2
+    top5_core_floor: int = 3
+    top5_satellite_cap: int = 1
+    top5_timing_cap: int = 1
+    nominations_per_local_strategy: int = 5
+    genome_nomination_cap: int = 5
+    genome_prefilter_n: int = 250
+    genome_min_lane_score: float = 45.0
+    priority_main_force: float = 1.0
+    priority_low_price_bull: float = 1.0
+    priority_value: float = 1.0
+    priority_small_cap: float = 0.70
+    priority_profit_growth: float = 0.50
 
     @classmethod
     def from_env(cls) -> "SelectionPolicy":
@@ -165,7 +181,7 @@ class SelectionPolicy:
                 os.getenv("LOCAL_SELECTION_PREFERRED_HISTORY_DAYS", "400")
             )),
             max_per_industry=min(base.max_per_industry, max(
-                1, int(os.getenv("LOCAL_SELECTION_MAX_PER_INDUSTRY", "3"))
+                1, int(os.getenv("LOCAL_SELECTION_MAX_PER_INDUSTRY", "5"))
             )),
             max_pairwise_correlation=min(base.max_pairwise_correlation, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MAX_PAIRWISE_CORRELATION", "0.90")), 0.5, 1.0
@@ -195,6 +211,36 @@ class SelectionPolicy:
                 base.min_correlation_days,
                 min(60, int(os.getenv("LOCAL_SELECTION_MIN_CORRELATION_DAYS", "40")))
             ),
+            top15_core_floor=max(8, min(15, int(
+                os.getenv("LOCAL_FUSION_TOP15_CORE_FLOOR", "8")
+            ))),
+            top15_satellite_cap=max(0, min(5, int(
+                os.getenv("LOCAL_FUSION_TOP15_SATELLITE_CAP", "5")
+            ))),
+            top15_timing_cap=max(0, min(2, int(
+                os.getenv("LOCAL_FUSION_TOP15_TIMING_CAP", "2")
+            ))),
+            top5_core_floor=max(3, min(5, int(
+                os.getenv("LOCAL_FUSION_TOP5_CORE_FLOOR", "3")
+            ))),
+            top5_satellite_cap=max(0, min(1, int(
+                os.getenv("LOCAL_FUSION_TOP5_SATELLITE_CAP", "1")
+            ))),
+            top5_timing_cap=max(0, min(1, int(
+                os.getenv("LOCAL_FUSION_TOP5_TIMING_CAP", "1")
+            ))),
+            nominations_per_local_strategy=max(1, min(5, int(
+                os.getenv("LOCAL_FUSION_LOCAL_NOMINATIONS", "5")
+            ))),
+            genome_nomination_cap=max(0, min(5, int(
+                os.getenv("LOCAL_FUSION_GENOME_NOMINATIONS", "5")
+            ))),
+            genome_prefilter_n=max(50, min(500, int(
+                os.getenv("LOCAL_FUSION_GENOME_PREFILTER_N", "250")
+            ))),
+            genome_min_lane_score=_bounded(float(
+                os.getenv("LOCAL_FUSION_GENOME_MIN_SCORE", "45")
+            ), 0, 100),
         )
 
     def as_dict(self) -> dict:
@@ -218,6 +264,33 @@ class LocalStockSelector:
                  policy: Optional[SelectionPolicy] = None):
         self.store = store or ResearchStore()
         self.policy = policy or SelectionPolicy.from_env()
+        if policy is None:
+            try:
+                active = self.store.load_active_strategy_policy()
+                payload = dict((active or {}).get("payload") or {})
+                priority = dict(payload.get("strategy_priority") or {})
+                overrides = {
+                    key: payload[key] for key in (
+                        "top15_core_floor", "top15_satellite_cap", "top15_timing_cap",
+                        "top5_core_floor", "top5_satellite_cap", "top5_timing_cap",
+                        "nominations_per_local_strategy", "genome_nomination_cap",
+                        "genome_prefilter_n", "genome_min_lane_score",
+                        "max_per_industry", "max_pairwise_correlation",
+                    ) if key in payload
+                }
+                overrides.update({
+                    "priority_main_force": priority.get("主力资金", self.policy.priority_main_force),
+                    "priority_low_price_bull": priority.get("低价擒牛", self.policy.priority_low_price_bull),
+                    "priority_value": priority.get("低估值", self.policy.priority_value),
+                    "priority_small_cap": priority.get("小市值", self.policy.priority_small_cap),
+                    "priority_profit_growth": priority.get("净利增长", self.policy.priority_profit_growth),
+                })
+                if overrides:
+                    self.policy = replace(self.policy, **overrides)
+            except Exception:
+                # A missing policy table must not make the selector unavailable
+                # during a rolling deployment; the versioned defaults remain safe.
+                pass
         self._last_correlation_matrix: List[dict] = []
 
     def run(self, selection_date: Optional[str] = None,
@@ -225,6 +298,7 @@ class LocalStockSelector:
             decision_at: Optional[object] = None,
             decision_mode: str = "preopen",
             wencai_reference: Optional[Iterable[object]] = None,
+            strategy_snapshot: Optional[dict] = None,
             persist: bool = True) -> dict:
         selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
         try:
@@ -375,10 +449,6 @@ class LocalStockSelector:
         if not fundamentals.empty and "symbol" in fundamentals.columns:
             frame = frame.merge(fundamentals, on="symbol", how="left")
         frame = self._score_fundamentals(frame)
-        from analysis.local_reference_strategies import LocalReferenceStrategyEngine
-        local_strategy_reference = LocalReferenceStrategyEngine(self.store).run(
-            frame, market_as_of=actual_market_as_of
-        )
         qualified = frame["fundamental_metric_count"] >= self.policy.min_stock_fundamental_metrics
         financial_coverage = float(qualified.mean()) if len(frame) else 0.0
         if financial_coverage < self.policy.min_financial_universe_coverage:
@@ -403,6 +473,30 @@ class LocalStockSelector:
             "net_assets_positive", pd.Series(False, index=frame.index)
         ).fillna(False).astype(bool)
         frame = frame[qualified & non_negative_equity].copy()
+
+        # Every local producer consumes the exact same fail-closed eligible PIT frame.
+        eligible_scored = self._score_technical(frame)
+        eligible_scored = self._score_industry_and_quality(eligible_scored, breadth_frame)
+        eligible_scored = self._apply_events(eligible_scored, context)
+        from analysis.local_reference_strategies import LocalReferenceStrategyEngine
+        try:
+            local_strategy_reference = LocalReferenceStrategyEngine(
+                self.store, top_n=self.policy.nominations_per_local_strategy
+            ).run(eligible_scored, market_as_of=actual_market_as_of)
+        except Exception as exc:
+            local_strategy_reference = {
+                "rule_version": "local-satellite-v2",
+                "market_as_of": actual_market_as_of,
+                "reference_affects_score": False,
+                "candidate_affects_membership": True,
+                "strategies": {name: {
+                    "status": "unavailable", "rows": [],
+                    "reason": f"本地策略引擎异常:{type(exc).__name__}",
+                } for name in ("主力资金", "低价擒牛", "低估值", "小市值", "净利增长")},
+            }
+
+        # Keep local-pit-v4 as the core producer.  Its internal percentile universe
+        # is unchanged; local-fusion-v1 only composes its nominations afterwards.
         fundamental_pool = frame.sort_values(
             ["fundamental_score", "fundamental_coverage", "history_coverage"], ascending=False
         ).head(self.policy.fundamental_top_n).copy()
@@ -423,13 +517,71 @@ class LocalStockSelector:
             ["total_score", "data_coverage", "technical_60_score"], ascending=False
         )
         diversified = self._diversify(technical_pool)
-        candidates = self._records(diversified.head(self.policy.final_n))
+        core_candidates = self._records(diversified.head(self.policy.diversified_top_n))
+        if not core_candidates:
+            return self._failed(
+                selection_date, "local PIT core produced no eligible nominations",
+                pit_universe_count, reference, persist, coverage=coverage,
+                metadata={"market_as_of": actual_market_as_of,
+                          "decision_context": context.as_dict(), **pit},
+            )
+
+        from analysis.local_fusion import (
+            FusionPolicy, GenomeCandidateProducer, LocalFusionComposer, genome_snapshot,
+        )
+        recorded_pit_only = (
+            strategy_snapshot.get("pit_only_mode")
+            if isinstance(strategy_snapshot, dict) else None
+        )
+        pit_only_mode = (
+            bool(recorded_pit_only) if recorded_pit_only is not None else
+            os.getenv("LOCAL_FUSION_PIT_ONLY", "false").lower() in {
+                "1", "true", "yes", "on"
+            }
+        )
+        fusion_policy = FusionPolicy(
+            top15_size=self.policy.final_n,
+            top5_size=min(5, self.policy.final_n),
+            top15_core_floor=self.policy.top15_core_floor,
+            top15_satellite_cap=0 if pit_only_mode else self.policy.top15_satellite_cap,
+            top15_timing_cap=0 if pit_only_mode else self.policy.top15_timing_cap,
+            top5_core_floor=self.policy.top5_core_floor,
+            top5_satellite_cap=0 if pit_only_mode else self.policy.top5_satellite_cap,
+            top5_timing_cap=0 if pit_only_mode else self.policy.top5_timing_cap,
+            nominations_per_local_strategy=self.policy.nominations_per_local_strategy,
+            genome_nomination_cap=0 if pit_only_mode else self.policy.genome_nomination_cap,
+            genome_prefilter_n=self.policy.genome_prefilter_n,
+            genome_min_lane_score=self.policy.genome_min_lane_score,
+            max_per_industry=self.policy.max_per_industry,
+            max_pairwise_correlation=self.policy.max_pairwise_correlation,
+            strategy_priority={
+                "主力资金": self.policy.priority_main_force,
+                "低价擒牛": self.policy.priority_low_price_bull,
+                "低估值": self.policy.priority_value,
+                "小市值": self.policy.priority_small_cap,
+                "净利增长": self.policy.priority_profit_growth,
+            },
+        )
+        locked_strategy_snapshot = dict(strategy_snapshot or genome_snapshot())
+        locked_strategy_snapshot["pit_only_mode"] = pit_only_mode
+        genome_result = (
+            {"status": "paused", "rows": [], "strategy_snapshot": locked_strategy_snapshot,
+             "reason": "LOCAL_FUSION_PIT_ONLY=true"}
+            if pit_only_mode else GenomeCandidateProducer(fusion_policy).run(
+                eligible_scored, panel, strategy_snapshot=locked_strategy_snapshot
+            )
+        )
+        fusion = LocalFusionComposer(fusion_policy).compose(
+            core_candidates, local_strategy_reference, genome_result, eligible_scored
+        )
+        candidates = fusion["top15"]
+        formal_top5_candidates = fusion["top5"]
         comparison = self._comparison(candidates, reference)
         industry_values = frame["industry"].fillna("").astype(str).str.strip()
         industry_coverage = float(
             (industry_values.ne("") & industry_values.ne("未分类")).mean()
         ) if len(frame) else 0.0
-        rule_version = self.policy.version
+        rule_version = fusion_policy.version
         market_dataset_ids = sorted({
             str(value) for value in panel.get("dataset_id", pd.Series(dtype=str)).dropna()
             if str(value).strip()
@@ -450,6 +602,8 @@ class LocalStockSelector:
             "policy_version": self.policy.version,
             "policy_hash": self.policy.policy_hash,
             "policy": self.policy.as_dict(),
+            "fusion_policy": fusion_policy.as_dict(),
+            "strategy_snapshot": locked_strategy_snapshot,
             "code_revision": context.code_revision,
             "dependency_lock_hash": dependency_lock_hash(),
         }
@@ -468,6 +622,7 @@ class LocalStockSelector:
             "decision_context": context.as_dict(),
             "manifest_id": manifest_id,
             "candidates": candidates,
+            "formal_top5": formal_top5_candidates,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         snapshot_id = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
         run = {
@@ -499,8 +654,10 @@ class LocalStockSelector:
                 "manifest_id": manifest_id,
                 **pit,
                 "period_semantics": "trading_days",
-                "primary_pipeline": "local_pit",
+                "primary_pipeline": "local_fusion",
+                "core_pipeline": self.policy.core_rule_version,
                 "reference_affects_score": False,
+                "external_reference_affects_membership": False,
                 "industry_coverage": round(industry_coverage, 6),
                 "diversification_mode": (
                     "industry" if industry_coverage >= 0.95 else "industry_with_board_fallback"
@@ -509,19 +666,59 @@ class LocalStockSelector:
                 "correlation_matrix": self._last_correlation_matrix,
                 "stage_counts": {
                     "fundamental": len(fundamental_pool), "technical": len(technical_pool),
-                    "diversified": len(diversified), "final": len(candidates),
+                    "diversified": len(diversified), "core_nominations": len(core_candidates),
+                    "local_nominations": sum(len(item.get("rows") or []) for item in
+                                             local_strategy_reference["strategies"].values()),
+                    "genome_nominations": len(genome_result.get("rows") or []),
+                    "final": len(candidates),
                 },
+                "lane_counts": fusion["lane_counts"],
+                "fusion_policy": fusion_policy.as_dict(),
+                "strategy_snapshot_id": locked_strategy_snapshot.get("snapshot_id"),
+                "pit_only_mode": pit_only_mode,
             },
             "input_manifest": input_manifest,
+            "formal_top5_candidates": formal_top5_candidates,
         }
         if persist:
             run["run_id"] = self.store.save_selection(run, candidates, reference)
-            self.store.save_selection_artifact(
-                run["run_id"], "local_strategy_reference", local_strategy_reference
+            eligible_symbols = sorted(eligible_scored["symbol"].astype(str).tolist())
+            eligible_payload = {
+                "snapshot_id": hashlib.sha256(json.dumps(
+                    eligible_symbols, separators=(",", ":")
+                ).encode("utf-8")).hexdigest(),
+                "decision_context": context.as_dict(),
+                "market_as_of": actual_market_as_of,
+                "valuation_as_of": latest_valuation_as_of,
+                "financial_as_of": pit.get("financial_pit_end_date"),
+                "eligible_count": len(eligible_symbols),
+                "excluded_count": max(0, pit_universe_count - len(eligible_symbols)),
+                "symbols": eligible_symbols,
+                "manifest_id": manifest_id,
+            }
+            for artifact_type, payload in (
+                ("eligible_universe", eligible_payload),
+                ("local_strategy_nominations", local_strategy_reference),
+                ("genome_nominations", genome_result),
+                ("candidate_nominations", fusion["nominations"]),
+                ("pit_only_top15", core_candidates[:self.policy.final_n]),
+                ("fusion_policy", fusion_policy.as_dict()),
+            ):
+                self.store.save_selection_artifact(run["run_id"], artifact_type, payload)
+            self.store.save_selection_strategy_records(
+                run["run_id"], fusion["nominations"],
+                policy=fusion_policy.as_dict(), policy_hash=fusion_policy.policy_hash,
+                selection_date=selection_date,
+                input_snapshot_id=eligible_payload["snapshot_id"],
+                persist_policy=not pit_only_mode,
             )
         return {
             **run, "candidates": candidates, "wencai_reference": reference,
+            "formal_top5": formal_top5_candidates,
+            "core_candidates": core_candidates,
             "local_strategy_reference": local_strategy_reference,
+            "genome_nominations": genome_result,
+            "fusion": fusion,
         }
 
     def _failed(self, selection_date: str, reason: str, universe_count: int,
@@ -531,7 +728,8 @@ class LocalStockSelector:
             "selection_date": selection_date, "status": "incomplete",
             "universe_count": universe_count, "eligible_count": 0, "coverage": coverage,
             "comparison": self._comparison([], reference),
-            "metadata": {"reason": reason, "primary_pipeline": "local_pit",
+            "metadata": {"reason": reason, "primary_pipeline": "local_fusion",
+                         "core_pipeline": self.policy.core_rule_version,
                          "reference_affects_score": False, **(metadata or {})},
         }
         if persist:

@@ -193,18 +193,20 @@ def finalize_selection(rows: Iterable[Dict[str, Any]], limit: int = 5,
 
 
 def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
-    """Create the immutable deterministic TOP N from local PIT scores only.
+    """Create the immutable deterministic TOP N from local PIT policy only.
 
     Quotes, LLM verdicts, online technical calls and current holdings are deliberately
-    excluded from ranking. They may be attached later as review/display metadata.
+    excluded from ranking. Fusion rows are already ordered by the deterministic lane
+    policy; legacy PIT-only rows retain score sorting for replay compatibility.
     """
     ranked: List[Dict[str, Any]] = []
     for raw in rows or []:
         source = dict(raw or {})
         code = str(source.get("code") or source.get("symbol") or "").strip()
-        score = _number(
-            source.get("local_score", source.get("score", source.get("total_score")))
-        )
+        score = _number(source.get(
+            "lane_score_raw",
+            source.get("local_score", source.get("score", source.get("total_score"))),
+        ))
         if not code or score is None:
             continue
         required = (
@@ -215,6 +217,9 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
         missing = [key for key in required if not source.get(key)]
         if missing:
             raise ValueError(f"formal selection row missing: {','.join(missing)}")
+        is_fusion = bool(source.get("assigned_lane"))
+        assigned_lane = source.get("assigned_lane") or "core"
+        strategy_name = source.get("primary_strategy_name") or "本地PIT"
         row = {
             "run_id": source.get("run_id"),
             "snapshot_id": source.get("snapshot_id"),
@@ -226,7 +231,11 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "code": code,
             "symbol": code,
             "rank": int(source.get("rank") or 9999),
+            "selection_priority": int(
+                source.get("selection_priority") or source.get("rank") or 9999
+            ),
             "local_score": round(score, 4),
+            "lane_score_raw": round(score, 4),
             "score_components": dict(source.get("score_components") or {}),
             "technical_state": source.get("technical_state") or source.get("local_state"),
             "data_quality": _number(
@@ -235,20 +244,36 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "rule_version": source.get("rule_version"),
             "policy_hash": source.get("policy_hash"),
             "final_score": round(score, 4),
-            "final_reason": "本地PIT总分确定性排序",
-            "ranking_source": "local_pit_snapshot",
+            "final_reason": (
+                f"{strategy_name}赛道确定性入选" if is_fusion
+                else "本地PIT总分确定性排序"
+            ),
+            "ranking_source": "local_fusion_policy" if is_fusion else "local_pit_snapshot",
+            "assigned_lane": assigned_lane,
+            "primary_strategy": source.get("primary_strategy") or "local_pit_v4",
+            "primary_strategy_name": strategy_name,
+            "lane_rank": int(source.get("lane_rank") or source.get("rank") or 9999),
+            "strategy_priority_weight": _number(source.get("strategy_priority_weight")),
+            "supporting_nominations": list(source.get("supporting_nominations") or []),
+            "source_labels": list(source.get("source_labels") or []),
         }
         ranked.append(row)
-    ranked.sort(key=lambda row: (
-        -float(row["final_score"]), int(row.get("rank") or 9999), str(row.get("code") or "")
-    ))
+    if any(row.get("ranking_source") == "local_fusion_policy" for row in ranked):
+        ranked.sort(key=lambda row: (
+            int(row.get("selection_priority") or 9999), str(row.get("code") or "")
+        ))
+    else:
+        ranked.sort(key=lambda row: (
+            -float(row["final_score"]), int(row.get("rank") or 9999),
+            str(row.get("code") or "")
+        ))
     return ranked[:max(0, int(limit))]
 
 
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
     rows = list(rows or [])
     lines = [
-        '正式 TOP5 由本地 PIT 总分确定；实时行情、持仓和红蓝结论仅作为下方显示复核，不改变成员或顺序。',
+        '正式 TOP5 由本地多赛道政策确定；实时行情、持仓和红蓝结论仅作为下方显示复核，不改变成员或顺序。',
         '是否提高总仓位仍以 10:05 的组合动作分级为准。',
         '',
     ]

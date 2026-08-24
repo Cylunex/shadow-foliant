@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 
 def _json(value) -> str:
@@ -268,7 +268,8 @@ class ResearchStore:
                 financial_revision_set_id TEXT NOT NULL, event_dataset_id TEXT NOT NULL,
                 policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
                 policy_payload TEXT NOT NULL, code_revision TEXT NOT NULL,
-                dependency_lock_hash TEXT, schema_version TEXT NOT NULL, created_at TEXT NOT NULL
+                dependency_lock_hash TEXT, strategy_snapshot TEXT,
+                schema_version TEXT NOT NULL, created_at TEXT NOT NULL
             )""",
             """CREATE TABLE IF NOT EXISTS selection_artifacts (
                 artifact_id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
@@ -277,6 +278,42 @@ class ResearchStore:
                 payload_hash TEXT NOT NULL, payload TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(run_id,artifact_type)
+            )""",
+            """CREATE TABLE IF NOT EXISTS selection_strategy_runs (
+                strategy_run_id TEXT PRIMARY KEY, selection_run_id TEXT NOT NULL,
+                strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+                lane TEXT NOT NULL, status TEXT NOT NULL, data_as_of TEXT,
+                input_snapshot_id TEXT, policy_version TEXT NOT NULL,
+                metadata TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(selection_run_id,strategy_id,strategy_version)
+            )""",
+            """CREATE TABLE IF NOT EXISTS selection_candidate_nominations (
+                nomination_id TEXT PRIMARY KEY, selection_run_id TEXT NOT NULL,
+                strategy_run_id TEXT NOT NULL, symbol TEXT NOT NULL, lane TEXT NOT NULL,
+                strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+                lane_rank INTEGER NOT NULL, lane_score_raw REAL,
+                priority_weight REAL NOT NULL, eligibility TEXT NOT NULL,
+                evidence TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(selection_run_id,strategy_id,strategy_version,symbol)
+            )""",
+            """CREATE TABLE IF NOT EXISTS selection_candidate_outcomes (
+                nomination_id TEXT NOT NULL, horizon_days INTEGER NOT NULL,
+                entry_date TEXT, entry_price REAL, exit_date TEXT, exit_price REAL,
+                return_pct REAL, benchmark_return_pct REAL, max_drawdown_pct REAL,
+                outcome_status TEXT NOT NULL, evaluated_at TEXT NOT NULL,
+                PRIMARY KEY(nomination_id,horizon_days)
+            )""",
+            """CREATE TABLE IF NOT EXISTS strategy_policy_versions (
+                policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
+                state TEXT NOT NULL, effective_from TEXT NOT NULL,
+                payload TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(policy_version,policy_hash)
+            )""",
+            """CREATE TABLE IF NOT EXISTS strategy_adjustment_proposals (
+                proposal_id TEXT PRIMARY KEY, base_policy_hash TEXT NOT NULL,
+                evidence_snapshot_id TEXT NOT NULL, proposal TEXT NOT NULL,
+                validation_status TEXT NOT NULL, validation_reason TEXT,
+                applied_policy_hash TEXT, created_at TEXT NOT NULL, applied_at TEXT
             )""",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
             "CREATE INDEX IF NOT EXISTS idx_research_fund_flow_date ON research_fund_flow_daily(trade_date,main_net_inflow)",
@@ -290,6 +327,8 @@ class ResearchStore:
             "CREATE INDEX IF NOT EXISTS idx_research_event_records_date ON research_event_records(event_date,symbol,confirmation_status)",
             "CREATE INDEX IF NOT EXISTS idx_research_event_revisions_visible ON research_event_revisions(event_id,retrieved_at)",
             "CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_selection_nominations_symbol ON selection_candidate_nominations(symbol,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_selection_strategy_runs ON selection_strategy_runs(strategy_id,created_at)",
         ]
         try:
             for sql in statements:
@@ -333,6 +372,14 @@ class ResearchStore:
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
             self._add_column(cur, "research_valuations", "dividend_yield", "REAL")
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, datetime.now().astimezone().isoformat()),
+            )
+        version = "7-local-fusion"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "selection_input_manifests", "strategy_snapshot", "TEXT")
             cur.execute(
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
@@ -1529,7 +1576,8 @@ class ResearchStore:
                 """SELECT manifest_id,run_id,decision_context,universe_snapshot_id,
                           market_dataset_ids,valuation_dataset_ids,financial_revision_set_id,
                           event_dataset_id,policy_version,policy_hash,policy_payload,
-                          code_revision,dependency_lock_hash,schema_version,created_at
+                          code_revision,dependency_lock_hash,strategy_snapshot,
+                          schema_version,created_at
                    FROM selection_input_manifests WHERE manifest_id=?""",
                 (str(manifest_id),),
             )
@@ -1540,12 +1588,14 @@ class ResearchStore:
                 "manifest_id", "run_id", "decision_context", "universe_snapshot_id",
                 "market_dataset_ids", "valuation_dataset_ids", "financial_revision_set_id",
                 "event_dataset_id", "policy_version", "policy_hash", "policy",
-                "code_revision", "dependency_lock_hash", "schema_version", "created_at",
+                "code_revision", "dependency_lock_hash", "strategy_snapshot",
+                "schema_version", "created_at",
             )
             value = dict(zip(keys, row))
             for key, fallback in (
                 ("decision_context", {}), ("market_dataset_ids", []),
                 ("valuation_dataset_ids", []), ("policy", {}),
+                ("strategy_snapshot", {}),
             ):
                 if not isinstance(value[key], (dict, list)):
                     value[key] = json.loads(value[key] or _json(fallback))
@@ -1759,6 +1809,7 @@ class ResearchStore:
             decision_at=str(context["decision_at"]),
             decision_mode=str(context["mode"]),
             wencai_reference=None,
+            strategy_snapshot=manifest.get("strategy_snapshot") or None,
             persist=False,
         )
         conn = self.connect()
@@ -1792,9 +1843,15 @@ class ResearchStore:
             )],
             limit=15,
         )
+        formal5 = finalize_local_selection(
+            [{**item, **identity, "rank": rank} for rank, item in enumerate(
+                replay.get("formal_top5") or [], 1
+            )],
+            limit=5,
+        )
         actual = {
             "formal_top15": hashlib.sha256(_json(formal15).encode("utf-8")).hexdigest(),
-            "formal_top5": hashlib.sha256(_json(formal15[:5]).encode("utf-8")).hexdigest(),
+            "formal_top5": hashlib.sha256(_json(formal5).encode("utf-8")).hexdigest(),
         }
         comparisons = {
             kind: {"expected_hash": expected.get(kind), "actual_hash": digest,
@@ -1832,7 +1889,13 @@ class ResearchStore:
                 [{**item, **identity, "rank": rank} for rank, item in enumerate(primary, 1)],
                 limit=15,
             )
-            formal_top5 = formal_top15[:5]
+            formal_top5_source = list(run.get("formal_top5_candidates") or primary[:5])
+            formal_top5 = finalize_local_selection(
+                [{**item, **identity, "rank": rank} for rank, item in enumerate(
+                    formal_top5_source, 1
+                )],
+                limit=5,
+            )
             if not formal_top5:
                 raise ValueError("successful selection requires a formal TOP5 artifact")
         conn = self.connect()
@@ -1853,7 +1916,9 @@ class ResearchStore:
                     publication_status,published_at,supersedes_run_id)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, run["selection_date"], created_at,
-                 run.get("status", "success"), "local_pit", int(run.get("universe_count", 0)),
+                 run.get("status", "success"),
+                 "local_fusion" if metadata.get("primary_pipeline") == "local_fusion" else "local_pit",
+                 int(run.get("universe_count", 0)),
                  int(run.get("eligible_count", 0)), len(primary), float(run.get("coverage", 0)),
                  "wencai" if reference else None, _json(run.get("comparison", {})),
                  _json(metadata), publication_status,
@@ -1889,8 +1954,9 @@ class ResearchStore:
                        (manifest_id,run_id,decision_context,universe_snapshot_id,
                         market_dataset_ids,valuation_dataset_ids,financial_revision_set_id,
                         event_dataset_id,policy_version,policy_hash,policy_payload,
-                        code_revision,dependency_lock_hash,schema_version,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        code_revision,dependency_lock_hash,strategy_snapshot,
+                        schema_version,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (manifest_id, run_id, _json(input_manifest.get("decision_context", {})),
                      input_manifest.get("universe_snapshot_id", ""),
                      _json(input_manifest.get("market_dataset_ids", [])),
@@ -1901,7 +1967,8 @@ class ResearchStore:
                      input_manifest.get("policy_hash", ""),
                      _json(input_manifest.get("policy", {})),
                      input_manifest.get("code_revision", "unknown"),
-                     input_manifest.get("dependency_lock_hash", "unknown"), SCHEMA_VERSION,
+                     input_manifest.get("dependency_lock_hash", "unknown"),
+                     _json(input_manifest.get("strategy_snapshot", {})), SCHEMA_VERSION,
                      datetime.now().astimezone().isoformat()),
                 )
                 self._insert_selection_artifact(conn, run_id, "formal_top15", formal_top15, metadata)
@@ -1949,6 +2016,322 @@ class ResearchStore:
             )
             conn.commit()
             return artifact_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def save_selection_strategy_records(self, run_id: str, nominations: Sequence[dict],
+                                        *, policy: dict, policy_hash: str,
+                                        selection_date: str,
+                                        input_snapshot_id: str = "",
+                                        persist_policy: bool = True) -> int:
+        """Persist multi-strategy nominations as normalized immutable facts."""
+        now = datetime.now().astimezone().isoformat()
+        grouped: Dict[tuple, List[dict]] = {}
+        for raw in nominations or ():
+            item = dict(raw or {})
+            key = (
+                str(item.get("strategy_id") or ""),
+                str(item.get("strategy_version") or ""),
+                str(item.get("lane") or ""),
+            )
+            if key[0] and _symbol(item.get("symbol")):
+                grouped.setdefault(key, []).append(item)
+        conn = self.connect()
+        inserted = 0
+        try:
+            cur = conn.cursor()
+            if persist_policy:
+                cur.execute(
+                    "SELECT 1 FROM strategy_policy_versions WHERE policy_version=? AND policy_hash=?",
+                    (str(policy.get("version") or "local-fusion-v1"), str(policy_hash)),
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        "UPDATE strategy_policy_versions SET state='superseded' WHERE state='active'"
+                    )
+                    cur.execute(
+                        """INSERT INTO strategy_policy_versions
+                           (policy_version,policy_hash,state,effective_from,payload,created_at)
+                           VALUES (?,?,?,?,?,?)""",
+                        (str(policy.get("version") or "local-fusion-v1"), str(policy_hash),
+                         "active", str(selection_date), _json(policy), now),
+                    )
+            for (strategy_id, strategy_version, lane), rows in grouped.items():
+                strategy_run_id = hashlib.sha256(
+                    f"{run_id}:{strategy_id}:{strategy_version}".encode("utf-8")
+                ).hexdigest()
+                cur.execute(
+                    """INSERT INTO selection_strategy_runs
+                       (strategy_run_id,selection_run_id,strategy_id,strategy_version,lane,
+                        status,data_as_of,input_snapshot_id,policy_version,metadata,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (strategy_run_id, str(run_id), strategy_id, strategy_version, lane,
+                     "success", str(selection_date), str(input_snapshot_id),
+                     str(policy.get("version") or "local-fusion-v1"),
+                     _json({"nomination_count": len(rows)}), now),
+                )
+                for item in rows:
+                    symbol = _symbol(item.get("symbol"))
+                    nomination_id = hashlib.sha256(
+                        f"{strategy_run_id}:{symbol}".encode("utf-8")
+                    ).hexdigest()
+                    cur.execute(
+                        """INSERT INTO selection_candidate_nominations
+                           (nomination_id,selection_run_id,strategy_run_id,symbol,lane,
+                            strategy_id,strategy_version,lane_rank,lane_score_raw,
+                            priority_weight,eligibility,evidence,created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (nomination_id, str(run_id), strategy_run_id, symbol, lane,
+                         strategy_id, strategy_version, int(item.get("lane_rank") or 0),
+                         _plain(item.get("lane_score_raw")),
+                         float(item.get("priority_weight") or 0), "eligible",
+                         _json(item.get("evidence") or {}), now),
+                    )
+                    inserted += 1
+            conn.commit()
+            return inserted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_selection_candidate_outcomes(
+            self, *, horizons: Sequence[int] = (1, 3, 5, 10, 20),
+            limit: int = 2000) -> dict:
+        """Mature nomination outcomes with next-trading-day-open entry semantics."""
+        wanted = sorted({max(1, int(value)) for value in horizons})
+        conn = self.connect()
+        updated = 0
+        pending = 0
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT n.nomination_id,n.symbol,r.data_as_of
+                   FROM selection_candidate_nominations n
+                   JOIN selection_strategy_runs r ON r.strategy_run_id=n.strategy_run_id
+                   ORDER BY n.created_at DESC LIMIT ?""", (max(1, int(limit)),),
+            )
+            nominations = list(cur.fetchall())
+            now = datetime.now().astimezone().isoformat()
+            for nomination_id, symbol, signal_date in nominations:
+                cur.execute(
+                    """SELECT trade_date,open,close,low FROM research_daily_bars
+                       WHERE symbol=? AND trade_date>? AND adjustment='qfq'
+                         AND quality_status NOT IN ('unknown_unit','failed')
+                       ORDER BY trade_date""",
+                    (str(symbol), str(signal_date)),
+                )
+                bars = list(cur.fetchall())
+                for horizon in wanted:
+                    if len(bars) < horizon:
+                        pending += 1
+                        continue
+                    window = bars[:horizon]
+                    entry = _plain(window[0][1]) or _plain(window[0][2])
+                    exit_price = _plain(window[-1][2])
+                    if not entry or not exit_price or float(entry) <= 0:
+                        pending += 1
+                        continue
+                    ret = (float(exit_price) / float(entry) - 1.0) * 100.0
+                    lows = [float(row[3]) for row in window if row[3] is not None]
+                    max_dd = min((value / float(entry) - 1.0) * 100.0 for value in lows) if lows else None
+                    values = (
+                        str(window[0][0]), float(entry), str(window[-1][0]), float(exit_price),
+                        round(ret, 6), None, round(max_dd, 6) if max_dd is not None else None,
+                        "matured", now, str(nomination_id), horizon,
+                    )
+                    cur.execute(
+                        "SELECT 1 FROM selection_candidate_outcomes WHERE nomination_id=? AND horizon_days=?",
+                        (str(nomination_id), horizon),
+                    )
+                    if cur.fetchone():
+                        cur.execute(
+                            """UPDATE selection_candidate_outcomes SET
+                               entry_date=?,entry_price=?,exit_date=?,exit_price=?,return_pct=?,
+                               benchmark_return_pct=?,max_drawdown_pct=?,outcome_status=?,evaluated_at=?
+                               WHERE nomination_id=? AND horizon_days=?""", values,
+                        )
+                    else:
+                        cur.execute(
+                            """INSERT INTO selection_candidate_outcomes
+                               (entry_date,entry_price,exit_date,exit_price,return_pct,
+                                benchmark_return_pct,max_drawdown_pct,outcome_status,evaluated_at,
+                                nomination_id,horizon_days) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                            values,
+                        )
+                    updated += 1
+            conn.commit()
+            return {"updated": updated, "pending": pending, "horizons": wanted,
+                    "nomination_count": len(nominations)}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def selection_strategy_evidence(self, *, horizon_days: int = 5,
+                                    lookback_days: int = 180) -> dict:
+        """Return deterministic evidence consumed by the weekly policy committee."""
+        since = (datetime.now().astimezone() - timedelta(days=max(1, lookback_days))).isoformat()
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT n.strategy_id,n.lane,o.return_pct,o.max_drawdown_pct,
+                          n.created_at,n.symbol
+                   FROM selection_candidate_nominations n
+                   JOIN selection_candidate_outcomes o ON o.nomination_id=n.nomination_id
+                   WHERE o.horizon_days=? AND o.outcome_status='matured' AND n.created_at>=?""",
+                (max(1, int(horizon_days)), since),
+            )
+            buckets: Dict[str, dict] = {}
+            for strategy_id, lane, ret, drawdown, created_at, symbol in cur.fetchall():
+                bucket = buckets.setdefault(str(strategy_id), {
+                    "strategy_id": str(strategy_id), "lane": str(lane), "returns": [],
+                    "drawdowns": [], "dates": set(), "symbols": set(),
+                })
+                if ret is not None:
+                    bucket["returns"].append(float(ret))
+                if drawdown is not None:
+                    bucket["drawdowns"].append(float(drawdown))
+                bucket["dates"].add(str(created_at)[:10])
+                bucket["symbols"].add(str(symbol))
+            strategies = []
+            for bucket in buckets.values():
+                returns = bucket.pop("returns")
+                drawdowns = bucket.pop("drawdowns")
+                dates = bucket.pop("dates")
+                symbols = bucket.pop("symbols")
+                strategies.append({
+                    **bucket, "sample_size": len(returns), "independent_dates": len(dates),
+                    "symbol_count": len(symbols),
+                    "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 2)
+                    if returns else None,
+                    "avg_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
+                    "worst_drawdown_pct": round(min(drawdowns), 4) if drawdowns else None,
+                })
+            strategies.sort(key=lambda item: (item["lane"], item["strategy_id"]))
+            cur.execute(
+                """SELECT n.selection_run_id,n.symbol,n.lane,n.lane_rank,o.return_pct
+                   FROM selection_candidate_nominations n
+                   JOIN selection_candidate_outcomes o ON o.nomination_id=n.nomination_id
+                   WHERE o.horizon_days=? AND o.outcome_status='matured' AND n.created_at>=?""",
+                (max(1, int(horizon_days)), since),
+            )
+            by_run: Dict[str, Dict[str, dict]] = {}
+            for run_id, symbol, lane, lane_rank, ret in cur.fetchall():
+                by_run.setdefault(str(run_id), {}).setdefault(str(symbol), {
+                    "return_pct": float(ret), "core_rank": None,
+                })
+                if str(lane) == "core":
+                    current_rank = by_run[str(run_id)][str(symbol)].get("core_rank")
+                    rank_value = int(lane_rank or 9999)
+                    by_run[str(run_id)][str(symbol)]["core_rank"] = min(
+                        current_rank if current_rank is not None else rank_value, rank_value
+                    )
+            cur.execute(
+                """SELECT run_id,symbol FROM selection_candidates
+                   WHERE candidate_kind='diagnostic'"""
+            )
+            selected_by_run: Dict[str, set] = {}
+            for run_id, symbol in cur.fetchall():
+                selected_by_run.setdefault(str(run_id), set()).add(str(symbol))
+            comparisons = []
+            for run_id, symbol_rows in by_run.items():
+                selected = selected_by_run.get(run_id) or set()
+                fusion_returns = [row["return_pct"] for symbol, row in symbol_rows.items()
+                                  if symbol in selected]
+                pit_returns = [row["return_pct"] for row in symbol_rows.values()
+                               if row.get("core_rank") is not None and row["core_rank"] <= 15]
+                if fusion_returns and pit_returns:
+                    fusion_avg = sum(fusion_returns) / len(fusion_returns)
+                    pit_avg = sum(pit_returns) / len(pit_returns)
+                    comparisons.append({
+                        "selection_run_id": run_id,
+                        "fusion_return_pct": round(fusion_avg, 4),
+                        "pit_only_return_pct": round(pit_avg, 4),
+                        "satellite_marginal_pct": round(fusion_avg - pit_avg, 4),
+                        "fusion_sample_size": len(fusion_returns),
+                        "pit_sample_size": len(pit_returns),
+                    })
+            marginal_values = [item["satellite_marginal_pct"] for item in comparisons]
+            portfolio_comparison = {
+                "matured_runs": len(comparisons),
+                "avg_satellite_marginal_pct": round(
+                    sum(marginal_values) / len(marginal_values), 4
+                ) if marginal_values else None,
+                "runs": comparisons[-30:],
+            }
+            payload = {"horizon_days": horizon_days, "lookback_days": lookback_days,
+                       "strategies": strategies,
+                       "portfolio_comparison": portfolio_comparison}
+            encoded = _json(payload)
+            payload["evidence_snapshot_id"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            return payload
+        finally:
+            conn.close()
+
+    def load_active_strategy_policy(self) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT policy_version,policy_hash,payload,effective_from,created_at
+                   FROM strategy_policy_versions WHERE state='active'
+                   ORDER BY created_at DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            payload = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
+            return {"policy_version": str(row[0]), "policy_hash": str(row[1]),
+                    "payload": payload, "effective_from": str(row[3]),
+                    "created_at": str(row[4])}
+        finally:
+            conn.close()
+
+    def save_strategy_policy_proposal(self, proposal: dict, *, validation_status: str,
+                                      validation_reason: str = "",
+                                      applied_policy: Optional[dict] = None) -> str:
+        now = datetime.now().astimezone().isoformat()
+        proposal_id = str(proposal.get("proposal_id") or hashlib.sha256(
+            _json(proposal).encode("utf-8")
+        ).hexdigest())
+        applied_hash = None
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            if applied_policy:
+                payload = dict(applied_policy)
+                encoded = _json(payload)
+                applied_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                version = str(payload.get("version") or f"local-fusion-{now[:10]}")
+                cur.execute(
+                    "UPDATE strategy_policy_versions SET state='superseded' WHERE state='active'"
+                )
+                cur.execute(
+                    """INSERT INTO strategy_policy_versions
+                       (policy_version,policy_hash,state,effective_from,payload,created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (version, applied_hash, "active", str(proposal.get("effective_from") or now[:10]),
+                     encoded, now),
+                )
+            cur.execute(
+                """INSERT INTO strategy_adjustment_proposals
+                   (proposal_id,base_policy_hash,evidence_snapshot_id,proposal,
+                    validation_status,validation_reason,applied_policy_hash,created_at,applied_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (proposal_id, str(proposal.get("base_policy_hash") or ""),
+                 str(proposal.get("evidence_snapshot_id") or ""), _json(proposal),
+                 str(validation_status), str(validation_reason or ""), applied_hash,
+                 now, now if applied_hash else None),
+            )
+            conn.commit()
+            return proposal_id
         except Exception:
             conn.rollback()
             raise

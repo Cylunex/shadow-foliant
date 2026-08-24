@@ -23,10 +23,11 @@ WEEKEND_TIMES = {
     'weekend_portfolio': ('sunday', '12:05'),
     'wf_weekly_backtest': ('sunday', '20:00'),       # 无 LLM，保留原时间
     'ai_eval_weekly': ('sunday', '20:30'),           # 无 LLM，保留原时间
+    'strategy_policy_weekly': ('sunday', '21:00'),   # 单次有界 LLM 策略委员会
     'weekly_db_cleanup': ('sunday', '23:15'),
 }
 
-WEEKEND_LLM_JOBS = ('mx_weekend_outlook', 'weekend_portfolio')
+WEEKEND_LLM_JOBS = ('mx_weekend_outlook', 'weekend_portfolio', 'strategy_policy_weekly')
 WEEKEND_LLM_BLACKOUTS = ((9 * 60, 12 * 60), (14 * 60, 18 * 60))
 
 

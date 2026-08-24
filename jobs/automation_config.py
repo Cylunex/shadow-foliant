@@ -56,7 +56,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🎯 综合选股 TOP15 + 最终TOP5',
         'schedule': '09:45 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '本地PIT数据仓按基本面/估值、60日核心结构、120/250日风险修正和行业分散产出TOP15；问财只作并行参考，不参与评分；再复核最终TOP5',
+        'description': 'local-fusion-v1：PIT核心至少8、本地五策略最多5、技术基因组最多2，独立编排TOP5；问财/妙想仅参考',
     },
     'morning_portfolio': {
         'cn': '☀️ 早盘持仓分析',
@@ -191,6 +191,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心',
         'default': True,  # 盈利反馈环:按 source 出真实盈亏评估,回喂选股决策;无 AI 调用,开销低
         'description': '按 source 评估过去 30 天推荐真实盈亏(胜率/平均收益/盈亏比)',
+    },
+    'strategy_policy_weekly': {
+        'cn': '🧠 本地选股策略委员会',
+        'schedule': f"周日 {WEEKEND_TIMES['strategy_policy_weekly'][1]}",
+        'category': '核心',
+        'default': True,
+        'description': '基于本地策略成熟后验，由一次LLM提出有界配额/门槛调整，程序校验后版本化应用',
     },
     'portfolio_stress_ai': {
         'cn': '🛡️ 组合压力情景叙事官',

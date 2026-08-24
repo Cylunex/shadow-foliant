@@ -32,17 +32,25 @@ export default {
     <!-- 每日综合选股产物 -->
     <div v-if="tab==='latest'">
       <section class="command-hero" style="margin-bottom:16px">
-        <div><span class="badge info">UNIFIED SELECTION</span><h1 style="margin-top:10px">综合选股</h1><p>TOP15 保留完整候选，最终 TOP5 再经过技术结构、红蓝证伪、追高和组合集中度复核。</p></div>
+        <div><span class="badge info">LOCAL FUSION V1</span><h1 style="margin-top:10px">本地多赛道选股</h1><p>PIT 为核心，本地五策略与技术基因组拥有受控提名权；问财、妙想和红蓝只作参考复核。</p></div>
         <div class="hero-status"><div><strong>{{latest.meta?.snapshot_date||'暂无快照'}}</strong><small>{{latest.status==='success'?'今日产物可用':statusCn(latest.status)}}</small></div><button class="ghost" :disabled="latest.loading" @click="loadLatest">{{latest.loading?'读取中…':'刷新'}}</button></div>
       </section>
       <div v-if="latest.err" class="err">{{latest.err}}</div>
       <section class="card">
-        <div class="section-head"><div><h2>最终优选 TOP5</h2><p>这是需要优先研究的短名单，不等于直接买入指令</p></div><span class="badge warning">买入前核对盘面与价格</span></div>
+        <div class="section-head"><div><h2>今日赛道构成</h2><p>正式 TOP15：PIT 至少 8，本地策略最多 5，技术基因组最多 2；空缺自动归还 PIT</p></div><span class="pill">同一行业最多 5 只</span></div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px">
+          <span class="badge info">PIT 核心 {{laneCounts.core||0}}</span>
+          <span class="badge warning">本地五策略 {{laneCounts.satellite||0}}</span>
+          <span class="badge success">技术基因组 {{laneCounts.timing||0}}</span>
+        </div>
+      </section>
+      <section class="card">
+        <div class="section-head"><div><h2>最终优选 TOP5</h2><p>由独立配额编排器确定，不是 TOP15 简单截取，也不等于直接买入指令</p></div><span class="badge warning">买入前核对盘面与价格</span></div>
         <div v-if="latestFinal.length" class="pick-grid">
           <article v-for="(r,i) in latestFinal" :key="r.code" class="pick-card" style="cursor:pointer" @click="openStock(r.code)">
             <span class="pick-rank">{{i+1}}</span><div class="pick-code">{{r.code}}</div><div class="pick-name">{{r.name||'未命名'}}</div>
             <div class="pick-score">{{fmt(r.final_score)}}<small>优选分</small></div>
-            <div class="pick-tags"><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'规则优选'}}</span><span v-if="r.source_count" class="pill">{{r.source_count}} 源</span></div>
+            <div class="pick-tags"><span class="badge info">{{laneText(r.assigned_lane)}}</span><span class="pill">{{r.primary_strategy_name||'本地PIT'}}</span></div>
             <div class="pick-reason">{{r.final_reason||'等待优选依据'}}</div>
           </article>
         </div>
@@ -50,12 +58,12 @@ export default {
       </section>
       <section class="card">
         <div class="section-head"><div><h2>完整候选 TOP15</h2><p>点击任意标的进入股票研究</p></div><span class="pill">{{latestRows.length}} 只</span></div>
-        <div v-if="latestRows.length" class="table-wrap"><table><thead><tr><th>#</th><th>代码 / 名称</th><th>综合分</th><th>现价</th><th>涨跌</th><th>红蓝结论</th><th>来源</th></tr></thead>
-          <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.score)}}</td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td><td><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'—'}}</span></td><td style="text-align:left">{{(r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
+        <div v-if="latestRows.length" class="table-wrap"><table><thead><tr><th>#</th><th>代码 / 名称</th><th>赛道分</th><th>赛道</th><th>现价</th><th>涨跌</th><th>主要策略</th><th>共同提名</th></tr></thead>
+          <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.lane_score_raw??r.final_score)}}</td><td><span class="badge info">{{laneText(r.assigned_lane)}}</span></td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td><td>{{r.primary_strategy_name||'本地PIT'}}</td><td style="text-align:left">{{(r.source_labels||r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
         </table></div><div v-else class="empty-state">尚无综合选股快照。</div>
       </section>
       <section class="card">
-        <div class="section-head"><div><h2>本地策略参考</h2><p>同一 PIT 快照独立计算，仅显示共振，不改变正式排名</p></div><span class="pill">local-reference-v1</span></div>
+        <div class="section-head"><div><h2>本地五策略真实提名</h2><p>每个策略在同一 PIT 合格全集上最多提名 5 只，共同争取 TOP15 的 5 个卫星名额</p></div><span class="pill">local-satellite-v2</span></div>
         <div v-if="localStrategies.length" class="dashboard-grid">
           <article v-for="item in localStrategies" :key="item.name" class="card" style="box-shadow:none">
             <div class="section-head"><h3>{{item.name}}</h3><span class="badge" :class="strategyStatusClass(item.status)">{{strategyStatusText(item.status)}}</span></div>
@@ -66,7 +74,14 @@ export default {
             <p v-if="item.reason&&item.rows.length" class="sub" style="margin:10px 0 0">{{item.reason}}</p>
           </article>
         </div>
-        <div v-else class="empty-state">旧快照尚无本地策略附件；下次综合选股后自动生成。</div>
+        <div v-else class="empty-state">旧快照尚无本地策略提名；下次综合选股后自动生成。</div>
+      </section>
+      <section class="card">
+        <div class="section-head"><div><h2>技术基因组提名</h2><p>本地全市场技术预筛后，使用已部署进化变体扫描；最多提名 5 只、正式 TOP15 最多占 2 席</p></div><span class="pill">{{genomeStatus}}</span></div>
+        <div v-if="genomeRows.length" style="display:flex;flex-wrap:wrap;gap:8px">
+          <button v-for="r in genomeRows" :key="r.symbol" class="ghost" @click="openStock(r.symbol)">{{r.rank}}. {{r.symbol}} {{r.name||''}} · {{fmt(r.lane_score)}}</button>
+        </div>
+        <div v-else class="empty-state" style="min-height:64px">{{latest.data?.genome_nominations?.reason||'当前快照无技术基因组命中'}}</div>
       </section>
     </div>
 
@@ -150,7 +165,10 @@ export default {
     const latest = reactive({ status:'missing', data:null, meta:null, loading:false, err:'' })
     const latestFinal = computed(()=>latest.data?.final_rows||[])
     const latestRows = computed(()=>latest.data?.rows||[])
+    const laneCounts = computed(()=>latest.data?.lane_counts||{})
     const localStrategies = computed(()=>Object.entries(latest.data?.local_strategy_reference?.strategies||{}).map(([name,value])=>({name,rows:value.rows||[],...value})))
+    const genomeRows = computed(()=>latest.data?.genome_nominations?.rows||[])
+    const genomeStatus = computed(()=>({ready:'可用',empty:'无命中',unavailable:'不可用'}[latest.data?.genome_nominations?.status]||'未知'))
     async function loadLatest(){
       latest.loading=true;latest.err=''
       try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{}}
@@ -161,6 +179,7 @@ export default {
     const strategyStatusText=v=>({ready:'完整',degraded:'降级',unavailable:'待数据',empty:'无命中'}[v]||v||'未知')
     const strategyStatusClass=v=>v==='ready'?'success':v==='degraded'?'warning':v==='unavailable'?'danger':'info'
     const signed=v=>v==null?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`
+    const laneText=v=>({core:'PIT核心',satellite:'本地策略',timing:'技术基因组'}[v]||v||'本地')
     function openStock(code){if(code){try{sessionStorage.setItem('sf-stock-code',code)}catch(e){};location.hash='stock'}}
     const s = reactive({ index:'000300', n:15, style:'balanced', res:null, err:'', loading:false })
     const mcols = reactive([])
@@ -200,8 +219,9 @@ export default {
       catch(e){ w.err=''+e }finally{ w.loading=false }
     }
     onMounted(loadLatest)
-    return { tab, latest, latestFinal, latestRows, localStrategies, loadLatest, statusCn, debateClass,
-             strategyStatusText, strategyStatusClass, signed, openStock,
+    return { tab, latest, latestFinal, latestRows, laneCounts, localStrategies, genomeRows,
+             genomeStatus, loadLatest, statusCn, debateClass,
+             strategyStatusText, strategyStatusClass, signed, laneText, openStock,
              s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,
              idx:INDEXES, styles:STYLES, strats:STRATS, runMf, setStyle, runWc,
              rp, recipes:RECIPES, rpCount, runRecipe, rpHoldings, rpHs300,
