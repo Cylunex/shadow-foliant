@@ -98,6 +98,8 @@ class ControlledDeployTest(unittest.TestCase):
         self.assertIn('FOLIANT_SHARED_ENV is required for release activation', script)
         self.assertIn('ln -sfn "$shared_env" "$release_dir/.env"', script)
         self.assertIn("-m pip install 'pytest>=8,<10'", script)
+        self.assertIn('export PGHOST="${PGHOST:-${PG_HOST:-}}"', script)
+        self.assertIn('export PGDATABASE="${PGDATABASE:-${PG_DATABASE:-}}"', script)
 
 
 class StrategyDeploymentQualityTest(unittest.TestCase):

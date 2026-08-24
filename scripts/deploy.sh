@@ -95,6 +95,14 @@ fi
 )
 
 if command -v psql >/dev/null 2>&1; then
+  # Application config uses explicit PG_* names; libpq uses the compact PG*
+  # convention. Map without printing values so migrations target the same
+  # database as the runtime instead of silently falling back to a local socket.
+  export PGHOST="${PGHOST:-${PG_HOST:-}}"
+  export PGPORT="${PGPORT:-${PG_PORT:-}}"
+  export PGUSER="${PGUSER:-${PG_USER:-}}"
+  export PGPASSWORD="${PGPASSWORD:-${PG_PASSWORD:-}}"
+  export PGDATABASE="${PGDATABASE:-${PG_DATABASE:-}}"
   psql -X -v ON_ERROR_STOP=1 --single-transaction \
     -c "SELECT pg_advisory_xact_lock(1936482714)" \
     -f "$validation_dir/scripts/init_postgres.sql"
