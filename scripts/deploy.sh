@@ -48,6 +48,10 @@ if [[ -n "$release_root" ]]; then
   if [[ ! -x "$venv_dir/bin/python" ]]; then
     python3 -m venv "$venv_dir"
   fi
+  # Supervisor and operational scripts consistently address ``venv2``. Keep
+  # that stable release-local entry point while the controlled builder owns
+  # the actual ``venv`` directory.
+  ln -sfn venv "$release_dir/venv2"
   validation_dir="$release_dir"
 else
   venv_dir="${FOLIANT_VENV:-$repo_dir/venv2}"
@@ -111,6 +115,12 @@ if [[ -e "$app_link" && ! -L "$app_link" ]]; then
   echo "FOLIANT_CURRENT_LINK must be a symlink managed by this deploy script" >&2
   exit 10
 fi
+shared_env="${FOLIANT_SHARED_ENV:?FOLIANT_SHARED_ENV is required for release activation}"
+if [[ ! -r "$shared_env" ]]; then
+  echo "configured shared runtime environment is not readable" >&2
+  exit 10
+fi
+ln -sfn "$shared_env" "$release_dir/.env"
 previous_link="$(readlink "$app_link" 2>/dev/null || true)"
 ln -sfn "$release_dir" "$app_link"
 

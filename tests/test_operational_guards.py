@@ -89,6 +89,16 @@ class RemovedSqliteModuleTest(unittest.TestCase):
                 self.assertNotIn('from database import db', source.read())
 
 
+class ControlledDeployTest(unittest.TestCase):
+    def test_release_keeps_supervisor_entrypoint_and_shared_environment(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, 'scripts/deploy.sh'), encoding='utf-8') as source:
+            script = source.read()
+        self.assertIn('ln -sfn venv "$release_dir/venv2"', script)
+        self.assertIn('FOLIANT_SHARED_ENV is required for release activation', script)
+        self.assertIn('ln -sfn "$shared_env" "$release_dir/.env"', script)
+
+
 class StrategyDeploymentQualityTest(unittest.TestCase):
     def test_holdout_quality_changes_deployment_order(self):
         from analysis.strategy_genome import deployment_quality_score
