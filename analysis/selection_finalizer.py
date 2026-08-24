@@ -1,7 +1,7 @@
-"""综合选股 TOP15 的二次优选。
+"""正式本地融合产物终结器，以及旧二次优选的兼容实现。
 
-只消费 unified_selection 已取得的规则分、来源、行情和红蓝结论，不再拉数据或调用 LLM。
-红蓝失败时仍可按规则分和多源共振稳定产出；明确否决的候选不会进入最终名单。
+生产正式 TOP15/TOP5 只调用 ``finalize_local_selection``。旧 ``finalize_selection``
+保留给历史测试与兼容入口，不得用于改变当前正式成员或排序。
 """
 
 from __future__ import annotations

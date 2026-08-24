@@ -82,7 +82,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'depends_on': ['unified_selection'],
         'dependency_wait_sec': 900,
-        'description': '对综合选股 TOP 逐个过东财妙想诊断',
+        'description': '运行五组妙想外部参考，并只对正式 TOP5 做逐股诊断；不改变正式候选',
     },
     'noon_report': {
         'cn': '📊 午盘简报',
@@ -126,7 +126,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🗄️ 本地研究数据同步',
         'schedule': '17:10 每交易日',
         'category': '数据', 'default': True, 'core': True,
-        'description': '一次拉取全市场复权日线、估值和PIT财务，写本地研究仓；显式执行接口频率、并发、分页和覆盖率限制',
+        'description': '拉取全市场复权日线、估值和PIT财务，成功入库后更新正式选股1/3/5/10/20日后验',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',
@@ -229,7 +229,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'schedule': '09:45 每日(unified_selection 内)',
         'category': '工作流',
         'default': True,  # 零成本(只记录不监控不调AI),给选股算真实胜率,反哺门槛
-        'description': '综合选股 TOP10 入推荐池记录(source=unified_selection),ai_eval_weekly 出真实胜率',
+        'description': '正式 TOP15 进入兼容推荐记录；多赛道真实表现以规范化候选后验为准',
     },
     'wf_overnight_to_rec': {
         'cn': '🔗 工作流 A：晨间策略 → AI 推荐池',
@@ -240,10 +240,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'wf_daily_strategy_scan': {
         'cn': '🔗 工作流 B：盘后策略扫描 → AI 分析 → 推荐池',
-        'schedule': '16:30 每日(daily_backtest 尾部,进化后用最新基因组情报)',
+        'schedule': '19:00 每日(daily_backtest 尾部,进化后用最新基因组情报)',
         'category': '工作流',
         'default': True,  # 盈利闭环的"新血"来源:每日产出带目标/止损的 AI 推荐供监控+评估
-        'description': '对持仓+候选池跑 InStock 10 策略，命中股深度 AI 分析(带盈亏比约束+历史战绩反馈)后入推荐',
+        'description': '正式TOP5/TOP15优先，再对持仓和热门池跑 InStock 13 策略；统一锁定当次基因组快照',
     },
     'wf_weekly_backtest': {
         'cn': '🔗 工作流 C：周末回测推送',
@@ -261,11 +261,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # ↓↓↓ 个人策略专属（按你 7 条规则定制）
     'wf_daily_candidate_pool': {
-        'cn': '🎯 个人策略：每日候选池',
-        'schedule': '09:45 每日(unified_selection 尾部)',
-        'category': '个人策略',
-        'default': True,
-        'description': '低价(≤20)+非ST+强势板块+短期/历史低位+反转形态，TOP 10 推送',
+        'cn': '🧪 个人口味候选实验',
+        'schedule': '仅手动运行',
+        'category': '实验',
+        'default': False,
+        'description': '独立旧规则实验，不属于正式选股，也不作为本地融合失败时的候选兜底',
     },
     # wf_weekly_portfolio_report 已并入 weekly_analysis(周日 12:05,4象限体检随周报常开)
     'wf_position_guard_check': {

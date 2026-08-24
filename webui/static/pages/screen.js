@@ -83,6 +83,21 @@ export default {
         </div>
         <div v-else class="empty-state" style="min-height:64px">{{latest.data?.genome_nominations?.reason||'当前快照无技术基因组命中'}}</div>
       </section>
+      <section class="card">
+        <div class="section-head"><div><h2>外部策略参考</h2><p>问财与妙想仅用于发现差异和后验比较，永远不改变正式 TOP15/TOP5</p></div><span class="pill">REFERENCE ONLY</span></div>
+        <div v-if="externalReferences.length" class="dashboard-grid">
+          <article v-for="group in externalReferences" :key="group.source" class="card" style="box-shadow:none">
+            <div class="section-head"><h3>{{group.source}}</h3><span class="badge info">{{group.ready}}/{{group.items.length}} 可用</span></div>
+            <div v-for="item in group.items" :key="item.name" style="margin-top:10px">
+              <b>{{item.name}}</b><span style="margin-left:8px;color:var(--muted)">{{item.picks.length}} 只</span>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+                <button v-for="r in item.picks" :key="r.symbol" class="ghost" @click="openStock(r.symbol)">{{r.symbol}} {{r.name||''}}</button>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div v-else class="empty-state">外部参考尚未完成或当前不可用，不影响本地正式结果。</div>
+      </section>
     </div>
 
     <!-- 多因子 -->
@@ -169,6 +184,13 @@ export default {
     const localStrategies = computed(()=>Object.entries(latest.data?.local_strategy_reference?.strategies||{}).map(([name,value])=>({name,rows:value.rows||[],...value})))
     const genomeRows = computed(()=>latest.data?.genome_nominations?.rows||[])
     const genomeStatus = computed(()=>({ready:'可用',empty:'无命中',unavailable:'不可用'}[latest.data?.genome_nominations?.status]||'未知'))
+    const externalReferences = computed(()=>[
+      ['问财', latest.data?.wencai_strategy_runs],
+      ['妙想', latest.data?.miaoxiang_strategy_runs],
+    ].map(([source,run])=>{
+      const items=Object.entries(run?.strategies||{}).map(([name,value])=>({name,picks:value.picks||[],status:value.status}))
+      return {source,items,ready:items.filter(x=>x.status==='ready').length}
+    }).filter(group=>group.items.length))
     async function loadLatest(){
       latest.loading=true;latest.err=''
       try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{}}
@@ -220,7 +242,7 @@ export default {
     }
     onMounted(loadLatest)
     return { tab, latest, latestFinal, latestRows, laneCounts, localStrategies, genomeRows,
-             genomeStatus, loadLatest, statusCn, debateClass,
+             genomeStatus, externalReferences, loadLatest, statusCn, debateClass,
              strategyStatusText, strategyStatusClass, signed, laneText, openStock,
              s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,
              idx:INDEXES, styles:STYLES, strats:STRATS, runMf, setStyle, runWc,

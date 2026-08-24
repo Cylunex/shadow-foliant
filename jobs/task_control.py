@@ -798,6 +798,9 @@ def latest_selection_artifact() -> Dict[str, Any]:
     miaoxiang_review = (
         (artifacts.get('miaoxiang_review') or {}).get('payload') or {}
     )
+    miaoxiang_strategy_runs = (
+        (artifacts.get('miaoxiang_strategy_runs') or {}).get('payload') or {}
+    )
     ai_review = (artifacts.get('ai_review') or {}).get('payload') or {}
     metadata = formal.get('metadata') or {}
     overlay_rows = overlay if isinstance(overlay, list) else []
@@ -846,6 +849,7 @@ def latest_selection_artifact() -> Dict[str, Any]:
         'fusion_policy': fusion_policy,
         'lane_counts': metadata.get('lane_counts') or {},
         'wencai_strategy_runs': wencai_strategy_runs,
+        'miaoxiang_strategy_runs': miaoxiang_strategy_runs,
         'miaoxiang_review': miaoxiang_review,
         'ai_review': ai_review,
         'artifacts': {

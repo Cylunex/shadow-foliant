@@ -213,6 +213,40 @@ def test_formal_selection_read_performs_no_write_or_reanalysis() -> None:
     assert store.calls == ["latest_formal_selection"]
 
 
+def test_formal_selection_read_exposes_lanes_and_reference_layers() -> None:
+    class Store:
+        def latest_formal_selection(self):
+            return {
+                "run_id": "selection-1", "selection_date": "2026-08-24",
+                "metadata": {"lane_counts": {"core": 3, "satellite": 1, "timing": 1}},
+                "comparison": {"overlap": ["600001"]},
+                "artifacts": {
+                    "formal_top15": {"payload": [{
+                        "code": "600001", "rank": 1, "assigned_lane": "core",
+                    }]},
+                    "formal_top5": {"payload": [{
+                        "code": "600001", "rank": 1, "assigned_lane": "core",
+                    }]},
+                    "display_overlay": {"payload": [{
+                        "code": "600001", "name": "样例", "price": 10,
+                    }]},
+                    "local_strategy_nominations": {"payload": {"strategies": {}}},
+                    "genome_nominations": {"payload": {"status": "ready"}},
+                    "fusion_policy": {"payload": {"version": "local-fusion-v1"}},
+                    "wencai_strategy_runs": {"payload": {"strategies": {"低估值": {}}}},
+                    "miaoxiang_strategy_runs": {"payload": {"strategies": {"妙想·低估值": {}}}},
+                },
+            }
+
+    result = SelectionRunService(store=Store()).latest_formal()
+    assert result["status"] == "complete"
+    assert result["data"]["formal_top5"][0]["name"] == "样例"
+    assert result["data"]["formal_top5"][0]["assigned_lane"] == "core"
+    assert result["data"]["lane_counts"]["core"] == 3
+    assert "wencai" in result["data"]["references"]
+    assert "miaoxiang" in result["data"]["references"]
+
+
 def test_durable_worker_lease_reclaims_once_then_fails_after_attempt_budget(repository) -> None:
     created = repository.create_or_get(
         actor_id="agent-owner", capability="foliant.selection.preview",

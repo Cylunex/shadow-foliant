@@ -159,23 +159,36 @@ def get_indicator_snapshot(symbol: str, date: str = None) -> Optional[Dict]:
     return _coerce_json(row[0]) if row else None
 
 
-def _last_selection_picks() -> List[str]:
-    """读今日综合选股(unified_selection 09:45)的 TOP 代码列表,统一收口。
-
-    ⚠️ 关键坑:`save_indicator_snapshot('_last_selection', {'picks':[...]})` 把 dict 直接存进
-    indicators 列,`get_indicator_snapshot` 返回的就是该列反序列化结果 = {'picks':[...]} 本身,
-    **没有 'indicators' 外层包裹**。历史上多处消费者误写 `snap.get('indicators')` → 恒 None →
-    死分支(盘后扫描并入/妙想复核 当日选股 都因此恒空)。一律走本函数取 picks,别再裸读。"""
+def _formal_selection_rows(scope: str = 'top15', *, require_today: bool = True) -> List[Dict]:
+    """读取追加式正式选股产物；旧 indicator snapshot 不得再充当任务输入。"""
     try:
-        snap = get_indicator_snapshot('_last_selection')
-        if isinstance(snap, dict):
-            picks = snap.get('picks')
-            return [str(c).strip() for c in picks if c] if isinstance(picks, list) else []
-        if isinstance(snap, list):
-            return [str(c).strip() for c in snap if c]
+        from data.research_store import ResearchStore
+        formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+        if require_today and str(formal.get('selection_date') or '')[:10] != datetime.now().strftime('%Y-%m-%d'):
+            return []
+        artifacts = formal.get('artifacts') or {}
+        artifact_name = 'formal_top5' if str(scope).lower() == 'top5' else 'formal_top15'
+        rows = (artifacts.get(artifact_name) or {}).get('payload') or []
+        overlay = (artifacts.get('display_overlay') or {}).get('payload') or []
+        overlay_by_code = {
+            str(row.get('code') or row.get('symbol') or ''): row
+            for row in overlay if isinstance(row, dict)
+        }
+        return [
+            {**overlay_by_code.get(str(row.get('code') or row.get('symbol') or ''), {}), **row}
+            for row in rows if isinstance(row, dict)
+        ]
     except Exception:
-        pass
-    return []
+        return []
+
+
+def _last_selection_picks(scope: str = 'top15') -> List[str]:
+    """兼容调用名：只返回今日权威 formal TOP15/TOP5 的代码。"""
+    return [
+        str(row.get('code') or row.get('symbol') or '').strip()
+        for row in _formal_selection_rows(scope)
+        if row.get('code') or row.get('symbol')
+    ]
 
 
 def save_market_snapshot(payload: Dict):
@@ -646,7 +659,7 @@ def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool
 def task_daily_backtest():
     """盘后批量回测 + 策略基因组进化：全股池回测 → 横截面评分 → 变异 → 反哺AI。
 
-    每天 16:30 运行。受开关 daily_backtest 控制（默认开）。
+    每个交易日 19:00 运行。受开关 daily_backtest 控制（默认开）。
 
     v2 进化版：
       1. 池子：持仓 + 昨日强势股 TOP20 → 扩容到 30+
@@ -1153,9 +1166,9 @@ def task_strategy_policy_weekly():
 
 
 def task_eod_outcomes():
-    """🎯 盘后后验合并(16:55)—— 合 ai_rec_check + decision_signal_outcomes 为一个任务:
+    """🎯 盘后后验合并(16:55)—— 推荐池与决策信号后验:
     收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
-    ②决策信号过 horizon 判 hit/miss(run_outcomes)。二者都是"盘后读K线/行情做后验",合一个少一环
+    ②决策信号过 horizon 判 hit/miss(run_outcomes)。正式选股后验在 17:10 研究行情入库后更新。
     盘后链。两段各自 try 包裹:一段失败不拖另一段。开关 eod_outcomes(默认开)。非交易日跳过。"""
     job = 'eod_outcomes'
     try:
@@ -1191,18 +1204,10 @@ def task_eod_outcomes():
     except Exception as e:
         fails += 1
         parts.append(f"signal_err={type(e).__name__}:{str(e)[:50]}")
-    # ③ 本地多赛道候选后验：按次日开盘入场，更新1/3/5/10/20交易日结果。
-    try:
-        from research_store import ResearchStore
-        r = ResearchStore().update_selection_candidate_outcomes()
-        parts.append(f"selection: updated={r.get('updated')} pending={r.get('pending')}")
-    except Exception as e:
-        fails += 1
-        parts.append(f"selection_err={type(e).__name__}:{str(e)[:50]}")
-    # 三段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
+    # 两段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
     # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
     # 单段失败仍记 success(两段隔离是有意设计,另一段照常工作)。
-    _log_run(job, 'error' if fails >= 3 else 'success', error=' | '.join(parts),
+    _log_run(job, 'error' if fails >= 2 else 'success', error=' | '.join(parts),
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
@@ -1717,7 +1722,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
     'strategy_prefetch':         1000,   # 盘前预取 5 条问财外部参考；失败不影响本地主链
     'strategy_prefetch_retry':    360,    # 09:30 只补 4 条问财缓存缺口；4×75s 外层上限，09:45 前必收尾
-    'unified_selection':         1800,   # 本地 PIT 选股 + 红蓝对抗整合(10只LLM)
+    'unified_selection':         1800,   # 本地多赛道选股 + 正式TOP5红蓝参考
     'morning_portfolio':         900,
     'afternoon_portfolio':       900,
     'portfolio_indicator_snapshot': 1200,
@@ -3061,9 +3066,9 @@ def _parse_tp_sl(text: str, ref_price=None):
 
 
 def _daily_strategy_scan():
-    """🔗 工作流 B：盘后 InStock 10 策略扫描 → 命中股深度 AI 分析 → 入推荐池
+    """🔗 工作流 B：盘后 InStock 13 策略扫描 → 命中股深度 AI 分析 → 入推荐池
 
-    股票池：持仓 + 当日强势股 TOP 30 + 当日龙虎榜 TOP 20（去重）
+    股票池：正式 TOP5 + 正式 TOP15其余 + 持仓 + 强势股 TOP30 + 龙虎榜 TOP20（去重）
     命中策略 ≥1 套的股票按命中数排序，对 TOP N 跑 plan_execute AI 分析
     AI 给出 "buy/strong_buy" 评级时入 ai_recommendations + 启用监控
     受开关 wf_daily_strategy_scan 控制（默认开;生产以 DB automation_switches 为准）。
@@ -3085,6 +3090,17 @@ def _daily_strategy_scan():
     try:
         # 1. 组装股票池（去重）
         pool: dict = {}
+        # 正式候选优先占据扫描预算：TOP5 在前、TOP15 其余随后。即使外部热门池很大，
+        # 也不能在 100 只截断时把当天正式候选悄悄丢掉。
+        formal_rows = _formal_selection_rows('top15')
+        formal_top5 = _formal_selection_rows('top5')
+        formal_by_code = {
+            str(row.get('code') or row.get('symbol') or ''): row for row in formal_rows
+        }
+        for row in [*formal_top5, *formal_rows]:
+            code = str(row.get('code') or row.get('symbol') or '').strip()
+            if code and code not in pool:
+                pool[code] = str(row.get('name') or formal_by_code.get(code, {}).get('name') or '')
         try:
             from portfolio_db import portfolio_db
             for s in portfolio_db.get_all_stocks() or []:
@@ -3118,19 +3134,6 @@ def _daily_strategy_scan():
         except Exception as e:
             print(f'[wf_daily_strategy_scan] 龙虎榜加载失败(池子可能偏小): {e}')
 
-        # 并入今日 unified_selection(09:45 综合选股)的 TOP 选股 —— 让早盘多因子/主力选出的候选
-        # 也走"策略命中 → AI 深析 → 推荐池 + 决策信号"全流程被追踪(此前它们只零成本到期了结)。
-        try:
-            _us_added = 0
-            for _c in _last_selection_picks():
-                if _c and _c not in pool:
-                    pool[_c] = ''
-                    _us_added += 1
-            if _us_added:
-                print(f'[wf_daily_strategy_scan] 并入 unified_selection 今日选股 {_us_added} 只')
-        except Exception as e:
-            print(f'[wf_daily_strategy_scan] unified_selection 池并入失败: {e}')
-
         if not pool:
             _log_run(job, 'success', error='empty_pool',
                      started_at=started, finished_at=datetime.now().isoformat())
@@ -3138,8 +3141,10 @@ def _daily_strategy_scan():
 
         # 2. 对池内逐只跑 InStock 13 策略(基因组最优参数 + 组合新策略)
         from instock_strategy_runner import run_one
+        from analysis.strategy_genome import get_live_strategy_set
         from stock_data import StockDataFetcher
         fetcher = StockDataFetcher()
+        live_set = get_live_strategy_set() or {}
 
         scan_results = []
         scan_pool = list(pool.items())
@@ -3152,7 +3157,7 @@ def _daily_strategy_scan():
                 if df is None or len(df) == 0:
                     scan_fail += 1
                     continue
-                r = run_one(code, df, name=name, evolved=True)
+                r = run_one(code, df, name=name, evolved=True, live_set=live_set)
                 if r['matched_count'] > 0:
                     scan_results.append(r)
             except Exception as _e:
@@ -3291,8 +3296,7 @@ def _safe_float(v):
 
 
 def _daily_candidate_pool():
-    """🔗 工作流 E：每日扫候选池 (你的个人策略口味)
-    （2026-06-12 整合:并入 unified_selection 之后执行,不再独立调度;开关 wf_daily_candidate_pool 仍有效）
+    """🧪 个人口味候选实验（仅手动，不属于正式选股链）。
 
     筛选条件 (来自 user_strategy_config，可在 UI 调)：
       价格 ≤ price_max (默认 20 元)
@@ -3652,7 +3656,7 @@ def task_factor_collection():
 
 
 def task_research_data_sync():
-    """盘后同步全市场本地研究快照；次日选股只读本地仓。"""
+    """盘后同步全市场本地研究快照，并在新行情入库后更新正式选股后验。"""
     job = 'research_data_sync'
     if _skip_if_not_trading(job):
         return
@@ -3669,6 +3673,14 @@ def task_research_data_sync():
             f"master={master.get('rows', 0)} "
             f"fund_flow={result.get('fund_flow_rows', 0)}"
         )
+        if status == 'success':
+            try:
+                outcome = syncer.store.update_selection_candidate_outcomes()
+                detail += (f" outcomes={outcome.get('updated', 0)}"
+                           f" pending={outcome.get('pending', 0)}")
+            except Exception as outcome_error:
+                status = 'error'
+                detail += f" outcome_error={type(outcome_error).__name__}"
         _log_run(job, status, error=None if status == 'success' else detail,
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
@@ -3677,7 +3689,7 @@ def task_research_data_sync():
 
 
 def task_weekly_backtest():
-    """🔗 工作流 C：周日晚 InStock 10 策略回测 → 推送"最有效策略"周报
+    """🔗 工作流 C：周日晚 InStock 13 策略回测 → 推送"最有效策略"周报
 
     池：持仓 + 强势股 TOP 20（轻量化避免太重）
     每只跑 10 套策略过去 30 天回测，汇总胜率 → 推送 TOP 5 策略
@@ -3766,7 +3778,7 @@ def task_weekly_backtest():
 
         # 3. 按胜率排序 + 推送
         results.sort(key=lambda x: (x['win_rate'], x['avg_ret_pct']), reverse=True)
-        lines = [f'📊 InStock 10 策略 30 天回测周报 — {end_date}',
+        lines = [f'📊 InStock 13 策略 30 天回测周报 — {end_date}',
                  f'股票池: {len(stocks)} 只  期间: {start_date} ~ {end_date}  持有: 10 天', '']
         if results:
             lines.append('━━━ 最有效策略 TOP 5(含8%止损/15%止盈纪律对比)━━━')
@@ -4182,6 +4194,35 @@ _WENCAI_SOURCE_LABELS = {
     '低估值': '问财·低估值',
 }
 
+_WENCAI_STRATEGY_IDS = {
+    '主力资金': 'wencai_main_force',
+    '低价擒牛': 'wencai_low_price',
+    '小市值': 'wencai_small_cap',
+    '净利增长': 'wencai_profit_growth',
+    '低估值': 'wencai_value',
+}
+
+_WENCAI_DEFINITION_TARGETS = {
+    '主力资金': ('main_force_selector', 'MainForceStockSelector', 'get_main_force_stocks'),
+    **{name: (module, class_name, method) for name, module, class_name, method
+       in _WENCAI_PREFETCH_JOBS},
+}
+
+
+def _wencai_definition_hash(strategy_name: str) -> str:
+    """Fingerprint actual selector implementation without pretending it is one fixed query."""
+    import hashlib
+    import inspect
+    target = _WENCAI_DEFINITION_TARGETS.get(strategy_name)
+    identity = ':'.join(target or (strategy_name, 'unknown'))
+    try:
+        module_name, class_name, method_name = target
+        method = getattr(getattr(__import__(module_name), class_name), method_name)
+        identity += ':' + inspect.getsource(method)
+    except Exception:
+        pass
+    return hashlib.sha256(identity.encode('utf-8')).hexdigest()
+
 
 def _prefetch_main_force(*, use_cache: bool, log_job: str) -> int:
     """预取问财主力资金，成功返回 1。
@@ -4329,10 +4370,16 @@ def task_unified_selection():
             'strategies': {},
             'reference_affects_membership': False,
         }
+        wencai_nominations = []
         for sname, (ok, df, msg) in strategy_scan.get('results', {}).items():
             strategy_picks = []
+            strategy_id = _WENCAI_STRATEGY_IDS.get(
+                sname, 'wencai_' + str(sname).strip().lower().replace(' ', '_')
+            )
+            definition_hash = _wencai_definition_hash(sname)
+            strategy_version = f'{wencai_strategy_runs["version"]}:{definition_hash[:12]}'
             if ok and df is not None:
-                for _, row in df.iterrows():
+                for rank, (_, row) in enumerate(df.iterrows(), 1):
                     code = next((row[c] for c in ['股票代码', 'code', 'symbol'] if c in row.index), None)
                     if code:
                         pick = {
@@ -4341,7 +4388,18 @@ def task_unified_selection():
                         }
                         wencai_reference.append(pick)
                         strategy_picks.append(pick)
+                        wencai_nominations.append({
+                            'symbol': code, 'lane': 'reference',
+                            'strategy_id': strategy_id,
+                            'strategy_version': strategy_version,
+                            'lane_rank': rank, 'lane_score_raw': 0,
+                            'priority_weight': 0,
+                            'evidence': {'source': 'wencai', 'reference_only': True},
+                        })
             wencai_strategy_runs['strategies'][sname] = {
+                'strategy_id': strategy_id,
+                'strategy_version': strategy_version,
+                'definition_hash': definition_hash,
                 'status': 'ready' if ok else 'failed',
                 'message': str(msg or '')[:300],
                 'picks': _normalize_reference(strategy_picks),
@@ -4357,6 +4415,16 @@ def task_unified_selection():
             selector.store.save_selection_artifact(
                 local_result.get('run_id'), 'wencai_strategy_runs', wencai_strategy_runs
             )
+            if wencai_nominations:
+                fusion_policy = local_result.get('metadata', {}).get('fusion_policy') or {}
+                selector.store.save_selection_strategy_records(
+                    local_result.get('run_id'), wencai_nominations,
+                    policy=fusion_policy,
+                    policy_hash=str(local_result.get('metadata', {}).get('policy_hash') or ''),
+                    selection_date=str(local_result.get('selection_date') or ''),
+                    input_snapshot_id=str(local_result.get('metadata', {}).get('snapshot_id') or ''),
+                    persist_policy=False,
+                )
         except Exception as _are:
             print(f'[unified_selection] 问财参考保存失败(不影响本地主链): '
                   f'{type(_are).__name__}')
@@ -4409,11 +4477,16 @@ def task_unified_selection():
         except Exception:
             name_map = {}
 
-        # 红蓝对抗整合(2026-06-24):上午不再单独推一条,TOP10 的多空对抗结论直接并进本表
+        formal_top5_codes = [
+            str(row.get('symbol') or row.get('code') or '')
+            for row in (local_result.get('formal_top5') or [])
+            if row.get('symbol') or row.get('code')
+        ]
+
+        # 红蓝对抗只复核权威 TOP5，结论直接并进展示，不改变任何正式成员或顺序。
         # (妙想第二意见 10:30 仍独立)。best-effort:LLM 挂了红蓝列留空,不影响选股表;
         # 决策信号在此写(record_signals=True),原 selection_debate 独立任务因此跳过不重复。
-        # ⚡ 整体超时护栏(2026-06-25 修):红蓝是 10 只 LLM,外网/LLM 挂时会拖很久 → 套 6min 硬超时,
-        # 超了放弃红蓝(表格红蓝列留空),**保住选股核心先推出去**,不让 unified 被红蓝拖到 1800s 超时崩。
+        # TOP5 仍设整体硬超时；外网/LLM 异常时放弃复核，优先发布正式本地结果。
         debate_map = {}
         try:
             from selection_debate import run_selection_debate
@@ -4421,7 +4494,10 @@ def task_unified_selection():
             # shutdown(wait=True) 等 worker 跑完 → 护栏形同虚设(红蓝卡死照样拖满 1800s)。
             # 改走 _call_with_hard_timeout(常驻池+不 join,孤儿线程留给底层自然结束;2026-07-16 修)。
             _dres = _call_with_hard_timeout(
-                '红蓝对抗', lambda: run_selection_debate(top_list[:10], 10, False), timeout=360)
+                '红蓝对抗',
+                lambda: run_selection_debate(formal_top5_codes, len(formal_top5_codes), False),
+                timeout=240,
+            )
             for _it in (_dres.get('items') or []):
                 debate_map[str(_it.get('code'))] = _it
         except Exception as _de:
@@ -4484,7 +4560,7 @@ def task_unified_selection():
 
         # 红蓝对抗速览(结论先行):被否决的直接点名"避开"
         if debate_map:
-            _rej = [debate_map[c] for c in top_list[:10]
+            _rej = [debate_map[c] for c in formal_top5_codes
                     if debate_map.get(c, {}).get('verdict') == '否决']
             _pass_n = sum(1 for v in debate_map.values() if v.get('verdict') == '买入')
             body += (f'\n\n⚔️ 红蓝对抗:{_pass_n} 只可买、{len(_rej)} 只建议避开')
@@ -4557,7 +4633,7 @@ def task_unified_selection():
                     'local_state': cinfo.get('state'),
                     'data_coverage': cinfo.get('data_coverage'),
                 })
-            persisted = selector.store.latest_selection() or {}
+            persisted = selector.store.latest_formal_selection() or {}
             if str(persisted.get('run_id') or '') != str(local_result.get('run_id') or ''):
                 raise RuntimeError('formal selection artifact does not match local run')
             artifacts = persisted.get('artifacts') or {}
@@ -4601,7 +4677,7 @@ def task_unified_selection():
             print(f'[unified_selection] 最终TOP5生成/保存失败(不影响TOP15): '
                   f'{type(_fe).__name__}: {str(_fe)[:80]}')
 
-        # ── 选股战绩闭环(2026-06-12):TOP10 入推荐池记录(不启监控,零成本) ──
+        # ── 兼容战绩闭环：正式 TOP15 入推荐池记录(不启监控,零成本) ──
         # ai_eval_weekly 每周按 source 算真实胜率 → _source_feedback 反哺门槛。
         # 此前 TOP15 发完即消失,没人知道综合选股的真实命中率。开关 wf_selection_to_rec(默认开)。
         try:
@@ -4611,7 +4687,7 @@ def task_unified_selection():
                 rec_n = 0
                 rec_fail = 0
                 _rec_err = None
-                for code in top_list[:10]:
+                for code in top_list:
                     if code in held_codes:
                         continue  # 已持仓的不算"新推荐"
                     q = (quotes_cache.get(code) or quotes_cache.get(str(code)[-6:]) or {})
@@ -4622,8 +4698,9 @@ def task_unified_selection():
                             source='unified_selection', rating='candidate',
                             confidence='中',
                             ref_price=_safe_float(q.get('price')),
-                            reason=('综合选股 分' + str(round(cinfo.get('score', 0), 1))
-                                    + ' 来源:' + '/'.join(cinfo.get('src', []))[:120]),
+                            reason=(str(cinfo.get('assigned_lane') or 'formal') + '赛道 '
+                                    + str(cinfo.get('primary_strategy_name') or '本地融合')
+                                    + ' 分' + str(round(cinfo.get('score', 0), 1))),
                         )
                         if rid:
                             rec_n += 1
@@ -4647,8 +4724,9 @@ def task_unified_selection():
                             source='unified_selection_final', rating='candidate',
                             confidence='中',
                             ref_price=_safe_float(row.get('price')),
-                            reason=('本地PIT最终优选 分'
-                                    + str(round(row.get('final_score', 0), 1))
+                            reason=('正式本地融合TOP5 '
+                                    + str(row.get('assigned_lane') or 'formal') + '赛道 '
+                                    + str(row.get('primary_strategy_name') or '')
                                     + ' 规则版本:' + str(row.get('rule_version') or '')),
                         )
                         if rid:
@@ -4700,16 +4778,9 @@ def task_unified_selection():
                  started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:
-        # Keep the optional candidate-pool fallback below, but propagate the
-        # formal-chain failure to _run_with_log so scheduler output/job_runs can
-        # never report a false success.
+        # Propagate formal-chain failure so scheduler output/job_runs can never
+        # report a false success. External/manual experiments are not fallbacks.
         main_error = e
-
-    # ── 个人口味候选池（原 wf_daily_candidate_pool,开关控制,默认开）──
-    try:
-        _daily_candidate_pool()
-    except Exception as e:
-        print(f'[unified_selection] 候选池子任务失败: {e}')
     if main_error is not None:
         raise main_error
 
@@ -5248,7 +5319,7 @@ def task_exit_advice():
 
 
 def task_mx_selection_review():
-    """🆕 选股结果过妙想——对 unified_selection TOP 逐个过妙想诊断"""
+    """妙想外部参考：五组参考选股 + 对正式 TOP5 的逐股诊断。"""
     job = 'mx_selection_review'
     if _skip_if_not_trading(job):
         return
@@ -5259,22 +5330,74 @@ def task_mx_selection_review():
         return
     started = datetime.now().isoformat()
     try:
-        # 读缓存的选股结果(统一走 _last_selection_picks,修复原 snap.get('indicators') 死分支)
-        top_list = _last_selection_picks()
+        formal_rows = _formal_selection_rows('top5')
+        top_list = [
+            str(row.get('code') or row.get('symbol') or '') for row in formal_rows
+            if row.get('code') or row.get('symbol')
+        ]
 
         if not top_list:
             _log_run(job, 'success', error='no selection cache', started_at=started,
                      finished_at=datetime.now().isoformat())
             return
 
+        # 五组妙想选股与逐股诊断都只作参考，失败不会影响正式产物。
+        mx_strategy_runs = {
+            'version': 'miaoxiang-reference-v2',
+            'executed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'strategies': {}, 'reference_affects_membership': False,
+        }
+        mx_nominations = []
+        try:
+            import hashlib as _mx_hashlib
+            from selection.mx_strategies import MX_STRATEGIES, run_all as run_mx_strategies
+            mx_results = _call_with_hard_timeout(
+                '妙想五策略参考', lambda: run_mx_strategies(use_cache=True, top_n=5), 180
+            )
+            query_by_name = {name: query for name, query, _ in MX_STRATEGIES}
+            for strategy_name, (ok, frame, message) in mx_results.items():
+                strategy_id = 'miaoxiang_' + strategy_name.replace('妙想·', '')
+                query_hash = _mx_hashlib.sha256(
+                    str(query_by_name.get(strategy_name) or '').encode('utf-8')
+                ).hexdigest()
+                strategy_version = f'{mx_strategy_runs["version"]}:{query_hash[:12]}'
+                picks = []
+                if ok and frame is not None:
+                    for rank, (_, row) in enumerate(frame.iterrows(), 1):
+                        code = next((row[key] for key in ('代码', '股票代码', 'code', 'symbol')
+                                     if key in row.index), None)
+                        if not code:
+                            continue
+                        name = next((row[key] for key in ('名称', '股票简称', 'name')
+                                     if key in row.index), '')
+                        picks.append({'symbol': str(code), 'name': str(name or '')})
+                        mx_nominations.append({
+                            'symbol': str(code), 'lane': 'reference',
+                            'strategy_id': strategy_id,
+                            'strategy_version': strategy_version,
+                            'lane_rank': rank, 'lane_score_raw': 0, 'priority_weight': 0,
+                            'evidence': {'source': 'miaoxiang', 'reference_only': True},
+                        })
+                mx_strategy_runs['strategies'][strategy_name] = {
+                    'strategy_id': strategy_id,
+                    'strategy_version': strategy_version,
+                    'query_hash': query_hash,
+                    'status': 'ready' if ok else 'failed',
+                    'message': str(message or '')[:300], 'picks': picks,
+                }
+        except Exception as strategy_error:
+            mx_strategy_runs['error'] = (
+                f'{type(strategy_error).__name__}: {str(strategy_error)[:120]}'
+            )
+
         from analysis.miaoxiang import stock_diagnosis
         try:
-            name_map = datahub.stock_names(top_list[:10])
+            name_map = datahub.stock_names(top_list)
         except Exception:
             name_map = {}
 
         agree, watch, avoid, detail, review_rows = [], [], [], [], []
-        for code in top_list[:10]:
+        for code in top_list:
             nm = name_map.get(code) or code
             try:
                 result = stock_diagnosis(code)
@@ -5302,14 +5425,26 @@ def task_mx_selection_review():
             from research_store import ResearchStore
             formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
             if formal.get('run_id'):
-                ResearchStore(ensure_schema=False).save_selection_artifact(
-                    formal['run_id'], 'miaoxiang_review', {
+                store = ResearchStore(ensure_schema=False)
+                store.save_selection_artifact(formal['run_id'], 'miaoxiang_review', {
                         'version': 'miaoxiang-reference-v1',
                         'executed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                         'rows': review_rows,
                         'reference_affects_membership': False,
-                    }
+                    })
+                store.save_selection_artifact(
+                    formal['run_id'], 'miaoxiang_strategy_runs', mx_strategy_runs
                 )
+                if mx_nominations:
+                    metadata = formal.get('metadata') or {}
+                    store.save_selection_strategy_records(
+                        formal['run_id'], mx_nominations,
+                        policy=metadata.get('fusion_policy') or {},
+                        policy_hash=str(metadata.get('policy_hash') or ''),
+                        selection_date=str(formal.get('selection_date') or ''),
+                        input_snapshot_id=str(metadata.get('snapshot_id') or ''),
+                        persist_policy=False,
+                    )
         except Exception as artifact_error:
             print(f'[mx_selection_review] 妙想参考附件保存跳过: {type(artifact_error).__name__}')
 
@@ -5325,6 +5460,7 @@ def task_mx_selection_review():
             _push_daily('🔍 妙想第二意见', head + '\n' + '\n'.join(detail))
         _log_run(job, 'success',
                  error=f'买入{len(agree)}/观望{len(watch)}/规避{len(avoid)}'
+                       f'/妙想策略{sum(1 for row in mx_strategy_runs["strategies"].values() if row.get("status") == "ready")}/5'
                        + ('(分歧已推)' if avoid else '(一致,未推)'),
                  started_at=started, finished_at=datetime.now().isoformat())
 
@@ -5702,9 +5838,9 @@ def register_default_jobs():
       08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:15/09:30 strategy_prefetch     — 问财外部参考首取 / 仅补缓存缺口
-      09:45 unified_selection           — 本地 PIT 选股主链；问财只对照，尾接红蓝复核
+      09:45 unified_selection           — 本地多赛道正式选股；问财只对照，红蓝只复核TOP5
       10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
-      10:30 mx_selection_review         — unified_selection 成功后过妙想诊断(D:分歧才推) + 急跌兜底
+      10:30 mx_selection_review         — 妙想五组参考 + 正式TOP5诊断(D:分歧才推) + 急跌兜底
       11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
       12:00 noon_report                 — 📊 午盘简报(大盘)
       14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
@@ -5715,7 +5851,7 @@ def register_default_jobs():
       16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(prefetch 成功后提交;次日早盘读它)
       16:48 daily_market_snapshot       — 📷 大盘快照
       16:55 eod_outcomes                — 🎯 盘后后验合并(prefetch 成功后提交:推荐池回填+信号后验)
-      17:10 research_data_sync          — 🗄️ 全市场日线/估值/PIT 财务写本地研究仓
+      17:10 research_data_sync          — 🗄️ 全市场日线/估值/PIT 财务入仓后更新正式选股后验
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
       19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
@@ -5736,8 +5872,9 @@ def register_default_jobs():
         chan_scan(快照+早盘)、portfolio_risk/daily_pattern_alert(快照尾部)、
         multi_factor_screen(unified_selection 同缓存)、weekly_portfolio_report/
         weekly_portfolio_analysis(weekly_analysis)。
-      改为子流程(开关仍有效): _daily_strategy_scan、_daily_candidate_pool、
+      改为子流程(开关仍有效): _daily_strategy_scan、
         _position_profit_check、_position_guard_check。
+      _daily_candidate_pool 已改为只供手动实验，不再接在正式选股尾部。
       2026-06-12 二轮: morning_pnl(08:50昨日收益)并入 morning_strategy 模块D;
         持仓扫描改读盘后快照(不再逐只拉K线);AI 加 lazy_summary 口语化一句话。
     """

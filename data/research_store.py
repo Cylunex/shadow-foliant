@@ -2101,19 +2101,36 @@ class ResearchStore:
 
     def update_selection_candidate_outcomes(
             self, *, horizons: Sequence[int] = (1, 3, 5, 10, 20),
-            limit: int = 2000) -> dict:
-        """Mature nomination outcomes with next-trading-day-open entry semantics."""
+            limit: int = 10000) -> dict:
+        """Mature incomplete nomination outcomes with next-open entry semantics.
+
+        Fully matured nominations are excluded before applying ``limit``. This keeps
+        the 20-day horizon reachable as producer/reference strategies add more rows.
+        """
         wanted = sorted({max(1, int(value)) for value in horizons})
         conn = self.connect()
         updated = 0
         pending = 0
         try:
             cur = conn.cursor()
+            horizon_placeholders = ",".join("?" for _ in wanted)
             cur.execute(
-                """SELECT n.nomination_id,n.symbol,r.data_as_of
-                   FROM selection_candidate_nominations n
-                   JOIN selection_strategy_runs r ON r.strategy_run_id=n.strategy_run_id
-                   ORDER BY n.created_at DESC LIMIT ?""", (max(1, int(limit)),),
+                f"""SELECT n.nomination_id,n.symbol,r.data_as_of
+                    FROM selection_candidate_nominations n
+                    JOIN selection_strategy_runs r ON r.strategy_run_id=n.strategy_run_id
+                    WHERE EXISTS (
+                              SELECT 1 FROM research_daily_bars b
+                              WHERE b.symbol=n.symbol AND b.trade_date>r.data_as_of
+                                AND b.adjustment='qfq'
+                                AND b.quality_status NOT IN ('unknown_unit','failed')
+                          )
+                      AND (SELECT COUNT(DISTINCT o.horizon_days)
+                           FROM selection_candidate_outcomes o
+                           WHERE o.nomination_id=n.nomination_id
+                             AND o.outcome_status='matured'
+                             AND o.horizon_days IN ({horizon_placeholders})) < ?
+                    ORDER BY n.created_at ASC LIMIT ?""",
+                (*wanted, len(wanted), max(1, int(limit))),
             )
             nominations = list(cur.fetchall())
             now = datetime.now().astimezone().isoformat()

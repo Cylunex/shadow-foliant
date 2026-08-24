@@ -387,20 +387,16 @@ def run_daily_wrap() -> Optional[str]:
         """)
         hold_items = [(r[0], int(r[1]), r[2]) for r in cur.fetchall() if r[0]]
 
-        # 2. 今日选股(从 unified_selection 缓存)
-        # ⚠️ 修正:indicator_snapshots 真实列是 symbol/snapshot_date/indicators(无 data/indicator_key 列);
-        #    且 indicators 列存的就是 {'picks':[...]} 本身。原 SQL 必抛列不存在被静默吞 → top_picks 恒空。
+        # 2. 今日正式 TOP5。追加式 selection_artifacts 是唯一权威源；展示快照不可回退成输入。
         try:
-            cur.execute("""
-                SELECT indicators FROM indicator_snapshots
-                WHERE symbol = '_last_selection'
-                ORDER BY snapshot_date DESC LIMIT 1
-            """)
-            row = cur.fetchone()
-            if row and row[0]:
-                blob = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                picks = blob.get('picks') if isinstance(blob, dict) else blob
-                top_picks = picks[:10] if isinstance(picks, list) else []
+            from data.research_store import ResearchStore
+            formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+            if str(formal.get('selection_date') or '')[:10] == datetime.now().strftime('%Y-%m-%d'):
+                rows = ((formal.get('artifacts') or {}).get('formal_top5') or {}).get('payload') or []
+                top_picks = [
+                    str(item.get('code') or item.get('symbol') or '') for item in rows
+                    if item.get('code') or item.get('symbol')
+                ]
         except Exception:
             pass
 

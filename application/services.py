@@ -473,7 +473,54 @@ class SelectionRunService:
             policy_hash=metadata.get("policy_hash"),
             code_revision=context.get("code_revision"),
         )
-        candidates = latest.get("candidates") or []
+        top15 = (artifacts.get("formal_top15") or {}).get("payload") or []
+        top5 = (artifacts.get("formal_top5") or {}).get("payload") or []
+        overlay = (artifacts.get("display_overlay") or {}).get("payload") or []
+        ai_review = (artifacts.get("ai_review") or {}).get("payload") or []
+        overlay_by_symbol = {
+            str(row.get("symbol") or row.get("code") or ""): row
+            for row in overlay if isinstance(row, dict)
+        }
+        review_by_symbol = {
+            str(row.get("symbol") or row.get("code") or ""): row
+            for row in ai_review if isinstance(row, dict)
+        }
+
+        def decorate(rows):
+            return [{
+                **overlay_by_symbol.get(str(row.get("symbol") or row.get("code") or ""), {}),
+                **review_by_symbol.get(str(row.get("symbol") or row.get("code") or ""), {}),
+                **row,
+            } for row in rows if isinstance(row, dict)]
+
+        candidates = decorate(top15)
+        final_candidates = decorate(top5)
+        references = {
+            "wencai": (artifacts.get("wencai_strategy_runs") or {}).get("payload") or {},
+            "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},
+            "miaoxiang_review": (artifacts.get("miaoxiang_review") or {}).get("payload") or {},
+        }
+        strategy_inputs = {
+            "local_strategies": (
+                (artifacts.get("local_strategy_nominations") or {}).get("payload") or {}
+            ),
+            "technical_genome": (
+                (artifacts.get("genome_nominations") or {}).get("payload") or {}
+            ),
+            "fusion_policy": (artifacts.get("fusion_policy") or {}).get("payload") or {},
+        }
+        payload = {
+            "selection_date": latest.get("selection_date"),
+            "candidates": candidates,
+            "formal_top15": candidates,
+            "formal_top5": final_candidates,
+            "final_candidates": final_candidates,
+            "lane_counts": metadata.get("lane_counts") or {},
+            "strategy_inputs": strategy_inputs,
+            "references": references,
+            "comparison": latest.get("comparison") or {},
+            "formal": True,
+        }
         return tool_result(
             summary=(f"Formal SelectionRun {run_id} contains {len(candidates)} candidates for "
                      f"{latest.get('selection_date')}."),
@@ -481,18 +528,8 @@ class SelectionRunService:
             status="degraded" if warnings else "complete",
             provenance_value=prov,
             warnings=warnings,
-            data={
-                "selection_date": latest.get("selection_date"),
-                "candidates": candidates[:15],
-                "comparison": latest.get("comparison") or {},
-                "formal": True,
-            },
-            model_payload={
-                "selection_date": latest.get("selection_date"),
-                "candidates": candidates[:15],
-                "comparison": latest.get("comparison") or {},
-                "formal": True,
-            },
+            data=payload,
+            model_payload=payload,
         )
 
     def create_preview(self, *, selection_date: str | None, decision_mode: str,

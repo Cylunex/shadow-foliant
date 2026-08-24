@@ -1,12 +1,7 @@
-"""妙想智能选股的「5 大策略镜像」—— 与问财 5 策略一一对应的自然语言查询,作**非问财冗余源**。
+"""妙想智能选股的五组外部参考策略。
 
-走妙想 selectSecurity 海选(analysis/miaoxiang.screen),结果入 strategy_cache 当日缓存
-(盘前 strategy_prefetch 预取 + 09:45 unified_selection 读暖,与问财策略同机制、同避高峰)。
-
-设计:source 名带「妙想·」前缀,与问财源(主力资金/低价擒牛…)区分 → 同一只票若问财源 + 妙想源
-都命中,在 unified 的 _add 里得 +2 分、命中 2 source → 排序靠前(**双源交叉验证 = 更可信**)。
-问财熔断时妙想这 5 条仍能出候选,整层选股不至于因单一数据源(问财)挂掉而哑火。
-查询可按需调整(改这里即可;缓存按 name 键,改查询次日生效或 use_cache=False 立即生效)。
+结果只用于发现、对照与后验评估，不得进入本地正式候选，也不得改变 TOP15/TOP5
+成员或顺序。缓存按策略名保存；查询变化通过 query_hash 留痕。
 """
 
 # (缓存名/source 标签, 妙想自然语言查询, select_type)
@@ -53,9 +48,9 @@ def run_one(name: str, query: str, select_type: str = 'A股',
         return False, None, f'{name} 缓存异常: {type(e).__name__}: {str(e)[:50]}'
 
 
-def run_all(use_cache: bool = True) -> dict:
-    """跑全部 5 条妙想策略 → {name: (ok, df, msg)}。供 unified_selection 并池。"""
+def run_all(use_cache: bool = True, top_n: int = 5) -> dict:
+    """跑全部五条参考策略 → ``{name: (ok, df, msg)}``。"""
     out = {}
     for name, query, st in MX_STRATEGIES:
-        out[name] = run_one(name, query, st, use_cache=use_cache)
+        out[name] = run_one(name, query, st, use_cache=use_cache, top_n=top_n)
     return out

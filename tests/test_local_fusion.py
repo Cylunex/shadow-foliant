@@ -168,6 +168,9 @@ class SelectionOutcomeTest(unittest.TestCase):
             store.upsert_daily_bars(bars)
             result = store.update_selection_candidate_outcomes(horizons=(1, 5))
             self.assertEqual(result["updated"], 2)
+            repeated = store.update_selection_candidate_outcomes(horizons=(1, 5))
+            self.assertEqual(repeated["updated"], 0)
+            self.assertEqual(repeated["nomination_count"], 0)
             evidence = store.selection_strategy_evidence(horizon_days=5, lookback_days=3650)
             row = evidence["strategies"][0]
             self.assertEqual(row["strategy_id"], "local_value_v2")

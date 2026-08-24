@@ -888,7 +888,7 @@ def task_runs(task_name: str = '', limit: int = 30) -> Dict[str, Any]:
 
 @mcp.tool()
 def latest_selection() -> Dict[str, Any]:
-    """读取最近一次综合选股 TOP15 及二次优选 final_picks/final_rows；不现算、不拉源。"""
+    """读取权威本地融合 TOP15/TOP5、三条本地赛道与外部参考；不现算、不拉源。"""
     from application.runtime import get_application_services
     return get_application_services().selection.latest_formal()
 

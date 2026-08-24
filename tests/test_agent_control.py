@@ -131,7 +131,7 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(
             REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])
 
-    def test_formal_selection_failure_is_propagated_after_fallback(self):
+    def test_formal_selection_failure_does_not_run_external_candidate_fallback(self):
         with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
                 mock.patch(
                     'data.research_sync.ResearchSynchronizer.sync_calendar',
@@ -140,8 +140,30 @@ class ScheduledDependencyTests(unittest.TestCase):
                 mock.patch.object(jobs_hub, '_log_run') as log_run:
             with self.assertRaisesRegex(ValueError, 'bad calendar'):
                 jobs_hub.task_unified_selection()
-        fallback.assert_called_once_with()
+        fallback.assert_not_called()
         log_run.assert_not_called()
+
+    def test_scheduled_consumers_read_today_formal_artifacts_only(self):
+        formal = {
+            'selection_date': datetime.now().strftime('%Y-%m-%d'),
+            'artifacts': {
+                'formal_top15': {'payload': [
+                    {'code': '600001', 'rank': 1, 'assigned_lane': 'core'},
+                    {'code': '600002', 'rank': 2, 'assigned_lane': 'satellite'},
+                ]},
+                'formal_top5': {'payload': [
+                    {'code': '600002', 'rank': 1, 'assigned_lane': 'satellite'},
+                ]},
+                'display_overlay': {'payload': [
+                    {'code': '600001', 'name': '甲'}, {'code': '600002', 'name': '乙'},
+                ]},
+            },
+        }
+        with mock.patch('data.research_store.ResearchStore') as store_type:
+            store_type.return_value.latest_formal_selection.return_value = formal
+            self.assertEqual(jobs_hub._last_selection_picks(), ['600001', '600002'])
+            self.assertEqual(jobs_hub._last_selection_picks('top5'), ['600002'])
+            self.assertEqual(jobs_hub._formal_selection_rows('top5')[0]['name'], '乙')
 
     def test_naive_job_timestamp_is_stored_as_shanghai_time(self):
         normalized = jobs_hub._normalize_run_timestamp('2026-08-17T16:30:00')

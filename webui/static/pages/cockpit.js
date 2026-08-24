@@ -44,7 +44,7 @@ export default {
 
     <section class="card">
       <div class="section-head">
-        <div><h2>最终优选 TOP5</h2><p>从完整 TOP15 中叠加技术结构、红蓝证伪、追高风险和组合集中度后优中选优</p></div>
+        <div><h2>最终优选 TOP5</h2><p>由本地融合独立配额确定；红蓝、问财和妙想只作复核，不改变名单</p></div>
         <span class="badge" :class="selectionStatus==='success'?'success':'warning'">{{selectionDate||'等待选股'}}</span>
       </div>
       <div v-if="finalRows.length" class="pick-grid">
@@ -55,7 +55,7 @@ export default {
           <div class="pick-score">{{fmt(r.final_score)}}<small>优选分</small></div>
           <div class="pick-tags">
             <span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'规则优选'}}</span>
-            <span v-if="r.source_count" class="pill">{{r.source_count}} 源共振</span>
+            <span class="pill">{{laneText(r.assigned_lane)}}</span>
           </div>
           <div class="pick-reason">{{r.final_reason||'等待结构化优选依据'}}</div>
         </article>
@@ -66,16 +66,16 @@ export default {
     <div class="dashboard-grid">
       <section class="card">
         <div class="section-head">
-          <div><h2>综合选股 TOP15</h2><p>完整候选继续保留，用于复核来源、分数和市场表现</p></div>
+          <div><h2>综合选股 TOP15</h2><p>唯一正式候选集，用于盘中复核、盘后扫描和后验评估</p></div>
           <button class="ghost" @click="go('screen')">进入选股中心</button>
         </div>
         <div v-if="topRows.length" class="table-wrap">
-          <table><thead><tr><th>#</th><th>代码 / 名称</th><th>评分</th><th>现价</th><th>涨跌</th><th>红蓝结论</th><th>来源</th></tr></thead>
+          <table><thead><tr><th>#</th><th>代码 / 名称</th><th>赛道分</th><th>现价</th><th>涨跌</th><th>红蓝参考</th><th>正式赛道</th></tr></thead>
           <tbody><tr v-for="r in topRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer">
             <td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td>
             <td>{{fmt(r.score)}}</td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td>
             <td><span class="badge" :class="debateClass(r.debate_verdict)">{{r.debate_verdict||'—'}}</span></td>
-            <td style="text-align:left">{{(r.sources||[]).join(' / ')||'—'}}</td>
+            <td style="text-align:left">{{laneText(r.assigned_lane)}} · {{r.primary_strategy_name||'本地PIT'}}</td>
           </tr></tbody></table>
         </div>
         <div v-else class="empty-state">暂无 TOP15 结构化产物。</div>
@@ -160,6 +160,7 @@ export default {
     const statusText=v=>STATUS_CN[v]||v||'暂无记录'
     const runDot=j=>{const x=effectiveRun(j)?.status;return ['queued','running'].includes(x)?'running':FINAL_BAD.has(x)?'offline':'ready'}
     const debateClass=v=>String(v||'').includes('否决')?'danger':String(v||'').includes('谨慎')?'warning':'success'
+    const laneText=v=>({core:'PIT核心',satellite:'本地策略',timing:'技术基因组'}[v]||v||'本地')
     const actionClass=v=>['buy','add'].includes(String(v||'').toLowerCase())?'market-buy':['sell','reduce','avoid'].includes(String(v||'').toLowerCase())?'market-sell':'info'
     const ratingClass=v=>String(v||'').includes('买')?'market-buy':String(v||'').includes('卖')?'market-sell':'info'
     const signed=v=>v==null?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`
@@ -176,6 +177,6 @@ export default {
     onMounted(()=>{load();timer=setInterval(()=>{if(!document.hidden)load()},60000)})
     onUnmounted(()=>{if(timer)clearInterval(timer)})
     return {s,d,finalRows,topRows,selectionDate,selectionStatus,revision,warnings,policyTitle,policyReason,
-      effectiveRun,dependencyRows,runningJobs,statusText,runDot,debateClass,actionClass,ratingClass,signed,go,openStock,load,cls,fmt}
+      effectiveRun,dependencyRows,runningJobs,statusText,runDot,debateClass,laneText,actionClass,ratingClass,signed,go,openStock,load,cls,fmt}
   }
 }

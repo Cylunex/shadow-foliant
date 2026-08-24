@@ -682,6 +682,24 @@ class LocalStockSelector:
         }
         if persist:
             run["run_id"] = self.store.save_selection(run, candidates, reference)
+            formal_memberships = []
+            for strategy_id, strategy_name, rows in (
+                ("formal_local_fusion_top15", "正式本地融合TOP15", candidates),
+                ("formal_local_fusion_top5", "正式本地融合TOP5", formal_top5_candidates),
+            ):
+                for rank, row in enumerate(rows, 1):
+                    formal_memberships.append({
+                        "symbol": row.get("symbol"), "lane": "formal",
+                        "strategy_id": strategy_id, "strategy_name": strategy_name,
+                        "strategy_version": fusion_policy.version, "lane_rank": rank,
+                        "lane_score_raw": row.get("lane_score_raw", row.get("total_score", 0)),
+                        "priority_weight": 1.0,
+                        "evidence": {
+                            "assigned_lane": row.get("assigned_lane"),
+                            "primary_strategy": row.get("primary_strategy"),
+                            "supporting_nominations": row.get("supporting_nominations") or [],
+                        },
+                    })
             eligible_symbols = sorted(eligible_scored["symbol"].astype(str).tolist())
             eligible_payload = {
                 "snapshot_id": hashlib.sha256(json.dumps(
@@ -701,12 +719,13 @@ class LocalStockSelector:
                 ("local_strategy_nominations", local_strategy_reference),
                 ("genome_nominations", genome_result),
                 ("candidate_nominations", fusion["nominations"]),
+                ("formal_membership_nominations", formal_memberships),
                 ("pit_only_top15", core_candidates[:self.policy.final_n]),
                 ("fusion_policy", fusion_policy.as_dict()),
             ):
                 self.store.save_selection_artifact(run["run_id"], artifact_type, payload)
             self.store.save_selection_strategy_records(
-                run["run_id"], fusion["nominations"],
+                run["run_id"], [*fusion["nominations"], *formal_memberships],
                 policy=fusion_policy.as_dict(), policy_hash=fusion_policy.policy_hash,
                 selection_date=selection_date,
                 input_snapshot_id=eligible_payload["snapshot_id"],
