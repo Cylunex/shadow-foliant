@@ -169,6 +169,11 @@ def _safe_frame(endpoint: str, call: Callable[[], object]) -> pd.DataFrame:
                 if isinstance(data, list) and data and not isinstance(data[0], dict):
                     data = [{"value": item} for item in data]
                 return pd.DataFrame(data or [])
+            if isinstance(result, (list, tuple)):
+                data = list(result)
+                if data and not isinstance(data[0], dict):
+                    data = [{"value": item} for item in data]
+                return pd.DataFrame(data)
             return pd.DataFrame(result or [])
         except Exception:
             if attempt >= contract.retries:

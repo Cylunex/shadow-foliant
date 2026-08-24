@@ -138,6 +138,20 @@ class SourceContractTest(unittest.TestCase):
             zzshare._reset_for_tests()
         self.assertEqual(days, ["2026-08-21"])
 
+    def test_zzshare_calendar_accepts_direct_date_list_from_released_sdk(self):
+        class Api:
+            def trade_days(self, **kwargs):
+                return ["2026-08-20", "2026-08-21"]
+
+        zzshare._api = Api()
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                days = zzshare.get_trade_days("2026-08-20", "2026-08-21")
+        finally:
+            zzshare._reset_for_tests()
+        self.assertEqual(days, ["2026-08-20", "2026-08-21"])
+
     def test_zzshare_security_master_normalizes_numeric_listed_status(self):
         class Api:
             def stock_basic(self, **kwargs):
