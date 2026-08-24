@@ -774,6 +774,64 @@ CREATE TABLE IF NOT EXISTS strategy_adjustment_proposals (
     validation_status TEXT NOT NULL, validation_reason TEXT,
     applied_policy_hash TEXT, created_at TEXT NOT NULL, applied_at TEXT
 );
+-- Premarket factual-news slice.  Event identity comes from the upstream source;
+-- observations preserve repeated appearances while revisions preserve content changes.
+CREATE TABLE IF NOT EXISTS news_events (
+    event_id TEXT PRIMARY KEY, source TEXT NOT NULL, source_event_id TEXT NOT NULL,
+    title TEXT NOT NULL, content TEXT NOT NULL, published_at TEXT NOT NULL,
+    first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL, level TEXT, url TEXT,
+    source_quality TEXT NOT NULL, raw_payload TEXT NOT NULL,
+    UNIQUE(source,source_event_id)
+);
+CREATE TABLE IF NOT EXISTS news_event_revisions (
+    revision_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+    title TEXT NOT NULL, content TEXT NOT NULL, raw_payload TEXT NOT NULL,
+    first_observed_at TEXT NOT NULL, UNIQUE(event_id,content_hash)
+);
+CREATE TABLE IF NOT EXISTS news_observations (
+    observation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, event_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL, bucket TEXT NOT NULL, platform_rank INTEGER,
+    platform_heat DOUBLE PRECISION, url TEXT, UNIQUE(run_id,event_id)
+);
+CREATE TABLE IF NOT EXISTS news_event_tags (
+    run_id TEXT NOT NULL, event_id TEXT NOT NULL, bucket TEXT NOT NULL,
+    keep INTEGER NOT NULL, importance INTEGER NOT NULL,
+    information_type TEXT NOT NULL, time_role TEXT NOT NULL,
+    market_relevance TEXT NOT NULL, topic_tags TEXT NOT NULL,
+    a_share_mapping TEXT NOT NULL, summary TEXT NOT NULL, reason TEXT NOT NULL,
+    tagger TEXT NOT NULL, schema_version TEXT NOT NULL,
+    evidence_verified INTEGER NOT NULL, tagged_at TEXT NOT NULL,
+    PRIMARY KEY(run_id,event_id)
+);
+CREATE TABLE IF NOT EXISTS news_theme_threads (
+    theme_id TEXT PRIMARY KEY, canonical_name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL, first_seen_at TEXT NOT NULL,
+    last_catalyst_at TEXT NOT NULL, strength DOUBLE PRECISION NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL, linked_sector_ids TEXT NOT NULL,
+    linked_security_ids TEXT NOT NULL, active_assumptions TEXT NOT NULL,
+    invalidation_conditions TEXT NOT NULL, evidence_event_ids TEXT NOT NULL,
+    schema_version TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS news_premarket_runs (
+    run_id TEXT PRIMARY KEY, report_date TEXT NOT NULL, status TEXT NOT NULL,
+    started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+    window_start TEXT NOT NULL, background_end TEXT NOT NULL, window_end TEXT NOT NULL,
+    input_count INTEGER NOT NULL, deduplicated_count INTEGER NOT NULL,
+    inserted_count INTEGER NOT NULL, revised_count INTEGER NOT NULL,
+    tagged_count INTEGER NOT NULL, local_fallback_count INTEGER NOT NULL,
+    theme_count INTEGER NOT NULL, evidence_coverage DOUBLE PRECISION NOT NULL,
+    stage_status TEXT NOT NULL, warnings TEXT NOT NULL, data_notes TEXT NOT NULL,
+    brief_payload TEXT NOT NULL, schema_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_events_published
+    ON news_events(published_at,source);
+CREATE INDEX IF NOT EXISTS idx_news_observations_run
+    ON news_observations(run_id,bucket);
+CREATE INDEX IF NOT EXISTS idx_news_tags_role
+    ON news_event_tags(run_id,time_role,importance);
+CREATE INDEX IF NOT EXISTS idx_news_premarket_date
+    ON news_premarket_runs(report_date,finished_at);
 CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence
     ON research_trade_calendar_evidence(trade_date, is_open);
 CREATE INDEX IF NOT EXISTS idx_research_calendar_fetch
@@ -807,6 +865,9 @@ VALUES ('5-event-revisions-and-publication', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('7-local-fusion', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('8-premarket-facts', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

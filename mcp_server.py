@@ -894,6 +894,17 @@ def latest_selection() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def latest_premarket_facts(report_date: str = '') -> Dict[str, Any]:
+    """读取最近盘前事实流：CLS 红讯证据、双窗口标签、题材线程与降级状态。
+
+    只读已落库产物，不现抓数据、不调用 LLM；所有题材均为 reference_only，
+    不生成股票代码，也不影响正式 TOP15/TOP5。report_date 可传 YYYY-MM-DD。
+    """
+    from news_flow.premarket_facts import latest_premarket_facts as _latest
+    return _latest(report_date)
+
+
+@mcp.tool()
 def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]:
     """Agent 主入口总览：任务异常/核心开关、综合选股产物、持仓数、活跃推荐/
     决策信号和数据源健康度。只读已有数据库与运行遥测，不触发重分析。"""

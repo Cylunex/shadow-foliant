@@ -2578,19 +2578,42 @@ def task_morning_strategy():
         except Exception as e:
             us_summary = f'(拉取失败: {e})'
 
-        # ─── 3. 隔夜新闻 ───
+        # ─── 3. 隔夜事实流 ───
+        # CLS 加红电报走稳定源 ID、A 股双时间窗口和本地结构化标签；只给晨报补证据，
+        # 不映射股票、不产生候选、不修改正式选股。抓取/存储失败时继续走原 market_news。
         news_summary = '（无数据）'
+        premarket_news_meta = {'status': 'fallback', 'run_id': '', 'events': 0, 'warnings': []}
         try:
-            news = datahub.market_news(15)
-            if news:
-                lines = []
-                for n in news[:10]:
-                    title = (n.get('title') or n.get('content', ''))[:60]
-                    t = n.get('time') or ''
-                    lines.append(f'  [{t}] {title}')
-                news_summary = '\n'.join(lines)
+            from news_flow.premarket_facts import generate_premarket_facts
+            _fact_result = generate_premarket_facts(datetime.now().strftime('%Y-%m-%d'))
+            _fact_brief = _fact_result.get('brief') or {}
+            _fact_rows = _fact_brief.get('facts') or []
+            premarket_news_meta = {
+                'status': _fact_result.get('status', 'unknown'),
+                'run_id': _fact_result.get('run_id', ''),
+                'events': len(_fact_rows),
+                'warnings': (_fact_result.get('warnings') or [])[:5],
+            }
+            if _fact_rows and _fact_brief.get('text'):
+                news_summary = str(_fact_brief['text'])
         except Exception as e:
-            news_summary = f'(拉取失败: {e})'
+            premarket_news_meta = {
+                'status': 'failed', 'run_id': '', 'events': 0,
+                'warnings': [f'{type(e).__name__}: {str(e)[:120]}'],
+            }
+        if news_summary == '（无数据）':
+            try:
+                news = datahub.market_news(15)
+                if news:
+                    lines = []
+                    for n in news[:10]:
+                        title = (n.get('title') or n.get('content', ''))[:60]
+                        t = n.get('time') or ''
+                        lines.append(f'  [{t}] {title}')
+                    news_summary = '\n'.join(lines)
+                    premarket_news_meta['fallback_source'] = 'market_news'
+            except Exception as e:
+                news_summary = f'(拉取失败: {type(e).__name__})'
 
         # ─── 4. 北向资金近 5 日 ───
         north_summary = '（无数据）'
@@ -2789,6 +2812,8 @@ def task_morning_strategy():
             '\n\n【输出质量要求】只输出一个合法 JSON 对象，不要 Markdown 代码块或说明文字；'
             'open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；'
             'hot_sectors 至少给出一项，数据不足时明确写“暂无可靠板块信号”，不得用“（无）”或“未知”占位。'
+            '\n【新闻事实边界】隔夜新闻中的证据 ID 只用于事实追溯；新闻和题材线程均为 reference_only。'
+            '不得根据新闻自行编造股票代码、目标价、仓位或买卖指令，也不得让新闻改变正式选股结果。'
         )
 
         from deepseek_client import DeepSeekClient
@@ -2922,7 +2947,7 @@ def task_morning_strategy():
                 symbol='_OVERNIGHT_STRATEGY_',
                 stock_name='晨间市场报告',
                 period='1d',
-                stock_info={'date': lookback_date},
+                stock_info={'date': lookback_date, 'premarket_news': premarket_news_meta},
                 agents_results={'strategy_agent': {
                     'agent_name': '晨间策略 AI',
                     # 修复:原引用未定义的 content 变量,NameError 被静默吞掉导致从不落库
@@ -2996,6 +3021,8 @@ def task_morning_strategy():
         _log_run(job, 'success',
                  error=(f"analysis={diagnosis_meta['mode']}/{diagnosis_meta['reason']} "
                         f"data={_cov['available']}/{_cov['total']} "
+                        f"news={premarket_news_meta.get('status')}/"
+                        f"{premarket_news_meta.get('events', 0)} "
                         f'candidates={len(diagnosis.get("candidate_stocks", []) or [])}{rec_summary}'),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:

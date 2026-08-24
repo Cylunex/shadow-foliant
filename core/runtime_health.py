@@ -72,6 +72,8 @@ def _database_check() -> Dict[str, Any]:
             'manual_task_runs', 'research_schema_migrations',
             'selection_runs', 'selection_artifacts', 'selection_input_manifests',
             'research_event_revisions', 'foliant_runs', 'foliant_domain_outbox',
+            'news_events', 'news_event_revisions', 'news_observations',
+            'news_event_tags', 'news_theme_threads', 'news_premarket_runs',
         }
         cur.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -80,7 +82,7 @@ def _database_check() -> Dict[str, Any]:
         present = {str(row[0]) for row in cur.fetchall()}
         missing = sorted(required - present)
         migration = None
-        expected_migration = '5-event-revisions-and-publication'
+        expected_migration = '8-premarket-facts'
         migration_ready = False
         if 'research_schema_migrations' in present:
             cur.execute(
