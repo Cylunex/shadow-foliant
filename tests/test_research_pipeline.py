@@ -585,7 +585,7 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             sync_id, status="success", row_count=24, quality_status="ok"
         )
         readiness = research_health_snapshot(
-            store=self.store, selection_date=selection_date
+            store=self.store, selection_date=selection_date, mode="preopen"
         )
         self.assertTrue(readiness["ready"], readiness)
         self.assertEqual(readiness["expected_market_date"], "2026-08-21")
