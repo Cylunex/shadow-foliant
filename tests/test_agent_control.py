@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
@@ -286,8 +287,8 @@ class FactorCollectorDateTests(unittest.TestCase):
         from scripts.daily_signal_scan import _calc_stock_scores
 
         self.assertTrue(callable(_calc_stock_scores))
-        self.assertIn('shadow-foliant/scripts/daily_signal_scan.py',
-                      _calc_stock_scores.__code__.co_filename)
+        expected = Path(__file__).resolve().parents[1] / 'scripts' / 'daily_signal_scan.py'
+        self.assertEqual(Path(_calc_stock_scores.__code__.co_filename).resolve(), expected)
 
     def test_snapshot_date_does_not_double_apply_cst_offset(self):
         local_time = datetime(2026, 7, 29, 17, 13)
