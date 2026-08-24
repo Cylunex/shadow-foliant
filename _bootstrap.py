@@ -95,10 +95,22 @@ except Exception:
 
 # ---------------------------------------------------------------------------
 # Legacy logical database-name helper. Runtime persistence is PostgreSQL-only;
-# this function remains temporarily so old call sites can pass a harmless name
-# into the PostgreSQL adapter without creating local files.
+# this path now carries only file caches and repair artifacts. Commit-specific
+# releases must share it, otherwise a deployment silently loses the morning
+# Wencai/K-line cache before the later selection task consumes it.
 # ---------------------------------------------------------------------------
-DB_DIR = os.path.join(ROOT, 'db')
+def _runtime_data_dir(root: str, configured: str = '') -> str:
+    configured = str(configured or '').strip()
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    release_parent = os.path.dirname(root)
+    if (os.path.basename(release_parent) == 'releases'
+            and os.path.isfile(os.path.join(root, '.release-revision'))):
+        return os.path.join(os.path.dirname(release_parent), 'shared', 'db')
+    return os.path.join(root, 'db')
+
+
+DB_DIR = _runtime_data_dir(ROOT, os.environ.get('FOLIANT_RUNTIME_DATA_DIR', ''))
 
 
 def db_path(name: str) -> str:

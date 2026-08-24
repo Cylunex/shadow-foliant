@@ -89,6 +89,29 @@ class RemovedSqliteModuleTest(unittest.TestCase):
                 self.assertNotIn('from database import db', source.read())
 
 
+class ReleaseRuntimeDataTest(unittest.TestCase):
+    def test_commit_release_uses_shared_runtime_cache(self):
+        import _bootstrap
+        with tempfile.TemporaryDirectory() as tmp:
+            release = os.path.join(tmp, 'releases', 'abc123')
+            os.makedirs(release)
+            with open(os.path.join(release, '.release-revision'), 'w', encoding='utf-8') as marker:
+                marker.write('abc123\n')
+            self.assertEqual(
+                _bootstrap._runtime_data_dir(release),
+                os.path.join(tmp, 'shared', 'db'),
+            )
+
+    def test_explicit_runtime_cache_path_has_priority(self):
+        import _bootstrap
+        with tempfile.TemporaryDirectory() as tmp:
+            configured = os.path.join(tmp, 'persistent-cache')
+            self.assertEqual(
+                _bootstrap._runtime_data_dir('/ignored/release', configured),
+                configured,
+            )
+
+
 class ControlledDeployTest(unittest.TestCase):
     def test_release_keeps_supervisor_entrypoint_and_shared_environment(self):
         root = os.path.dirname(os.path.dirname(__file__))
