@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -11,8 +12,10 @@ import _bootstrap  # noqa: F401
 from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy
 from analysis.selection_finalizer import finalize_local_selection
 from core.research_health import snapshot as research_health_snapshot
-from data.research_sync import ResearchSynchronizer
-from data.research_store import ResearchStore
+from data.research_sync import (
+    ResearchSynchronizer, _calendar_chunk_quality, _fetch_calendar_sources,
+)
+from data.research_store import ResearchStore, _iso_date
 from data.source_contracts import contracts, get_contract
 from data.sources import zzshare
 
@@ -22,6 +25,32 @@ def _sqlite(path):
 
 
 class SourceContractTest(unittest.TestCase):
+    def test_missing_dates_are_rejected_before_calendar_comparison(self):
+        quality, detail = _calendar_chunk_quality(
+            [(pd.NaT, True), ('2026-08-21', True)], '2026-08-20', '2026-08-21'
+        )
+        self.assertEqual(_iso_date(pd.NaT), '')
+        self.assertEqual(quality, 'incomplete')
+        self.assertEqual(detail['invalid_row_count'], 1)
+        self.assertIn('invalid_calendar_rows', detail['reasons'])
+
+    def test_calendar_sources_share_one_hard_deadline(self):
+        def slow_source(*_args):
+            time.sleep(0.12)
+            return [('2026-08-21', True)]
+
+        started = time.monotonic()
+        with patch('data.research_sync.zzshare.get_trade_calendar_evidence', slow_source), \
+                patch('data.research_sync.baostock.trade_calendar_evidence',
+                      return_value=[('2026-08-21', True)]):
+            evidence, failures = _fetch_calendar_sources(
+                '2026-08-21', '2026-08-21', timeout_seconds=0.02
+            )
+        self.assertLess(time.monotonic() - started, 0.10)
+        self.assertEqual(evidence['zzshare'], [])
+        self.assertEqual(failures['zzshare'], 'source_timeout')
+        self.assertEqual(evidence['baostock'], [('2026-08-21', True)])
+
     def test_published_and_operational_limits_are_explicit(self):
         matrix = contracts()
         self.assertEqual(matrix["zzshare"]["daily_symbol"]["hard_max_rows"], 1000)
@@ -159,6 +188,29 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_complete_legacy_master_is_promoted_idempotently(self):
+        frame = pd.DataFrame([{
+            'ts_code': '600000.SH', 'name': '样本', 'exchange': 'SSE',
+            'market': '主板', 'industry': '银行', 'list_status': 'L',
+            'list_date': '1999-11-10', 'delist_date': '', 'is_hs': 'Y',
+        }])
+        frame.attrs['provenance'] = self._provenance('2026-08-21')
+        self.store.upsert_securities(frame)
+        conn = self.store.connect()
+        try:
+            conn.execute('DELETE FROM research_security_master_rows')
+            conn.execute('DELETE FROM research_master_snapshot_runs')
+            with patch.dict(os.environ, {'RESEARCH_MIN_UNIVERSE_ROWS': '1'}):
+                first = self.store._promote_legacy_master(conn.cursor())
+                second = self.store._promote_legacy_master(conn.cursor())
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertTrue(first)
+        self.assertIsNone(second)
+        universe = self.store.load_universe('2026-08-22')
+        self.assertEqual(universe['symbol'].tolist(), ['600000'])
 
     @staticmethod
     def _provenance(as_of):

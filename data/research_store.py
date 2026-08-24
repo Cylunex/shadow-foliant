@@ -52,7 +52,10 @@ def _symbol(value: object) -> str:
 
 def _iso_date(value: object) -> str:
     try:
-        return pd.Timestamp(value).date().isoformat()
+        parsed = pd.Timestamp(value)
+        if pd.isna(parsed):
+            return ""
+        return parsed.date().isoformat()
     except Exception:
         return ""
 
@@ -353,6 +356,74 @@ class ResearchStore:
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, now),
             )
+        # V5 introduced immutable master snapshots.  Existing PostgreSQL installs
+        # already have a validated legacy security snapshot, so publish the newest
+        # sufficiently complete one instead of leaving the selector with an empty
+        # universe until the next external master refresh.
+        self._promote_legacy_master(cur)
+        version = "6-publish-legacy-master"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, datetime.now().astimezone().isoformat()),
+            )
+
+    def _promote_legacy_master(self, cur) -> Optional[str]:
+        """Idempotently publish the newest complete V2 master as a V5 snapshot."""
+        cur.execute(
+            """SELECT snapshot_id FROM research_master_snapshot_runs
+               WHERE quality_status='ok' AND published_at IS NOT NULL LIMIT 1"""
+        )
+        if cur.fetchone():
+            return None
+        minimum_rows = max(1, int(os.getenv("RESEARCH_MIN_UNIVERSE_ROWS", "3000")))
+        cur.execute(
+            """SELECT snapshot_date,COUNT(*),MAX(retrieved_at)
+               FROM research_security_snapshots GROUP BY snapshot_date
+               HAVING COUNT(*)>=? ORDER BY snapshot_date DESC LIMIT 1""",
+            (minimum_rows,),
+        )
+        legacy = cur.fetchone()
+        if not legacy:
+            return None
+        snapshot_date, observed_count, retrieved_at = legacy
+        snapshot_date = str(snapshot_date)
+        observed_count = int(observed_count or 0)
+        retrieved_at = str(retrieved_at or datetime.now().astimezone().isoformat())
+        snapshot_id = hashlib.sha256(
+            f"legacy-master:{snapshot_date}:{observed_count}".encode("utf-8")
+        ).hexdigest()
+        cur.execute(
+            """SELECT COALESCE(NULLIF(exchange,''),'unknown'),COUNT(*)
+               FROM research_security_snapshots WHERE snapshot_date=?
+               GROUP BY COALESCE(NULLIF(exchange,''),'unknown')""",
+            (snapshot_date,),
+        )
+        exchange_counts = {str(row[0]): int(row[1] or 0) for row in cur.fetchall()}
+        cur.execute(
+            """INSERT INTO research_master_snapshot_runs
+               (snapshot_id,snapshot_date,provider,retrieved_at,observed_count,
+                expected_min_count,exchange_counts,previous_snapshot_id,quality_status,
+                published_at,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(snapshot_id) DO NOTHING""",
+            (snapshot_id, snapshot_date, "legacy-migration", retrieved_at, observed_count,
+             minimum_rows, _json(exchange_counts), None, "ok", retrieved_at,
+             _json({"source": "research_security_snapshots", "migration": "v6"})),
+        )
+        cur.execute(
+            """INSERT INTO research_security_master_rows
+               (snapshot_id,symbol,ts_code,name,exchange,market,industry,list_status,
+                list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                schema_version,quality_status,payload)
+               SELECT ?,symbol,ts_code,name,exchange,market,industry,list_status,
+                      list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                      schema_version,quality_status,payload
+               FROM research_security_snapshots WHERE snapshot_date=?
+               ON CONFLICT(snapshot_id,symbol) DO NOTHING""",
+            (snapshot_id, snapshot_date),
+        )
+        return snapshot_id
 
     def _add_column(self, cur, table: str, column: str, definition: str) -> None:
         if self._is_postgres:

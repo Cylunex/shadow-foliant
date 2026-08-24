@@ -131,6 +131,18 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(
             REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])
 
+    def test_formal_selection_failure_is_propagated_after_fallback(self):
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch(
+                    'data.research_sync.ResearchSynchronizer.sync_calendar',
+                    side_effect=ValueError('bad calendar'),
+                ), mock.patch.object(jobs_hub, '_daily_candidate_pool') as fallback, \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            with self.assertRaisesRegex(ValueError, 'bad calendar'):
+                jobs_hub.task_unified_selection()
+        fallback.assert_called_once_with()
+        log_run.assert_not_called()
+
     def test_naive_job_timestamp_is_stored_as_shanghai_time(self):
         normalized = jobs_hub._normalize_run_timestamp('2026-08-17T16:30:00')
         parsed = datetime.fromisoformat(normalized)
@@ -315,7 +327,7 @@ class AsyncTaskControlTests(unittest.TestCase):
         conn.close()
 
         with mock.patch("data.research_store.ResearchStore") as store_type:
-            store_type.return_value.latest_selection.return_value = None
+            store_type.return_value.latest_formal_selection.return_value = None
             artifact = task_control.latest_selection_artifact()
 
         self.assertEqual(artifact['status'], 'missing')

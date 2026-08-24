@@ -81,6 +81,14 @@ class LegacyAutostartTest(unittest.TestCase):
         self.assertFalse(module._STARTED)
 
 
+class RemovedSqliteModuleTest(unittest.TestCase):
+    def test_runtime_code_no_longer_imports_deleted_database_module(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        for relative in ('core/batch_analyze.py', 'jobs/jobs_hub.py'):
+            with open(os.path.join(root, relative), encoding='utf-8') as source:
+                self.assertNotIn('from database import db', source.read())
+
+
 class StrategyDeploymentQualityTest(unittest.TestCase):
     def test_holdout_quality_changes_deployment_order(self):
         from analysis.strategy_genome import deployment_quality_score

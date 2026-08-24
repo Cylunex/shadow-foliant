@@ -747,6 +747,64 @@ INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('5-event-revisions-and-publication', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
+-- Publish the latest complete legacy master when upgrading an existing install.
+-- This is intentionally idempotent and never replaces a newer immutable snapshot.
+DO $$
+DECLARE
+    legacy_date TEXT;
+    legacy_count INTEGER;
+    legacy_retrieved_at TEXT;
+    legacy_snapshot_id TEXT;
+    legacy_exchange_counts TEXT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM research_master_snapshot_runs
+        WHERE quality_status='ok' AND published_at IS NOT NULL
+    ) THEN
+        SELECT snapshot_date, COUNT(*), MAX(retrieved_at)
+          INTO legacy_date, legacy_count, legacy_retrieved_at
+          FROM research_security_snapshots
+         GROUP BY snapshot_date
+        HAVING COUNT(*) >= 3000
+         ORDER BY snapshot_date DESC
+         LIMIT 1;
+        IF legacy_date IS NOT NULL THEN
+            legacy_snapshot_id := MD5('legacy-master:' || legacy_date || ':' || legacy_count::TEXT);
+            SELECT COALESCE(JSONB_OBJECT_AGG(exchange_name, exchange_count), '{}'::JSONB)::TEXT
+              INTO legacy_exchange_counts
+              FROM (
+                  SELECT COALESCE(NULLIF(exchange,''),'unknown') AS exchange_name,
+                         COUNT(*) AS exchange_count
+                    FROM research_security_snapshots
+                   WHERE snapshot_date=legacy_date
+                   GROUP BY COALESCE(NULLIF(exchange,''),'unknown')
+              ) AS exchange_summary;
+            INSERT INTO research_master_snapshot_runs
+                (snapshot_id,snapshot_date,provider,retrieved_at,observed_count,
+                 expected_min_count,exchange_counts,previous_snapshot_id,quality_status,
+                 published_at,detail)
+            VALUES
+                (legacy_snapshot_id,legacy_date,'legacy-migration',
+                 COALESCE(legacy_retrieved_at,NOW()::TEXT),legacy_count,3000,
+                 legacy_exchange_counts,NULL,'ok',COALESCE(legacy_retrieved_at,NOW()::TEXT),
+                 '{"source":"research_security_snapshots","migration":"v6"}')
+            ON CONFLICT(snapshot_id) DO NOTHING;
+            INSERT INTO research_security_master_rows
+                (snapshot_id,symbol,ts_code,name,exchange,market,industry,list_status,
+                 list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                 schema_version,quality_status,payload)
+            SELECT legacy_snapshot_id,symbol,ts_code,name,exchange,market,industry,list_status,
+                   list_date,delist_date,is_hs,provider,origin,effective_at,retrieved_at,
+                   schema_version,quality_status,payload
+              FROM research_security_snapshots WHERE snapshot_date=legacy_date
+            ON CONFLICT(snapshot_id,symbol) DO NOTHING;
+        END IF;
+    END IF;
+END $$;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('6-publish-legacy-master', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+
 -- Runtime-neutral Agent preview Runs.  These rows never replace formal research/selection facts.
 CREATE TABLE IF NOT EXISTS foliant_runs (
     run_id TEXT PRIMARY KEY,

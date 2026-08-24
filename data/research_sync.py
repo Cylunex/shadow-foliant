@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import date, timedelta
 import os
+import time
 from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
 from data.research_store import ResearchStore
 from data.sources import baostock, zzshare
+
+
+_CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="research-calendar"
+)
 
 
 def _calendar_chunks(start_date: str, end_date: str, *, days: int = 92):
@@ -23,12 +30,24 @@ def _calendar_chunks(start_date: str, end_date: str, *, days: int = 92):
 
 
 def _calendar_chunk_quality(evidence, start_date: str, end_date: str) -> tuple[str, dict]:
-    normalized = sorted({(str(day), bool(state)) for day, state in evidence})
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
+    normalized_rows = set()
+    invalid_rows = 0
+    for day, state in evidence:
+        try:
+            parsed = pd.Timestamp(day)
+            if pd.isna(parsed):
+                raise ValueError("missing calendar date")
+            normalized_rows.add((parsed.date().isoformat(), bool(state)))
+        except (TypeError, ValueError, OverflowError):
+            invalid_rows += 1
+    normalized = sorted(normalized_rows)
     opens = [pd.Timestamp(day).date() for day, state in normalized if state]
     weekdays = len(pd.bdate_range(start, end))
     reasons = []
+    if invalid_rows:
+        reasons.append("invalid_calendar_rows")
     if not normalized or not opens:
         reasons.append("empty_calendar_chunk")
     if any(pd.Timestamp(day).date() < start or pd.Timestamp(day).date() > end
@@ -43,8 +62,46 @@ def _calendar_chunk_quality(evidence, start_date: str, end_date: str) -> tuple[s
             reasons.append("trailing_calendar_gap")
     return ("ok" if not reasons else "incomplete", {
         "reasons": reasons, "row_count": len(normalized), "open_count": len(opens),
-        "weekday_count": weekdays,
+        "weekday_count": weekdays, "invalid_row_count": invalid_rows,
     })
+
+
+def _calendar_source_timeout() -> float:
+    try:
+        configured = float(os.getenv("RESEARCH_CALENDAR_SOURCE_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        configured = 30.0
+    return min(120.0, max(5.0, configured))
+
+
+def _fetch_calendar_sources(start_date: str, end_date: str, *,
+                            timeout_seconds: Optional[float] = None) -> tuple[dict, dict]:
+    """Fetch independent calendars concurrently under one wall-clock deadline."""
+    timeout = (_calendar_source_timeout() if timeout_seconds is None
+               else max(0.01, float(timeout_seconds)))
+    calls = {
+        "zzshare": lambda: zzshare.get_trade_calendar_evidence(start_date, end_date),
+        "baostock": lambda: baostock.trade_calendar_evidence(start_date, end_date),
+    }
+    futures = {
+        provider: _CALENDAR_EXECUTOR.submit(call) for provider, call in calls.items()
+    }
+    deadline = time.monotonic() + timeout
+    evidence = {}
+    failures = {}
+    for provider, future in futures.items():
+        try:
+            evidence[provider] = future.result(
+                timeout=max(0.001, deadline - time.monotonic())
+            ) or []
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            evidence[provider] = []
+            failures[provider] = "source_timeout"
+        except Exception as exc:
+            evidence[provider] = []
+            failures[provider] = f"source_error:{type(exc).__name__}"
+    return evidence, failures
 
 
 def _flag(value) -> bool:
@@ -145,14 +202,16 @@ class ResearchSynchronizer:
             provider_evidence = {"zzshare": [], "baostock": []}
             incomplete_chunks = []
             for chunk_start, chunk_end in _calendar_chunks(start, end):
-                chunks = {
-                    "zzshare": zzshare.get_trade_calendar_evidence(chunk_start, chunk_end),
-                    "baostock": baostock.trade_calendar_evidence(chunk_start, chunk_end),
-                }
+                chunks, failures = _fetch_calendar_sources(chunk_start, chunk_end)
                 for provider, evidence in chunks.items():
                     quality, chunk_detail = _calendar_chunk_quality(
                         evidence, chunk_start, chunk_end
                     )
+                    if provider in failures:
+                        quality = "incomplete"
+                        chunk_detail["reasons"] = list(dict.fromkeys(
+                            [*chunk_detail.get("reasons", []), failures[provider]]
+                        ))
                     self.store.record_calendar_fetch(
                         provider, chunk_start, chunk_end, evidence,
                         quality_status=quality, detail=chunk_detail,

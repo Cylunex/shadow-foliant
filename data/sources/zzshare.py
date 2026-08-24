@@ -398,7 +398,10 @@ def get_trade_days(start_date: str, end_date: str) -> List[str]:
 
 def _normalize_date(value: object) -> str:
     try:
-        return pd.Timestamp(value).date().isoformat()
+        parsed = pd.Timestamp(value)
+        if pd.isna(parsed):
+            return ""
+        return parsed.date().isoformat()
     except Exception:
         return ""
 

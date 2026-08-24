@@ -2866,7 +2866,7 @@ def task_morning_strategy():
 
         # 保存到 PG analysis_records（精简）
         try:
-            from database import db
+            from database_pg import db
             db.save_analysis(
                 symbol='_OVERNIGHT_STRATEGY_',
                 stock_name='晨间市场报告',
@@ -4246,6 +4246,7 @@ def task_unified_selection():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    main_error = None
     try:
         # 1. 本地 PIT 数据仓先独立产出并持久化。外部参考即使超时也不能延迟
         #    数据门槛判断，更不能在本地仓不完整时成为救援候选。
@@ -4610,14 +4611,18 @@ def task_unified_selection():
                  started_at=started, finished_at=datetime.now().isoformat())
 
     except Exception as e:
-        _log_run(job, 'error', error=str(e), started_at=started,
-                 finished_at=datetime.now().isoformat())
+        # Keep the optional candidate-pool fallback below, but propagate the
+        # formal-chain failure to _run_with_log so scheduler output/job_runs can
+        # never report a false success.
+        main_error = e
 
     # ── 个人口味候选池（原 wf_daily_candidate_pool,开关控制,默认开）──
     try:
         _daily_candidate_pool()
     except Exception as e:
         print(f'[unified_selection] 候选池子任务失败: {e}')
+    if main_error is not None:
+        raise main_error
 
 
 def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '', rollover_watch=None) -> str:

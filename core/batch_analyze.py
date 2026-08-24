@@ -12,7 +12,7 @@ import concurrent.futures
 import config
 from stock_data import StockDataFetcher
 from ai_agents import StockAnalysisAgents
-from database import db
+from database_pg import db
 
 
 def get_stock_data(symbol, period):

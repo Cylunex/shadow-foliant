@@ -87,6 +87,11 @@ class ZzshareSourceTest(unittest.TestCase):
         self.assertEqual(zzshare._ts_code('000001'), '000001.SZ')
         self.assertEqual(zzshare._ts_code('920001'), '920001.BJ')
 
+    def test_missing_calendar_dates_do_not_become_literal_nat(self):
+        self.assertEqual(zzshare._normalize_date(pd.NaT), '')
+        self.assertEqual(zzshare._normalize_date(None), '')
+        self.assertEqual(zzshare._normalize_date('not-a-date'), '')
+
     def test_volume_unit_is_inferred_without_cross_source_lookup(self):
         raw = pd.DataFrame({
             'trade_date': ['20260820', '20260821', '20260822'],
