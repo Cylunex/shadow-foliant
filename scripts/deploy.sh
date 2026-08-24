@@ -76,6 +76,9 @@ if [[ "$actual_platform_wheel_sha256" != "$platform_wheel_sha256" ]]; then
 fi
 "$python_bin" -m pip install "$platform_wheel"
 "$python_bin" -m pip install -r "$validation_dir/requirements.txt"
+# Validation runs inside the freshly created release, so its test runner cannot
+# depend on whatever happened to be installed in a previous production venv.
+"$python_bin" -m pip install 'pytest>=8,<10'
 (
   cd "$validation_dir"
   "$python_bin" -m compileall -q \
