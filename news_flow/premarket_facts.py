@@ -51,11 +51,17 @@ def _as_datetime(value: Any) -> datetime:
     return parsed.astimezone(_SHANGHAI)
 
 
-def resolve_window(report_date: str | date, trade_days: Iterable[str]) -> PremarketWindow:
+def resolve_window(report_date: str | date, trade_days: Iterable[str], *,
+                   report_date_confirmed: bool = False) -> PremarketWindow:
     current = date.fromisoformat(str(report_date)) if not isinstance(report_date, date) else report_date
     available = sorted({date.fromisoformat(str(item)[:10]) for item in trade_days if str(item).strip()})
-    if current not in available:
+    if current not in available and not report_date_confirmed:
         raise NonTradingReportDate(f"{current.isoformat()} is not a confirmed A-share trading day")
+    if current not in available:
+        # 晨报调度器已通过独立交易日判断后可以确认报告日；研究仓只需提供
+        # 此前最近交易日，不能因盘前尚未写入当天 PIT 日历而误判休市。
+        available.append(current)
+        available.sort()
     previous = next((item for item in reversed(available) if item < current), None)
     if previous is None:
         raise ValueError("confirmed previous A-share trading day is unavailable")
@@ -608,13 +614,16 @@ def generate_premarket_facts(report_date: str = "", *,
                              trade_days: Optional[Iterable[str]] = None,
                              fetcher: Optional[Callable[..., list[dict]]] = None,
                              store: Optional[PremarketFactStore] = None,
-                             now: Optional[datetime] = None) -> dict:
+                             now: Optional[datetime] = None,
+                             report_date_confirmed: bool = False) -> dict:
     """生成并持久化当天盘前事实产物；源失败时优先读取已入库窗口缓存。"""
     now = (now or datetime.now(_SHANGHAI)).astimezone(_SHANGHAI)
     report_date = str(report_date or now.date().isoformat())[:10]
     store = store or PremarketFactStore()
     days = list(trade_days) if trade_days is not None else _default_trade_days(report_date)
-    window = resolve_window(report_date, days)
+    window = resolve_window(
+        report_date, days, report_date_confirmed=report_date_confirmed
+    )
     run_id = uuid.uuid4().hex
     started_at = now.isoformat()
     observed_at = started_at

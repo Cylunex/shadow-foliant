@@ -76,6 +76,15 @@ class PremarketWindowTests(unittest.TestCase):
         with self.assertRaises(NonTradingReportDate):
             resolve_window("2026-08-23", ["2026-08-21", "2026-08-24"])
 
+    def test_scheduler_confirmation_does_not_require_today_in_pit_calendar(self):
+        window = resolve_window(
+            "2026-08-25", ["2026-08-21", "2026-08-24"],
+            report_date_confirmed=True,
+        )
+        self.assertEqual(window.previous_trade_date, "2026-08-24")
+        self.assertEqual(window.start.strftime("%Y-%m-%d %H:%M"), "2026-08-24 08:30")
+        self.assertEqual(window.end.strftime("%Y-%m-%d %H:%M"), "2026-08-25 08:30")
+
     def test_deployment_schema_contains_the_whole_fact_slice(self):
         root = Path(__file__).resolve().parents[1]
         schema = (root / "scripts" / "init_postgres.sql").read_text(encoding="utf-8")
@@ -226,6 +235,17 @@ class PremarketFactPipelineTests(unittest.TestCase):
         self.assertEqual(result["stage_status"]["source_fetch"], "degraded")
         self.assertEqual(len(result["brief"]["facts"]), 2)
         self.assertNotIn("source timeout", " ".join(result["warnings"]))
+
+    def test_generation_accepts_scheduler_confirmed_report_date(self):
+        result = generate_premarket_facts(
+            "2026-08-25", trade_days=["2026-08-21", "2026-08-24"],
+            fetcher=lambda *_args: [], store=self.store,
+            now=datetime(2026, 8, 25, 9, 0, tzinfo=_CST),
+            report_date_confirmed=True,
+        )
+        self.assertEqual(result["window"]["start"][:16], "2026-08-24T08:30")
+        self.assertEqual(result["window"]["end"][:16], "2026-08-25T08:30")
+        self.assertEqual(result["status"], "incomplete")
 
 
 if __name__ == "__main__":

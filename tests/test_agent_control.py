@@ -135,12 +135,14 @@ class ScheduledDependencyTests(unittest.TestCase):
     def test_formal_selection_failure_does_not_run_external_candidate_fallback(self):
         with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
                 mock.patch(
-                    'data.research_sync.ResearchSynchronizer.sync_calendar',
+                    'data.research_sync.ResearchSynchronizer.refresh_calendar_for_day',
                     side_effect=ValueError('bad calendar'),
-                ), mock.patch.object(jobs_hub, '_daily_candidate_pool') as fallback, \
+                ) as refresh, mock.patch.object(jobs_hub, '_daily_candidate_pool') as fallback, \
                 mock.patch.object(jobs_hub, '_log_run') as log_run:
             with self.assertRaisesRegex(ValueError, 'bad calendar'):
                 jobs_hub.task_unified_selection()
+        expected_cutoff = (datetime.now().date() - timedelta(days=1)).isoformat()
+        refresh.assert_called_once_with(expected_cutoff)
         fallback.assert_not_called()
         log_run.assert_not_called()
 

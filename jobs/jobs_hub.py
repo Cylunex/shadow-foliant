@@ -2585,7 +2585,11 @@ def task_morning_strategy():
         premarket_news_meta = {'status': 'fallback', 'run_id': '', 'events': 0, 'warnings': []}
         try:
             from news_flow.premarket_facts import generate_premarket_facts
-            _fact_result = generate_premarket_facts(datetime.now().strftime('%Y-%m-%d'))
+            # 本任务已通过 _skip_if_not_trading，显式传递报告日确认；研究 PIT
+            # 日历在盘前只覆盖上一交易日也不应阻断事实流。
+            _fact_result = generate_premarket_facts(
+                datetime.now().strftime('%Y-%m-%d'), report_date_confirmed=True
+            )
             _fact_brief = _fact_result.get('brief') or {}
             _fact_rows = _fact_brief.get('facts') or []
             premarket_news_meta = {
@@ -4369,15 +4373,22 @@ def task_unified_selection():
     try:
         # 1. 本地 PIT 数据仓先独立产出并持久化。外部参考即使超时也不能延迟
         #    数据门槛判断，更不能在本地仓不完整时成为救援候选。
-        #    交易日历是本地准入的一部分，盘前先刷新两条独立证据链。
+        #    交易日历是本地准入的一部分。盘前只能刷新决策上下文允许使用的
+        #    已完成市场截止日，不能要求独立数据源提前证明选择日当天；瞬时
+        #    失败时 refresh_calendar_for_day 会复用同截止日的完整双源缓存。
         from data.research_sync import ResearchSynchronizer
-        calendar_end = datetime.now().date()
-        ResearchSynchronizer().sync_calendar(
-            (calendar_end - timedelta(days=14)).isoformat(), calendar_end.isoformat()
-        )
         from analysis.local_stock_selector import LocalStockSelector, _normalize_reference
+        from core.decision_context import DecisionContext
+        selection_date = datetime.now().strftime('%Y-%m-%d')
         selector = LocalStockSelector()
-        local_result = selector.run(datetime.now().strftime('%Y-%m-%d'), persist=True)
+        context = DecisionContext.build(
+            selection_date,
+            mode='preopen',
+            policy_version=selector.policy.version,
+            policy_hash=selector.policy.policy_hash,
+        )
+        ResearchSynchronizer().refresh_calendar_for_day(context.market_cutoff)
+        local_result = selector.run(selection_date, persist=True)
         local_candidates = local_result.get('candidates', [])
         if not local_candidates:
             reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')
