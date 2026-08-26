@@ -2,6 +2,35 @@
 
 from datetime import datetime
 
+# BaoStock 的日线与复权因子不是收盘即完成。盘后数据链统一在这里留出
+# 可见的安全缓冲，避免 jobs_hub、Web 开关页和文档各自维护一套时间。
+#
+# 其余已知发布时间仅作边界说明：分钟线 20:00、周线周六 17:30、
+# 月线每月 1 日 17:30、其它财务报告次日 01:30。当前项目没有依赖
+# BaoStock 这些批次的定时入库任务，不能用它们约束 zzshare/实时源任务。
+BAOSTOCK_READY_TIMES = {
+    'daily_kline': '17:30',
+    'adjustment_factor': '18:00',
+    'minute_kline': '20:00',
+    'financial_reports_next_day': '01:30',
+    'weekly_kline_saturday': '17:30',
+    'monthly_kline_day_1': '17:30',
+}
+
+MARKET_DATA_TIMES = {
+    # 正式 PIT 数据优先：18:00 复权因子完成后先同步，失败再轻量补跑。
+    'research_data_sync': '18:05',
+    'research_data_sync_retry': '18:20',
+    # 大批量预热放在 PIT 同步之后，避免并发争用 BaoStock 单会话/熔断器。
+    'kline_prefetch': '18:35',
+    # 下游仍有显式依赖；这些时间只是进入 deferred 队列的最早时刻。
+    'factor_collection': '18:40',
+    'portfolio_indicator_snapshot': '18:45',
+    'eod_outcomes': '18:50',
+    # 给最长 45 分钟的预热留出窗口；未完成时继续由依赖队列等待。
+    'daily_backtest': '19:30',
+}
+
 # 夜间任务按硬超时预算后仍应在 23:30 前结束；24:00 是绝对上限。
 EVENING_TIMES = {
     'rag_ingest': '20:15',          # 默认关闭；启用时 60 分钟预算，21:15 前收尾

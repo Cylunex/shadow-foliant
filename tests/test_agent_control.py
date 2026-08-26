@@ -144,7 +144,8 @@ class ScheduledDependencyTests(unittest.TestCase):
 
     def test_registry_exposes_hard_dependencies(self):
         for name in (
-                'factor_collection', 'portfolio_indicator_snapshot', 'eod_outcomes'):
+                'factor_collection', 'portfolio_indicator_snapshot',
+                'eod_outcomes', 'daily_backtest'):
             self.assertEqual(REGISTRY[name]['depends_on'], ['kline_prefetch'])
         self.assertEqual(
             REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])

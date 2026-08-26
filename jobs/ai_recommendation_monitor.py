@@ -6,7 +6,7 @@ import _bootstrap  # noqa: F401  路径引导（搬入子目录后定位项目�
 闭环用户体验：
   AI 任意分析输出"推荐买入 / 目标价 / 止损价" → save_recommendation 入库
    → enable_monitor 推入 monitored_stocks（如已存在则更新）
-   → 盘后任务 jobs_hub.task_eod_outcomes(16:55)用收盘价回填胜率(check_all_active)
+   → 盘后任务 jobs_hub.task_eod_outcomes(18:50起，等待K线预热)用收盘价回填胜率(check_all_active)
    → 触发 take_profit / stop_loss 时通过 notification_router 推送
    → 回填 hit_target_at / hit_stop_at
 

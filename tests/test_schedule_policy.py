@@ -4,8 +4,10 @@ import unittest
 from jobs import jobs_hub
 from jobs.automation_config import REGISTRY
 from jobs.schedule_policy import (
+    BAOSTOCK_READY_TIMES,
     EVENING_MAX_RUNTIME_MINUTES,
     EVENING_TIMES,
+    MARKET_DATA_TIMES,
     WEEKEND_LLM_BLACKOUTS,
     WEEKEND_LLM_JOBS,
     WEEKEND_TIMES,
@@ -58,6 +60,31 @@ class SchedulePolicyTests(unittest.TestCase):
             self.assertIn(f"WEEKEND_TIMES['{name}']", source)
         for name in ('rag_ingest', 'fund_evening', 'daily_pnl_snapshot'):
             self.assertIn(f"EVENING_TIMES['{name}']", source)
+
+        for name, hhmm in MARKET_DATA_TIMES.items():
+            self.assertIn(f"MARKET_DATA_TIMES['{name}']", source)
+            self.assertTrue(REGISTRY[name]['schedule'].startswith(hhmm), name)
+
+    def test_baostock_consumers_start_after_provider_is_ready(self):
+        adjustment_ready = minute_of_day(BAOSTOCK_READY_TIMES['adjustment_factor'])
+        self.assertGreaterEqual(
+            minute_of_day(MARKET_DATA_TIMES['research_data_sync']),
+            adjustment_ready + 5,
+        )
+        self.assertGreater(
+            minute_of_day(MARKET_DATA_TIMES['research_data_sync_retry']),
+            minute_of_day(MARKET_DATA_TIMES['research_data_sync']),
+        )
+        self.assertGreater(
+            minute_of_day(MARKET_DATA_TIMES['kline_prefetch']),
+            minute_of_day(MARKET_DATA_TIMES['research_data_sync_retry']),
+        )
+
+    def test_kline_consumers_keep_explicit_dependency(self):
+        for name in (
+                'factor_collection', 'portfolio_indicator_snapshot',
+                'eod_outcomes', 'daily_backtest'):
+            self.assertIn('kline_prefetch', REGISTRY[name]['depends_on'])
 
 
 if __name__ == '__main__':

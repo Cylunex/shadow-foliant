@@ -31,7 +31,7 @@ import concurrent.futures
 from db_compat import connect as db_connect
 from datetime import datetime, date, timedelta, timezone
 from typing import Callable, Dict, List, Optional
-from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
+from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
 import schedule
 import datahub  # 统一外部数据层(行情/北向/龙虎榜/板块/新闻等取数唯一入口)
@@ -659,7 +659,7 @@ def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool
 def task_daily_backtest():
     """盘后批量回测 + 策略基因组进化：全股池回测 → 横截面评分 → 变异 → 反哺AI。
 
-    每个交易日 19:00 运行。受开关 daily_backtest 控制（默认开）。
+    每个交易日 19:30 起、K线预热完成后运行。受开关 daily_backtest 控制（默认开）。
 
     v2 进化版：
       1. 池子：持仓 + 昨日强势股 TOP20 → 扩容到 30+
@@ -1166,9 +1166,9 @@ def task_strategy_policy_weekly():
 
 
 def task_eod_outcomes():
-    """🎯 盘后后验合并(16:55)—— 推荐池与决策信号后验:
+    """🎯 盘后后验合并(18:50 起)—— 推荐池与决策信号后验:
     收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
-    ②决策信号过 horizon 判 hit/miss(run_outcomes)。正式选股后验在 17:10 研究行情入库后更新。
+    ②决策信号过 horizon 判 hit/miss(run_outcomes)。正式选股后验在 18:05 研究行情入库后更新。
     盘后链。两段各自 try 包裹:一段失败不拖另一段。开关 eod_outcomes(默认开)。非交易日跳过。"""
     job = 'eod_outcomes'
     try:
@@ -3760,7 +3760,7 @@ def task_research_data_sync():
 
 
 def task_research_data_sync_retry():
-    """17:50 条件补跑：当天正式研究快照已完整则秒级跳过。"""
+    """18:20 条件补跑：当天正式研究快照已完整则秒级跳过。"""
     job = 'research_data_sync_retry'
     if _skip_if_not_trading(job):
         return
@@ -3949,7 +3949,8 @@ def task_weekly_db_cleanup():
 def task_kline_prefetch():
     """📥 盘后预热 K线缓存(开关 kline_prefetch,默认开)。
     全量预拉 持仓 + 监测 + 沪深300成分 的日线写入共享磁盘缓存(db/kline_cache),
-    让 16:30 回测 / 因子IC / 晨报 / 持仓守卫 命中暖缓存(0ms),避免逐只冷拉外部源。
+    在 BaoStock 日线和复权因子完成后刷新，让回测 / 因子IC / 晨报 / 持仓守卫
+    命中暖缓存(0ms),避免逐只冷拉外部源。
     实测主源每次返回的是已按当日复权因子重算的完整序列 → 全量拉即天然无复权漂移,
     故无需增量追加/锚点校验/周末特判:每个交易日盘后跑一次就是一次完整且正确的刷新。"""
     job = 'kline_prefetch'
@@ -5936,7 +5937,7 @@ def register_default_jobs():
 
     """注册整合后的任务时间表（2026-06-12 二次整合，CST 时区）
 
-    时间表（CST，2026-06-25 大改:监控重构 + 盘后全挪 16:30 后）：
+    时间表（CST；盘后数据链按提供方完成时间留安全缓冲）：
       08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:15/09:30 strategy_prefetch     — 问财外部参考首取 / 仅补缓存缺口
@@ -5947,16 +5948,15 @@ def register_default_jobs():
       12:00 noon_report                 — 📊 午盘简报(大盘)
       14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
       —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
-      —— 盘后(全 16:30 后;F:读暖缓存任务显式等 kline_prefetch 焐完,不靠时钟间隔)——
-      16:30 kline_prefetch              — 📥 K线+因子缓存预热(链头)
-      16:40 factor_collection           — 🧬 因子采集(prefetch 成功后由 deferred 队列提交)
-      16:45 portfolio_indicator_snapshot— 📸 持仓指标快照(prefetch 成功后提交;次日早盘读它)
+      —— 盘后(日线17:30、复权因子18:00就绪;读暖缓存任务仍显式等依赖)——
       16:48 daily_market_snapshot       — 📷 大盘快照
-      16:55 eod_outcomes                — 🎯 盘后后验合并(prefetch 成功后提交:推荐池回填+信号后验)
-      17:10 research_data_sync          — 🗄️ 全市场日线/估值/PIT 财务入仓后更新正式选股后验
+      18:05/18:20 research_data_sync    — 🗄️ 全市场复权日线/估值/PIT 首轮与条件补跑
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
-      18:35 announcement_scan           — 📢 公告/研报/解禁三合一预警
-      19:00 daily_backtest              — 📐 回测+基因组进化(尾接策略扫描→推荐池)
+      18:35 kline_prefetch/announcement — 📥 K线预热链头 / 📢 公告扫描（相互独立）
+      18:40 factor_collection           — 🧬 因子采集(prefetch 成功后由 deferred 队列提交)
+      18:45 portfolio_indicator_snapshot— 📸 持仓指标快照(prefetch 成功后提交;次日早盘读它)
+      18:50 eod_outcomes                — 🎯 盘后后验合并(prefetch 成功后提交:推荐池回填+信号后验)
+      19:30 daily_backtest              — 📐 预热完成后回测+基因组进化(尾接策略扫描→推荐池)
       17:00 mx_daily_analysis           — 🌙 妙想收盘复盘
       17:30 sector_rotation             — 📈 题材轮动雷达(智策板块引擎进每日节奏)
       20:15 rag_ingest                  — 🔎 可选 RAG 摄取(默认关闭;启用时也在 21:15 前结束)
@@ -6002,23 +6002,24 @@ def register_default_jobs():
     # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 
-    # ---- 🔴 盘后(2026-06-25 全部挪到 16:30 之后:错峰 + 收盘数据已稳,降东财峰值并发)----
-    # ⚠️ 硬依赖顺序(勿随手按字母/时间调序):kline_prefetch 必须**最先**焐 K线+因子缓存,
+    # ---- 🔴 盘后：BaoStock 日线 17:30、复权因子 18:00 完成后再跑正式数据链 ----
+    # ⚠️ PIT 同步优先于大批量预热，避免两者争 BaoStock 单会话/熔断器。
+    # 硬依赖顺序(勿随手按字母/时间调序):kline_prefetch 焐 K线+因子缓存后，
     #    factor_collection / portfolio_indicator_snapshot / daily_backtest 都读这份暖缓存(顺序颠倒→冷拉雪崩);
     #    decision_signal_outcomes 需当日收盘 K线已入缓存;龙虎榜傍晚才出全量,故 dragon_tiger 押后到 18:30。
-    hub.register('kline_prefetch',              '16:30', task_kline_prefetch)            # 链头:焐缓存(最慢,留足窗)
-    hub.register('factor_collection',           '16:40', task_factor_collection)        # 读暖缓存(F:等 prefetch 焐完)
-    hub.register('portfolio_indicator_snapshot','16:45', task_portfolio_indicator_snapshot)
+    hub.register('research_data_sync', MARKET_DATA_TIMES['research_data_sync'], task_research_data_sync)
+    hub.register('research_data_sync_retry', MARKET_DATA_TIMES['research_data_sync_retry'], task_research_data_sync_retry)
+    hub.register('kline_prefetch', MARKET_DATA_TIMES['kline_prefetch'], task_kline_prefetch)
+    hub.register('factor_collection', MARKET_DATA_TIMES['factor_collection'], task_factor_collection)
+    hub.register('portfolio_indicator_snapshot', MARKET_DATA_TIMES['portfolio_indicator_snapshot'], task_portfolio_indicator_snapshot)
     hub.register('daily_market_snapshot',       '16:48', task_daily_market_snapshot)
     # A 合并(2026-06-26):eod_outcomes = 原 ai_rec_check(16:35 推荐池回填)+ decision_signal_outcomes(信号后验)
-    hub.register('eod_outcomes',                '16:55', task_eod_outcomes)             # 盘后后验合并(读暖缓存)
-    hub.register('research_data_sync',          '17:10', task_research_data_sync)       # 次日选股本地 PIT 数据
-    hub.register('research_data_sync_retry',    '17:50', task_research_data_sync_retry) # 当天完整则跳过；只补 17:10 失败
+    hub.register('eod_outcomes', MARKET_DATA_TIMES['eod_outcomes'], task_eod_outcomes)
     hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
     hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 
     # ---- 📐 盘后回测(放最后:纯 CPU 重活,读全量暖缓存,不与焐缓存抢)----
-    hub.register('daily_backtest',             '19:00', task_daily_backtest)
+    hub.register('daily_backtest', MARKET_DATA_TIMES['daily_backtest'], task_daily_backtest)
 
     # ---- 🌙 夜间 ----
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)

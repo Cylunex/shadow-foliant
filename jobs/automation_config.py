@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from db_compat import connect as db_connect, USE_POSTGRES
-from jobs.schedule_policy import EVENING_TIMES, WEEKEND_TIMES
+from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
 _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
@@ -98,13 +98,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',
-        'schedule': '16:30 每日(盘后链头)',
+        'schedule': f"{MARKET_DATA_TIMES['kline_prefetch']} 每交易日(复权数据就绪后)",
         'category': '数据', 'default': True,
-        'description': '盘后全量预拉 持仓+监测+沪深300成分 日线写共享磁盘缓存(db/kline_cache),让回测/因子/晨报/持仓守卫命中暖缓存(0ms);全量拉天然无复权漂移,无需增量/周末特判',
+        'description': '18:00复权因子就绪且PIT同步优先完成后，全量预拉持仓+监测+选股指数成分的raw/qfq日线到共享缓存；不使用尚未完成的收盘批次',
     },
     'portfolio_indicator_snapshot': {
         'cn': '📸 持仓指标快照',
-        'schedule': '16:45 起，K线缓存预热完成后',
+        'schedule': f"{MARKET_DATA_TIMES['portfolio_indicator_snapshot']} 起，K线缓存预热完成后",
         'category': '核心', 'default': True, 'core': True,
         'depends_on': ['kline_prefetch'],
         'description': '持仓+监测列表算 MyTT/缠论/VaR 快照(早盘晨报扫描全靠它);尾接风险预警/形态告警[开关]。关掉会让次日分析读不到快照',
@@ -117,22 +117,22 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'factor_collection': {
         'cn': '🧬 因子采集',
-        'schedule': '16:40 起，K线缓存预热完成后',
+        'schedule': f"{MARKET_DATA_TIMES['factor_collection']} 起，K线缓存预热完成后",
         'category': '核心', 'default': True, 'core': True,
         'depends_on': ['kline_prefetch'],
         'description': '收盘后采集 OHLCV+技术指标+估值打分因子快照',
     },
     'research_data_sync': {
         'cn': '🗄️ 本地研究数据同步',
-        'schedule': '17:10 每交易日',
+        'schedule': f"{MARKET_DATA_TIMES['research_data_sync']} 每交易日",
         'category': '数据', 'default': True, 'core': True,
-        'description': '拉取全市场复权日线、估值和PIT财务，成功入库后更新正式选股1/3/5/10/20日后验',
+        'description': '18:00复权因子完成后优先拉取全市场复权日线、估值和PIT财务；成功入库后更新正式选股1/3/5/10/20日后验',
     },
     'research_data_sync_retry': {
         'cn': '🔁 本地研究数据补跑',
-        'schedule': '17:50 每交易日（仅 17:10 未完成时）',
+        'schedule': f"{MARKET_DATA_TIMES['research_data_sync_retry']} 每交易日（仅首轮未完成时）",
         'category': '数据', 'default': True,
-        'description': '仅当当天全市场研究快照未完整入库时补跑；已完成则立即跳过',
+        'description': '仅当18:05全市场研究快照未完整入库时补跑；已完成则立即跳过，避免与后续大批量K线预热争用数据源',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',
@@ -185,7 +185,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # ===== 常驻核心(已在表内)=====
     'eod_outcomes': {
         'cn': '🎯 盘后后验合并',
-        'schedule': '16:55 起，K线缓存预热完成后',
+        'schedule': f"{MARKET_DATA_TIMES['eod_outcomes']} 起，K线缓存预热完成后",
         'category': '核心',
         'default': True,  # A 合并:推荐池收盘价回填胜率 + 决策信号 K线后验,二者皆"盘后读K线做后验",合一个任务
         'depends_on': ['kline_prefetch'],
@@ -223,10 +223,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # 不再单独定时;模块仍供 MCP(exit_advice/portfolio_health_check)与前端"🧹清仓助手"页按需调用。
     'daily_backtest': {
         'cn': '📐 盘后策略回测',
-        'schedule': '19:00 每日（默认一/三/五完整，其余交易日轻扫描）',
+        'schedule': f"{MARKET_DATA_TIMES['daily_backtest']} 起，K线缓存预热完成后（默认一/三/五完整，其余交易日轻扫描）",
         'category': '核心',
         'default': True,
-        'description': '默认一/三/五跑全池策略进化，二/四只做当日策略扫描以降低NAS发热；报告进入22:30盘后汇总',
+        'depends_on': ['kline_prefetch'],
+        'description': '默认一/三/五跑全池策略进化，二/四只做当日策略扫描；未完成K线预热时在worker外等待，避免冷拉和NAS并发升温，报告进入22:30盘后汇总',
     },
 
     # 新增工作流（默认全关）
@@ -246,7 +247,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'wf_daily_strategy_scan': {
         'cn': '🔗 工作流 B：盘后策略扫描 → AI 分析 → 推荐池',
-        'schedule': '19:00 每日(daily_backtest 尾部,进化后用最新基因组情报)',
+        'schedule': f"{MARKET_DATA_TIMES['daily_backtest']} 起(daily_backtest 尾部,进化后用最新基因组情报)",
         'category': '工作流',
         'default': True,  # 盈利闭环的"新血"来源:每日产出带目标/止损的 AI 推荐供监控+评估
         'description': '正式TOP5/TOP15优先，再对持仓和热门池跑 InStock 13 策略；统一锁定当次基因组快照',
@@ -260,7 +261,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'wf_daily_pattern_alert': {
         'cn': '🔗 工作流 D：形态+基本面 E 级预警',
-        'schedule': '16:45 每日(portfolio_indicator_snapshot 内,复用同一份K线)',
+        'schedule': f"{MARKET_DATA_TIMES['portfolio_indicator_snapshot']} 起(portfolio_indicator_snapshot 内,复用同一份K线)",
         'category': '工作流',
         'default': True,
         'description': '对持仓股扫 TA-Lib 反转形态 + 基本面 E 级警报，立即推送',
