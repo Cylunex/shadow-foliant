@@ -44,7 +44,7 @@ export default {
 
     <section class="card">
       <div class="section-head">
-        <div><h2>最终优选 TOP5</h2><p>由本地融合独立配额确定；红蓝、问财和妙想只作复核，不改变名单</p></div>
+        <div><h2>最终优选 TOP5</h2><p>在完整 TOP15 内按本地确定性指标独立复排；红蓝、问财和妙想只作复核</p></div>
         <span class="badge" :class="selectionStatus==='success'?'success':'warning'">{{selectionDate||'等待选股'}}</span>
       </div>
       <div v-if="finalRows.length" class="pick-grid">

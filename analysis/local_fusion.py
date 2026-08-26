@@ -1,4 +1,4 @@
-"""Deterministic local multi-lane selection for ``local-fusion-v1``.
+"""Deterministic local multi-lane selection for ``local-fusion-v2``.
 
 Only local PIT data can nominate formal candidates.  Wencai, Miaoxiang and LLM
 reviews are deliberately absent from this module.  Cross-lane scores are not
@@ -43,7 +43,7 @@ def _plain(value: object) -> object:
 
 @dataclass(frozen=True)
 class FusionPolicy:
-    version: str = "local-fusion-v1"
+    version: str = "local-fusion-v2"
     top15_size: int = 15
     top5_size: int = 5
     top15_core_floor: int = 8
@@ -227,15 +227,10 @@ class LocalFusionComposer:
             self.policy.top15_size,
         )
 
-        top5_lanes = {
-            "core": selected_by_lane["core"][:self.policy.top5_core_floor],
-            "satellite": selected_by_lane["satellite"][:self.policy.top5_satellite_cap],
-            "timing": selected_by_lane["timing"][:self.policy.top5_timing_cap],
-        }
-        top5 = self._rank_with_template(
-            top5_lanes, ("core", "core", "satellite", "core", "timing"),
-            self.policy.top5_size, fallback=top15,
-        )
+        # TOP15 的模板只负责让三类本地生产器按配额进入正式候选集。TOP5 必须在
+        # 完整 TOP15 上重新比较，不能再次套用同一模板，否则结构上永远等于前五行。
+        # 复排只使用同一 PIT 快照内的确定性信息，不读取行情、持仓、问财或 LLM。
+        top5 = self._shortlist_top5(top15, feature_map)
         return {
             "policy": self.policy.as_dict(),
             "policy_hash": self.policy.policy_hash,
@@ -244,6 +239,150 @@ class LocalFusionComposer:
             "top5": top5,
             "lane_counts": {lane: len(rows) for lane, rows in selected_by_lane.items()},
         }
+
+    @staticmethod
+    def _pit_score(feature: Optional[pd.Series], fallback: float) -> float:
+        if feature is None:
+            return float(fallback)
+        values = [
+            _number(feature.get(key)) for key in (
+                "fundamental_score", "technical_60_score", "industry_score",
+                "correction_120", "correction_250", "event_correction",
+            )
+        ]
+        available = [value for value in values if value is not None]
+        return float(sum(available)) if available else float(fallback)
+
+    @staticmethod
+    def _scaled(value: float, low: float, high: float) -> float:
+        if high <= low:
+            return 100.0
+        return max(0.0, min(100.0, (float(value) - low) / (high - low) * 100.0))
+
+    def _shortlist_top5(self, top15: Sequence[dict],
+                        feature_map: Mapping[str, pd.Series]) -> List[dict]:
+        """Independently re-rank TOP15 while preserving the local lane contract.
+
+        Cross-lane raw scores use different units, so they are never added directly.
+        PIT composite and lane strength are normalized first; coverage, configured
+        strategy priority and independent local nominations provide small tie-breaks.
+        """
+        prepared: List[dict] = []
+        for original_rank, raw in enumerate(top15, 1):
+            row = dict(raw)
+            feature = feature_map.get(str(row.get("symbol") or ""))
+            lane_score = _number(row.get("lane_score_raw")) or 0.0
+            pit_score = self._pit_score(feature, lane_score)
+            coverage = _number(row.get("data_coverage"))
+            if coverage is None and feature is not None:
+                coverage = _number(feature.get("data_coverage"))
+            strategy_ids = {
+                str(item.get("strategy_id") or "")
+                for item in (row.get("supporting_nominations") or [])
+                if item.get("strategy_id")
+            }
+            prepared.append({
+                **row,
+                "_top15_rank": original_rank,
+                "_pit_score": pit_score,
+                "_lane_score": lane_score,
+                "_coverage": max(0.0, min(1.0, coverage or 0.0)),
+                "_support_count": max(1, len(strategy_ids)),
+            })
+
+        if not prepared:
+            return []
+        pit_values = [float(row["_pit_score"]) for row in prepared]
+        lane_bounds: Dict[str, tuple[float, float]] = {}
+        for lane in {str(row.get("assigned_lane") or "core") for row in prepared}:
+            values = [float(row["_lane_score"]) for row in prepared
+                      if str(row.get("assigned_lane") or "core") == lane]
+            lane_bounds[lane] = (min(values), max(values))
+
+        ranked: List[dict] = []
+        for row in prepared:
+            lane = str(row.get("assigned_lane") or "core")
+            lane_low, lane_high = lane_bounds[lane]
+            components = {
+                "pit_quality": round(self._scaled(
+                    row["_pit_score"], min(pit_values), max(pit_values)
+                ), 2),
+                "lane_strength": round(self._scaled(
+                    row["_lane_score"], lane_low, lane_high
+                ), 2),
+                "data_coverage": round(float(row["_coverage"]) * 100.0, 2),
+                "local_confirmation": round(min(
+                    100.0, 50.0 + (int(row["_support_count"]) - 1) * 20.0
+                ), 2),
+                "strategy_priority": round(min(
+                    100.0, max(0.0, float(
+                        _number(row.get("strategy_priority_weight")) or 0.0
+                    ) * 100.0)
+                ), 2),
+            }
+            shortlist_score = (
+                components["pit_quality"] * 0.55
+                + components["lane_strength"] * 0.20
+                + components["data_coverage"] * 0.10
+                + components["local_confirmation"] * 0.10
+                + components["strategy_priority"] * 0.05
+            )
+            ranked.append({
+                **{key: value for key, value in row.items() if not key.startswith("_")},
+                "shortlist_score": round(shortlist_score, 4),
+                "shortlist_components": components,
+                "top15_rank": int(row["_top15_rank"]),
+            })
+
+        ranked.sort(key=lambda row: (
+            -float(row["shortlist_score"]), int(row.get("top15_rank") or 9999),
+            str(row.get("symbol") or ""),
+        ))
+        selected: List[dict] = []
+        used: set[str] = set()
+
+        def take(lane: str, count: int) -> None:
+            for item in ranked:
+                if count <= 0 or len(selected) >= self.policy.top5_size:
+                    break
+                symbol = str(item.get("symbol") or "")
+                if symbol in used or str(item.get("assigned_lane") or "core") != lane:
+                    continue
+                selected.append(dict(item))
+                used.add(symbol)
+                count -= 1
+
+        take("core", self.policy.top5_core_floor)
+        take("satellite", self.policy.top5_satellite_cap)
+        take("timing", self.policy.top5_timing_cap)
+        lane_caps = {
+            "satellite": self.policy.top5_satellite_cap,
+            "timing": self.policy.top5_timing_cap,
+        }
+        for item in ranked:
+            if len(selected) >= self.policy.top5_size:
+                break
+            symbol = str(item.get("symbol") or "")
+            lane = str(item.get("assigned_lane") or "core")
+            if symbol in used:
+                continue
+            cap = lane_caps.get(lane)
+            if cap is not None and sum(
+                1 for chosen in selected if chosen.get("assigned_lane") == lane
+            ) >= cap:
+                continue
+            selected.append(dict(item))
+            used.add(symbol)
+
+        selected.sort(key=lambda row: (
+            -float(row["shortlist_score"]), int(row.get("top15_rank") or 9999),
+            str(row.get("symbol") or ""),
+        ))
+        for rank, item in enumerate(selected[:self.policy.top5_size], 1):
+            item["selection_priority"] = rank
+            item["rank"] = rank
+            item["shortlist_rank"] = rank
+        return selected[:self.policy.top5_size]
 
     def _nominations(self, core_rows: Sequence[dict], local_result: dict,
                      genome_result: dict) -> List[dict]:

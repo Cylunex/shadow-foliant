@@ -32,7 +32,7 @@ export default {
     <!-- 每日综合选股产物 -->
     <div v-if="tab==='latest'">
       <section class="command-hero" style="margin-bottom:16px">
-        <div><span class="badge info">LOCAL FUSION V1</span><h1 style="margin-top:10px">本地多赛道选股</h1><p>PIT 为核心，本地五策略与技术基因组拥有受控提名权；问财、妙想和红蓝只作参考复核。</p></div>
+        <div><span class="badge info">LOCAL FUSION V2</span><h1 style="margin-top:10px">本地多赛道选股</h1><p>PIT 为核心，本地五策略与技术基因组拥有受控提名权；问财、妙想和红蓝只作参考复核。</p></div>
         <div class="hero-status"><div><strong>{{latest.meta?.snapshot_date||'暂无快照'}}</strong><small>{{latest.status==='success'?'今日产物可用':statusCn(latest.status)}}</small></div><button class="ghost" :disabled="latest.loading" @click="loadLatest">{{latest.loading?'读取中…':'刷新'}}</button></div>
       </section>
       <div v-if="latest.err" class="err">{{latest.err}}</div>
@@ -45,7 +45,7 @@ export default {
         </div>
       </section>
       <section class="card">
-        <div class="section-head"><div><h2>最终优选 TOP5</h2><p>由独立配额编排器确定，不是 TOP15 简单截取，也不等于直接买入指令</p></div><span class="badge warning">买入前核对盘面与价格</span></div>
+        <div class="section-head"><div><h2>最终优选 TOP5</h2><p>在完整 TOP15 内按本地质量与赛道强度独立复排，不是简单截取，也不等于直接买入指令</p></div><span class="badge warning">买入前核对盘面与价格</span></div>
         <div v-if="latestFinal.length" class="pick-grid">
           <article v-for="(r,i) in latestFinal" :key="r.code" class="pick-card" style="cursor:pointer" @click="openStock(r.code)">
             <span class="pick-rank">{{i+1}}</span><div class="pick-code">{{r.code}}</div><div class="pick-name">{{r.name||'未命名'}}</div>

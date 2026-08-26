@@ -2046,7 +2046,7 @@ class ResearchStore:
             if persist_policy:
                 cur.execute(
                     "SELECT 1 FROM strategy_policy_versions WHERE policy_version=? AND policy_hash=?",
-                    (str(policy.get("version") or "local-fusion-v1"), str(policy_hash)),
+                    (str(policy.get("version") or "local-fusion-v2"), str(policy_hash)),
                 )
                 if not cur.fetchone():
                     cur.execute(
@@ -2056,7 +2056,7 @@ class ResearchStore:
                         """INSERT INTO strategy_policy_versions
                            (policy_version,policy_hash,state,effective_from,payload,created_at)
                            VALUES (?,?,?,?,?,?)""",
-                        (str(policy.get("version") or "local-fusion-v1"), str(policy_hash),
+                        (str(policy.get("version") or "local-fusion-v2"), str(policy_hash),
                          "active", str(selection_date), _json(policy), now),
                     )
             for (strategy_id, strategy_version, lane), rows in grouped.items():
@@ -2070,7 +2070,7 @@ class ResearchStore:
                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (strategy_run_id, str(run_id), strategy_id, strategy_version, lane,
                      "success", str(selection_date), str(input_snapshot_id),
-                     str(policy.get("version") or "local-fusion-v1"),
+                     str(policy.get("version") or "local-fusion-v2"),
                      _json({"nomination_count": len(rows)}), now),
                 )
                 for item in rows:

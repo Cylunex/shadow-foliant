@@ -659,6 +659,34 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         ]
         self.assertEqual(result, finalize_local_selection(changed, limit=2))
 
+    def test_final_top_five_persists_independent_shortlist_score(self):
+        formal = {
+            "run_id": "run", "snapshot_id": "snapshot",
+            "selection_date": "2026-08-24", "market_as_of": "2026-08-21",
+            "valuation_as_of": "2026-08-21", "financial_as_of": "2026-08-24",
+            "rule_version": "local-fusion-v2", "policy_hash": "policy",
+            "manifest_id": "manifest", "assigned_lane": "core",
+            "primary_strategy_name": "本地PIT",
+        }
+        rows = [
+            {**formal, "code": "600001", "lane_score_raw": 90,
+             "shortlist_score": 70, "shortlist_rank": 2,
+             "selection_priority": 2, "top15_rank": 1,
+             "shortlist_components": {"pit_quality": 60}},
+            {**formal, "code": "600002", "lane_score_raw": 80,
+             "shortlist_score": 95, "shortlist_rank": 1,
+             "selection_priority": 1, "top15_rank": 8,
+             "shortlist_components": {"pit_quality": 100}},
+        ]
+
+        result = finalize_local_selection(rows, limit=2)
+
+        self.assertEqual([row["code"] for row in result], ["600002", "600001"])
+        self.assertEqual(result[0]["final_score"], 95)
+        self.assertEqual(result[0]["lane_score_raw"], 80)
+        self.assertEqual(result[0]["top15_rank"], 8)
+        self.assertEqual(result[0]["ranking_source"], "local_fusion_shortlist_v2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,14 +116,18 @@ def _normalize_reference(items: Optional[Iterable[object]]) -> List[dict]:
         if isinstance(item, dict):
             raw = item.get("symbol") or item.get("code") or item.get("股票代码")
             labels = item.get("source_labels") or item.get("sources") or item.get("src") or []
+            name = item.get("name") or item.get("股票简称")
         else:
-            raw, labels = item, []
+            raw, labels, name = item, [], None
         symbol = "".join(ch for ch in str(raw or "") if ch.isdigit())[-6:]
         if len(symbol) != 6:
             continue
         if isinstance(labels, str):
             labels = [labels]
         current = output.setdefault(symbol, {"symbol": symbol, "source_labels": []})
+        name_text = str(name).strip() if name is not None else ""
+        if name_text.lower() not in ("", "nan", "none", "<na>") and not current.get("name"):
+            current["name"] = name_text
         for label in labels:
             text = str(label).strip()
             if text and text not in current["source_labels"]:
@@ -133,7 +137,7 @@ def _normalize_reference(items: Optional[Iterable[object]]) -> List[dict]:
 
 @dataclass(frozen=True)
 class SelectionPolicy:
-    version: str = "local-fusion-v1"
+    version: str = "local-fusion-v2"
     core_rule_version: str = "local-pit-v4"
     fundamental_top_n: int = 200
     technical_top_n: int = 50
@@ -496,7 +500,7 @@ class LocalStockSelector:
             }
 
         # Keep local-pit-v4 as the core producer.  Its internal percentile universe
-        # is unchanged; local-fusion-v1 only composes its nominations afterwards.
+        # is unchanged; local-fusion-v2 only composes its nominations afterwards.
         fundamental_pool = frame.sort_values(
             ["fundamental_score", "fundamental_coverage", "history_coverage"], ascending=False
         ).head(self.policy.fundamental_top_n).copy()

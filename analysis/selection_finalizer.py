@@ -203,11 +203,12 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
     for raw in rows or []:
         source = dict(raw or {})
         code = str(source.get("code") or source.get("symbol") or "").strip()
-        score = _number(source.get(
+        lane_score = _number(source.get(
             "lane_score_raw",
             source.get("local_score", source.get("score", source.get("total_score"))),
         ))
-        if not code or score is None:
+        shortlist_score = _number(source.get("shortlist_score"))
+        if not code or lane_score is None:
             continue
         required = (
             "run_id", "snapshot_id", "selection_date", "market_as_of",
@@ -220,6 +221,20 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
         is_fusion = bool(source.get("assigned_lane"))
         assigned_lane = source.get("assigned_lane") or "core"
         strategy_name = source.get("primary_strategy_name") or "本地PIT"
+        shortlist_components = dict(source.get("shortlist_components") or {})
+        if shortlist_score is not None:
+            top15_rank = int(source.get("top15_rank") or source.get("rank") or 9999)
+            final_reason = (
+                f"TOP15第{top15_rank}名→本地复排；"
+                f"PIT质量{(_number(shortlist_components.get('pit_quality')) or 0):g}、"
+                f"赛道强度{(_number(shortlist_components.get('lane_strength')) or 0):g}、"
+                f"数据覆盖{(_number(shortlist_components.get('data_coverage')) or 0):g}"
+            )
+        else:
+            final_reason = (
+                f"{strategy_name}赛道确定性入选" if is_fusion
+                else "本地PIT总分确定性排序"
+            )
         row = {
             "run_id": source.get("run_id"),
             "snapshot_id": source.get("snapshot_id"),
@@ -234,8 +249,8 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "selection_priority": int(
                 source.get("selection_priority") or source.get("rank") or 9999
             ),
-            "local_score": round(score, 4),
-            "lane_score_raw": round(score, 4),
+            "local_score": round(lane_score, 4),
+            "lane_score_raw": round(lane_score, 4),
             "score_components": dict(source.get("score_components") or {}),
             "technical_state": source.get("technical_state") or source.get("local_state"),
             "data_quality": _number(
@@ -243,12 +258,14 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             ),
             "rule_version": source.get("rule_version"),
             "policy_hash": source.get("policy_hash"),
-            "final_score": round(score, 4),
-            "final_reason": (
-                f"{strategy_name}赛道确定性入选" if is_fusion
-                else "本地PIT总分确定性排序"
+            "final_score": round(
+                shortlist_score if shortlist_score is not None else lane_score, 4
             ),
-            "ranking_source": "local_fusion_policy" if is_fusion else "local_pit_snapshot",
+            "final_reason": final_reason,
+            "ranking_source": (
+                "local_fusion_shortlist_v2" if shortlist_score is not None
+                else "local_fusion_policy" if is_fusion else "local_pit_snapshot"
+            ),
             "assigned_lane": assigned_lane,
             "primary_strategy": source.get("primary_strategy") or "local_pit_v4",
             "primary_strategy_name": strategy_name,
@@ -256,6 +273,14 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
             "strategy_priority_weight": _number(source.get("strategy_priority_weight")),
             "supporting_nominations": list(source.get("supporting_nominations") or []),
             "source_labels": list(source.get("source_labels") or []),
+            "top15_rank": int(source.get("top15_rank") or source.get("rank") or 9999),
+            "shortlist_rank": (
+                int(source.get("shortlist_rank")) if source.get("shortlist_rank") else None
+            ),
+            "shortlist_score": (
+                round(shortlist_score, 4) if shortlist_score is not None else None
+            ),
+            "shortlist_components": shortlist_components,
         }
         ranked.append(row)
     if any(row.get("ranking_source") == "local_fusion_policy" for row in ranked):

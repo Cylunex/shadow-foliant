@@ -58,10 +58,18 @@ class LocalFusionTest(unittest.TestCase):
         symbols = [row["symbol"] for row in self.core]
         symbols += [f"001{i:03d}" for i in range(1, 9)] + ["002001", "002002"]
         rng = np.random.default_rng(42)
+        pit_quality = {
+            **{f"600{i:03d}": 40 + i * 8 for i in range(10)},
+            **{f"001{i:03d}": 35 + i * 9 for i in range(1, 9)},
+            "002001": 45, "002002": 95,
+        }
         self.eligible = pd.DataFrame([{
             "symbol": symbol, "name": symbol,
             "industry": "卫星行业" if symbol.startswith("001") else f"行业{pos}",
             "data_coverage": 0.95, "state": "趋势确认",
+            "fundamental_score": pit_quality[symbol], "technical_60_score": 0,
+            "industry_score": 0, "correction_120": 0, "correction_250": 0,
+            "event_correction": 0,
             "return_series_60": pd.Series(rng.normal(0, 0.01, 60)),
         } for pos, symbol in enumerate(symbols)])
 
@@ -78,6 +86,13 @@ class LocalFusionTest(unittest.TestCase):
         self.assertEqual(
             [row["assigned_lane"] for row in result["top5"]].count("core"), 3
         )
+        self.assertNotEqual(
+            [row["symbol"] for row in result["top5"]],
+            [row["symbol"] for row in result["top15"][:5]],
+        )
+        self.assertIn("600007", [row["symbol"] for row in result["top5"]])
+        self.assertIn("002002", [row["symbol"] for row in result["top5"]])
+        self.assertTrue(all("shortlist_components" in row for row in result["top5"]))
 
     def test_high_priority_local_strategies_win_satellite_capacity(self):
         result = LocalFusionComposer(self.policy).compose(

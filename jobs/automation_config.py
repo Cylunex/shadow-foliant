@@ -56,7 +56,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🎯 综合选股 TOP15 + 最终TOP5',
         'schedule': '09:45 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': 'local-fusion-v1：PIT核心至少8、本地五策略最多5、技术基因组最多2，独立编排TOP5；问财/妙想仅参考',
+        'description': 'local-fusion-v2：TOP15按本地三赛道配额产生，TOP5再对完整候选独立复排；问财/妙想仅参考',
     },
     'morning_portfolio': {
         'cn': '☀️ 早盘持仓分析',

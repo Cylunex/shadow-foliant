@@ -2440,6 +2440,37 @@ def _format_strategy_results(results: dict) -> str:
     return '\n'.join(lines)
 
 
+def _format_wencai_reference_notification(results: dict) -> str:
+    """通知中完整展示五组问财参考；不可用也必须显式可见。"""
+    lines = ['🌐 问财选股参考（仅供对照，不参与正式排名）']
+    order = ('主力资金', '低价擒牛', '低估值', '小市值', '净利增长')
+    for strategy in order:
+        ok, frame, message = (results or {}).get(strategy, (False, None, '未执行'))
+        if not ok or frame is None or len(frame) == 0:
+            detail = '盘前缓存缺失' if '缓存' in str(message or '') else '外部源暂不可用'
+            lines.append(f'{strategy}: ⚠️ 暂不可用（{detail}）')
+            continue
+        picks = []
+        for _, row in frame.head(5).iterrows():
+            raw_code = next(
+                (row[key] for key in ('股票代码', 'code', 'symbol') if key in row.index), ''
+            )
+            code = ''.join(ch for ch in str(raw_code or '') if ch.isdigit())[-6:]
+            if len(code) != 6:
+                continue
+            name = ''
+            for key in ('股票简称', 'name', '名称'):
+                if key not in row.index:
+                    continue
+                text = str(row[key]).strip()
+                if text.lower() not in ('', 'nan', 'none', '<na>'):
+                    name = text
+                    break
+            picks.append(f'{code} {name}'.strip())
+        lines.append(f'{strategy}: ' + ('、'.join(picks) if picks else '（无命中）'))
+    return '\n'.join(lines)
+
+
 def _run_daily_signal_scan(mode: str, job_name: str):
     """通用 wrapper：调用 scripts/daily_signal_scan.py 的指定 mode
 
@@ -4426,6 +4457,8 @@ def task_unified_selection():
                     if code:
                         pick = {
                             'symbol': code,
+                            'name': next((row[c] for c in ['股票简称', 'name', '名称']
+                                          if c in row.index), None),
                             'source_labels': [_WENCAI_SOURCE_LABELS.get(sname, sname)],
                         }
                         wencai_reference.append(pick)
@@ -4599,6 +4632,10 @@ def task_unified_selection():
                 local_lines.append(f'{strategy_name}:数据暂缺')
         if local_lines:
             body += '\n\n🧭 本地策略提名（参与正式候选，受赛道配额约束）\n' + '\n'.join(local_lines)
+
+        body += '\n\n' + _format_wencai_reference_notification(
+            strategy_scan.get('results', {})
+        )
 
         # 红蓝对抗速览(结论先行):被否决的直接点名"避开"
         if debate_map:

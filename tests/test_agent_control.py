@@ -48,6 +48,23 @@ class MainForceQualityTests(unittest.TestCase):
         self.assertEqual(result.iloc[0]['股票代码'], '000002')
 
 
+class WencaiNotificationTests(unittest.TestCase):
+    def test_reference_notification_shows_picks_and_unavailable_strategies(self):
+        results = {
+            '主力资金': (True, pd.DataFrame([
+                {'股票代码': '600001.SH', '股票简称': '样例一'},
+            ]), 'ok'),
+            '低价擒牛': (False, None, '当日缓存缺失'),
+        }
+
+        text = jobs_hub._format_wencai_reference_notification(results)
+
+        self.assertIn('仅供对照，不参与正式排名', text)
+        self.assertIn('主力资金: 600001 样例一', text)
+        self.assertIn('低价擒牛: ⚠️ 暂不可用（盘前缓存缺失）', text)
+        self.assertIn('低估值: ⚠️ 暂不可用', text)
+
+
 class MonitorDatabaseTests(unittest.TestCase):
     def test_single_monitor_mapping_and_name_update(self):
         with tempfile.TemporaryDirectory() as tmp:
