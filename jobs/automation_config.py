@@ -128,6 +128,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '数据', 'default': True, 'core': True,
         'description': '拉取全市场复权日线、估值和PIT财务，成功入库后更新正式选股1/3/5/10/20日后验',
     },
+    'research_data_sync_retry': {
+        'cn': '🔁 本地研究数据补跑',
+        'schedule': '17:50 每交易日（仅 17:10 未完成时）',
+        'category': '数据', 'default': True,
+        'description': '仅当当天全市场研究快照未完整入库时补跑；已完成则立即跳过',
+    },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',
         'schedule': '18:30 每日(晚间出全量)',

@@ -3731,6 +3731,7 @@ def task_research_data_sync():
         master = syncer.sync_master()
         stage = 'daily_market'
         result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
+        stage = 'quality_gate'
         status = 'success' if result.get('quality_status') == 'ok' else 'error'
         detail = (
             f"market={result.get('providers', {}).get('zzshare', 0)} "
@@ -3741,17 +3742,39 @@ def task_research_data_sync():
         )
         if status == 'success':
             try:
+                stage = 'selection_outcomes'
                 outcome = syncer.store.update_selection_candidate_outcomes()
                 detail += (f" outcomes={outcome.get('updated', 0)}"
                            f" pending={outcome.get('pending', 0)}")
             except Exception as outcome_error:
                 status = 'error'
                 detail += f" outcome_error={type(outcome_error).__name__}"
-        _log_run(job, status, error=None if status == 'success' else detail,
+        if status != 'success':
+            raise RuntimeError(f'{stage} quality gate failed: {detail}')
+        _log_run(job, 'success', error=detail,
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
-        _log_run(job, 'error', error=f'{type(e).__name__}: {stage} failed',
+        raise RuntimeError(
+            f'{job} stage={stage} failed ({type(e).__name__}): {str(e)[:240]}'
+        ) from e
+
+
+def task_research_data_sync_retry():
+    """17:50 条件补跑：当天正式研究快照已完整则秒级跳过。"""
+    job = 'research_data_sync_retry'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    from data.research_sync import ResearchSynchronizer
+    syncer = ResearchSynchronizer()
+    today = datetime.now().strftime('%Y-%m-%d')
+    if syncer.store.completed_sync('daily_market', today):
+        _log_run(job, 'skipped', error='daily_market already complete',
                  started_at=started, finished_at=datetime.now().isoformat())
+        return
+    task_research_data_sync()
+    _log_run(job, 'success', error='daily_market repaired',
+             started_at=started, finished_at=datetime.now().isoformat())
 
 
 def task_weekly_backtest():
@@ -5990,6 +6013,7 @@ def register_default_jobs():
     # A 合并(2026-06-26):eod_outcomes = 原 ai_rec_check(16:35 推荐池回填)+ decision_signal_outcomes(信号后验)
     hub.register('eod_outcomes',                '16:55', task_eod_outcomes)             # 盘后后验合并(读暖缓存)
     hub.register('research_data_sync',          '17:10', task_research_data_sync)       # 次日选股本地 PIT 数据
+    hub.register('research_data_sync_retry',    '17:50', task_research_data_sync_retry) # 当天完整则跳过；只补 17:10 失败
     hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
     hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 

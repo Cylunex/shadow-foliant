@@ -163,6 +163,33 @@ class ScheduledDependencyTests(unittest.TestCase):
         fallback.assert_not_called()
         log_run.assert_not_called()
 
+    def test_research_sync_failure_propagates_to_scheduler(self):
+        syncer = mock.MagicMock()
+        syncer.sync_master.return_value = {'rows': 5569}
+        syncer.sync_day.side_effect = RuntimeError(
+            'trade calendar refresh failed and same-day consensus cache is unavailable'
+        )
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer',
+                           return_value=syncer), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            with self.assertRaisesRegex(RuntimeError, 'stage=daily_market failed'):
+                jobs_hub.task_research_data_sync()
+        log_run.assert_not_called()
+
+    def test_research_sync_retry_skips_when_today_is_complete(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = True
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer',
+                           return_value=syncer), \
+                mock.patch.object(jobs_hub, 'task_research_data_sync') as run_sync, \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            jobs_hub.task_research_data_sync_retry()
+        run_sync.assert_not_called()
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_retry', 'skipped'))
+
     def test_scheduled_consumers_read_today_formal_artifacts_only(self):
         formal = {
             'selection_date': datetime.now().strftime('%Y-%m-%d'),

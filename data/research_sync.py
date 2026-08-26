@@ -230,7 +230,13 @@ class ResearchSynchronizer:
             primary = {day for day, state in provider_evidence["zzshare"] if state}
             validator = {day for day, state in provider_evidence["baostock"] if state}
             if not primary or not validator:
-                raise RuntimeError("independent trade calendar source unavailable")
+                unavailable = [
+                    provider for provider, rows in provider_evidence.items() if not rows
+                ]
+                raise RuntimeError(
+                    "independent trade calendar source unavailable: "
+                    + ",".join(unavailable)
+                )
             confirmed = sorted(primary & validator)
             disagreements = sorted(primary ^ validator)
             self.store.upsert_trade_days(confirmed, provider="zzshare+baostock")
@@ -252,7 +258,11 @@ class ResearchSynchronizer:
         except Exception as exc:
             self.store.finish_sync(
                 run_id, status="error", row_count=0, quality_status="failed",
-                detail={"error_type": type(exc).__name__},
+                detail={
+                    "error_type": type(exc).__name__,
+                    "error_stage": "independent_source_consensus",
+                    "incomplete_chunks": incomplete_chunks,
+                },
             )
             raise
 
@@ -260,20 +270,40 @@ class ResearchSynchronizer:
         """Refresh calendar evidence, falling back only to complete same-day cache."""
         day = pd.Timestamp(trade_date).date()
         try:
-            return self.sync_calendar(
-                (day - timedelta(days=14)).isoformat(), day.isoformat()
+            attempts = min(
+                3, max(1, int(os.getenv("RESEARCH_CALENDAR_REFRESH_ATTEMPTS", "3")))
             )
-        except Exception as exc:
-            cached = self.store.calendar_consensus(day.isoformat(), inclusive=True)
-            if (cached.get("ready")
-                    and str(cached.get("coverage_through_date") or "") >= day.isoformat()):
-                return {
-                    **cached, "quality_status": "cached",
-                    "refresh_error_type": type(exc).__name__,
-                }
-            raise RuntimeError(
-                "trade calendar refresh failed and same-day consensus cache is unavailable"
-            ) from exc
+        except (TypeError, ValueError):
+            attempts = 3
+        try:
+            retry_delay = min(
+                30.0,
+                max(0.0, float(os.getenv("RESEARCH_CALENDAR_RETRY_DELAY_SECONDS", "5"))),
+            )
+        except (TypeError, ValueError):
+            retry_delay = 5.0
+
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self.sync_calendar(
+                    (day - timedelta(days=14)).isoformat(), day.isoformat()
+                )
+            except Exception as exc:
+                last_error = exc
+                cached = self.store.calendar_consensus(day.isoformat(), inclusive=True)
+                if (cached.get("ready")
+                        and str(cached.get("coverage_through_date") or "") >= day.isoformat()):
+                    return {
+                        **cached, "quality_status": "cached",
+                        "refresh_error_type": type(last_error).__name__,
+                    }
+                if attempt + 1 < attempts and retry_delay:
+                    time.sleep(retry_delay * (attempt + 1))
+
+        raise RuntimeError(
+            "trade calendar refresh failed and same-day consensus cache is unavailable"
+        ) from last_error
 
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
                  fallback: bool = True, refresh_calendar: bool = True) -> dict:
@@ -286,8 +316,11 @@ class ResearchSynchronizer:
             "trade_date": trade_date, "providers": {},
             "calendar_quality_status": calendar_result.get("quality_status"),
         }
+        stage = "daily_market"
         try:
             frame = _normalize_market_bars(zzshare.get_market_daily(trade_date), trade_date)
+            if frame.empty:
+                raise RuntimeError("zzshare.daily_market returned no rows")
             self.store.upsert_daily_bars(frame, adjustment="qfq")
             primary_rows = self.store.daily_bar_symbol_count(
                 trade_date, adjustment="qfq", provider="zzshare"
@@ -317,23 +350,35 @@ class ResearchSynchronizer:
                         fallback_rows += self.store.upsert_daily_bars(row, adjustment="qfq")
             result["providers"]["baostock_qfq_fallback"] = fallback_rows
 
+            stage = "valuation"
             valuation = zzshare.get_valuation(trade_date)
             result["valuation_rows"] = self.store.upsert_valuations(valuation, as_of=trade_date)
             # This is an optional local-reference dataset.  Failure does not poison
             # the formal selector; the "主力资金" local strategy simply reports
             # unavailable rather than inventing a volume/turnover proxy.
-            fund_flow = akshare.stock_fund_flow_rank(trade_date)
-            result["fund_flow_rows"] = self.store.upsert_fund_flow_daily(
-                fund_flow, trade_date=trade_date
-            )
+            stage = "optional_fund_flow"
+            try:
+                fund_flow = akshare.stock_fund_flow_rank(trade_date)
+                result["fund_flow_rows"] = self.store.upsert_fund_flow_daily(
+                    fund_flow, trade_date=trade_date
+                )
+                result["fund_flow_quality_status"] = (
+                    "ok" if int(result["fund_flow_rows"]) > 0 else "unavailable"
+                )
+            except Exception as fund_flow_error:
+                result["fund_flow_rows"] = 0
+                result["fund_flow_quality_status"] = "unavailable"
+                result["fund_flow_error_type"] = type(fund_flow_error).__name__
             result["finance_rows"] = {}
             if fundamentals:
+                stage = "finance_pit"
                 for table in ("indicator", "income", "balance", "cash_flow"):
                     pit = zzshare.get_finance_pit(table, trade_date)
                     result["finance_rows"][table] = self.store.upsert_financial_pit(
                         table, pit, as_of=trade_date
                     )
 
+            stage = "quality_gate"
             usable_rows = self.store.daily_bar_symbol_count(trade_date, adjustment="qfq")
             primary_coverage = primary_rows / expected if expected else 0.0
             usable_coverage = usable_rows / expected if expected else 0.0
@@ -372,7 +417,8 @@ class ResearchSynchronizer:
             return result
         except Exception as exc:
             self.store.finish_sync(run_id, status="error", row_count=0, quality_status="failed",
-                                   detail={"error_type": type(exc).__name__})
+                                   detail={"error_type": type(exc).__name__,
+                                           "error_stage": stage})
             raise
 
     def bootstrap(self, *, end_date: Optional[str] = None, trading_days: int = 500) -> dict:

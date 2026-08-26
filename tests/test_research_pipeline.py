@@ -17,7 +17,7 @@ from data.research_sync import (
 )
 from data.research_store import ResearchStore, _iso_date
 from data.source_contracts import contracts, get_contract
-from data.sources import zzshare
+from data.sources import baostock as baostock_source, zzshare
 
 
 def _sqlite(path):
@@ -74,9 +74,29 @@ class SourceContractTest(unittest.TestCase):
                 return {'ready': True, 'coverage_through_date': '2026-08-21'}
 
         syncer = ResearchSynchronizer(store=Store())
-        with patch.object(syncer, 'sync_calendar', side_effect=RuntimeError('transient')):
+        with patch.dict(os.environ, {'RESEARCH_CALENDAR_RETRY_DELAY_SECONDS': '0'}), \
+                patch.object(syncer, 'sync_calendar',
+                             side_effect=RuntimeError('transient')) as refresh:
             with self.assertRaisesRegex(RuntimeError, 'same-day consensus cache'):
                 syncer.refresh_calendar_for_day('2026-08-24')
+        self.assertEqual(refresh.call_count, 3)
+
+    def test_baostock_daily_breaker_does_not_block_calendar(self):
+        original = {
+            capability: dict(state)
+            for capability, state in baostock_source._BREAKER_STATE.items()
+        }
+        try:
+            for state in baostock_source._BREAKER_STATE.values():
+                state.update(fail_count=0, last_fail=0.0)
+            baostock_source._mark_fail('daily')
+            baostock_source._mark_fail('daily')
+            self.assertTrue(baostock_source._in_cooldown('daily'))
+            self.assertFalse(baostock_source._in_cooldown('calendar'))
+            self.assertTrue(baostock_source.breaker_open())
+        finally:
+            baostock_source._BREAKER_STATE.clear()
+            baostock_source._BREAKER_STATE.update(original)
 
     def test_published_and_operational_limits_are_explicit(self):
         matrix = contracts()

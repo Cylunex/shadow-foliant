@@ -28,31 +28,43 @@ _LOGGED_IN = False
 # 修法:
 #  ① 等锁最多 2s,拿不到立即返空让 _route 跳源(不持锁等 100s+)
 #  ② 自带"连续失败 2 次 → 冷却 5 分钟"短路,期间秒返空,baostock 服务恢复后自动重试
-_FAIL_COUNT = 0
-_LAST_FAIL = 0.0
+# K 线预热会高频触发 daily 兜底；交易日历只在 PIT 边界刷新时调用。
+# 两者共用一个熔断器会让 daily 的临时失败错误地封死 calendar，继而阻断正式选股。
+_BREAKER_STATE = {
+    "daily": {"fail_count": 0, "last_fail": 0.0},
+    "calendar": {"fail_count": 0, "last_fail": 0.0},
+}
 _COOLDOWN_FAILS = 2
 _COOLDOWN_SEC = 300       # 5 分钟
 
 
-def _in_cooldown() -> bool:
-    return _FAIL_COUNT >= _COOLDOWN_FAILS and (_time.time() - _LAST_FAIL) < _COOLDOWN_SEC
+def _breaker_state(capability: str) -> dict:
+    return _BREAKER_STATE.setdefault(
+        str(capability), {"fail_count": 0, "last_fail": 0.0}
+    )
 
 
-def _mark_fail():
-    global _FAIL_COUNT, _LAST_FAIL, _LOGGED_IN
-    _FAIL_COUNT += 1
-    _LAST_FAIL = _time.time()
+def _in_cooldown(capability: str = "daily") -> bool:
+    state = _breaker_state(capability)
+    return (state["fail_count"] >= _COOLDOWN_FAILS
+            and (_time.time() - state["last_fail"]) < _COOLDOWN_SEC)
+
+
+def _mark_fail(capability: str = "daily"):
+    global _LOGGED_IN
+    state = _breaker_state(capability)
+    state["fail_count"] += 1
+    state["last_fail"] = _time.time()
     _LOGGED_IN = False    # 失败一律重置登录,下次重连
 
 
-def _mark_ok():
-    global _FAIL_COUNT
-    _FAIL_COUNT = 0
+def _mark_ok(capability: str = "daily"):
+    _breaker_state(capability)["fail_count"] = 0
 
 
 def breaker_open() -> bool:
     """对外查询冷却状态(供 _notify_data_unavailable 显示具体卡死的源)。"""
-    return _in_cooldown()
+    return any(_in_cooldown(capability) for capability in _BREAKER_STATE)
 
 # 与 datahub._PERIOD_DAYS 对齐(自然日)
 _PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825}
@@ -105,7 +117,7 @@ def trade_calendar_evidence(start_date: str, end_date: str):
         import pandas as pd
     except Exception:
         return []
-    if _in_cooldown() or not _LOCK.acquire(timeout=2):
+    if _in_cooldown("calendar") or not _LOCK.acquire(timeout=2):
         return []
     rows = []
     try:
@@ -116,12 +128,12 @@ def trade_calendar_evidence(start_date: str, end_date: str):
                     start_date=str(start_date), end_date=str(end_date)
                 )
             if getattr(result, "error_code", "1") != "0":
-                _mark_fail()
+                _mark_fail("calendar")
                 return []
             while result.next():
                 rows.append(result.get_row_data())
         except Exception:
-            _mark_fail()
+            _mark_fail("calendar")
             return []
     finally:
         _LOCK.release()
@@ -130,7 +142,7 @@ def trade_calendar_evidence(start_date: str, end_date: str):
     frame = pd.DataFrame(rows, columns=["calendar_date", "is_trading_day"])
     dates = pd.to_datetime(frame["calendar_date"], errors="coerce")
     states = frame["is_trading_day"].astype(str).str.strip().str.lower()
-    _mark_ok()
+    _mark_ok("calendar")
     rows = []
     for day, state in zip(dates, states):
         if pd.isna(day):
@@ -162,7 +174,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
     if interval not in ('1d', 'daily', '101'):
         return pd.DataFrame()                  # 仅日线,其余交回主链
     # ⭐ 冷却期:连续失败 2 次 → 5 分钟内秒拒,让 _route 跳源(不再卡 100s+ OS RTO)
-    if _in_cooldown():
+    if _in_cooldown("daily"):
         return pd.DataFrame()
     days = _PERIOD_DAYS.get(period, 365)
     start = (datetime.now() - timedelta(days=int(days) + 10)).strftime('%Y-%m-%d')  # +10 冗余
@@ -182,12 +194,12 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
                     bscode, "date,open,high,low,close,volume",
                     start_date=start, end_date=end, frequency='d', adjustflag=adjustflag)
             if getattr(rs, 'error_code', '1') != '0':
-                _mark_fail()
+                _mark_fail("daily")
                 return pd.DataFrame()
             while rs.next():
                 rows.append(rs.get_row_data())
         except Exception:
-            _mark_fail()
+            _mark_fail("daily")
             return pd.DataFrame()
     finally:
         _LOCK.release()
@@ -210,7 +222,7 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
         # 严格对齐 datahub:大写 Open/Close/High/Low/Volume(volume 已是「股」)
         out = df[['open', 'close', 'high', 'low', 'volume']].copy()
         out.columns = ['Open', 'Close', 'High', 'Low', 'Volume']
-        _mark_ok()   # 成功重置失败计数 → 解除冷却
+        _mark_ok("daily")   # 成功重置失败计数 → 解除冷却
         return out
     except Exception:
         return pd.DataFrame()
