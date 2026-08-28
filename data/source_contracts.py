@@ -34,6 +34,7 @@ class EndpointContract:
     amount_unit: str = "not_applicable"
     quota_basis: str = "operational"
     notes: str = ""
+    daily_request_limit: Optional[int] = None
 
     def public_dict(self) -> dict:
         """Return configuration metadata that is always safe to log or expose."""
@@ -152,13 +153,15 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
     ("baostock", "daily"): EndpointContract(
         "baostock", "daily", "daily_ohlcv", "anonymous_login", None, None,
         0.2, 1, 15.0, 1, adjustment="raw/qfq", volume_unit="shares",
-        amount_unit="yuan", quota_basis="operational",
-        notes="Single serialized session; Foliant does not rely on an undocumented daily quota.",
+        amount_unit="yuan", quota_basis="published",
+        notes="Host-wide serialized access; local hard stop defaults to 45000 requests/day.",
+        daily_request_limit=50_000,
     ),
     ("baostock", "calendar"): EndpointContract(
         "baostock", "calendar", "a_share_trade_calendar", "anonymous_login", None, None,
-        0.2, 1, 15.0, 1, supports_pit=True, quota_basis="operational",
-        notes="Independent validator for zzshare calendar consensus.",
+        0.2, 1, 15.0, 1, supports_pit=True, quota_basis="published",
+        notes="Independent validator; shares the host-wide 50000 request/day limit.",
+        daily_request_limit=50_000,
     ),
     ("cninfo", "announcements"): EndpointContract(
         "cninfo", "announcements", "official_disclosures", "none", None, 30,

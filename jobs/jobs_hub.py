@@ -599,6 +599,31 @@ def _latest_job_run_today(job_name: str, success_only: bool = False) -> Optional
             conn.close()
 
 
+def _latest_job_run_since(job_name: str, started_at: str) -> Optional[Dict]:
+    """Read the task's own outcome so the outer runner does not print false success."""
+    conn = None
+    try:
+        conn = db_connect(_SNAPSHOT_DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT started_at, finished_at, status, error FROM job_runs
+               WHERE job_name=? AND started_at>=? ORDER BY id DESC LIMIT 1""",
+            (job_name, started_at),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'started_at': row[0], 'finished_at': row[1],
+            'status': str(row[2]), 'error': row[3],
+        }
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _wait_task_dependency(job: str, dependency: str,
                           max_wait: int = None, poll: int = 10) -> bool:
     """任务内依赖 barrier，主要兜住 Agent 手动触发和调度器重启竞态。
@@ -1766,7 +1791,22 @@ def _run_with_log(name, func, *a, **kw):
     try:
         fut.result(timeout=timeout)
         elapsed = time.time() - t0
-        print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
+        outcome = _latest_job_run_since(
+            name, datetime.fromtimestamp(t0).astimezone().isoformat()
+        )
+        status = str((outcome or {}).get('status') or 'success')
+        detail = str((outcome or {}).get('error') or '')
+        if status == 'error':
+            print(f'[jobs_hub] ⚠️ {name} 已降级收尾 (耗时 {elapsed:.1f}s): '
+                  f'{detail[:120]}', flush=True)
+        elif status == 'skipped':
+            print(f'[jobs_hub] ⏭️ {name} 已跳过 (耗时 {elapsed:.1f}s): '
+                  f'{detail[:120]}', flush=True)
+        elif detail.lower().startswith('degraded'):
+            print(f'[jobs_hub] ⚠️ {name} 降级完成 (耗时 {elapsed:.1f}s): '
+                  f'{detail[:120]}', flush=True)
+        else:
+            print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
     except concurrent.futures.TimeoutError as timeout_exc:
         elapsed = time.time() - t0
         if fut.done():
@@ -4410,8 +4450,9 @@ def task_strategy_prefetch_retry():
     done += _prefetch_wencai_strategies(
         use_cache=True, log_job=job)
     _log_run(
-        job, 'success',
-        error=f'available {done}/5' if done else 'degraded 0/5(问财仍不可达,非核心源)',
+        job, 'success' if done else 'skipped',
+        error=(f'available {done}/5' if done
+               else 'source_unavailable 0/5(问财仍不可达,非核心源)'),
         started_at=started,
         finished_at=datetime.now().isoformat(),
         notify=False,
@@ -4442,7 +4483,13 @@ def task_unified_selection():
             policy_version=selector.policy.version,
             policy_hash=selector.policy.policy_hash,
         )
-        ResearchSynchronizer().refresh_calendar_for_day(context.market_cutoff)
+        syncer = ResearchSynchronizer()
+        syncer.refresh_calendar_for_day(context.market_cutoff)
+        repair = syncer.repair_daily_market_if_missing(context.market_cutoff)
+        if repair.get('repaired'):
+            print('[unified_selection] 🧰 已在正式选股前补齐前一交易日市场快照 '
+                  f"({context.market_cutoff}, coverage={float(repair.get('coverage') or 0):.1%})",
+                  flush=True)
         local_result = selector.run(selection_date, persist=True)
         local_candidates = local_result.get('candidates', [])
         if not local_candidates:

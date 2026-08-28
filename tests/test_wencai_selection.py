@@ -214,10 +214,12 @@ class WencaiRetryScheduleTests(unittest.TestCase):
                         ("others", kwargs["use_cache"])
                     ) or 0,
                 ), \
-                patch.object(module, "_log_run"):
+                patch.object(module, "_log_run") as log_run:
             module.task_strategy_prefetch_retry()
 
         self.assertEqual(calls, [("main_force", True), ("others", True)])
+        self.assertEqual(log_run.call_args.args[:2], ("strategy_prefetch_retry", "skipped"))
+        self.assertIn("source_unavailable 0/5", log_run.call_args.kwargs["error"])
 
 
 class WencaiCookieTests(unittest.TestCase):

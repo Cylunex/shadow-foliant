@@ -692,37 +692,57 @@ class StockDataFetcher:
             "cash_flow": None,  # 现金流量表
             "financial_ratios": {},  # 财务比率
             "quarter_data": None,  # 季度数据
+            "source_status": "ok",
+            "source_errors": [],
         }
         
         try:
-            # 1. 获取资产负债表
-            try:
-                balance_sheet = ak.stock_financial_abstract_ths(symbol=symbol, indicator="资产负债表")
-                if balance_sheet is not None and not balance_sheet.empty:
-                    financial_data["balance_sheet"] = balance_sheet.head(8).to_dict('records')
-            except Exception as e:
-                print(f"获取资产负债表失败: {e}")
-            
-            # 2. 获取利润表
-            try:
-                income_statement = ak.stock_financial_abstract_ths(symbol=symbol, indicator="利润表")
-                if income_statement is not None and not income_statement.empty:
-                    financial_data["income_statement"] = income_statement.head(8).to_dict('records')
-            except Exception as e:
-                print(f"获取利润表失败: {e}")
-            
-            # 3. 获取现金流量表
-            try:
-                cash_flow = ak.stock_financial_abstract_ths(symbol=symbol, indicator="现金流量表")
-                if cash_flow is not None and not cash_flow.empty:
-                    financial_data["cash_flow"] = cash_flow.head(8).to_dict('records')
-            except Exception as e:
-                print(f"获取现金流量表失败: {e}")
+            # 1-3. 三张报表共用同一个同花顺页面解析链。上游返回空 HTML 时
+            # AkShare 会抛 NoneType 解析错误；第一次已证明整条链不可用，后两次
+            # 再请求只会放大限流/代理故障。因此同一只股仅记一次错误并停止。
+            statement_sections = (
+                ("资产负债表", "balance_sheet"),
+                ("利润表", "income_statement"),
+                ("现金流量表", "cash_flow"),
+            )
+            for indicator, target in statement_sections:
+                try:
+                    frame = ak.stock_financial_abstract_ths(
+                        symbol=symbol, indicator=indicator
+                    )
+                    if frame is None or frame.empty:
+                        financial_data["source_status"] = "degraded"
+                        financial_data["source_errors"].append({
+                            "source": "akshare_ths_financial",
+                            "section": indicator,
+                            "error_type": "EmptyResponse",
+                        })
+                        print(f"[stock_data.finance] {symbol} 同花顺财务报表不可用: "
+                              "EmptyResponse")
+                        break
+                    financial_data[target] = frame.head(8).to_dict('records')
+                except Exception as exc:
+                    financial_data["source_status"] = "degraded"
+                    financial_data["source_errors"].append({
+                        "source": "akshare_ths_financial",
+                        "section": indicator,
+                        "error_type": type(exc).__name__,
+                    })
+                    print(f"[stock_data.finance] {symbol} 同花顺财务报表不可用: "
+                          f"{type(exc).__name__}")
+                    break
             
             # 4. 获取主要财务指标
             try:
                 financial_abstract = ak.stock_financial_abstract(symbol=symbol)
-                if financial_abstract is not None and not financial_abstract.empty:
+                if financial_abstract is None or financial_abstract.empty:
+                    financial_data["source_status"] = "degraded"
+                    financial_data["source_errors"].append({
+                        "source": "akshare_financial_abstract",
+                        "section": "financial_ratios",
+                        "error_type": "EmptyResponse",
+                    })
+                else:
                     # 提取关键财务指标
                     key_indicators = [
                         '净资产收益率(ROE)', '总资产报酬率(ROA)', '销售毛利率', '销售净利率',
@@ -756,7 +776,14 @@ class StockDataFetcher:
                             
                             financial_data["financial_ratios"] = financial_ratios
             except Exception as e:
-                print(f"获取财务指标失败: {e}")
+                financial_data["source_status"] = "degraded"
+                financial_data["source_errors"].append({
+                    "source": "akshare_financial_abstract",
+                    "section": "financial_ratios",
+                    "error_type": type(e).__name__,
+                })
+                print(f"[stock_data.finance] {symbol} 财务指标不可用: "
+                      f"{type(e).__name__}")
             
             # 注意：季报数据现在由 quarterly_report_data.py 模块使用 akshare 获取（8期完整季报）
             # 不再使用问财获取季报，避免重复

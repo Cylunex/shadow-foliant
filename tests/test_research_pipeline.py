@@ -105,6 +105,8 @@ class SourceContractTest(unittest.TestCase):
         self.assertGreaterEqual(matrix["zzshare"]["realtime"]["min_interval_seconds"], 3.0)
         self.assertEqual(matrix["eltdx"]["bars"]["page_size"], 800)
         self.assertEqual(matrix["baostock"]["daily"]["max_concurrency"], 1)
+        self.assertEqual(matrix["baostock"]["daily"]["daily_request_limit"], 50_000)
+        self.assertEqual(matrix["baostock"]["daily"]["quota_basis"], "published")
         self.assertTrue(matrix["baostock"]["calendar"]["supports_pit"])
         self.assertTrue(matrix["zzshare"]["finance_pit"]["supports_pit"])
         self.assertEqual(matrix["pywencai"]["discovery"]["capability"],
@@ -120,6 +122,43 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(actual.min_interval_seconds, 3.1)
         self.assertEqual(actual.max_concurrency, 1)
         self.assertEqual(actual.retries, 1)
+
+    def test_baostock_budget_is_persisted_and_cannot_exceed_published_limit(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "BAOSTOCK_STATE_DIR": tmp,
+            "BAOSTOCK_DAILY_REQUEST_BUDGET": "2",
+        }):
+            with baostock_source._provider_slot() as handle:
+                self.assertEqual(baostock_source._reserve_request(handle, "calendar"), 1)
+                self.assertEqual(baostock_source._reserve_request(handle, "daily"), 2)
+                with self.assertRaises(baostock_source.BaoStockBudgetExceeded):
+                    baostock_source._reserve_request(handle, "daily")
+            self.assertEqual(baostock_source.request_budget_status()["used"], 2)
+
+        with patch.dict(os.environ, {"BAOSTOCK_DAILY_REQUEST_BUDGET": "999999"}):
+            self.assertEqual(baostock_source._daily_budget(), 50_000)
+
+    def test_preselection_repair_is_bulk_only_and_idempotent(self):
+        store = unittest.mock.MagicMock()
+        store.completed_sync.return_value = False
+        syncer = ResearchSynchronizer(store=store)
+        repaired = {
+            "quality_status": "ok", "coverage": 0.996,
+            "providers": {"zzshare": 5550},
+        }
+        with patch.object(syncer, "sync_day", return_value=repaired) as sync_day:
+            result = syncer.repair_daily_market_if_missing("2026-08-27")
+        sync_day.assert_called_once_with(
+            "2026-08-27", fundamentals=False, fallback=False, refresh_calendar=False
+        )
+        self.assertTrue(result["repaired"])
+        self.assertEqual(result["repair_mode"], "bulk_market_without_baostock_fallback")
+
+        store.completed_sync.return_value = True
+        with patch.object(syncer, "sync_day") as sync_day:
+            result = syncer.repair_daily_market_if_missing("2026-08-27")
+        sync_day.assert_not_called()
+        self.assertFalse(result["repaired"])
 
     def test_zzshare_pit_rejects_future_publication(self):
         class Api:

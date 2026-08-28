@@ -305,6 +305,36 @@ class ResearchSynchronizer:
             "trade calendar refresh failed and same-day consensus cache is unavailable"
         ) from last_error
 
+    def repair_daily_market_if_missing(self, trade_date: str) -> dict:
+        """Bounded pre-selection repair for a missed previous-evening snapshot.
+
+        The normal 18:05/18:20 jobs remain the authoritative full ingestion path.
+        This guard runs only when their completed marker is absent.  It deliberately
+        skips financial PIT and per-symbol BaoStock repair: one zzshare market batch
+        plus valuation is sufficient to restore the formal selector, while BaoStock
+        is kept out of a potentially large morning catch-up loop.
+        """
+        trade_date = pd.Timestamp(trade_date).date().isoformat()
+        if self.store.completed_sync("daily_market", trade_date):
+            return {"status": "ready", "trade_date": trade_date, "repaired": False}
+        result = self.sync_day(
+            trade_date,
+            fundamentals=False,
+            fallback=False,
+            refresh_calendar=False,
+        )
+        if result.get("quality_status") != "ok":
+            raise RuntimeError(
+                "pre-selection daily market repair did not pass quality gate: "
+                f"coverage={result.get('coverage')} quality={result.get('quality_status')}"
+            )
+        return {
+            **result,
+            "status": "ready",
+            "repaired": True,
+            "repair_mode": "bulk_market_without_baostock_fallback",
+        }
+
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
                  fallback: bool = True, refresh_calendar: bool = True) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()

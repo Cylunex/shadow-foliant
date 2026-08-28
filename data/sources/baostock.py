@@ -12,15 +12,142 @@
 输出严格对齐 datahub 既有 K线格式:DatetimeIndex(name='Date') + 大写列 Open/Close/High/Low/Volume,
 volume 单位「股」(实测 baostock 即股,与新浪/东财×100 后同口径)。
 """
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+import json
+import os
+from pathlib import Path
 import threading
 import time as _time
-from datetime import datetime, timedelta
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - NAS/Linux and the development Mac both provide it.
+    fcntl = None
 
 from data.source_contracts import source_call
 
-_LOCK = threading.Lock()          # 串行化所有 baostock 调用(不可并发连接)
+_LOCK = threading.Lock()          # 进程内串行化所有 baostock 调用
 _BS = None                        # baostock 模块(惰性 import)
 _LOGGED_IN = False
+
+# BaoStock 的公开硬限是 5 万次/日且不允许并发连接访问。上面的
+# threading.Lock 只能管一个 Python 进程，但生产同时有 jobs/Web/Agent 进程；
+# 因此这里再用共享运行目录中的 flock 做跨进程单通道，并在同一文件内
+# 持久化当日请求计数。默认 4.5 万次即硬停，预留 10% 安全余量。
+_BAOSTOCK_PUBLISHED_DAILY_LIMIT = 50_000
+_BAOSTOCK_DEFAULT_DAILY_BUDGET = 45_000
+
+
+class BaoStockBudgetExceeded(RuntimeError):
+    """Raised before a request that would exceed the local daily safety budget."""
+
+
+def _guard_path() -> Path:
+    configured = str(os.getenv("BAOSTOCK_STATE_DIR") or "").strip()
+    if configured:
+        root = Path(configured).expanduser()
+    else:
+        import _bootstrap
+        root = Path(_bootstrap.DB_DIR) / "provider_state"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "baostock-guard.json"
+
+
+def _daily_budget() -> int:
+    try:
+        configured = int(os.getenv(
+            "BAOSTOCK_DAILY_REQUEST_BUDGET", str(_BAOSTOCK_DEFAULT_DAILY_BUDGET)
+        ))
+    except (TypeError, ValueError):
+        configured = _BAOSTOCK_DEFAULT_DAILY_BUDGET
+    return min(_BAOSTOCK_PUBLISHED_DAILY_LIMIT, max(1, configured))
+
+
+def _read_guard_state(handle) -> dict:
+    handle.seek(0)
+    try:
+        state = json.loads(handle.read() or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        state = {}
+    today = date.today().isoformat()
+    if state.get("date") != today:
+        state = {"date": today, "count": 0}
+    try:
+        state["count"] = max(0, int(state.get("count") or 0))
+    except (TypeError, ValueError):
+        state["count"] = 0
+    return state
+
+
+def _write_guard_state(handle, state: dict) -> None:
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+    handle.flush()
+
+
+def _reserve_request(handle, capability: str) -> int:
+    state = _read_guard_state(handle)
+    limit = _daily_budget()
+    if state["count"] >= limit:
+        raise BaoStockBudgetExceeded(
+            f"baostock daily request budget exhausted: {state['count']}/{limit}"
+        )
+    state["count"] += 1
+    state["last_capability"] = str(capability)
+    state["last_request_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_guard_state(handle, state)
+    return state["count"]
+
+
+@contextmanager
+def _provider_slot(timeout: float = 2.0):
+    """Yield the shared budget file only while this host owns BaoStock globally."""
+    if not _LOCK.acquire(timeout=max(0.01, float(timeout))):
+        yield None
+        return
+    handle = None
+    locked = False
+    try:
+        handle = _guard_path().open("a+", encoding="utf-8")
+        if fcntl is None:
+            locked = True
+        else:
+            deadline = _time.monotonic() + max(0.01, float(timeout))
+            while _time.monotonic() < deadline:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    _time.sleep(0.05)
+        yield handle if locked else None
+    finally:
+        if handle is not None:
+            if locked and fcntl is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
+        _LOCK.release()
+
+
+def request_budget_status() -> dict:
+    """Return the persisted local budget without disclosing credentials or endpoints."""
+    with _provider_slot() as handle:
+        if handle is None:
+            return {"available": False, "reason": "provider_busy"}
+        state = _read_guard_state(handle)
+        limit = _daily_budget()
+        return {
+            "available": state["count"] < limit,
+            "date": state["date"],
+            "used": state["count"],
+            "limit": limit,
+            "remaining": max(0, limit - state["count"]),
+        }
 
 # ⚠️ 2026-06-30 防 baostock 雪崩:连续失败计数 + 冷却。
 # 根因:baostock 用底层 socket(无 socket-level timeout),服务端慢响应时孤儿线程持 _LOCK 卡 OS RTO 120s,
@@ -79,13 +206,14 @@ def available() -> bool:
         return False
 
 
-def _ensure():
+def _ensure(guard_file):
     """惰性 import + 登录(进程内复用)。失败抛异常,上层 except 跳过本源。"""
     global _BS, _LOGGED_IN
     if _BS is None:
         import baostock as _bs
         _BS = _bs
     if not _LOGGED_IN:
+        _reserve_request(guard_file, "login")
         lg = _BS.login()
         if getattr(lg, 'error_code', '1') != '0':
             raise RuntimeError(f'baostock login 失败: {getattr(lg, "error_msg", "?")}')
@@ -117,12 +245,15 @@ def trade_calendar_evidence(start_date: str, end_date: str):
         import pandas as pd
     except Exception:
         return []
-    if _in_cooldown("calendar") or not _LOCK.acquire(timeout=2):
+    if _in_cooldown("calendar"):
         return []
     rows = []
-    try:
+    with _provider_slot() as guard_file:
+        if guard_file is None:
+            return []
         try:
-            bs = _ensure()
+            bs = _ensure(guard_file)
+            _reserve_request(guard_file, "calendar")
             with source_call("baostock", "calendar"):
                 result = bs.query_trade_dates(
                     start_date=str(start_date), end_date=str(end_date)
@@ -132,11 +263,11 @@ def trade_calendar_evidence(start_date: str, end_date: str):
                 return []
             while result.next():
                 rows.append(result.get_row_data())
+        except BaoStockBudgetExceeded:
+            return []
         except Exception:
             _mark_fail("calendar")
             return []
-    finally:
-        _LOCK.release()
     if not rows:
         return []
     frame = pd.DataFrame(rows, columns=["calendar_date", "is_trading_day"])
@@ -184,11 +315,12 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
     rows = []
     # ⭐ 等锁最多 2s,拿不到立即返空(防孤儿持锁拖累后续调用)。锁里 login/query 卡到 OS RTO 是它的事,
     # 但本调用 2s 内一定脱身让 _route 跳源,且累计失败触发冷却 → 整链最多卡 1 次孤儿,不再雪崩。
-    if not _LOCK.acquire(timeout=2):
-        return pd.DataFrame()
-    try:
+    with _provider_slot() as guard_file:
+        if guard_file is None:
+            return pd.DataFrame()
         try:
-            bs = _ensure()
+            bs = _ensure(guard_file)
+            _reserve_request(guard_file, "daily")
             with source_call("baostock", "daily"):
                 rs = bs.query_history_k_data_plus(
                     bscode, "date,open,high,low,close,volume",
@@ -198,11 +330,11 @@ def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "ra
                 return pd.DataFrame()
             while rs.next():
                 rows.append(rs.get_row_data())
+        except BaoStockBudgetExceeded:
+            return pd.DataFrame()
         except Exception:
             _mark_fail("daily")
             return pd.DataFrame()
-    finally:
-        _LOCK.release()
     if not rows:
         # 查询成功但 0 行 =「该代码无数据」(北交所/退市/指数误入个股规则),不是源故障
         # —— 不计熔断、不重置登录(2026-07-17 修:原来一只北交所码 raw+qfq 各查一次就把
