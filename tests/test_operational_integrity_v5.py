@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import time
 import sqlite3
 
@@ -11,6 +12,9 @@ from data import runtime_capabilities
 from data.research_store import ResearchStore
 from data.source_contracts import SourceCooldownActive, source_call
 from jobs.isolated_runtime import run_isolated_task
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _quick_task():
@@ -155,3 +159,10 @@ def test_isolated_runtime_completes_and_terminates_timeout() -> None:
     )
     assert timed_out["status"] == "timeout"
     assert timed_out["terminated"] is True
+
+
+def test_migration_script_uses_portable_bounded_version_query() -> None:
+    script = (REPOSITORY_ROOT / "scripts" / "migrate.sh").read_text(encoding="utf-8")
+    assert "version=:'version'" not in script
+    assert "^[0-9A-Za-z][0-9A-Za-z._-]*$" in script
+    assert "WHERE version='$version'" in script

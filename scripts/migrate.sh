@@ -29,8 +29,14 @@ fi
 for migration in "$migration_dir"/*.sql; do
   [[ -e "$migration" ]] || continue
   version="$(basename "$migration" .sql)"
-  applied="$(psql -X -Atq -v version="$version" \
-    -c "SELECT 1 FROM research_schema_migrations WHERE version=:'version'")"
+  if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+    echo "invalid schema migration filename: $version" >&2
+    exit 9
+  fi
+  # psql does not expand :'name' variables inside a -c argument.  The filename
+  # is constrained above, so direct SQL interpolation is both portable and safe.
+  applied="$(psql -X -Atq \
+    -c "SELECT 1 FROM research_schema_migrations WHERE version='$version'")"
   if [[ "$applied" == "1" ]]; then
     continue
   fi
