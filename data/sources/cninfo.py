@@ -35,7 +35,8 @@ def announcements(code: str, page_size: int = 30) -> List[dict]:
                                           timeout=contract.timeout_seconds).json()
         return [{"title": it.get("announcementTitle", ""), "type": it.get("announcementTypeName", ""),
                  "date": it.get("announcementTime", ""),
-                 "url": f"https://www.cninfo.com.cn/new/disclosure/detail?annoId={it.get('announcementId', '')}"}
+                 "url": f"https://www.cninfo.com.cn/new/disclosure/detail?annoId={it.get('announcementId', '')}",
+                 "source": "cninfo", "official": True}
                 for it in (d.get("announcements", []) or [])]
     except Exception as e:
         print(f"[sources.cninfo] 巨潮公告请求失败: {type(e).__name__}")

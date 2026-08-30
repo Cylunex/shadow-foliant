@@ -34,14 +34,35 @@ DATASET_ROUTES: dict[str, dict[str, Any]] = {
         "policy": "never_repair_qfq",
     },
     "minute": {
-        "primary": "zzshare.minute", "fallback": ["eltdx.bars", "tdx_python.bars"],
+        "primary": "zzshare.minute",
+        "fallback": ["eltdx.bars", "tdx_python.bars", "mairui.kline", "moma.kline"],
+        "policy": "mairui_compatible_sources_support_5m_plus_without_pro",
     },
     "realtime_quote": {
-        "primary": "zzshare.realtime", "fallback": ["eltdx.quotes", "tdx_python.quotes"],
+        "primary": "zzshare.realtime",
+        "fallback": ["eltdx.quotes", "tdx_python.quotes", "mairui.realtime", "moma.realtime"],
     },
     "valuation": {"primary": "zzshare.valuation", "fallback": []},
     "financial_pit": {"primary": "zzshare.finance_pit", "fallback": []},
-    "official_disclosure": {"primary": "cninfo.announcements", "fallback": []},
+    "official_disclosure": {
+        "primary": "cninfo.announcements",
+        "fallback": ["mairui.announcements"],
+        "policy": "aggregator_fallback_is_not_marked_official",
+    },
+    "daily_order_flow": {
+        "primary": "eastmoney",
+        "fallback": ["mairui.capital_flow", "moma.capital_flow"],
+    },
+    "market_microstructure_reference": {
+        "primary": "mairui.limit_performance",
+        "fallback": [],
+        "policy": "reference_only",
+    },
+    "investor_interaction_reference": {
+        "primary": "mairui.interactive_qa",
+        "fallback": [],
+        "policy": "reference_only",
+    },
     "external_reference": {
         "primary": "pywencai.discovery", "fallback": [], "policy": "reference_only",
     },
@@ -62,6 +83,8 @@ def _configured(provider: str, auth: str) -> bool:
     names = {
         "zzshare": ("ZZSHARE_TOKEN",),
         "pywencai": ("PYWENCAI_COOKIE", "WENCAI_COOKIE"),
+        "mairui": ("MAIRUI_LICENCE",),
+        "moma": ("MOMA_TOKEN",),
     }.get(provider, ())
     return any(str(os.getenv(name) or "").strip() for name in names)
 
@@ -71,6 +94,8 @@ def _enabled(provider: str) -> bool:
         "zzshare": "ZZSHARE_ENABLED",
         "eltdx": "TDX_USE_ELTDX",
         "tdx_python": "TDX_USE_TDX_PYTHON",
+        "mairui": "MAIRUI_ENABLED",
+        "moma": "MOMA_ENABLED",
     }
     name = flags.get(provider)
     if not name:
@@ -311,6 +336,17 @@ def capability_snapshot() -> dict[str, Any]:
                 )
     except Exception:
         pass
+    for provider in ("mairui", "moma"):
+        try:
+            module = __import__(f"data.sources.{provider}", fromlist=["request_budget_status"])
+            budget = module.request_budget_status()
+            for item in providers.get(provider, {}).values():
+                item["quota"] = budget
+                item["available"] = bool(
+                    item.get("available") and budget.get("available")
+                )
+        except Exception:
+            pass
     return {
         "schema_version": "runtime-data-capabilities-v1",
         "generated_at": _now_iso(),

@@ -175,6 +175,39 @@ _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
 }
 
 
+def _register_mairui_compatible(provider: str) -> None:
+    """Register the conservative free-tier boundary shared by both API products."""
+    definitions = {
+        "realtime": ("batch_realtime_quote", 20, False),
+        "kline": ("five_minute_or_slower_ohlcv_fallback", 3200, False),
+        "capital_flow": ("daily_order_flow_fallback", 365, False),
+    }
+    if provider == "mairui":
+        definitions.update({
+            "announcements": ("exchange_disclosure_reference", None, True),
+            "interactive_qa": ("investor_interaction_reference", None, True),
+            "limit_performance": ("limit_board_reference", 365, False),
+            "auction_performance": ("auction_reference", 365, False),
+        })
+    for endpoint, (capability, hard_max_rows, supports_pit) in definitions.items():
+        _BASE_CONTRACTS[(provider, endpoint)] = EndpointContract(
+            provider, endpoint, capability, "path_token", hard_max_rows, None,
+            0.25, 1, 15.0, 1, supports_pit=supports_pit,
+            adjustment="raw" if endpoint == "kline" else "not_applicable",
+            volume_unit="runtime_validated" if endpoint == "kline" else "not_applicable",
+            amount_unit="yuan" if endpoint in {"kline", "capital_flow"} else "not_applicable",
+            quota_basis="published",
+            notes=("Optional fallback/reference only; one provider-wide persisted budget is "
+                   "shared by all endpoints. Credentials in URL paths are never logged."),
+            daily_request_limit=500,
+        )
+
+
+for _provider in ("mairui", "moma"):
+    _register_mairui_compatible(_provider)
+del _provider
+
+
 class _Gate:
     def __init__(self, contract: EndpointContract):
         self.contract = contract

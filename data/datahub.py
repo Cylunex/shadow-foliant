@@ -258,6 +258,9 @@ _CACHE_TTL: Dict[str, Any] = {
     # —— 新闻/公告/选股 ——
     "stock_news": 1800,
     "market_news": 900,
+    "interactive_qa": 86400,
+    "limit_performance": 21600,
+    "auction_performance": 21600,
     "announcements": 3600,
     "screen": 1800,
     "convertible_bonds": (1800, 21600),
@@ -508,6 +511,38 @@ def _quotes_tdx_python(codes: List[str]) -> Dict[str, dict]:
         return {}
 
 
+def _mairui_available() -> bool:
+    try:
+        from data.sources import mairui as _source
+        return _source.available()
+    except Exception:
+        return False
+
+
+def _moma_available() -> bool:
+    try:
+        from data.sources import moma as _source
+        return _source.available()
+    except Exception:
+        return False
+
+
+def _quotes_mairui(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import mairui as _source
+        return _source.get_quotes(codes)
+    except Exception:
+        return {}
+
+
+def _quotes_moma(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import moma as _source
+        return _source.get_quotes(codes)
+    except Exception:
+        return {}
+
+
 def quotes(codes: List[str]) -> Dict[str, dict]:
     """批量实时行情。返回 {code(6位): 标准quote dict}。
     datahub 级多源链(2026-08 增补正式 API 与 TDX 协议源):
@@ -533,6 +568,11 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
         sources.append(("tdx_python", lambda: _quotes_tdx_python(codes)))
     if _easy_tdx_available():
         sources.append(("easy_tdx", lambda: _quotes_easy_tdx(codes)))
+    # 两个额度独立但接口/上游高度相似，只作为既有独立行情链的末位补洞源。
+    if _mairui_available():
+        sources.append(("mairui", lambda: _quotes_mairui(codes)))
+    if _moma_available():
+        sources.append(("moma", lambda: _quotes_moma(codes)))
     raw = _route("quotes", sources, empty={}) or {}
     norm = {_norm_code(k): v for k, v in raw.items()}
     _name_remember(norm)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)
@@ -921,6 +961,30 @@ def _kline_zzshare(code: str, period: str = '1y', interval: str = '1d',
         return pd.DataFrame()
 
 
+def _kline_mairui(code: str, period: str = '1y', interval: str = '5m') -> pd.DataFrame:
+    try:
+        from data.sources import mairui as _source
+        raw = _source.get_kline(
+            _norm_code(code), interval=interval,
+            count=_kline_bar_count(period, interval),
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _kline_moma(code: str, period: str = '1y', interval: str = '5m') -> pd.DataFrame:
+    try:
+        from data.sources import moma as _source
+        raw = _source.get_kline(
+            _norm_code(code), interval=interval,
+            count=_kline_bar_count(period, interval),
+        )
+        return _provider_kline_to_contract(raw, period, interval)
+    except Exception:
+        return pd.DataFrame()
+
+
 def _kline_mootdx(code: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """mootdx 通达信公网日线(raw)——真·独立协议源:东财/新浪等 HTTP 源全被机房墙时的最后兜底
     (走通达信二进制协议、非 HTTP)。返回 fetcher 同款格式(DatetimeIndex='Date' + 大写 OCHLV,
@@ -1188,6 +1252,14 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         if _tdx_python_available():
             intraday_sources.append(
                 ('tdx_python', lambda: _kline_tdx_python(code, period, interval))
+            )
+        if _mairui_available():
+            intraday_sources.append(
+                ('mairui', lambda: _kline_mairui(code, period, interval))
+            )
+        if _moma_available():
+            intraday_sources.append(
+                ('moma', lambda: _kline_moma(code, period, interval))
             )
         if _easy_tdx_available():
             intraday_sources.append(
@@ -1586,10 +1658,17 @@ def capital_flow(code: str, days: int = 120) -> List[dict]:
     源:东财 push2his(主)→ akshare(弱兜底)。⚠️ 2026-06-24 实测:akshare stock_individual_fund_flow
     底层与主源**同走东财 push2his fflow 端点**,非真跨源——东财 IP 级被封时主备同死,仅防东财子接口
     偶发抽风+akshare 换解析路径恰好成功的弱场景。个股历史资金流东财近乎垄断,暂无真跨公司替代源。"""
-    return _route("capital_flow",
-                  [("a_stock", lambda: _adapter().get_fund_flow_history(code, days)),
-                   ("akshare", lambda: _capital_flow_akshare(code, days))],
-                  empty=[]) or []
+    sources = [
+        ("a_stock", lambda: _adapter().get_fund_flow_history(code, days)),
+        ("akshare", lambda: _capital_flow_akshare(code, days)),
+    ]
+    if _mairui_available():
+        from data.sources import mairui as _mairui
+        sources.append(("mairui", lambda: _mairui.capital_flow(code, days)))
+    if _moma_available():
+        from data.sources import moma as _moma
+        sources.append(("moma", lambda: _moma.capital_flow(code, days)))
+    return _route("capital_flow", sources, empty=[]) or []
 
 
 def capital_flow_minute(code: str) -> List[dict]:
@@ -1878,9 +1957,40 @@ def market_news(page_size: int = 50) -> List[dict]:
 
 
 def announcements(code: str) -> List[dict]:
-    """个股公告。list[dict]。"""
+    """个股公告。巨潮官方源优先，两个聚合API只在官方链失败时补洞。"""
     from data_source_manager import data_source_manager as dsm
-    return _route("announcements", [("dsm", lambda: dsm.get_announcements_a_stock(code))], empty=[]) or []
+    sources = [("cninfo", lambda: dsm.get_announcements_a_stock(code))]
+    if _mairui_available():
+        from data.sources import mairui as _mairui
+        sources.append(("mairui", lambda: _mairui.announcements(code)))
+    return _route("announcements", sources, empty=[]) or []
+
+
+def interactive_qa(code: str, limit: int = 20) -> List[dict]:
+    """投资者互动问答，仅用于研究参考，不直接产生评分或交易信号。"""
+    sources = []
+    if _mairui_available():
+        from data.sources import mairui as _mairui
+        sources.append(("mairui", lambda: _mairui.interactive_qa(code, limit)))
+    return _route("interactive_qa", sources, empty=[]) or []
+
+
+def limit_performance(code: str, days: int = 30) -> List[dict]:
+    """涨跌停、炸板和封板表现，仅作为短线结构参考。"""
+    sources = []
+    if _mairui_available():
+        from data.sources import mairui as _mairui
+        sources.append(("mairui", lambda: _mairui.limit_performance(code, days)))
+    return _route("limit_performance", sources, empty=[]) or []
+
+
+def auction_performance(code: str, days: int = 30) -> List[dict]:
+    """开收盘集合竞价表现，仅作为研究参考。"""
+    sources = []
+    if _mairui_available():
+        from data.sources import mairui as _mairui
+        sources.append(("mairui", lambda: _mairui.auction_performance(code, days)))
+    return _route("auction_performance", sources, empty=[]) or []
 
 
 # ══════════════════════════════════════════════════════════
@@ -2019,6 +2129,7 @@ for _name in ("quotes", "indices", "capital_flow_minute", "kline_with_indicators
               "financials", "valuation", "full_valuation", "eps_forecast",
               "stock_reports", "industry_reports",
               "stock_news", "market_news", "announcements", "screen", "convertible_bonds",
+              "interactive_qa", "limit_performance", "auction_performance",
               "fund_nav_history"):
     globals()[_name] = _dh_cache(_name if _name != "fund_nav_history" else "fund_nav")(globals()[_name])
 del _name
@@ -2059,6 +2170,9 @@ class _Hub:
     stock_news = staticmethod(stock_news)
     market_news = staticmethod(market_news)
     announcements = staticmethod(announcements)
+    interactive_qa = staticmethod(interactive_qa)
+    limit_performance = staticmethod(limit_performance)
+    auction_performance = staticmethod(auction_performance)
     screen = staticmethod(screen)
     convertible_bonds = staticmethod(convertible_bonds)
     fund_nav_history = staticmethod(fund_nav_history)

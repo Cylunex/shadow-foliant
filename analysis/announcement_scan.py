@@ -47,7 +47,9 @@ def _recent_records(code: str, days: int, cap: int = 8) -> List[dict]:
                 url = str(a.get('url') or '')
                 document_id = (re.search(r'annoId=([^&]+)', url) or [None, ''])[1]
                 out.append({'title': t, 'date': d, 'type': str(a.get('type') or ''),
-                            'url': url, 'document_id': document_id})
+                            'url': url, 'document_id': document_id,
+                            'source': str(a.get('source') or 'cninfo'),
+                            'official': bool(a.get('official', bool(document_id)))})
     return out[:cap]
 
 
@@ -128,9 +130,14 @@ def run_announcement_scan(codes: List[str], days: int = 5, max_llm: int = 40,
             continue
         event_date = max((item['date'] for item in b.get('announcements', []) if item.get('date')),
                          default=datetime.now().strftime('%Y-%m-%d'))
+        evidence = next((item for item in b['announcements'] if item.get('title')), {})
+        source = str(evidence.get('source') or 'cninfo')
+        official = bool(evidence.get('official', source == 'cninfo'))
         it = {'code': code, 'name': names.get(code, ''), 'event_date': event_date,
-              'source': 'cninfo', 'source_family': 'official_disclosure',
-              'source_origin': 'cninfo', 'official': True,
+              'source': source,
+              'source_family': ('official_disclosure' if official
+                                else 'aggregated_disclosure_reference'),
+              'source_origin': source, 'official': official,
               'document_id': next((item.get('document_id') for item in b['announcements']
                                    if item.get('document_id')), ''),
               'confirmation_status': 'title_only', 'materiality': None,
