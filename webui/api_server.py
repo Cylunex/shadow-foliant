@@ -1838,7 +1838,10 @@ def factors_eval(horizon: int = 10):
     try:
         from factor_eval import evaluate
         return _ok(_cache_or(f"factor_eval:{horizon}", 86400,
-                             lambda: _with_deadline(lambda: evaluate(horizon=horizon), 25, {"factors": [], "error": "timeout(等周任务预热)"}),
+                             lambda: _with_deadline(
+                                 lambda: evaluate(horizon=horizon, use_pit_exposures=True),
+                                 25, {"factors": [], "error": "timeout(等周任务预热)"}
+                             ),
                              keep=lambda v: isinstance(v, dict) and v.get("factors")))
     except Exception as e:
         return _err(e)

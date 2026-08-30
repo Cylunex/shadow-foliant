@@ -63,7 +63,7 @@ export default {
         </table></div><div v-else class="empty-state">尚无综合选股快照。</div>
       </section>
       <section class="card">
-        <div class="section-head"><div><h2>本地五策略真实提名</h2><p>每个策略在同一 PIT 合格全集上最多提名 5 只，共同争取 TOP15 的 5 个卫星名额</p></div><span class="pill">local-satellite-v2</span></div>
+        <div class="section-head"><div><h2>本地五策略真实提名</h2><p>每个策略在同一 PIT 合格全集上最多提名 5 只，共同争取 TOP15 的 5 个卫星名额</p></div><span class="pill">local-satellite-v3</span></div>
         <div v-if="localStrategies.length" class="dashboard-grid">
           <article v-for="item in localStrategies" :key="item.name" class="card" style="box-shadow:none">
             <div class="section-head"><h3>{{item.name}}</h3><span class="badge" :class="strategyStatusClass(item.status)">{{strategyStatusText(item.status)}}</span></div>

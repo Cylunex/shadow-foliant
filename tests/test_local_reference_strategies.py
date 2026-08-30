@@ -62,6 +62,7 @@ class LocalReferenceStrategyTest(unittest.TestCase):
         result = LocalReferenceStrategyEngine(self.store).run(
             self.frame, market_as_of=self.market_date
         )
+        self.assertEqual(result["rule_version"], "local-satellite-v3")
         strategies = result["strategies"]
         self.assertFalse(result["reference_affects_score"])
         self.assertEqual(strategies["低价擒牛"]["rows"][0]["symbol"], "002001")
@@ -95,6 +96,38 @@ class LocalReferenceStrategyTest(unittest.TestCase):
         self.assertEqual(value["status"], "degraded")
         self.assertTrue(value["rows"])
         self.assertIn("股息率", value["reason"])
+
+    def test_low_price_bull_uses_strict_twenty_and_known_growth_stability(self):
+        frame = self.frame.copy()
+        frame["close"] = frame["close"].astype(float)
+        frame.loc[frame["symbol"] == "002001", "close"] = 20.0
+        result = LocalReferenceStrategyEngine(self.store).run(
+            frame, market_as_of=self.market_date
+        )
+        self.assertNotIn(
+            "002001", [row["symbol"] for row in result["strategies"]["低价擒牛"]["rows"]]
+        )
+
+        frame.loc[frame["symbol"] == "002001", "close"] = 19.99
+        frame.loc[
+            frame["symbol"] == "002001", "net_profit_growth_positive_ratio"
+        ] = 1 / 3
+        result = LocalReferenceStrategyEngine(self.store).run(
+            frame, market_as_of=self.market_date
+        )
+        self.assertNotIn(
+            "002001", [row["symbol"] for row in result["strategies"]["低价擒牛"]["rows"]]
+        )
+
+        frame.loc[
+            frame["symbol"] == "002001", "net_profit_growth_positive_ratio"
+        ] = 2 / 3
+        result = LocalReferenceStrategyEngine(self.store).run(
+            frame, market_as_of=self.market_date
+        )
+        self.assertIn(
+            "002001", [row["symbol"] for row in result["strategies"]["低价擒牛"]["rows"]]
+        )
 
 
 if __name__ == "__main__":

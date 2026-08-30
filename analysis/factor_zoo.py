@@ -33,6 +33,15 @@ def _vol(df):
     return None
 
 
+def _amount(df):
+    for c in ("amount", "turnover", "成交额"):
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce").astype(float)
+    # Volume units differ across providers (shares/lots/contracts).  Missing
+    # traded amount therefore remains unavailable instead of being guessed.
+    return None
+
+
 def _hi(df):
     for c in ("high", "High", "最高"):
         if c in df.columns:
@@ -66,6 +75,22 @@ def f_vol_20(df):
     if c is None:
         return None
     return c.pct_change().rolling(20).std()  # 方向-1:低波动更优
+
+
+def f_downside_vol_20(df):
+    c = _close(df)
+    if c is None:
+        return None
+    returns = c.pct_change()
+    return returns.where(returns < 0, 0.0).rolling(20).std()
+
+
+def f_max_drawdown_60(df):
+    c = _close(df)
+    if c is None:
+        return None
+    rolling_peak = c.rolling(60, min_periods=20).max()
+    return c / rolling_peak.replace(0, np.nan) - 1.0
 
 
 def f_ma_bias_20(df):
@@ -102,11 +127,18 @@ def f_vol_trend(df):
 
 
 def f_amihud(df):
-    """非流动性(Amihud):|日收益|/成交量,越大越不流动。方向-1。"""
-    c, v = _close(df), _vol(df)
-    if c is None or v is None:
+    """非流动性(Amihud):|日收益|/成交额,越大越不流动。方向-1。"""
+    c, amount = _close(df), _amount(df)
+    if c is None or amount is None:
         return None
-    return (c.pct_change().abs() / v.replace(0, np.nan)).rolling(20).mean()
+    return (c.pct_change().abs() / amount.replace(0, np.nan)).rolling(20).mean()
+
+
+def f_amount_trend(df):
+    amount = _amount(df)
+    if amount is None:
+        return None
+    return amount.rolling(5).mean() / amount.rolling(20).mean().replace(0, np.nan)
 
 
 def f_close_position_20(df):
@@ -165,6 +197,8 @@ FACTORS: Dict[str, Tuple[str, str, int, Callable]] = {
     "mom_accel":     ("动量加速",     "动量", +1, f_mom_accel),
     "reversal_5":    ("5日反转",      "反转", -1, f_reversal_5),
     "vol_20":        ("20日波动",     "波动", -1, f_vol_20),
+    "downside_vol_20": ("20日下行波动", "波动", -1, f_downside_vol_20),
+    "max_drawdown_60": ("60日回撤",    "波动", +1, f_max_drawdown_60),
     "range_20":      ("20日振幅",     "波动", -1, f_range_20),
     "max_ret_20":    ("彩票(最大日涨)", "波动", -1, f_max_ret_20),
     "ma_bias_20":    ("乖离MA20",     "位置", +1, f_ma_bias_20),
@@ -172,6 +206,7 @@ FACTORS: Dict[str, Tuple[str, str, int, Callable]] = {
     "high_52w":      ("52周高点占比", "位置", +1, f_high_52w),
     "rsi_14":        ("RSI14",        "动量", +1, f_rsi_14),
     "vol_trend":     ("量能趋势",     "量能", +1, f_vol_trend),
+    "amount_trend":  ("成交额趋势",   "量能", +1, f_amount_trend),
     "amihud":        ("非流动性",     "流动性", -1, f_amihud),
     "ret_skew":      ("收益偏度",     "波动", -1, f_ret_skew),
 }

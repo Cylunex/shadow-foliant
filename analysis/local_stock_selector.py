@@ -92,14 +92,16 @@ def _price_limit_ratio(symbol: str, name: str, trade_date: object) -> float:
     label = str(name or "").upper()
     code = "".join(ch for ch in str(symbol or "") if ch.isdigit())[-6:]
     day = pd.Timestamp(trade_date).date()
-    if "ST" in label:
-        return 0.05
     if code.startswith(("4", "8", "92")):
         return 0.30
     if code.startswith(("688", "689")):
         return 0.20
     if code.startswith(("300", "301")) and day >= date(2020, 8, 24):
         return 0.20
+    # 沪深主板风险警示股票自 2026-07-06 起由 5% 调整为 10%。创业板、
+    # 科创板和北交所先按各自板块规则判断，不能被名称中的 ST 错降为 5%。
+    if "ST" in label and day < date(2026, 7, 6):
+        return 0.05
     return 0.10
 
 
@@ -521,7 +523,7 @@ class LocalStockSelector:
             ).run(eligible_scored, market_as_of=actual_market_as_of)
         except Exception as exc:
             local_strategy_reference = {
-                "rule_version": "local-satellite-v2",
+                "rule_version": "local-satellite-v3",
                 "market_as_of": actual_market_as_of,
                 "reference_affects_score": False,
                 "candidate_affects_membership": True,
@@ -546,6 +548,7 @@ class LocalStockSelector:
         technical_pool["total_score"] = (
             technical_pool["fundamental_score"] + technical_pool["technical_60_score"]
             + technical_pool["industry_score"]
+            + technical_pool["data_quality_score"]
             + technical_pool["correction_120"] + technical_pool["correction_250"]
             + technical_pool["event_correction"]
         )
@@ -886,6 +889,57 @@ class LocalStockSelector:
                 for key, value in row.items():
                     if key not in {"symbol", "as_of", "quality_status"}:
                         record[f"{table}_{key}"] = value
+            # 单季/单年同比很容易被低基数或一次性损益放大。保留最新同比作为
+            # “增长速度”，同时从已发布的最近三期计算正增长占比，作为“增长
+            # 持续性”。缺少历史时保持未知，不用 0 静默填充。
+            history_specs = {
+                "net_profit_growth_positive_ratio": (
+                    ("indicator", (
+                        "net_profit_growth", "inc_net_profit_year_on_year",
+                        "netprofit_yoy", "net_profit_yoy",
+                    )),
+                    ("income", (
+                        "net_profit_growth", "np_parent_company_owners_yoy",
+                        "netprofit_yoy", "n_income_attr_p_yoy",
+                    )),
+                ),
+                "revenue_growth_positive_ratio": (
+                    ("indicator", (
+                        "revenue_growth", "inc_revenue_year_on_year",
+                        "revenue_yoy", "or_yoy",
+                    )),
+                    ("income", (
+                        "revenue_growth", "revenue_yoy", "operate_income_yoy",
+                        "total_revenue_yoy",
+                    )),
+                ),
+            }
+            for metric_name, sources in history_specs.items():
+                observations = pd.Series(dtype=float)
+                for table, candidate_columns in sources:
+                    frame = tables.get(table)
+                    if frame is None:
+                        continue
+                    available = frame[frame["symbol"].astype(str) == symbol].copy()
+                    if anchor:
+                        available = available[
+                            available["stat_date"].astype(str) <= str(anchor)
+                        ]
+                    column = next(
+                        (key for key in candidate_columns if key in available.columns), None
+                    )
+                    if column:
+                        observations = (
+                            available.sort_values(["stat_date", "pub_date"])
+                            .drop_duplicates("stat_date", keep="last")
+                            .tail(3)[column]
+                        )
+                        observations = pd.to_numeric(observations, errors="coerce").dropna()
+                        if not observations.empty:
+                            break
+                if not observations.empty:
+                    record[f"history_{metric_name}"] = float(observations.gt(0).mean())
+                    record[f"history_{metric_name}_periods"] = int(len(observations))
             if len(set(period for period in selected_periods if period)) > 1:
                 record["statement_period_mismatch"] = True
             records.append(record)
@@ -933,6 +987,11 @@ class LocalStockSelector:
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
                 "volume_20_vs_60": float(np.mean(volumes[-20:]) / np.mean(volumes[-60:]))
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
+                "amount_5_vs_60": float(np.mean(amounts[-5:]) / np.mean(amounts[-60:]))
+                    if len(amounts) >= 60 and np.mean(amounts[-60:]) > 0 else None,
+                "amount_20_vs_60": float(np.mean(amounts[-20:]) / np.mean(amounts[-60:]))
+                    if len(amounts) >= 60 and np.mean(amounts[-60:]) > 0 else None,
+                "max_return_20": float(rets.tail(20).max()) if len(rets) >= 20 else None,
                 "average_amount_20": float(np.mean(amounts[-20:])) if len(amounts) >= 20 else None,
                 "average_amount_60": float(np.mean(amounts[-60:])) if len(amounts) >= 60 else None,
                 "paused_days_20": int(pd.to_numeric(
@@ -952,6 +1011,67 @@ class LocalStockSelector:
         frame = pd.DataFrame(rows)
         if frame.empty:
             return frame
+
+        # 用每日横截面中位收益构造稳健市场代理，再剔除每只股票的滚动 Beta。
+        # 这比“60 日涨幅减一个市场中位数”更接近可解释的个股残差趋势，也避免
+        # 高 Beta 股票在普涨阶段仅凭系统性暴露获得高分。
+        series_by_symbol = {
+            str(row["symbol"]): row["return_series_60"]
+            for row in rows if isinstance(row.get("return_series_60"), pd.Series)
+        }
+        return_matrix = (
+            pd.concat(series_by_symbol, axis=1).sort_index().tail(60)
+            if series_by_symbol else pd.DataFrame()
+        )
+        market_daily = return_matrix.median(axis=1, skipna=True)
+        industry_by_symbol = frame.set_index("symbol")["industry"].astype(str).to_dict()
+        industry_daily: Dict[str, pd.Series] = {}
+        for industry in sorted(set(industry_by_symbol.values())):
+            members = [
+                symbol for symbol, label in industry_by_symbol.items()
+                if label == industry and symbol in return_matrix.columns
+            ]
+            if industry and industry != "未分类" and len(members) >= 3:
+                industry_daily[industry] = return_matrix[members].median(axis=1, skipna=True)
+
+        beta_values: List[Optional[float]] = []
+        market_residual_values: List[Optional[float]] = []
+        industry_residual_values: List[Optional[float]] = []
+        idio_vol_values: List[Optional[float]] = []
+        for _, item in frame.iterrows():
+            symbol = str(item["symbol"])
+            stock_daily = return_matrix.get(symbol)
+            aligned = pd.concat(
+                [stock_daily, market_daily], axis=1, keys=["stock", "market"]
+            ).dropna() if stock_daily is not None else pd.DataFrame()
+            if len(aligned) >= 30 and float(aligned["market"].var()) > 0:
+                beta = float(aligned["stock"].cov(aligned["market"]) / aligned["market"].var())
+                residual = aligned["stock"] - beta * aligned["market"]
+                market_residual = float((1.0 + residual.clip(lower=-0.99)).prod() - 1.0)
+                idio_vol = float(residual.std() * math.sqrt(252))
+            else:
+                beta = None
+                market_residual = None
+                idio_vol = None
+            industry_series = industry_daily.get(str(item.get("industry") or ""))
+            industry_aligned = pd.concat(
+                [stock_daily, industry_series], axis=1, keys=["stock", "industry"]
+            ).dropna() if stock_daily is not None and industry_series is not None else pd.DataFrame()
+            industry_residual = (
+                float((1.0 + (industry_aligned["stock"] - industry_aligned["industry"])
+                       .clip(lower=-0.99)).prod() - 1.0)
+                if len(industry_aligned) >= 30 else None
+            )
+            beta_values.append(beta)
+            market_residual_values.append(market_residual)
+            industry_residual_values.append(industry_residual)
+            idio_vol_values.append(idio_vol)
+
+        frame["beta_60"] = beta_values
+        frame["market_residual_momentum_60"] = market_residual_values
+        frame["industry_residual_momentum_60"] = industry_residual_values
+        frame["idiosyncratic_volatility_60"] = idio_vol_values
+
         market_return = frame["ret_60"].median(skipna=True)
         classified = (
             frame["industry"].fillna("").astype(str).str.strip().ne("")
@@ -961,8 +1081,12 @@ class LocalStockSelector:
         industry_return.loc[classified] = frame.loc[classified].groupby(
             "industry"
         )["ret_60"].transform("median")
-        frame["market_excess_60"] = frame["ret_60"] - market_return
-        frame["industry_excess_60"] = frame["ret_60"] - industry_return
+        frame["market_excess_60"] = frame["market_residual_momentum_60"].where(
+            frame["market_residual_momentum_60"].notna(), frame["ret_60"] - market_return
+        )
+        frame["industry_excess_60"] = frame["industry_residual_momentum_60"].where(
+            frame["industry_residual_momentum_60"].notna(), frame["ret_60"] - industry_return
+        )
         return frame
 
     def _liquidity_gates(self, frame: pd.DataFrame) -> pd.DataFrame:
@@ -1028,6 +1152,11 @@ class LocalStockSelector:
             ).astype(float)
 
         roe = values(("indicator_roe", "indicator_roe_weighted", "indicator_roe_ttm"))
+        roa = values(("indicator_roa", "indicator_roa2", "indicator_roa_yearly"))
+        gross_margin = values((
+            "indicator_grossprofit_margin", "indicator_gross_profit_margin",
+            "indicator_gross_margin", "income_gross_profit_margin",
+        ))
         growth = values(("indicator_net_profit_growth", "indicator_inc_net_profit_year_on_year",
                          "income_net_profit_growth", "income_np_parent_company_owners_yoy"))
         revenue_growth = values((
@@ -1051,28 +1180,72 @@ class LocalStockSelector:
         pb = pd.to_numeric(out["pb"], errors="coerce") if "pb" in out else pd.Series(np.nan, index=out.index)
         pe = pe.where(pe > 0)
         pb = pb.where(pb > 0)
+        dividend = pd.to_numeric(
+            out.get("dividend_yield", pd.Series(np.nan, index=out.index)), errors="coerce"
+        ).where(lambda values_: values_ >= 0)
+        growth_stability = values(("history_net_profit_growth_positive_ratio",))
+        revenue_stability = values(("history_revenue_growth_positive_ratio",))
         out["net_profit_growth_pct"] = growth
         out["revenue_growth_pct"] = revenue_growth
+        out["net_profit_growth_positive_ratio"] = growth_stability
+        out["revenue_growth_positive_ratio"] = revenue_stability
         out["debt_ratio"] = debt
+        out["cash_quality"] = cash_quality
+        out["roa"] = roa
+        out["gross_margin"] = gross_margin
+        out["net_profit_positive"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+        out.loc[profit.notna(), "net_profit_positive"] = profit[profit.notna()].gt(0)
         industries = out.get("industry", pd.Series("", index=out.index))
         known_equity = assets.notna() & liabilities.notna()
         out["net_assets_positive"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
         out.loc[known_equity, "net_assets_positive"] = (
             assets[known_equity] - liabilities[known_equity]
         ) > 0
-        out["fundamental_score"] = (
-            _industry_percentile(roe, industries) * 8
-            + _industry_percentile(growth, industries) * 8
-            + _percentile(debt, higher_is_better=False) * 6
-            + _percentile(cash_quality.clip(-5, 5)) * 6
-            + _industry_percentile(pe, industries, higher_is_better=False) * 7
-            + _industry_percentile(pb, industries, higher_is_better=False) * 5
+        def family_mean(items: Sequence[Tuple[pd.Series, bool]]) -> pd.Series:
+            numerator = pd.Series(0.0, index=out.index)
+            denominator = pd.Series(0.0, index=out.index)
+            for metric, higher_is_better in items:
+                available = metric.notna().astype(float)
+                ranked = _industry_percentile(
+                    metric, industries, higher_is_better=higher_is_better
+                )
+                numerator += ranked * available
+                denominator += available
+            return (numerator / denominator.replace(0, np.nan)).fillna(0.0)
+
+        profitability_quality = family_mean([
+            (roe, True), (roa, True), (gross_margin, True),
+        ])
+        growth_quality = family_mean([
+            (growth, True), (revenue_growth, True),
+            (growth_stability, True), (revenue_stability, True),
+        ])
+        balance_quality = _industry_percentile(debt, industries, higher_is_better=False)
+        cash_flow_quality = _industry_percentile(
+            cash_quality.clip(-5, 5), industries, higher_is_better=True
         )
+        valuation_quality = family_mean([
+            (pe, False), (pb, False), (dividend, True),
+        ])
+        growth_divergence_penalty = (
+            growth.gt(50) & revenue_growth.lt(0)
+        ).astype(float) * 3.0
+        out["fundamental_score"] = (
+            profitability_quality * 10
+            + growth_quality * 8
+            + balance_quality * 6
+            + cash_flow_quality * 6
+            + valuation_quality * 10
+            - growth_divergence_penalty
+        ).clip(0.0, 40.0)
+        out["growth_divergence_penalty"] = growth_divergence_penalty
         out["fundamental_coverage"] = pd.concat(
-            [roe, growth, debt, cash_quality, pe, pb], axis=1
+            [roe, roa, gross_margin, growth, revenue_growth, debt, cash_quality, pe, pb, dividend],
+            axis=1,
         ).notna().mean(axis=1)
         out["fundamental_metric_count"] = pd.concat(
-            [roe, growth, debt, cash_quality, pe, pb], axis=1
+            [roe, roa, gross_margin, growth, revenue_growth, debt, cash_quality, pe, pb, dividend],
+            axis=1,
         ).notna().sum(axis=1)
         return out
 
@@ -1080,15 +1253,17 @@ class LocalStockSelector:
     def _score_technical(frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
         out["technical_60_score"] = (
-            _percentile(out["market_excess_60"]) * 6
-            + _percentile(out["industry_excess_60"]) * 5
-            + _percentile(out["ma60_slope"]) * 5
-            + _percentile(out["persistence_60"]) * 4
+            _percentile(out["market_excess_60"]) * 7
+            + _percentile(out["industry_excess_60"]) * 6
+            + _percentile(out["ma60_slope"]) * 4
+            + _percentile(out["persistence_60"]) * 3
             + _percentile(out["max_drawdown_60"]) * 3
-            + _percentile(out["volatility_60"], higher_is_better=False) * 2
-            + _percentile(out["volume_5_vs_60"]) * 2
-            + _percentile(out["volume_20_vs_60"]) * 1
-            + _percentile((out["range_pos_60"] - 0.75).abs(), higher_is_better=False) * 2
+            + _percentile(
+                out["idiosyncratic_volatility_60"], higher_is_better=False
+            ) * 3
+            + _percentile(out["max_return_20"], higher_is_better=False) * 2
+            + _percentile(out["amount_5_vs_60"]) * 1
+            + _percentile(out["amount_20_vs_60"]) * 1
         )
         return out
 
@@ -1273,8 +1448,8 @@ class LocalStockSelector:
         for _, row in frame.iterrows():
             state = str(row.get("state") or "趋势观察")
             reasons = [
-                f"60日相对市场强度 {float(row.get('market_excess_60') or 0):+.1%}",
-                f"60日相对行业强度 {float(row.get('industry_excess_60') or 0):+.1%}",
+                f"60日市场残差趋势 {float(row.get('market_excess_60') or 0):+.1%}",
+                f"60日行业残差趋势 {float(row.get('industry_excess_60') or 0):+.1%}",
                 state,
             ]
             records.append({
@@ -1290,6 +1465,11 @@ class LocalStockSelector:
                 "correction_250": round(float(row["correction_250"]), 4),
                 "event_correction": round(float(row["event_correction"]), 4),
                 "data_coverage": round(float(row["data_coverage"]), 4),
+                "beta_60": _number(row.get("beta_60")),
+                "idiosyncratic_volatility_60": _number(
+                    row.get("idiosyncratic_volatility_60")
+                ),
+                "max_return_20": _number(row.get("max_return_20")),
                 "score_components": {
                     "fundamental": round(float(row["fundamental_score"]), 4),
                     "technical_60": round(float(row["technical_60_score"]), 4),

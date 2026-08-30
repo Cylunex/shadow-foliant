@@ -466,8 +466,12 @@ def screen_index_cached(index_code: str = DEFAULT_INDEX, n: int = 15,
 # (factor_eval 评的是 factor_zoo 的价量因子,本函数正是用同一套价量因子选股,权重来自其 IC)
 # =============================================================================
 def pv_ic_weights(cache_key: str = 'factor_eval:10', drop_noise: bool = True) -> Optional[Dict[str, float]]:
-    """把 factor_eval 缓存里的价量因子 IC 转成选股权重:❌噪声→0(drop_noise),其余按 |IC-IR| 加权。
-    无缓存/无数据 → None(调用方回退等权)。这是把因子有效性评估接进选股的关键一环(闭环)。"""
+    """Build family-balanced weights from validated, correctly directed IC.
+
+    At most two factors per family are retained.  This prevents a family with
+    many near-duplicate indicators from receiving more weight merely because it
+    has more names in the zoo.
+    """
     try:
         from cache import cache_get
     except Exception:
@@ -475,14 +479,41 @@ def pv_ic_weights(cache_key: str = 'factor_eval:10', drop_noise: bool = True) ->
     rep = cache_get(cache_key)
     if not isinstance(rep, dict) or not rep.get('factors'):
         return None
-    w = {}
+    grouped: Dict[str, List[tuple[str, float]]] = {}
     for f in rep['factors']:
-        if drop_noise and f.get('verdict') == '❌噪声':
+        if drop_noise and f.get('verdict') not in {'✅有效', '⚠️弱'}:
             continue
-        iw = abs(f.get('ic_ir') or 0.0)
-        if iw > 0:
-            w[f['key']] = iw
-    return w or None
+        rank_ic = float(f.get('rank_ic') or 0.0)
+        ic_ir = float(f.get('ic_ir') or 0.0)
+        if rank_ic <= 0 or ic_ir <= 0:
+            continue
+        strength = rank_ic * ic_ir
+        grouped.setdefault(str(f.get('category') or '其他'), []).append(
+            (str(f['key']), strength)
+        )
+    if not grouped:
+        return None
+    family_budget = 1.0 / len(grouped)
+    weights: Dict[str, float] = {}
+    for items in grouped.values():
+        selected = sorted(items, key=lambda item: (-item[1], item[0]))[:2]
+        total = sum(item[1] for item in selected) or 1.0
+        for key, strength in selected:
+            weights[key] = family_budget * strength / total
+    return weights or None
+
+
+def _family_balanced_fallback(factors: Dict[str, tuple]) -> Dict[str, float]:
+    grouped: Dict[str, List[str]] = {}
+    for key, meta in factors.items():
+        grouped.setdefault(str(meta[1]), []).append(key)
+    if not grouped:
+        return {}
+    family_budget = 1.0 / len(grouped)
+    return {
+        key: family_budget / len(keys)
+        for keys in grouped.values() for key in keys
+    }
 
 
 def build_pv_factor_frame(symbols: List[str], period: str = '6mo', workers: int = 8) -> pd.DataFrame:
@@ -536,15 +567,17 @@ def screen_pv_ic(universe: Optional[List[str]] = None, n: int = 15,
     frame = build_pv_factor_frame(universe, period=period, workers=workers)
     if frame.empty:
         return {'top': [], 'error': '无有效价量因子数据'}
-    weights = pv_ic_weights()       # None → composite_score 回退等权
+    validated_weights = pv_ic_weights()
+    weights = validated_weights or _family_balanced_fallback(FACTORS)
     directions = {k: FACTORS[k][2] for k in FACTORS}
     ranked = rank_topn(frame, n=n, weights=weights, directions=directions)
     cols = ['rank', 'composite'] + [c for c in frame.columns]
     return {
         'index_code': index_code, 'universe_size': len(frame),
-        'ic_weighted': weights is not None,
-        'factors_used': [c for c in frame.columns if (weights is None or c in weights)],
-        'weights': {k: round(v, 3) for k, v in (weights or {}).items()},
+        'ic_weighted': validated_weights is not None,
+        'weight_source': 'validated_ic_family_balanced' if validated_weights else 'economic_family_balanced',
+        'factors_used': [c for c in frame.columns if c in weights],
+        'weights': {k: round(v, 4) for k, v in weights.items()},
         'top': ranked[[c for c in cols if c in ranked.columns]].reset_index()
                      .rename(columns={'index': 'symbol'}).to_dict(orient='records'),
     }

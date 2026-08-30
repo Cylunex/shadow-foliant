@@ -1073,7 +1073,7 @@ def task_daily_backtest():
     # ── 9. 预热因子IC评估(写 webui 同缓存键 factor_eval:10,genome页秒读)──
     try:
         from analysis.factor_eval import evaluate as _fe
-        rep = _fe(horizon=10)
+        rep = _fe(horizon=10, use_pit_exposures=True)
         if rep.get('factors'):
             from cache import cache_set
             cache_set('factor_eval:10', rep, 86400)

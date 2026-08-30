@@ -1560,6 +1560,40 @@ class ResearchStore:
         finally:
             conn.close()
 
+    def load_fund_flow_panel(self, as_of: str, *, trading_days: int = 5) -> pd.DataFrame:
+        """Load the most recent completed fund-flow dates up to ``as_of``.
+
+        The current-date snapshot is still checked separately by the strategy
+        engine.  This range loader exists only to measure persistence; it never
+        turns an old snapshot into a current signal.
+        """
+        cutoff = _iso_date(as_of)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT DISTINCT trade_date FROM research_fund_flow_daily
+                   WHERE trade_date<=? AND quality_status NOT IN ('failed','unknown')
+                   ORDER BY trade_date DESC LIMIT ?""",
+                (cutoff, max(1, int(trading_days))),
+            )
+            dates = [str(row[0]) for row in cur.fetchall() if row and row[0]]
+            if not dates:
+                return pd.DataFrame()
+            placeholders = ",".join("?" for _ in dates)
+            cur.execute(
+                f"""SELECT symbol,trade_date,name,close,change_pct,main_net_inflow,
+                           main_net_inflow_ratio,provider,quality_status,retrieved_at
+                    FROM research_fund_flow_daily
+                    WHERE trade_date IN ({placeholders})
+                      AND quality_status NOT IN ('failed','unknown')
+                    ORDER BY symbol,trade_date""",
+                tuple(dates),
+            )
+            return self._frame(cur)
+        finally:
+            conn.close()
+
     def pit_coverage(self, as_of: str) -> dict:
         """Describe the honest forward-PIT boundary without inferring historical visibility."""
         cutoff = _iso_date(as_of)

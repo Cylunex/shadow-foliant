@@ -104,6 +104,16 @@ class LocalFusionTest(unittest.TestCase):
         self.assertNotIn("小市值", selected)
         self.assertNotIn("净利增长", selected)
 
+    def test_confirmation_counts_independent_strategy_families(self):
+        composer = LocalFusionComposer(self.policy)
+        nominations = composer._nominations(self.core, self.local, self.genome)
+        family = {
+            item["strategy_name"]: item["strategy_family"]
+            for item in nominations if item["lane"] == "satellite"
+        }
+        self.assertEqual(family["小市值"], family["净利增长"])
+        self.assertNotEqual(family["低价擒牛"], family["小市值"])
+
 
 class StrategyPolicyValidationTest(unittest.TestCase):
     def setUp(self):

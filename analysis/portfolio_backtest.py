@@ -37,11 +37,11 @@ from instock_strategy_runner import _normalize_df
 
 # ── 交易成本(A股实盘口径) ──────────────────────────────────────────
 #   佣金:双边收，万 2.5，单边最低 5 元
-#   印花税:仅卖出收 0.1%
+#   印花税:仅卖出收；2023-08-28 起由 0.1% 减半为 0.05%
 #   滑点:每边按成交价 0.05% 让利(冲击成本近似)
 DEFAULT_COMMISSION_PCT = 0.00025   # 万 2.5
 DEFAULT_COMMISSION_MIN = 5.0       # 单笔最低佣金(元)
-DEFAULT_STAMP_TAX_PCT = 0.001      # 印花税 0.1%(仅卖)
+DEFAULT_STAMP_TAX_PCT = 0.0005     # 当前印花税 0.05%(仅卖)
 DEFAULT_SLIPPAGE_PCT = 0.0005      # 滑点 0.05%/边
 LOT = 100                          # A股一手 = 100 股
 TRADING_DAYS = 252
@@ -53,6 +53,13 @@ def _buy_fee(amount: float, commission_pct: float) -> float:
 
 def _sell_fee(amount: float, commission_pct: float, stamp_tax_pct: float) -> float:
     return max(amount * commission_pct, DEFAULT_COMMISSION_MIN) + amount * stamp_tax_pct
+
+
+def _stamp_tax_rate(trade_date: str, override: Optional[float] = None) -> float:
+    """Return the seller-side A-share stamp-tax rate effective on a trade date."""
+    if override is not None:
+        return max(0.0, float(override))
+    return 0.0005 if str(trade_date) >= "2023-08-28" else 0.001
 
 
 def _load_stock(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -70,6 +77,10 @@ def _load_stock(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         'low': norm['low'].to_numpy(dtype='float64'),
         'close': norm['close'].to_numpy(dtype='float64'),
         'volume': norm['volume'].to_numpy(dtype='float64'),
+        # 成交额口径明确时才启用容量约束；不能用 close*volume 猜测，因为不同
+        # 数据源的 volume 可能是股、手或张，猜错会制造数量级错误。
+        'amount': (pd.to_numeric(norm['amount'], errors='coerce').to_numpy(dtype='float64')
+                   if 'amount' in norm.columns else np.full(len(dates), np.nan)),
         'pchg': norm['p_change'].to_numpy(dtype='float64') if 'p_change' in norm.columns
                 else np.zeros(len(dates)),
         '_norm': norm,
@@ -238,8 +249,9 @@ def portfolio_backtest(
     initial_cash: float = 1_000_000.0,
     allocation: str = 'equal',              # 'equal' | 'signal'
     commission_pct: float = DEFAULT_COMMISSION_PCT,
-    stamp_tax_pct: float = DEFAULT_STAMP_TAX_PCT,
+    stamp_tax_pct: Optional[float] = None,
     slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
+    max_participation_rate: Optional[float] = 0.10,
     benchmark: Optional[str] = '000300',
     df_fetcher: Optional[Callable[[str, str], pd.DataFrame]] = None,
     period: str = '3y',
@@ -259,7 +271,10 @@ def portfolio_backtest(
         max_positions: 并发持仓上限(组合核心约束)
         initial_cash: 初始资金
         allocation: 'equal' 等权(每仓≈总权益/max_positions) | 'signal' 按信号强度加权
-        commission_pct / stamp_tax_pct / slippage_pct: 成本拆项
+        commission_pct / stamp_tax_pct / slippage_pct: 成本拆项。stamp_tax_pct=None
+            时按成交日期使用历史税率；传数值时作为显式回测覆盖。
+        max_participation_rate: 单笔买入金额占当日成交额上限，默认10%；成交额
+            缺失时不猜测单位、只保留固定滑点。None 关闭容量约束。
         benchmark: 基准指数代码(默认沪深300);None 不比较
         df_fetcher: fn(code, period)->DataFrame;None 用 datahub.kline
         curve_points: >0 时把净值曲线降采样到约该点数(API 传输用),0=返回全量
@@ -416,7 +431,7 @@ def portfolio_backtest(
                 continue
             exit_px = raw_exit * (1 - slippage_pct)       # 卖出滑点让利
             gross = exit_px * pos['shares']
-            fee = _sell_fee(gross, commission_pct, stamp_tax_pct)
+            fee = _sell_fee(gross, commission_pct, _stamp_tax_rate(d, stamp_tax_pct))
             cash += gross - fee
             net_ret = (gross - fee - pos['cost_basis']) / pos['cost_basis'] * 100.0
             trades.append({
@@ -460,6 +475,13 @@ def portfolio_backtest(
                         entry_px = open_d * (1 + slippage_pct)       # 买入滑点
                         budget = min(equity_now * w if allocation == 'signal'
                                      else equity_now / max_positions, cash)
+                        daily_amount = float(data[sym]['amount'][bar_i])
+                        if (max_participation_rate is not None
+                                and np.isfinite(daily_amount) and daily_amount > 0):
+                            budget = min(
+                                budget,
+                                daily_amount * max(0.0, float(max_participation_rate)),
+                            )
                         shares = int(budget // (entry_px * LOT)) * LOT
                         if shares < LOT:
                             continue
@@ -500,7 +522,7 @@ def portfolio_backtest(
             continue
         exit_px = px * (1 - slippage_pct)
         gross = exit_px * pos['shares']
-        fee = _sell_fee(gross, commission_pct, stamp_tax_pct)
+        fee = _sell_fee(gross, commission_pct, _stamp_tax_rate(last_d, stamp_tax_pct))
         cash += gross - fee
         net_ret = (gross - fee - pos['cost_basis']) / pos['cost_basis'] * 100.0
         bars_held = data[sym]['idx'].get(last_d, pos['entry_idx']) - pos['entry_idx']
@@ -580,6 +602,8 @@ def portfolio_backtest(
             'hold_days': hold_days, 'stop_pct': stop_pct, 'target_pct': target_pct,
             'max_positions': max_positions, 'initial_cash': initial_cash,
             'allocation': allocation, 'stocks_count': len(data),
+            'max_participation_rate': max_participation_rate,
+            'stamp_tax_mode': 'override' if stamp_tax_pct is not None else 'effective_date',
             'trigger_count': trig_count, 'skipped': skipped[:10],
         },
     }

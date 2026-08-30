@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import _bootstrap  # noqa: F401
 
@@ -114,9 +114,81 @@ MIN_CROSS = 15   # 单期横截面最少有效股票数(原 5 太小,单期 IC �
 FDR_Q = 0.10     # Benjamini-Hochberg 目标错误发现率
 
 
+def _residualize_cross_section(
+    values: Sequence[float], betas: Sequence[Optional[float]],
+    industries: Sequence[str], market_caps: Sequence[Optional[float]],
+) -> Tuple[np.ndarray, List[str]]:
+    """Remove available industry, size and Beta exposures without look-ahead."""
+    residual = np.asarray(values, dtype=float).copy()
+    applied: List[str] = []
+
+    labels = pd.Series(list(industries), dtype="object").fillna("").astype(str)
+    for label, index in labels.groupby(labels).groups.items():
+        if label and label != "未分类" and len(index) >= 3:
+            idx = np.asarray(list(index), dtype=int)
+            residual[idx] -= float(np.median(residual[idx]))
+            if "industry" not in applied:
+                applied.append("industry")
+
+    design = []
+    beta = pd.to_numeric(pd.Series(list(betas)), errors="coerce")
+    if beta.notna().sum() >= max(5, len(residual) // 2) and beta.dropna().std() > 1e-12:
+        design.append(beta.fillna(beta.median()).to_numpy(dtype=float))
+        applied.append("beta")
+    size = pd.to_numeric(pd.Series(list(market_caps)), errors="coerce").where(lambda x: x > 0)
+    if size.notna().sum() >= max(5, len(residual) // 2):
+        logged = np.log(size)
+        if logged.dropna().std() > 1e-12:
+            design.append(logged.fillna(logged.median()).to_numpy(dtype=float))
+            applied.append("size")
+    if design:
+        matrix = np.column_stack([np.ones(len(residual)), *design])
+        coefficients, *_ = np.linalg.lstsq(matrix, residual, rcond=None)
+        residual = residual - matrix @ coefficients
+    return residual, applied
+
+
+def _load_pit_exposures(points: Sequence[str], symbols: Sequence[str]) -> Dict[str, Dict[str, dict]]:
+    """Load optional PIT industry/size exposures from the local research warehouse."""
+    try:
+        from data.research_store import ResearchStore
+        store = ResearchStore(ensure_schema=False)
+    except Exception:
+        return {}
+    wanted = set(str(symbol) for symbol in symbols)
+    output: Dict[str, Dict[str, dict]] = {}
+    for trade_date in points:
+        try:
+            universe = store.load_universe(trade_date)
+            valuation = store.load_valuations(trade_date, exact=False)
+        except Exception:
+            continue
+        if universe.empty:
+            continue
+        universe = universe[universe["symbol"].astype(str).isin(wanted)].copy()
+        if not valuation.empty:
+            valuation = valuation[valuation["symbol"].astype(str).isin(wanted)].copy()
+            universe = universe.merge(
+                valuation[["symbol", "market_cap"]].drop_duplicates("symbol"),
+                on="symbol", how="left",
+            )
+        else:
+            universe["market_cap"] = np.nan
+        output[str(trade_date)] = {
+            str(row["symbol"]): {
+                "industry": str(row.get("industry") or ""),
+                "market_cap": float(row["market_cap"])
+                    if pd.notna(row.get("market_cap")) else None,
+            }
+            for _, row in universe.iterrows()
+        }
+    return output
+
+
 def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[str]] = None,
              horizon: int = 10, rebalance: Optional[int] = None, period: str = "2y",
-             with_random: bool = True, n_perm: int = 200) -> dict:
+             with_random: bool = True, n_perm: int = 200,
+             use_pit_exposures: bool = False) -> dict:
     """评估因子(2026-06-28 统计加固)。返回 {factors:[{key,name,category,direction,ic_mean,
        rank_ic,ic_ir,win_rate,n_periods,random_ic(=噪声p95),p_value,fdr_significant,verdict}],
        horizon, rebalance, universe_n, n_points, period, neutralized, fdr_q}。
@@ -124,10 +196,10 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     加固点:
       - 非重叠调仓:rebalance 缺省=horizon,相邻期未来收益不再 50% 重叠 → IC-IR 不再被自相关高估;
       - 置换检验:每因子 n_perm 次整段打乱构造 null 分布得 p_value(取代原"比单次洗牌×2"的伪门);
-      - 多重比较:14 因子 p 值做 BH-FDR(q=FDR_Q),fdr_significant 才判✅;
+      - 多重比较:全部候选因子 p 值做 BH-FDR(q=FDR_Q),fdr_significant 才判✅;
       - 横截面下限 MIN_CROSS=15、股池扩到 ~50 → 降单期 IC 噪声。
-      ⚠️ 仍**未做行业/市值/Beta 中性化**(neutralized=False):动量/位置类 IC 仍含 β/规模暴露,
-         不能据此声称纯 alpha——需接入行业/市值面板,留作后续。"""
+      - 可执行标签:T 日收盘后出信号,T+1 开盘买入,T+H 收盘计价;
+      - Beta 始终尽力中性化；use_pit_exposures=True 时再从本地 PIT 仓库加载行业/市值暴露。"""
     import datahub
     from factor_zoo import FACTORS, compute
     keys = [k for k in (factor_keys or list(FACTORS)) if k in FACTORS]
@@ -150,7 +222,7 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
                 continue
             dates = pd.Index(df['date'].dt.strftime('%Y-%m-%d'), name='trade_date')
             close = df["close"].astype(float).reset_index(drop=True)
-            fwd = close.shift(-horizon) / close - 1
+            entry_open = pd.to_numeric(df.get("open", close), errors="coerce").reset_index(drop=True)
             fac = compute(df.reset_index(drop=True), keys)
             if fac:
                 # A zero-volume row is not a valid rebalance observation.  A
@@ -162,19 +234,38 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
                     high = pd.to_numeric(df['high'], errors='coerce')
                     low = pd.to_numeric(df['low'], errors='coerce')
                     one_price = (high.sub(low).abs() <= 0.001)
-                tradable = volume.gt(0) & ~one_price
+                next_one_price = one_price.shift(-1)
+                if len(next_one_price):
+                    next_one_price.iloc[-1] = True
+                entry_tradable = (
+                    volume.shift(-1).gt(0) & ~next_one_price.astype(bool)
+                )
+                fwd = close.shift(-horizon) / entry_open.shift(-1) - 1
                 panel[code] = {
                     "fwd": pd.Series(fwd.values, index=dates),
                     "factors": {
                         name: pd.Series(series.reset_index(drop=True).values, index=dates)
                         for name, series in fac.items()
                     },
-                    "tradable": pd.Series(tradable.values, index=dates),
+                    "tradable": pd.Series(entry_tradable.values, index=dates),
+                    "daily_return": pd.Series(close.pct_change().values, index=dates),
                 }
         except Exception:
             continue
     if len(panel) < 5:
         return {"error": f"有效股池过小({len(panel)}),无法评估", "factors": []}
+
+    daily_returns = pd.concat(
+        {code: item["daily_return"] for code, item in panel.items()}, axis=1
+    ).sort_index()
+    market_daily = daily_returns.median(axis=1, skipna=True)
+    market_variance = market_daily.rolling(60, min_periods=30).var()
+    for code, item in panel.items():
+        stock_daily = item["daily_return"].reindex(market_daily.index)
+        covariance = stock_daily.rolling(60, min_periods=30).cov(market_daily)
+        item["beta"] = (covariance / market_variance.replace(0, np.nan)).reindex(
+            item["fwd"].index
+        )
 
     # 2) Select one market-date grid.  Dates are eligible only when a genuine
     # cross-section exists; each stock is looked up by that exact date below.
@@ -188,13 +279,16 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     if len(points) < 5:
         return {"error": "历史调仓点不足", "factors": []}
 
+    pit_exposures = _load_pit_exposures(points, list(panel)) if use_pit_exposures else {}
+
     # 3) 逐因子:每个调仓点算横截面 IC / Rank-IC,并收集逐期秩用于置换检验
     results = []
     for key in keys:
         name, cat, direction, _ = FACTORS[key]
         ics, ricks, period_ranks = [], [], []
+        neutralization_used: set[str] = set()
         for trade_date in points:
-            fvals, rets = [], []
+            fvals, rets, betas, industries, market_caps = [], [], [], [], []
             for code, p in panel.items():
                 fser = p["factors"].get(key)
                 if (fser is None or trade_date not in fser.index
@@ -204,9 +298,18 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
                 fv = fser.loc[trade_date]
                 rv = p["fwd"].loc[trade_date]
                 if pd.notna(fv) and pd.notna(rv):
+                    exposure = (pit_exposures.get(str(trade_date)) or {}).get(code) or {}
+                    beta = p["beta"].get(trade_date, np.nan)
                     fvals.append(float(fv)); rets.append(float(rv))
+                    betas.append(float(beta) if pd.notna(beta) else None)
+                    industries.append(str(exposure.get("industry") or ""))
+                    market_caps.append(exposure.get("market_cap"))
             if len(fvals) >= MIN_CROSS:
-                x, y = np.array(fvals), np.array(rets)
+                x, applied = _residualize_cross_section(
+                    fvals, betas, industries, market_caps
+                )
+                neutralization_used.update(applied)
+                y = np.array(rets)
                 ic = _pearson(x, y)
                 if not np.isnan(ic):
                     rx = pd.Series(x).rank().values
@@ -223,12 +326,18 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
         ic_ir = round(ic_mean / ic_std, 2)
         rank_ic = round(float(np.mean(ricks)), 3)
         win = round(sum(1 for v in ics if v > 0) / len(ics) * 100, 1)
+        folds = [part for part in np.array_split(np.asarray(ricks), min(3, len(ricks))) if len(part)]
+        positive_fold_ratio = round(
+            sum(float(np.mean(part)) > 0 for part in folds) / len(folds), 3
+        ) if folds else 0.0
         p_value, noise_p95 = (_perm_pvalue(period_ranks, direction, float(np.mean(ricks)), n_perm)
                               if with_random else (None, None))
         results.append({
             "key": key, "name": name, "category": cat, "direction": direction,
             "ic_mean": round(ic_mean, 3), "rank_ic": rank_ic, "ic_ir": ic_ir,
             "win_rate": win, "n_periods": len(ics), "random_ic": noise_p95,
+            "positive_fold_ratio": positive_fold_ratio,
+            "neutralization": sorted(neutralization_used),
             "p_value": p_value, "fdr_significant": False, "verdict": "❌噪声",
         })
 
@@ -240,20 +349,44 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     sig = _bh_fdr([r["p_value"] for r in results], q=FDR_Q)
     for r, s in zip(results, sig):
         r["fdr_significant"] = bool(s)
-        ar = abs(r["rank_ic"])
+        ar = r["rank_ic"]
         pv = r["p_value"]
-        if s and ar >= 0.02:
+        stable = r.get("positive_fold_ratio", 0) >= 2 / 3
+        if s and ar >= 0.02 and stable:
             r["verdict"] = "✅有效"
-        elif (pv is not None and pv < 0.10 and ar >= 0.015):
+        elif ar < 0 and pv is not None and pv < 0.10:
+            r["verdict"] = "❌方向相反"
+        elif (pv is not None and pv < 0.10 and ar >= 0.015 and stable):
             r["verdict"] = "⚠️弱"
         else:
             r["verdict"] = "❌噪声"
 
-    results.sort(key=lambda r: (r["fdr_significant"], abs(r["ic_ir"])), reverse=True)
+    verdict_order = {"✅有效": 3, "⚠️弱": 2, "❌噪声": 1, "❌方向相反": 0}
+    # 方向相反的显著因子不能因为 |IC-IR| 大而排在有效因子前面。
+    results.sort(
+        key=lambda r: (
+            verdict_order.get(r["verdict"], 0),
+            r.get("positive_fold_ratio", 0.0),
+            r["rank_ic"],
+            r["ic_ir"],
+        ),
+        reverse=True,
+    )
     return {"factors": results, "horizon": horizon, "rebalance": rebalance,
             "universe_n": len(panel), "n_points": len(points), "period": period,
             "alignment": "trade_date",
-            "neutralized": False, "fdr_q": FDR_Q, "n_perm": n_perm}
+            "return_label": "signal_close_T__entry_open_T+1__exit_close_T+H",
+            "neutralized": any(r.get("neutralization") for r in results),
+            "pit_exposure_dates": sum(
+                len(exposures) >= MIN_CROSS for exposures in pit_exposures.values()
+            ),
+            "neutralization_complete": (
+                len(points) > 0
+                and sum(len(exposures) >= MIN_CROSS for exposures in pit_exposures.values())
+                == len(points)
+            ),
+            "survivorship_warning": universe is None,
+            "fdr_q": FDR_Q, "n_perm": n_perm, "trial_count": len(keys)}
 
 
 def format_text(rep: dict, top_n: int = 8) -> str:
@@ -265,10 +398,13 @@ def format_text(rep: dict, top_n: int = 8) -> str:
         pv = r.get("p_value")
         L.append(f"  {r['verdict']} {r['name']}({r['category']}): "
                  f"RankIC {r['rank_ic']:+.3f} · IC-IR {r['ic_ir']:+.2f} · 胜率{r['win_rate']}%"
+                 f" · 稳定折{r.get('positive_fold_ratio', 0):.0%}"
                  + (f" · p={pv}" if pv is not None else "")
                  + (" · FDR✓" if r.get("fdr_significant") else ""))
-    if rep.get("neutralized") is False:
-        L.append("  ⚠️ 未做行业/市值中性化:动量/位置类 IC 仍含 β/规模暴露,非纯 alpha。")
+    if not rep.get("neutralization_complete"):
+        L.append("  ⚠️ 已尽力剔除 Beta；当前缺少完整 PIT 行业/市值暴露，不能称为完整纯因子检验。")
+    if rep.get("survivorship_warning"):
+        L.append("  ⚠️ 默认样本仍是当前固定股池；正式研究应传入历史时点股池。")
     return "\n".join(L)
 
 

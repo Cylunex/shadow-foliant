@@ -247,6 +247,7 @@ class LocalFusionComposer:
         values = [
             _number(feature.get(key)) for key in (
                 "fundamental_score", "technical_60_score", "industry_score",
+                "data_quality_score",
                 "correction_120", "correction_250", "event_correction",
             )
         ]
@@ -276,10 +277,10 @@ class LocalFusionComposer:
             coverage = _number(row.get("data_coverage"))
             if coverage is None and feature is not None:
                 coverage = _number(feature.get("data_coverage"))
-            strategy_ids = {
-                str(item.get("strategy_id") or "")
+            strategy_families = {
+                str(item.get("strategy_family") or item.get("strategy_id") or "")
                 for item in (row.get("supporting_nominations") or [])
-                if item.get("strategy_id")
+                if item.get("strategy_family") or item.get("strategy_id")
             }
             prepared.append({
                 **row,
@@ -287,7 +288,7 @@ class LocalFusionComposer:
                 "_pit_score": pit_score,
                 "_lane_score": lane_score,
                 "_coverage": max(0.0, min(1.0, coverage or 0.0)),
-                "_support_count": max(1, len(strategy_ids)),
+                "_support_count": max(1, len(strategy_families)),
             })
 
         if not prepared:
@@ -409,7 +410,7 @@ class LocalFusionComposer:
                     "symbol": str(row.get("symbol") or ""), "lane": "satellite",
                     "strategy_id": config.get("strategy_id") or strategy_name,
                     "strategy_name": strategy_name,
-                    "strategy_version": local_result.get("rule_version") or "local-satellite-v2",
+                    "strategy_version": local_result.get("rule_version") or "local-satellite-v3",
                     "strategy_family": config.get("family") or "satellite",
                     "lane_rank": rank, "lane_score_raw": _number(row.get("lane_score")) or 0.0,
                     "priority_weight": priority, "evidence": dict(row),
@@ -505,6 +506,7 @@ class LocalFusionComposer:
         supporting = [{
             "lane": item.get("lane"), "strategy_id": item.get("strategy_id"),
             "strategy_name": item.get("strategy_name"),
+            "strategy_family": item.get("strategy_family"),
             "strategy_version": item.get("strategy_version"),
             "lane_rank": item.get("lane_rank"),
             "lane_score_raw": item.get("lane_score_raw"),

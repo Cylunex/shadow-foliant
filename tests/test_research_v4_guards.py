@@ -30,9 +30,13 @@ class FactorDateAlignmentTest(unittest.TestCase):
             returns = 0.0005 + pos * 0.00002 + np.sin(np.arange(len(own_dates)) / 11) * 0.0001
             close = 10 * np.cumprod(1 + returns)
             frames[f"{600000 + pos:06d}"] = pd.DataFrame({
-                "date": own_dates, "open": close, "high": close * 1.01,
+                "date": own_dates, "open": np.r_[10.0, close[:-1]], "high": close * 1.01,
                 "low": close * 0.99, "close": close, "volume": 1_000_000,
-                "test_factor": np.arange(len(own_dates), dtype=float) + pos,
+                # 保留真实日期错位，同时让横截面信号不与股票 Beta 完全共线。
+                "test_factor": (
+                    np.sin(np.arange(len(own_dates), dtype=float) / 9 + pos * 0.7)
+                    + (pos % 4) * 0.11
+                ),
             })
 
         fake_factors = {"test": ("test", "test", 1, None)}
@@ -85,6 +89,32 @@ class PortfolioExecutionGuardTest(unittest.TestCase):
                 max_workers=1,
             )
         self.assertEqual(result["summary"]["trade_count"], 0)
+
+    def test_entry_is_capped_by_reliable_daily_amount(self):
+        bars = self._bars()
+        bars["amount"] = 500_000.0
+        with patch.object(pbt, "_trigger_dates", return_value=["2026-01-05"]):
+            result = pbt.portfolio_backtest(
+                [("600001", "样本")], "2026-01-05", "2026-01-09",
+                hold_days=4, stop_pct=None, target_pct=None, benchmark=None,
+                df_fetcher=lambda *_a: bars, max_workers=1,
+            )
+        self.assertEqual(result["summary"]["trade_count"], 1)
+        self.assertLessEqual(result["trades"][0]["shares"], 5_000)
+        self.assertEqual(result["config"]["max_participation_rate"], 0.10)
+
+    def test_stamp_tax_uses_trade_date_unless_overridden(self):
+        self.assertEqual(pbt._stamp_tax_rate("2023-08-25"), 0.001)
+        self.assertEqual(pbt._stamp_tax_rate("2023-08-28"), 0.0005)
+        self.assertEqual(pbt._stamp_tax_rate("2023-08-25", 0.0002), 0.0002)
+
+    def test_board_and_dated_st_price_limits(self):
+        from analysis.local_stock_selector import _price_limit_ratio
+
+        self.assertEqual(_price_limit_ratio("688001", "ST样本", "2026-08-01"), 0.20)
+        self.assertEqual(_price_limit_ratio("300001", "ST样本", "2026-08-01"), 0.20)
+        self.assertEqual(_price_limit_ratio("600001", "ST样本", "2026-07-05"), 0.05)
+        self.assertEqual(_price_limit_ratio("600001", "ST样本", "2026-07-06"), 0.10)
 
 
 @unittest.skipUnless(os.getenv("RUN_POSTGRES_INTEGRATION") == "1",
