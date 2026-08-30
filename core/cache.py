@@ -201,10 +201,15 @@ def rate_slot(name: str, interval_seconds: float, wait_seconds: float = 10.0):
     token = str(time.time_ns())
     while True:
         try:
-            if c.set(key, token, nx=True, px=ttl_ms):
-                yield
-                return
+            acquired = bool(c.set(key, token, nx=True, px=ttl_ms))
         except Exception:
+            # Redis failure degrades to the caller's in-process gate.  Keep the
+            # caller's body outside this ``except``: otherwise a body exception
+            # is caught here and a second yield masks it with
+            # ``generator didn't stop after throw()``.
+            yield
+            return
+        if acquired:
             yield
             return
         if time.monotonic() >= deadline:

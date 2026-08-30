@@ -149,6 +149,21 @@ def test_redis_is_not_probed_without_explicit_configuration(monkeypatch) -> None
     assert cache._tried is True
 
 
+def test_rate_slot_preserves_caller_exception(monkeypatch) -> None:
+    class Redis:
+        @staticmethod
+        def set(*_args, **_kwargs):
+            return True
+
+    class CallerFailure(RuntimeError):
+        pass
+
+    monkeypatch.setattr(cache, "_redis", lambda: Redis())
+    with pytest.raises(CallerFailure):
+        with cache.rate_slot("provider.example", 0.01):
+            raise CallerFailure("must pass through unchanged")
+
+
 def test_isolated_runtime_completes_and_terminates_timeout() -> None:
     complete = run_isolated_task(
         "quick-example", _quick_task, (), {}, timeout_seconds=5, cancel_grace_seconds=1

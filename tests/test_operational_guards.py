@@ -117,12 +117,15 @@ class ControlledDeployTest(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, 'scripts/deploy.sh'), encoding='utf-8') as source:
             script = source.read()
+        with open(os.path.join(root, 'scripts/migrate.sh'), encoding='utf-8') as source:
+            migration_script = source.read()
         self.assertIn('ln -sfn venv "$release_dir/venv2"', script)
         self.assertIn('FOLIANT_SHARED_ENV is required for release activation', script)
         self.assertIn('ln -sfn "$shared_env" "$release_dir/.env"', script)
         self.assertIn("-m pip install 'pytest>=8,<10'", script)
-        self.assertIn('export PGHOST="${PGHOST:-${PG_HOST:-}}"', script)
-        self.assertIn('export PGDATABASE="${PGDATABASE:-${PG_DATABASE:-}}"', script)
+        self.assertIn('bash scripts/migrate.sh', script)
+        self.assertIn('export PGHOST="${PGHOST:-${PG_HOST:-}}"', migration_script)
+        self.assertIn('export PGDATABASE="${PGDATABASE:-${PG_DATABASE:-}}"', migration_script)
 
 
 class StrategyDeploymentQualityTest(unittest.TestCase):
