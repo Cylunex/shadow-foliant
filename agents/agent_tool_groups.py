@@ -33,15 +33,15 @@ TOOL_GROUP_META: Dict[str, Dict[str, Any]] = {
         'use_cases': ['技术分析师', '形态识别', '短线买卖点'],
     },
     'fund_flow': {
-        'description': '资金流向（主力/超大单/中小单 + 北向资金）',
-        'use_cases': ['资金面分析师', '主力选股', '北向跟踪'],
+        'description': '个股资金流向（主力/超大单/中小单）',
+        'use_cases': ['资金面分析师', '主力选股'],
     },
     'fundamentals': {
         'description': '财务三表 + 季报 + 估值数据',
         'use_cases': ['基本面分析师', '价值股筛选'],
     },
     'sentiment': {
-        'description': '新闻 / 龙虎榜 / 北向 / 概念热度 / 融资融券 / 强势股+题材归因',
+        'description': '新闻 / 龙虎榜 / 概念热度 / 融资融券 / 强势股+题材归因',
         'use_cases': ['市场情绪解码', '游资跟踪', '题材识别'],
     },
     'chipset': {
@@ -171,7 +171,7 @@ def collect_chan_theory_context(symbol: str, period: str = '1y') -> Dict[str, An
 
 
 def collect_fund_flow_context(symbol: str, days: int = 60) -> Dict[str, Any]:
-    """采集资金流：个股资金流 + 北向资金大盘 + 历史日度资金流(东财)"""
+    """采集个股主力资金流和历史日度资金流。"""
     ctx: Dict[str, Any] = {'symbol': symbol, 'errors': []}
 
     # 个股资金流（沿用现有 a-stock HTTP > akshare > tushare 优先级）
@@ -190,13 +190,6 @@ def collect_fund_flow_context(symbol: str, days: int = 60) -> Dict[str, Any]:
         ctx['adata_capital_flow'] = rows[:days] if rows else []
     except Exception as e:
         ctx['errors'].append(f'adata_capital_flow: {e}')
-
-    # 北向资金大盘趋势
-    try:
-        import datahub
-        ctx['north_flow'] = datahub.north_flow(days)
-    except Exception as e:
-        ctx['errors'].append(f'north_flow: {e}')
 
     return ctx
 
@@ -303,7 +296,7 @@ def _aggregate_hot_themes(hot_df, top_n: int = 20) -> List[Dict[str, Any]]:
 
 
 def collect_sentiment_context(symbol: str = None, lookback_days: int = 30) -> Dict[str, Any]:
-    """采集市场情绪：新闻 / 龙虎榜 / 北向 / 融资融券 / 同花顺热点+题材"""
+    """采集市场情绪：新闻 / 龙虎榜 / 融资融券 / 同花顺热点和题材。"""
     ctx: Dict[str, Any] = {'symbol': symbol, 'errors': []}
 
     try:
@@ -311,12 +304,6 @@ def collect_sentiment_context(symbol: str = None, lookback_days: int = 30) -> Di
         ctx['dragon_tiger_today'] = datahub.dragon_tiger()
     except Exception as e:
         ctx['errors'].append(f'dragon_tiger: {e}')
-
-    try:
-        import datahub
-        ctx['north_flow'] = datahub.north_flow(lookback_days)
-    except Exception as e:
-        ctx['errors'].append(f'north_flow: {e}')
 
     try:
         import datahub

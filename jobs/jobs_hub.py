@@ -5,7 +5,7 @@ import _bootstrap  # noqa: F401  路径引导（搬入子目录后定位项目�
 Jobs Hub — 统一的后台任务注册与管理
 
 借鉴 instock 的 Job 设计思路：
-  - 后台预算重型数据（指标、北向、龙虎榜），存入快照表
+  - 后台预算重型数据（指标、龙虎榜），存入快照表
   - Agent 分析时直接读快照，避免每次重算
   - 复用现有 `schedule` 库（不引入 APScheduler，避免破坏既有 4 个 scheduler）
 
@@ -34,7 +34,7 @@ from typing import Callable, Dict, List, Optional
 from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
 import schedule
-import datahub  # 统一外部数据层(行情/北向/龙虎榜/板块/新闻等取数唯一入口)
+import datahub  # 统一外部数据层(行情/龙虎榜/板块/新闻等取数唯一入口)
 
 
 # =============================================================================
@@ -97,7 +97,7 @@ def _get_log_db():
 def _json_sanitize(obj):
     """递归把 NaN/Inf → None。PG 的 JSONB 列拒收 NaN/Infinity 字面量,而 json.dumps 默认
     (allow_nan=True)会把 float('nan') 原样写成 NaN → 写库报 `invalid input syntax for type
-    json: Token "NaN" is invalid`。datahub 行情/北向
+    json: Token "NaN" is invalid`。datahub 行情
     记录里常有 NaN(如 turnover_ratio),写快照前必须洗。numpy.float64 是 float 子类,
     isnan/isinf 通吃;其余 numpy 标量随后由 json.dumps(default=str) 兜底。"""
     if isinstance(obj, float):
@@ -1550,17 +1550,13 @@ def task_rag_ingest():
 
 
 def task_daily_market_snapshot():
-    """采集大盘+北向资金快照（盘后跑）"""
+    """采集龙虎榜市场快照（盘后跑）。"""
     job = 'daily_market_snapshot'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
     try:
         payload = {}
-        try:
-            payload['north_flow'] = datahub.north_flow(30)
-        except Exception as e:
-            payload['north_flow_error'] = str(e)
         try:
             payload['dragon_tiger'] = datahub.dragon_tiger()
         except Exception as e:
@@ -2526,11 +2522,10 @@ def task_noon_report():
 
 
 def task_morning_strategy():
-    """📊 每日晨间市场报告 (08:30)
+    """📊 每日晨间市场报告（09:00，只推送一条通俗结论）。
 
-    同 overnight_ai_strategy 原逻辑，更名为 morning_strategy，
-    时间改为 08:30（代替原 dragon_tiger_report 时段），
-    新增新闻简报模块。如果内容过长，自动拆分为多条 QQ 消息。
+    同 overnight_ai_strategy 原逻辑，更名为 morning_strategy，09:00 执行，
+    新闻、龙虎榜等仍作为分析证据和网页详情，不再拆成多条即时通知。
     """
     job = 'morning_strategy'
     # 非交易日跳过(节假日感知,见 _is_trading_day)
@@ -2662,20 +2657,7 @@ def task_morning_strategy():
             except Exception as e:
                 news_summary = f'(拉取失败: {type(e).__name__})'
 
-        # ─── 4. 北向资金近 5 日 ───
-        north_summary = '（无数据）'
-        try:
-            rows = datahub.north_flow(5)
-            if rows:
-                lines = []
-                for r in rows[:5]:
-                    net = (r.get('net_hgt', 0) or 0) + (r.get('net_sgt', 0) or 0)
-                    lines.append(f"  {r.get('trade_date', '')}: 净流入 {net/100000000:.2f}亿")
-                north_summary = '\n'.join(lines)
-        except Exception as e:
-            north_summary = f'(拉取失败: {e})'
-
-        # ─── 5. 当日强势股 + 题材热度榜（同花顺热点） ───
+        # ─── 4. 当日强势股 + 题材热度榜（同花顺热点） ───
         hot_summary = '（无数据）'
         themes_summary = '（无数据）'
         try:
@@ -2810,7 +2792,6 @@ def task_morning_strategy():
             'dragon_tiger_summary': dragon_tiger_summary,
             'us_summary': us_summary,
             'news_summary': news_summary,
-            'north_summary': north_summary,
             'hot_summary': hot_summary,
             'themes_summary': themes_summary,
             'fred_summary': fred_summary,
@@ -2820,7 +2801,13 @@ def task_morning_strategy():
         }
         try:
             from prompt_manager import render as _render_prompt
-            prompt = _render_prompt('overnight_strategy', **prompt_vars)
+            # 兼容服务器数据库中尚未更新的旧模板参数，随后明确剔除整个北向段落，
+            # 绝不让陈旧净流入值进入模型上下文。
+            prompt = _render_prompt('overnight_strategy', north_summary='', **prompt_vars)
+            prompt = re.sub(
+                r'【4\.\s*北向资金[^】]*】.*?(?=【5\.|\Z)', '', prompt or '',
+                flags=re.S,
+            )
             # DB 里的旧模板(6维)没有 A股大盘/板块/持仓维度 → 运行时补齐,保证 AI 能看到
             if prompt and 'A股大盘指数' not in prompt:
                 prompt += (
@@ -2828,8 +2815,10 @@ def task_morning_strategy():
                     f"【7. A股大盘指数】\n{cn_index_summary}\n\n"
                     f"【7b. 行业板块强弱】\n{sector_summary}\n\n"
                     f"【8. 我的持仓技术扫描（含昨日盈亏/浮盈/破位/缠论信号）】\n{hold_summary}\n\n"
-                    f"请在输出 JSON 中额外加两个字段: "
-                    f"\"lazy_summary\"(3-4句口语化今日操作要点:大盘基调/该卖谁该留谁/可加谁,像朋友间提醒); "
+                    f"请在输出 JSON 中额外加四个字段: "
+                    f"\"market_direction\"(只能是看涨/看跌/震荡); "
+                    f"\"position_action\"(只能是加仓/减仓/不动); "
+                    f"\"lazy_summary\"(不超过2句口语化操作要点); "
                     f"\"position_advice\"(针对第8维持仓逐只口语化建议:卖/减/留/可加+一句理由)。"
                 )
         except Exception as _pme:
@@ -2837,19 +2826,19 @@ def task_morning_strategy():
             prompt = ''
         if not prompt:
             prompt = (
-                f"你是一名资深 A 股策略分析师。请基于以下 8 维数据，综合判断今日 A 股开盘策略。\n\n"
+                f"你是一名 A 股策略分析师。请基于以下 7 类数据，判断今日涨跌和是否加减仓。\n\n"
                 f"【1. 昨日 ({lookback_date}) 龙虎榜 TOP 15（按净买入排序）】\n{dragon_tiger_summary}\n\n"
                 f"【2. 美股隔夜收盘】\n{us_summary}\n\n"
                 f"【3. 隔夜国内新闻头条】\n{news_summary}\n\n"
-                f"【4. 北向资金近 5 日】\n{north_summary}\n\n"
-                f"【5. 昨日强势股 TOP 10】\n{hot_summary}\n\n"
-                f"【5b. 题材热度榜 TOP 15】\n{themes_summary}\n\n"
-                f"【6. 美国宏观面板】\n{fred_summary}\n\n"
-                f"【7. A股大盘指数】\n{cn_index_summary}\n\n"
-                f"【7b. 行业板块强弱】\n{sector_summary}\n\n"
-                f"【8. 我的持仓技术扫描（含昨日盈亏/浮盈/破位/缠论信号）】\n{hold_summary}\n\n"
+                f"【4. 昨日强势股】\n{hot_summary}\n\n"
+                f"【5. 题材热度】\n{themes_summary}\n\n"
+                f"【6. 海外宏观】\n{fred_summary}\n\n"
+                f"【7. A股大盘和板块】\n{cn_index_summary}\n{sector_summary}\n\n"
+                f"【8. 我的持仓】\n{hold_summary}\n\n"
                 f'请综合以上信息严格按 JSON 输出: '
-                f'{{"lazy_summary": "3-4句口语化的今日操作要点(大盘基调/该卖谁该留谁/可加谁,像朋友间提醒,直接说人话)", '
+                f'{{"market_direction": "看涨/看跌/震荡三选一", '
+                f'"position_action": "加仓/减仓/不动三选一", '
+                f'"lazy_summary": "不超过2句，只说涨跌和加减仓", '
                 f'"open_strategy": "...", "external_impact": "...", '
                 f'"hot_sectors": [...], "risk_warning": "...", '
                 f'"candidate_stocks": [...], '
@@ -2857,7 +2846,9 @@ def task_morning_strategy():
             )
         prompt += (
             '\n\n【输出质量要求】只输出一个合法 JSON 对象，不要 Markdown 代码块或说明文字；'
-            'open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；'
+            'market_direction、position_action、open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；'
+            'market_direction 只能是看涨/看跌/震荡，position_action 只能是加仓/减仓/不动；'
+            '使用普通话，不使用 VaR、ATR、Alpha、Beta、IC、缠论等术语；'
             'hot_sectors 至少给出一项，数据不足时明确写“暂无可靠板块信号”，不得用“（无）”或“未知”占位。'
             '\n【新闻事实边界】隔夜新闻中的证据 ID 只用于事实追溯；新闻和题材线程均为 reference_only。'
             '不得根据新闻自行编造股票代码、目标价、仓位或买卖指令，也不得让新闻改变正式选股结果。'
@@ -2882,108 +2873,23 @@ def task_morning_strategy():
                   f"mode={diagnosis_meta['mode']} reason={diagnosis_meta['reason']} "
                   f"data={_cov['available']}/{_cov['total']}")
 
-        # ─── 8. 构建各模块 ───
+        # ─── 8. 构建一条通俗即时通知；详细证据只落库/留在网页 ───
         now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-        data_date = lookback_date
+        from analysis.morning_strategy_report import format_plain_morning_notification
+        notify_title, notify_body = format_plain_morning_notification(
+            diagnosis,
+            market=cn_index_summary,
+            holdings=diagnosis.get('position_advice') or hold_summary,
+            as_of=now_str,
+        )
+        mod_a = [notify_title, notify_body]
 
-        # === 模块A: 策略核心（AI 分析） ===
-        mod_a = []
-        mod_a.append(f'📊 晨间市场报告 — {now_str}')
-        if diagnosis.get('lazy_summary'):
-            mod_a.append('')
-            mod_a.append('【今日一句话】')
-            mod_a.append(str(diagnosis['lazy_summary']))
-        if pnl_text:
-            mod_a.append('')
-            mod_a.append(pnl_text)
-        if cn_index_summary != '（无数据）':
-            mod_a.append('【大盘】' + cn_index_summary)
-        mod_a.append('')
-        mod_a.append('━━━ 🎯 开盘策略 ━━━')
-        mod_a.append(diagnosis.get('open_strategy', '（无）'))
-        mod_a.append('')
-        mod_a.append('━━━ 🌐 外部影响 ━━━')
-        mod_a.append(diagnosis.get('external_impact', '（无）'))
-        mod_a.append('')
-        mod_a.append('━━━ 🔥 热点板块 ━━━')
-        for s in diagnosis.get('hot_sectors', []) or []:
-            mod_a.append(f'  • {s}')
-        mod_a.append('')
-        mod_a.append('━━━ ⚠️ 风险提示 ━━━')
-        mod_a.append(diagnosis.get('risk_warning', '（无）'))
-        mod_a.append('')
-        # 候选股票不再展示(选股统一看 09:45 综合选股);candidate_stocks 仍静默入推荐池(wf_overnight_to_rec)
-        if diagnosis.get('position_advice'):
-            mod_a.append('━━━ 💼 持仓操作建议 ━━━')
-            mod_a.append(str(diagnosis['position_advice']))
-            mod_a.append('')
-        confidence_line = f'数据置信度: {diagnosis.get("confidence", "低")}'
-        if diagnosis_meta['mode'] != 'ai':
-            _cov = diagnosis_meta['coverage']
-            confidence_line += (f"（{'AI+规则' if diagnosis_meta['mode'] == 'hybrid' else '规则兜底'}，"
-                                f"{_cov['available']}/{_cov['total']} 类数据可用）")
-        mod_a.append(confidence_line)
-
-        # === 模块B: 新闻简报 — 使用已采集的 news_summary（不复拉） ===
-        mod_b = []
-        mod_b.append(f'📰 晨间新闻简报 — {data_date}')
-        mod_b.append('')
-        if news_summary and news_summary != '（无数据）':
-            for line in news_summary.split('\n'):
-                mod_b.append(line)
-        else:
-            mod_b.append('  （暂无新闻）')
-        mod_b.append('')
-        mod_b.append('━━━ 🌏 美股隔夜 ━━━')
-        mod_b.append(us_summary)
-        mod_b.append('')
-        mod_b.append('━━━ 💰 北向资金 5 日 ━━━')
-        mod_b.append(north_summary)
-
-        # === 模块C: 龙虎榜详细数据 ===
-        mod_c = []
-        mod_c.append(f'🐉 龙虎榜 — {data_date}')
-        mod_c.append('')
-        if dragon_tiger_detailed:
-            # 跳过已有标题行
-            dt_lines = dragon_tiger_detailed.split('\n')
-            mod_c.extend(dt_lines[2:])  # 跳过 '🐉 龙虎榜 (N条)' 和空行
-        else:
-            mod_c.append('（无数据）')
-        mod_c.append('')
-        mod_c.append('━━━ 🔥 昨日强势股 TOP 10 ━━━')
-        mod_c.append(hot_summary)
-        mod_c.append('')
-        mod_c.append('━━━ 🏷️ 题材热度榜 ━━━')
-        mod_c.append(themes_summary)
-        mod_c.append('')
-        mod_c.append('━━━ 🏛️ 宏观面板 (FRED) ━━━')
-        mod_c.append(fred_summary)
-
-        # (原模块D"持仓买卖提示"已移至 10:05 morning_portfolio,用开盘后实时价更准;
-        #  晨报回到 3 条,AI 的持仓建议仍在模块A的 position_advice)
-
-        # 组合各模块
-        modules = [('\n'.join(mod_a), '📊 晨间市场报告'),
-                   ('\n'.join(mod_b), '📰 晨间新闻简报'),
-                   ('\n'.join(mod_c), '🐉 盘前数据快照')]
-
-        # ─── 模块推送:全部走 notification_router(report→默认QQ);
-        #     QQ 整体不通时,合并 3 条为一封邮件兜底(不丢消息也不轰炸) ───
-        sent_ok = 0
         try:
             from notification_router import send as _nr_send
-            for mod_text, mod_title in modules:
-                text = mod_text.strip()
-                if not text:
-                    continue
-                res = _nr_send('report', mod_title, text, fallback=None)
-                if any(ok for ok, _ in res.values()):
-                    sent_ok += 1
-            if sent_ok == 0:
-                full_content = '\n\n'.join(f'# {t}\n\n{m}' for m, t in modules)
-                _nr_send('report', f'📊 晨间市场报告 — {datetime.now().strftime("%m-%d")}',
-                         full_content, only_channels=['email'], fallback=None)
+            result = _nr_send('report', notify_title, notify_body, fallback=None)
+            if result and not any(ok for ok, _ in result.values()):
+                _nr_send('report', notify_title, notify_body,
+                         only_channels=['email'], fallback=None)
         except Exception as qe:
             print(f'[morning_strategy] 模块推送失败: {qe}')
 
@@ -4878,21 +4784,13 @@ def task_unified_selection():
         except Exception:
             pass
 
-        _push_daily('🎯 综合选股 TOP 15', body)
         if final_rows:
             try:
                 from analysis.selection_finalizer import format_final_selection
                 _final_body = format_final_selection(final_rows)
-                try:
-                    _fb_final = _source_feedback('unified_selection_final')
-                    if (_fb_final.get('text')
-                            and '无历史战绩' not in _fb_final['text']):
-                        _final_body += f'\n\n📈 最终优选{_fb_final["text"]}'
-                except Exception:
-                    pass
-                _push_daily('🏆 综合选股最终 TOP 5', _final_body)
+                _push_daily('今日候选：加、减还是不动', _final_body)
             except Exception as _fpe:
-                print(f'[unified_selection] 最终TOP5推送失败(不影响TOP15): '
+                print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
                       f'{type(_fpe).__name__}: {str(_fpe)[:80]}')
         _rf = globals().pop('_UNIFIED_REC_FAIL', 0)
         _note = f'picks={len(top_list)} final={len(final_rows)}' + (f' rec_fail={_rf}' if _rf else '')
@@ -5083,8 +4981,14 @@ def task_morning_portfolio():
             lines.append('')
             lines.append(f'⚠️ {nosnap_n}/{len(scans)} 只无盘后指标快照(等 15:45 快照任务跑过后完整)')
 
-        _title = f"{_add_signal.get('headline', '☀️ 早盘持仓分析')}｜早盘持仓"
-        _push_daily(_title, '\n'.join(lines))
+        from notify.plain_language import build_portfolio_message
+        _title, _body = build_portfolio_message(
+            label='早盘持仓', signal=_add_signal,
+            sell_rows=sell_list, buy_rows=buy_list,
+            market=mkt_line,
+            as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
+        )
+        _push_daily(_title, _body)
 
         # 🎯 挑「今日重点盯盘候选」(持仓多→聚焦):风险分>0 / 有买点 / 盘中异动±3%。
         # 存快照供 11:20 午间盯盘只看这批(不再全持仓逐只),与"持仓瘦身"理念一致。
@@ -5108,7 +5012,8 @@ def task_morning_portfolio():
                        + (1 if s['buy_signal'] else 0)
                        + (1 if abs(s.get('change') or 0) >= 3 else 0))
                 cands.append({'code': s['code'], 'name': s['name'], 'pri': pri, 'tag': tag,
-                              'sell_score': s['sell_score'], 'mprice': s.get('price') or 0})
+                              'sell_score': s['sell_score'], 'buy_signal': bool(s['buy_signal']),
+                              'mprice': s.get('price') or 0})
             cands.sort(key=lambda x: x['pri'], reverse=True)
             save_indicator_snapshot('focus_candidates',
                                     {'date': datetime.now().strftime('%Y-%m-%d'), 'picks': cands[:15]})
@@ -5190,18 +5095,28 @@ def task_noon_portfolio():
                 except (TypeError, ValueError):
                     price, chg = 0, 0
                 rows_q.append((p, price, chg))
-            n_up = sum(1 for _, _, c in rows_q if c >= 3)
-            n_dn = sum(1 for _, _, c in rows_q if c <= -3)
-            head_sum = (f'异动:涨超3%有{n_up}只·跌超3%有{n_dn}只' if (n_up or n_dn)
-                        else '无明显异动,午间平稳')
-            lines = [f'## 🕦 午间重点盯盘 — {datetime.now().strftime("%Y-%m-%d %H:%M")} | {head_sum}',
-                     f'(早盘挑出 {len(picks)} 只重点, 午间只跟这批)', '']
-            for p, price, chg in rows_q:
-                # 红涨绿跌(2026-07-02 修:原来涨标🟢跌标🔴,反了)
-                mark = '🔴' if chg >= 3 else ('🟢' if chg <= -3 else '·')
-                price_s = f'¥{price}' if price else ''
-                lines.append(f"  {mark} {p['name']} {p['code']} {price_s} {chg:+.1f}%  {p.get('tag', '')}")
-            _push_daily('🕦 午间重点盯盘', '\n'.join(lines))
+            changes = [chg for _, _, chg in rows_q]
+            avg_change = sum(changes) / len(changes) if changes else 0.0
+            reduce_rows = [(p, chg) for p, _, chg in rows_q if p.get('sell_score')]
+            add_rows = [(p, chg) for p, _, chg in rows_q
+                        if p.get('buy_signal') and not p.get('sell_score')]
+            action = '减仓' if reduce_rows else ('加仓' if add_rows else '不动')
+            direction = '看涨' if avg_change >= 0.5 else ('看跌' if avg_change <= -0.5 else '震荡')
+            from notify.plain_language import build_market_message
+            title, body = build_market_message(
+                label='午间重点', direction=direction, action=action,
+                market=f'重点持仓平均{avg_change:+.1f}%',
+                holdings=(f'需减仓{len(reduce_rows)}只、可加仓{len(add_rows)}只'
+                          if reduce_rows or add_rows else '没有必须处理的，先不动'),
+                reason='只列早盘发现的重点持仓，其余不动',
+                as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
+            )
+            detail = []
+            for row_action, group in (('减仓', reduce_rows), ('加仓', add_rows)):
+                for p, chg in group:
+                    move = f'涨{chg:.1f}%' if chg > 0 else f'跌{abs(chg):.1f}%'
+                    detail.append(f"{row_action}：{p['name']}｜{move}")
+            _push_daily(title, body + ('\n' + '\n'.join(detail[:4]) if detail else ''))
         _log_run(job, 'success',
                  error=f'candidates={len(picks)}' + ('' if picks else ' (早盘未挑/无持仓)'),
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -5632,7 +5547,7 @@ def task_mx_weekend_outlook():
         # 用最灵活的 ask(七合一)承载开放式展望,hotspot 用文档式问法(特化 skill 对问法挑剔)。各自 try 隔离。
         segments = [
             ('📅 本周复盘 · 下周展望', finance_ask,
-             '回顾本周A股市场整体表现与资金动向(指数涨跌/风格切换/北向资金/市场情绪),并展望下周行情节奏与操作策略'),
+             '回顾本周A股市场整体表现与资金动向(指数涨跌/风格切换/主力资金/市场情绪),并展望下周行情节奏与操作策略'),
             ('🔥 热点板块', hotspot,
              '本周A股有哪些热点板块'),
             ('📌 下周关注', finance_ask,
@@ -5968,7 +5883,7 @@ def register_default_jobs():
       14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
       —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
       —— 盘后(日线17:30、复权因子18:00就绪;读暖缓存任务仍显式等依赖)——
-      16:48 daily_market_snapshot       — 📷 大盘快照
+      16:48 daily_market_snapshot       — 📷 龙虎榜市场快照
       18:05/18:20 research_data_sync    — 🗄️ 全市场复权日线/估值/PIT 首轮与条件补跑
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 kline_prefetch/announcement — 📥 K线预热链头 / 📢 公告扫描（相互独立）
@@ -5988,7 +5903,7 @@ def register_default_jobs():
 
     2026-06-12 整合说明:
       已删除(被覆盖): morning_briefing_push(并入 morning_strategy)、morning_warmup(并入快照)、
-        northbound_flow_refresh(读时自刷新)、strategy_screening/morning_picks(unified_selection)、
+        strategy_screening/morning_picks(unified_selection)、
         dragon_tiger_report(morning_strategy 模块C)、afternoon_picks(afternoon_portfolio)、
         chan_scan(快照+早盘)、portfolio_risk/daily_pattern_alert(快照尾部)、
         multi_factor_screen(unified_selection 同缓存)、weekly_portfolio_report/
@@ -6186,6 +6101,5 @@ if __name__ == '__main__':
         task_daily_market_snapshot()
         snap = get_market_snapshot()
         if snap:
-            print('  north_flow rows:', len(snap.get('north_flow', [])))
             print('  dragon_tiger rows:', len(snap.get('dragon_tiger', [])))
         print('OK')

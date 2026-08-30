@@ -1,7 +1,11 @@
 import json
 import unittest
 
-from analysis.morning_strategy_report import build_diagnosis, parse_diagnosis
+from analysis.morning_strategy_report import (
+    build_diagnosis,
+    format_plain_morning_notification,
+    parse_diagnosis,
+)
 
 
 def _sources(**overrides):
@@ -9,7 +13,6 @@ def _sources(**overrides):
         'dragon_tiger_summary': '000001 示例 净1200万 涨1.2%',
         'us_summary': '道琼斯: 45000 (+0.35%)\n标普500: 6500 (-0.10%)',
         'news_summary': '[08:10] 重要政策新闻',
-        'north_summary': '2026-08-13: 净流入 12.30亿',
         'hot_summary': '000001 示例 +5.2% — 人工智能',
         'themes_summary': '人工智能 (5 只)\n机器人 (3 只)',
         'fred_summary': 'VIX恐慌指数: 16.2 (-1.20%)',
@@ -34,7 +37,7 @@ class MorningStrategyReportTests(unittest.TestCase):
         diagnosis, meta = build_diagnosis('API返回空响应', _sources())
         self.assertEqual(meta['mode'], 'rules')
         self.assertEqual(meta['reason'], 'empty_response')
-        self.assertEqual(meta['coverage']['available'], 10)
+        self.assertEqual(meta['coverage']['available'], 9)
         for key in ('lazy_summary', 'open_strategy', 'external_impact',
                     'hot_sectors', 'risk_warning', 'confidence'):
             self.assertTrue(diagnosis[key])
@@ -77,12 +80,25 @@ class MorningStrategyReportTests(unittest.TestCase):
         self.assertEqual(meta['reason'], 'ok')
         self.assertEqual(diagnosis['confidence'], '高')
         self.assertEqual(diagnosis['candidate_stocks'][0]['code'], '000001')
+        self.assertIn(diagnosis['market_direction'], ('看涨', '看跌', '震荡'))
+        self.assertIn(diagnosis['position_action'], ('加仓', '减仓', '不动'))
 
     def test_rule_report_extracts_real_sector_leaders(self):
         diagnosis, _ = build_diagnosis('', _sources())
         self.assertEqual(diagnosis['hot_sectors'][:2], ['通信设备1.2%', '工业金属0.8%'])
         self.assertIn('隔夜美股', diagnosis['external_impact'])
-        self.assertIn('北向资金最近记录', diagnosis['external_impact'])
+        self.assertNotIn('北向', diagnosis['external_impact'])
+
+    def test_plain_notification_only_leads_with_direction_and_action(self):
+        diagnosis, _ = build_diagnosis('', _sources(
+            cn_index_summary='上证指数-1.50% 深证成指-1.80% 创业板指-1.30%',
+        ))
+        title, body = format_plain_morning_notification(
+            diagnosis, market='上证指数-1.50%', holdings='两只持仓走势转弱', as_of='09:00'
+        )
+        self.assertEqual(title, '🟢 早盘判断：看跌｜减仓')
+        self.assertEqual(body.splitlines()[0], '操作：减仓')
+        self.assertNotIn('北向', title + body)
 
 
 if __name__ == '__main__':

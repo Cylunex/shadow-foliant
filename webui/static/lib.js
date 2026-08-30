@@ -74,8 +74,7 @@ export const cls  = v => v==null||Number(v)===0?'':(Number(v)>0?'red':'green')
 
 // 字段名 → 中文表头(通用表格用;查不到回退原名)
 const ZH = {
-  // 北向资金
-  trade_date:'交易日', hgt_yi:'沪股通(亿)', sgt_yi:'深股通(亿)', net_total:'北向合计(亿)',
+  trade_date:'交易日',
   net_hgt:'沪净流入', net_sgt:'深净流入', net_tgt:'港股通净', source:'来源', last_time:'更新时间',
   // 通用
   date:'日期', code:'代码', name:'名称', symbol:'代码', price:'现价', close:'收盘',

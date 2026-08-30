@@ -57,13 +57,6 @@ def capital_flow(code: str) -> Any:
 
 
 @mcp.tool()
-def north_flow(days: int = 30) -> Any:
-    """北向资金近 N 日大盘数据。"""
-    import datahub
-    return datahub.north_flow(days)
-
-
-@mcp.tool()
 def dragon_tiger_today() -> Any:
     """当日龙虎榜明细。"""
     import datahub

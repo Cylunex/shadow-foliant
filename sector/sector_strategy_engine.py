@@ -146,7 +146,6 @@ class SectorStrategyEngine:
             print("3/4 资金流向分析师...")
             fund_result = self.agents.fund_flow_analyst_agent(
                 fund_flow_data=data.get("sector_fund_flow", {}),
-                north_flow_data=data.get("north_flow", {}),
                 sectors_data=data.get("sectors", {})
             )
             agents_results["fund"] = fund_result
@@ -592,10 +591,6 @@ if __name__ == "__main__":
             "today": [
                 {"sector": "电子", "main_net_inflow": 100000, "main_net_inflow_pct": 2.0, "change_pct": 2.5, "super_large_net_inflow": 50000}
             ]
-        },
-        "north_flow": {
-            "date": "2024-01-15",
-            "north_net_inflow": 50000
         }
     }
     

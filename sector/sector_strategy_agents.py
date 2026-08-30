@@ -233,13 +233,12 @@ class SectorStrategyAgents:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
     
-    def fund_flow_analyst_agent(self, fund_flow_data: Dict, north_flow_data: Dict, sectors_data: Dict) -> Dict[str, Any]:
+    def fund_flow_analyst_agent(self, fund_flow_data: Dict, sectors_data: Dict) -> Dict[str, Any]:
         """
         资金流向分析师 - 分析板块资金流向和主力行为
         
         职责：
         - 实时跟踪主力资金在板块间的流动
-        - 分析北向资金的板块偏好
         - 判断资金进攻或撤离的方向
         """
         print("💰 资金流向分析师正在分析...")
@@ -269,27 +268,10 @@ class SectorStrategyAgents:
             for idx, item in enumerate(sorted_outflow[:10], 1):
                 fund_flow_summary += f"{idx}. {item['sector']}: {item['main_net_inflow']/1e8:.2f}亿 ({item['main_net_inflow_pct']:+.2f}%) | 涨跌: {item['change_pct']:+.2f}%\n"
         
-        # 构建北向资金数据
-        north_summary = ""
-        if north_flow_data:
-            north_summary = f"""
-【北向资金】
-日期: {north_flow_data.get('date', 'N/A')}
-今日北向资金净流入: {north_flow_data.get('north_net_inflow', 0):.2f} 亿元
-  沪股通净流入: {north_flow_data.get('hgt_net_inflow', 0):.2f} 亿元
-  深股通净流入: {north_flow_data.get('sgt_net_inflow', 0):.2f} 亿元
-"""
-            if north_flow_data.get('history'):
-                north_summary += "\n近10日北向资金流向:\n"
-                for item in north_flow_data['history'][:10]:
-                    north_summary += f"  {item['date']}: {item['net_inflow']:.2f}亿\n"
-        
         prompt = f"""
 你是一名资深的资金流向分析师，拥有15年的市场资金研究经验，擅长从资金流向中洞察主力意图和市场趋势。
 
 {fund_flow_summary}
-
-{north_summary}
 
 请基于以上资金流向数据，进行深入的板块资金分析：
 
@@ -312,19 +294,13 @@ class SectorStrategyAgents:
    - 识别"资金流出+板块上涨"的出货警示
    - 识别"资金流出+板块下跌"的弱势板块
 
-4. **北向资金偏好**
-   - 分析北向资金的流向趋势
-   - 判断外资对A股的态度（积极/观望/撤离）
-   - 识别北向资金偏好的板块
-   - 评估北向资金的指示意义
-
-5. **板块资金轮动**
+4. **板块资金轮动**
    - 识别资金从哪些板块流出
    - 识别资金流向哪些板块
    - 分析板块资金轮动的节奏和方向
    - 预判下一个资金可能流入的板块
 
-6. **主力操作意图研判**
+5. **主力操作意图研判**
    - 判断主力是否在积极建仓某些板块
    - 识别主力可能在出货的板块
    - 分析主力的操作风格（激进/稳健）
@@ -357,7 +333,7 @@ class SectorStrategyAgents:
             "agent_name": "资金流向分析师",
             "agent_role": "跟踪板块资金流向，分析主力行为和资金轮动",
             "analysis": analysis,
-            "focus_areas": ["资金流向", "主力行为", "北向资金", "板块轮动", "量价配合"],
+            "focus_areas": ["资金流向", "主力行为", "板块轮动", "量价配合"],
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
     

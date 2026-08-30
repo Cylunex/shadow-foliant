@@ -71,7 +71,6 @@ class SectorStrategyDataFetcher:
             "sectors": {},
             "sector_fund_flow": {},
             "market_overview": {},
-            "north_flow": {},
             "news": []
         }
         
@@ -104,15 +103,8 @@ class SectorStrategyDataFetcher:
                 data["market_overview"] = market_data
                 print(f"    ✓ 成功获取市场概况")
             
-            # 5. 获取北向资金流向
-            print("  [5/6] 获取北向资金流向...")
-            north_flow = self._get_north_money_flow()
-            if north_flow:
-                data["north_flow"] = north_flow
-                print(f"    ✓ 成功获取北向资金数据")
-            
-            # 6. 获取财经新闻
-            print("  [6/6] 获取财经新闻...")
+            # 5. 获取财经新闻
+            print("  [5/5] 获取财经新闻...")
             news_data = self._get_financial_news()
             if news_data:
                 data["news"] = news_data
@@ -395,32 +387,6 @@ class SectorStrategyDataFetcher:
 
         return overview
     
-    def _get_north_money_flow(self):
-        """北向资金近 N 日。⭐ 2026-06-24 统一走 datahub.north_flow(单位规范:净额一律"亿元"),
-        不再各自调 tushare(north_money 百万元)/akshare(亿元) —— 两源单位互相矛盾、且都已停披露。
-        返回 {date, north_net_inflow, hgt_net_inflow, sgt_net_inflow, north_total_amount(均"亿元"),
-        history:[{date, net_inflow("亿元")}]}。⚠️ 北向 2024-08 起官方停实时披露,可能为空/陈旧。"""
-        try:
-            import datahub
-            rows = datahub.north_flow(days=20)   # list[dict] 按 trade_date 降序(最新在前),净额单位亿元
-            if not rows:
-                print("    ❌ 北向资金无数据(官方 2024-08 起已停实时披露?)")
-                return {}
-            latest = rows[0]
-            north_flow = {
-                "date": latest.get('trade_date', ''),
-                "north_net_inflow": latest.get('net_total', 0),   # 亿元
-                "hgt_net_inflow": latest.get('hgt_yi', 0),        # 亿元
-                "sgt_net_inflow": latest.get('sgt_yi', 0),        # 亿元
-                "north_total_amount": latest.get('net_total', 0), # 亿元(datahub 无总成交额,用净额近似)
-                "history": [{"date": r.get('trade_date', ''),
-                             "net_inflow": r.get('net_total', 0)} for r in rows],
-            }
-            return north_flow
-        except Exception as e:
-            print(f"    ❌ 北向资金获取失败: {e}")
-            return {}
-    
     def _get_financial_news(self):
         """获取财经新闻。⚠️ 2026-06-27 防东财封禁:改走 datahub.market_news()(财联社主源+三级缓存,
         东财仅降级兜底),替代原直调 ak.stock_news_em(东财全球快讯,绕 datahub 无缓存/熔断)。"""
@@ -478,17 +444,6 @@ class SectorStrategyDataFetcher:
   平盘: {market['flat_count']}
   涨停: {market['limit_up']}
   跌停: {market['limit_down']}
-""")
-        
-        # 北向资金
-        if data.get("north_flow"):
-            north = data["north_flow"]
-            text_parts.append(f"""
-【北向资金流向】
-日期: {north.get('date', 'N/A')}
-北向资金净流入: {north.get('north_net_inflow', 0):.2f} 亿元
-  沪股通: {north.get('hgt_net_inflow', 0):.2f} 亿元
-  深股通: {north.get('sgt_net_inflow', 0):.2f} 亿元
 """)
         
         # 行业板块表现（前20）
@@ -638,9 +593,6 @@ class SectorStrategyDataFetcher:
                 )
                 self.logger.info("[智策数据] 保存市场概况数据")
             
-            # 保存北向资金数据
-            # 注：north_flow结构与原始表不一致，此处暂不保存以避免歧义
-            
             # 保存新闻数据
             if data.get("news"):
                 self.database.save_news_data(
@@ -699,7 +651,6 @@ class SectorStrategyDataFetcher:
                 "concepts": {},
                 "sector_fund_flow": {},
                 "market_overview": {},
-                "north_flow": {},
                 "news": []
             }
             
@@ -723,11 +674,6 @@ class SectorStrategyDataFetcher:
             if market_data:
                 cached_data["market_overview"] = market_data.get("data_content", {})
             
-            # 加载北向资金数据
-            north_data = self.database.get_latest_raw_data("north_flow")
-            if north_data:
-                cached_data["north_flow"] = north_data.get("data_content", {})
-            
             # 加载新闻数据
             news_data = self.database.get_latest_news_data()
             if news_data:
@@ -740,7 +686,6 @@ class SectorStrategyDataFetcher:
                 cached_data["concepts"],
                 cached_data["sector_fund_flow"],
                 cached_data["market_overview"],
-                cached_data["north_flow"],
                 cached_data["news"]
             ])
             

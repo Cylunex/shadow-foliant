@@ -2074,34 +2074,6 @@ def portfolio_diagnose_ai():
 
 
 # ============================ 市场 ============================
-@app.get("/api/market/north")
-def market_north(days: int = 30):
-    try:
-        import datahub
-        out = _cache_or(f"north:{days}", 1800,
-                        lambda: _records(datahub.north_flow(days)), keep=lambda v: bool(v))
-        return _ok(out)
-    except Exception as e:
-        return _err(e)
-
-
-@app.post("/api/market/north-refresh")
-def market_north_refresh():
-    """手动触发北向资金实时拉取（同花顺 hsgtApi）"""
-    try:
-        from northbound_cache import refresh_today, get_recent
-        data = refresh_today()
-        if data:
-            return _ok({"refreshed": True, "date": data["date"],
-                        "hgt": data["hgt_yi"], "sgt": data["sgt_yi"],
-                        "note": "北向资金自2024年8月起多个数据源断供，若数值多日不变为正常现象"})
-        recent = get_recent(1)
-        return _ok({"refreshed": False, "note": "同花顺API返回空或与上次相同",
-                     "last": recent[0]["trade_date"] if recent else "无"})
-    except Exception as e:
-        return _err(e)
-
-
 def _recent_trade_dates(n: int = 10):
     """最近 n 个交易日(YYYY-MM-DD,降序)。Redis 缓存 1 天。"""
     try:

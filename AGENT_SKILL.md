@@ -1,6 +1,6 @@
 ---
 name: shadow-foliant
-description: A股多智能体分析平台的 Agent 技能文档。提供个股深度分析(技术/基本面/资金/风险/缠论)、多因子选股、条件选股漏斗、量化风险(VaR/压力测试)、估值(DCF)、财务排雷、组合诊断、行情/财务/资金/龙虎/北向/新闻数据查询、批量持仓导入、**基金长期定投(净值评价/定投回测/综合评分/AI研判)**等能力。仅 A 股(沪深京)+ 场外基金,部分能力需 DeepSeek API key。当用户要分析某只A股、选股、查行情财务资金数据、评估个股/组合风险、做基金净值评价/定投回测时使用。
+description: A股多智能体分析平台的 Agent 技能文档。提供个股深度分析(技术/基本面/资金/风险/缠论)、多因子选股、条件选股漏斗、量化风险(VaR/压力测试)、估值(DCF)、财务排雷、组合诊断、行情/财务/资金/龙虎榜/新闻数据查询、批量持仓导入、**基金长期定投(净值评价/定投回测/综合评分/AI研判)**等能力。仅 A 股(沪深京)+ 场外基金,部分能力需 DeepSeek API key。当用户要分析某只A股、选股、查行情财务资金数据、评估个股/组合风险、做基金净值评价/定投回测时使用。
 ---
 
 # shadow-foliant · Agent 技能文档
@@ -18,7 +18,7 @@ description: A股多智能体分析平台的 Agent 技能文档。提供个股�
 ## 一、MCP 适配评估(哪些能 / 哪些不能)
 
 ### ✅ 适合做 MCP 工具(纯函数、清晰入参出参、无 UI)
-- **数据查询**:统一取数门面 `data/datahub.py`(行情/K线/财务/资金流/北向/龙虎榜/新闻/估值;2026-06 源原子化重构后 K线等取数全部收口于此)。`StockDataFetcher.get_stock_data`/`calculate_technical_indicators` 仍可用(A 股已委托 datahub)。
+- **数据查询**:统一取数门面 `data/datahub.py`(行情/K线/财务/资金流/龙虎榜/新闻/估值)。`StockDataFetcher.get_stock_data`/`calculate_technical_indicators` 仍可用(A 股已委托 datahub)。
 - **个股分析**:缠论、形态识别、技术指标、基本面打分、财务排雷、DCF 估值、量化风险/压力测试。
 - **选股**:多因子横截面、条件选股漏斗(290 条件 + 配方)、5 套问财选股器。
 - **组合**:批量导入持仓、组合诊断、组合压力。
@@ -51,7 +51,6 @@ f.get_financial_data('600519')      # 三表/财务比率
 
 from data_source_manager import data_source_manager as M
 M.get_capital_flow_a_data('600519') # 个股资金流
-M.get_north_flow_a_data(days=30)    # 北向资金
 M.get_dragon_tiger_detail_a_data()  # 当日龙虎榜
 M.get_margin_trading_a_stock('600519')  # 融资融券
 M.get_stock_news_a_stock('600519')  # 个股新闻
@@ -227,7 +226,7 @@ fund_db.add_plan('110011', 1000, 'monthly', day_of=5)   # 定投计划
 - **需 key**:多智能体分析、智策/龙虎/新闻 的 AI 部分需 `DEEPSEEK_API_KEY`;问财选股需 `pywencai`。
 - **限流**:所有外部抓取已内置自限流(防封),批量调用会稍慢,**不要并发猛拉**。
 - **成本**:`run_multi_agent_analysis` 单次多次 LLM 调用、几十秒、耗 token —— 仅在"深度研判"时用;日常用 B/C/E 的纯计算函数。
-- **数据时效**:行情可能延迟;盘后数据(龙虎榜/北向)收盘后才全。
+- **数据时效**:行情可能延迟；龙虎榜等盘后数据收盘后才完整。
 - **先看总览**:新会话优先调用 `agent_cockpit`，只读已有快照/运行遥测，不会触发重分析。
 - **个股研究优先高层入口**:`research_stock(code,depth,view)` 一次返回行情/技术/资金/风险、最近信号/变化、推荐、组合动作及统一 `trade_plan`；`meta.data_quality` 按工具组给出质量分、状态、耗时与核心数据护栏，核心行情/K线降级时禁止把方向结论解释为高置信。`data.market_structure` 只用已取上下文判断热点题材和前排/跟随角色，缺历史题材序列时保持 `theme_phase=unknown`。计划使用自然周共振、量价/OBV、唐奇安（通道排除当天）、ADX/DMI、趋势斜率/R²、低波质量、确认形态、结构/ATR 止损、目标位、VaR 仓位和 R:R≥2 门控。形态测算价只是第二目标，不参与首目标盈亏比。只有需要更细证据时再调用底层工具。
 - **重任务异步**:`trigger_task(task_name,idempotency_key)` 只返回 `run_id`；后续轮询 `task_run_status`。同一意图重试必须复用幂等键。

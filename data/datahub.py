@@ -9,7 +9,7 @@
     - a_stock_data_adapter   腾讯/东财(非push2)/新浪/同花顺/百度  —— A股主力 HTTP 直连
     - stock_data.StockDataFetcher  K线+技术指标(内部已多源:东财/akshare/Ashare/mootdx)
     - akshare / tushare / pywencai  兜底源(按需,装了才用)
-    - data_source_manager / 北向缓存 等专用编排(datahub 调它们,它们不回调 datahub,无循环)
+    - data_source_manager 等专用编排(datahub 调它们,它们不回调 datahub,无循环)
 
 自适应升降级(_route):
   每个数据域有一条"具名源链"。每次取数按各源**健康度**(成功率为主、延迟轻罚、连续失败进冷却重罚)
@@ -22,7 +22,7 @@
       change_pct(%)/change_amt/amount/turnover_pct/pe_ttm/pb/mcap_yi/vol_ratio
   · K线 kline         : pandas.DataFrame,列 = date/open/high/low/close/volume/p_change(可含指标列)
   · 个股信息 stock_info: dict;指数 indices: list[{name,value,change_amt,change_pct}]
-  · 列表类(北向/龙虎榜/资金流/板块/新闻/财报): list[dict],键名见各函数 docstring
+  · 列表类(龙虎榜/资金流/板块/新闻/财报): list[dict],键名见各函数 docstring
   取数失败统一返回"空值"(dict→{}, list→[], DataFrame→空 DF),绝不抛异常打断上层。
 
 加新数据源:在对应域 _route(...) 的源链里加一个 (名, thunk) 即可,会自动纳入升降级竞争。
@@ -233,8 +233,7 @@ _CACHE_TTL: Dict[str, Any] = {
     "sector_ranking": (1800, 21600),
     "sector_spot": (1800, 21600),
     "sector_fund_flow": (1800, 21600),
-    # —— 日级(收盘后才更新):资金流/龙虎榜/北向 ——
-    "north_flow": 10800,
+    # —— 日级(收盘后才更新):资金流/龙虎榜 ——
     "capital_flow": 21600,
     "dragon_tiger": 21600,
     "dragon_tiger_stock": 21600,
@@ -1552,53 +1551,8 @@ def indices() -> List[dict]:
 
 
 # ══════════════════════════════════════════════════════════
-#  资金域:北向 / 个股资金流 / 龙虎榜 / 融资融券
+#  资金域:个股资金流 / 龙虎榜 / 融资融券
 # ══════════════════════════════════════════════════════════
-
-def _north_flow_akshare(days: int = 30) -> List[dict]:
-    """北向 akshare 兜底源,产出与主源逐字段同构
-    {trade_date/hgt_yi/sgt_yi/net_total(亿元)/source/net_hgt/net_sgt(元)/net_tgt}。
-    ⚠️ 北向 2024-08 起官方停实时披露,此源大概率已失效;列对不齐/空/异常/非日序列 → 返回 [] 让 _route 退回主源,无害。"""
-    need = ['日期', '北向资金-成交净买额', '沪股通-成交净买额', '深股通-成交净买额']
-    try:
-        import akshare as ak
-        from data.akshare_safe import call as ak_call
-        df = ak_call(ak.stock_hsgt_fund_flow_summary_em, timeout=20)
-    except Exception:
-        return []
-    if df is None or getattr(df, 'empty', True) or not all(c in df.columns for c in need):
-        return []
-
-    def _yi(v):
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return 0.0
-    out = []
-    for _, r in df.head(days).iterrows():
-        hgt, sgt = _yi(r['沪股通-成交净买额']), _yi(r['深股通-成交净买额'])
-        out.append({'trade_date': str(r['日期']), 'hgt_yi': hgt, 'sgt_yi': sgt,
-                    'net_total': _yi(r['北向资金-成交净买额']), 'source': 'akshare',
-                    'net_hgt': hgt * 1e8, 'net_sgt': sgt * 1e8, 'net_tgt': 0})
-    # 防误用:若不是"按日"序列(日期全同 = 当日各通道汇总表),弃用,避免重复同日污染
-    if len(out) > 1 and len({r['trade_date'] for r in out}) <= 1:
-        return []
-    return out
-
-
-def north_flow(days: int = 30) -> List[dict]:
-    """北向资金近 N 日。list[dict] 键:trade_date/hgt_yi/sgt_yi/net_total(亿元)+ net_hgt/net_sgt(元)/net_tgt。
-    源:北向本地缓存(同花顺,主;2026-06-27 阶段1:dsm 内 adata 兜底已删)→ akshare 沪深港通汇总(兜底,实质失效)。
-    ⚠️ 2026-06-24 实测:akshare 走的东财 datacenter 接口活着但 FUND_INFLOW=null(北向 2024-08 官方停实时
-    披露已坐实),拿不到有效净流入 → 真数据只能靠主源同花顺本地缓存(jobs 每日 15:40 入库)。akshare 留作
-    占位,值无效时被 _north_flow_akshare 的防御拦截、_route 退回主源,无害。"""
-    from data_source_manager import data_source_manager as dsm
-    return _route("north_flow",
-                  [("dsm", lambda: dsm.get_north_flow_a_data(days)),
-                   ("akshare", lambda: _north_flow_akshare(days))],
-                  empty=[]) or []
-
-
 def _capital_flow_akshare(code: str, days: int = 120) -> List[dict]:
     """个股资金流 akshare 兜底源,产出与主源逐字段同构 {date/main_net/small_net/mid_net/large_net/super_net}(元)。
     列对不齐/空/异常 → 返回 [] 让 _route 跳过(绝不污染下游)。"""
@@ -2059,7 +2013,7 @@ def fund_nav_history(code: str, start: str = None, end: str = None) -> Optional[
 #  · 各域 TTL 见 _CACHE_TTL;实时域(quotes/indices/capital_flow_minute)盘中秒级。
 # ══════════════════════════════════════════════════════════
 for _name in ("quotes", "indices", "capital_flow_minute", "kline_with_indicators",
-              "stock_info", "north_flow", "capital_flow", "dragon_tiger", "dragon_tiger_stock",
+              "stock_info", "capital_flow", "dragon_tiger", "dragon_tiger_stock",
               "margin", "block_trade", "holder_num_change", "dividend_history", "lockup_expiry",
               "hot_stocks", "sector_ranking", "sector_spot", "sector_fund_flow", "concept_blocks",
               "financials", "valuation", "full_valuation", "eps_forecast",
@@ -2082,7 +2036,6 @@ class _Hub:
     kline_with_indicators = staticmethod(kline_with_indicators)
     stock_info = staticmethod(stock_info)
     indices = staticmethod(indices)
-    north_flow = staticmethod(north_flow)
     capital_flow = staticmethod(capital_flow)
     capital_flow_minute = staticmethod(capital_flow_minute)
     dragon_tiger = staticmethod(dragon_tiger)

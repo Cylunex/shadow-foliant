@@ -820,121 +820,69 @@ def portfolio_analysis(session_name="持仓"):
 # ═══════════════════════════════════════════════════════════
 
 def noon_report():
-    """午盘简报: 大盘/板块/热门股/涨跌统计"""
-    lines = []
-    lines.append("📊 午盘市场简报")
-    lines.append(f"⏰ {datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')} CST")
-    lines.append(f"{'─'*40}")
-
+    """午盘只回答大盘涨跌、持仓涨跌和是否加减仓。"""
+    now_text = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
+    index_rows = []
     try:
-        # ─── 大盘指数 ───(走 datahub.indices 专用指数源:新浪/腾讯;不能用 datahub.quotes —
-        #  它按个股口径取数且把 key 归一成6位,指数代码 sh000001 既歧义又对不上 → 必取空)
-        want = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300"]
+        want = ["上证指数", "深证成指", "创业板指"]
         idx_map = {d.get("name"): d for d in (datahub.indices() or [])}
-        lines.append("🏛️ 大盘指数")
         for name in want:
-            q = idx_map.get(name)
-            if not q:
-                continue
-            price = q.get("value", "-")
-            zf = q.get("change_pct", 0)
-            if zf is not None and zf != 0:
-                arrow = "🔴" if float(zf) >= 0 else "🟢"
-                lines.append(f"  {name} {price}  {arrow} {float(zf):+.2f}%")
-            else:
-                lines.append(f"  {name} {price}  ⏸️")
-    except Exception as e:
-        lines.append(f"  ⚠️ 指数获取失败: {e}")
-
-    try:
-        # ─── 板块排名 ───
-        ranking = datahub.sector_ranking("industry", 10)
-        if ranking and isinstance(ranking, dict):
-            lines.append("  ")
-            lines.append("📂 上午板块排名")
-            top_list = ranking.get("top", [])
-            bottom_list = ranking.get("bottom", [])
-            if top_list:
-                lines.append("  🔺 涨幅前5")
-                for item in top_list[:5]:
-                    name = item.get("name", "")[:6]
-                    pct = item.get("change_pct", 0)
-                    lines.append(f"    {name} {pct:+.2f}%")
-            if bottom_list:
-                lines.append("  🔻 跌幅前5")
-                for item in bottom_list[:5]:
-                    name = item.get("name", "")[:6]
-                    pct = item.get("change_pct", 0)
-                    lines.append(f"    {name} {pct:+.2f}%")
-    except Exception as e:
-        lines.append(f"  ⚠️ 板块数据失败: {e}")
-
-    try:
-        # ─── 热门股 ───
-        hot = datahub.hot_stocks()
-        if hot is not None and len(hot) > 0:
-            lines.append("  ")
-            lines.append("🔥 热门强势股TOP10")
-            top_hot = hot.head(10)
-            # get_hot_stocks() 只返回 代码/名称/题材，需要单独拉实时行情补涨幅和成交额
-            hot_codes = [row.get("代码", row.get("code", "")) for _, row in top_hot.iterrows()]
-            hot_quotes = datahub.quotes(hot_codes) if hot_codes else {}
-            for _, row in top_hot.iterrows():
-                symbol = row.get("代码", row.get("code", ""))
-                name = row.get("名称", row.get("name", ""))
-                reason = row.get("题材归因", row.get("reason", "")) or ""
-                q = hot_quotes.get(symbol, {})
-                if q:
-                    zf_val = q.get("change_pct", 0)
-                    amount = q.get("amount_wan", 0) * 10000  # 腾讯返回万元
-                else:
-                    zf_val = amount = 0
-                amount_str = f"{float(amount)/1e8:.1f}亿" if amount else ""
-                arrow = "🔴" if zf_val >= 0 else "🟢"
-                reason_short = (reason[:16] + "..") if len(reason) > 16 else reason
-                lines.append(f"  {name}({symbol}) {arrow} {zf_val:+.2f}%  {amount_str}  {reason_short}")
-    except Exception as e:
-        lines.append(f"  ⚠️ 热门股数据失败: {e}")
-
-    try:
-        # ─── 持仓盘中概况(2026-06-12 新增:午盘一眼看持仓红绿) ───
-        codes = get_portfolio_codes()
-        if codes:
-            pq = {}
-            for i in range(0, len(codes), 20):
-                try:
-                    pq.update(datahub.quotes(codes[i:i + 20]) or {})
-                except Exception:
-                    continue
-            chgs = []
-            for c in codes:
-                q = pq.get(c) or {}
-                try:
-                    chgs.append((float(q.get('change_pct') or 0), q.get('name') or c, c))
-                except (TypeError, ValueError):
-                    continue
-            if chgs:
-                up = sum(1 for ch, _, _ in chgs if ch > 0)
-                down = sum(1 for ch, _, _ in chgs if ch < 0)
-                avg = sum(ch for ch, _, _ in chgs) / len(chgs)
-                chgs.sort(key=lambda x: x[0])
-                lines.append("  ")
-                lines.append("💼 持仓盘中概况")
-                lines.append(f"  共{len(chgs)}只  🔴涨{up} 🟢跌{down}  平均{avg:+.2f}%")
-                worst = [f"{n}{ch:+.1f}%" for ch, n, _ in chgs[:3] if ch < -2]
-                best = [f"{n}{ch:+.1f}%" for ch, n, _ in chgs[-3:][::-1] if ch > 2]
-                if worst:
-                    lines.append(f"  ⚠️ 领跌: {'、'.join(worst)}")
-                if best:
-                    lines.append(f"  💪 领涨: {'、'.join(best)}")
+            row = idx_map.get(name) or {}
+            if row.get('change_pct') is not None:
+                index_rows.append((name, float(row.get('change_pct') or 0)))
     except Exception:
-        pass
+        index_rows = []
 
-    lines.append("  ")
-    lines.append(f"{'─'*40}")
-    lines.append(f"⚡ Generated by 小鸡")
+    holding_changes = []
+    try:
+        codes = get_portfolio_codes()
+        quotes = {}
+        for i in range(0, len(codes), 20):
+            quotes.update(datahub.quotes(codes[i:i + 20]) or {})
+        for code in codes:
+            quote = quotes.get(code) or {}
+            if quote.get('change_pct') is not None:
+                holding_changes.append((
+                    float(quote.get('change_pct') or 0), quote.get('name') or code, code
+                ))
+    except Exception:
+        holding_changes = []
 
-    return "\n".join(lines)
+    index_avg = (sum(change for _, change in index_rows) / len(index_rows)
+                 if index_rows else 0.0)
+    holding_avg = (sum(change for change, _, _ in holding_changes) / len(holding_changes)
+                   if holding_changes else 0.0)
+    if index_avg <= -0.8 or holding_avg <= -1.0:
+        direction, action = '看跌', '减仓'
+        reason = '大盘或持仓跌得比较多，先把最弱的减一点。'
+    elif index_avg >= 0.8 and (not holding_changes or holding_avg >= 0):
+        direction, action = '看涨', '加仓'
+        reason = '大盘和持仓都偏强，只在回落时小幅加，不追高。'
+    else:
+        direction, action = '震荡', '不动'
+        reason = '涨跌都不明显，下午先看，不急着动。'
+
+    market = '、'.join(f'{name}{change:+.2f}%' for name, change in index_rows) or '指数数据待补'
+    holdings = ''
+    if holding_changes:
+        up = sum(1 for change, _, _ in holding_changes if change > 0)
+        down = sum(1 for change, _, _ in holding_changes if change < 0)
+        holding_changes.sort(key=lambda item: item[0])
+        holdings = f'涨{up}只、跌{down}只，平均{holding_avg:+.2f}%'
+        weak = [f'{name}{change:+.1f}%' for change, name, _ in holding_changes[:3]
+                if change <= -2]
+        if weak:
+            holdings += '；最弱：' + '、'.join(weak)
+
+    try:
+        from notify.plain_language import build_market_message
+        title, body = build_market_message(
+            label='午盘', direction=direction, action=action,
+            market=market, holdings=holdings, reason=reason, as_of=now_text,
+        )
+        return title + '\n' + body
+    except Exception:
+        return f'午盘：{direction}｜{action}\n大盘：{market}\n持仓：{holdings}\n原因：{reason}'
 
 
 # ═══════════════════════════════════════════════════════════

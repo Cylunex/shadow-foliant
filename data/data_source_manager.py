@@ -54,7 +54,7 @@ class DataSourceManager:
                 self.tushare_available = False
         else:
             print("ℹ️ 未配置Tushare Token，将仅使用Akshare数据源")
-        # ⚠️ adata（二道贩子整合库）已于 2026-06-27 阶段1重构删除：北向走同花顺本地缓存、龙虎榜/资金流走东财直连。
+        # ⚠️ adata（二道贩子整合库）已于 2026-06-27 阶段1重构删除；龙虎榜/资金流走东财直连。
 
     def _get_proxy_url(self):
         """获取代理URL，优先从环境变量读取，默认使用NAS代理"""
@@ -722,35 +722,6 @@ class DataSourceManager:
         except Exception as e:
             print(f"[a-stock] get_announcements 失败: {e}")
             return []
-
-    # ============================================================
-    # 北向资金（同花顺本地缓存主源；2026-06-27 阶段1:adata 兜底已删）
-    # 龙虎榜详情/个股资金流/融资融券的 adata 方法已删除：
-    #   · dragon_tiger → datahub.dragon_tiger（东财数据中心直连）
-    #   · capital_flow → datahub.capital_flow（东财 push2his 直连）
-    # ============================================================
-
-    def get_north_flow_a_data(self, days: int = 30):
-        """北向资金日度数据 — 沪股通/深股通 净流入累计
-
-        数据源优先级：
-          1. northbound_cache 本地缓存（同花顺 hsgtApi 真实数据，由 jobs_hub 每日 15:40 追加）
-          2. 同花顺实时拉取一次并入库（缓存为空时的 fallback）
-
-        返回: list[dict] 含 trade_date, hgt_yi, sgt_yi, net_total（亿元）+
-              兼容字段 net_hgt, net_sgt（元）, net_tgt（恒 0）；无缓存且实时拉取失败 → []。
-        """
-        try:
-            from northbound_cache import get_recent, refresh_today
-            rows = get_recent(days)
-            if rows:
-                return rows
-            if refresh_today():
-                return get_recent(days)
-        except Exception as e:
-            print(f"[northbound_cache] 读取失败: {e}")
-        return []
-
 
 # 全局数据源管理器实例
 data_source_manager = DataSourceManager()

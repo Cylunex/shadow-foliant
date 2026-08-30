@@ -2,7 +2,7 @@ import { reactive, computed, onMounted } from 'vue'
 import { api, zh, cell, useSort } from '../lib.js'
 
 const TABS = [
-  { k: 'flash', t: '财经快讯' }, { k: 'north', t: '北向资金' }, { k: 'hot', t: '热门题材' },
+  { k: 'flash', t: '财经快讯' }, { k: 'hot', t: '热门题材' },
   { k: 'dragon', t: '龙虎榜' }, { k: 'inst', t: '龙虎榜·机构' }, { k: 'news', t: '个股新闻' },
 ]
 const DATED = new Set(['hot', 'dragon'])   // 支持按日期查询的 tab
@@ -11,7 +11,7 @@ export default {
   template: `
   <div>
     <div class="h1">📡 市场</div>
-    <p class="sub">北向资金(自2024.8起多源断供) / 热门题材 / 龙虎榜 / 个股新闻 一站式。</p>
+    <p class="sub">财经快讯 / 热门题材 / 龙虎榜 / 个股新闻 一站式。</p>
     <div class="tabs">
       <div v-for="t in tabs" :key="t.k" class="tab" :class="{active:cur===t.k}" @click="go(t.k)">{{t.t}}</div>
       <button v-if="cur==='flash'||cur==='inst'" class="ghost" style="margin-left:auto" :disabled="mai.loading" @click="runAi">{{mai.loading?'研判中…':'🤖 AI研判'}}</button>
@@ -92,7 +92,6 @@ export default {
     }
     function urlFor(k) {
       if (k === 'flash') return '/api/market/news'
-      if (k === 'north') return '/api/market/north?days=30'
       if (k === 'hot') return '/api/market/hot' + (m.date ? '?date=' + m.date : '')
       if (k === 'dragon') return '/api/market/dragon' + (m.date ? '?date=' + m.date : '')
       if (k === 'inst') return '/api/market/lhb-inst?days=14'

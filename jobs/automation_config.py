@@ -30,7 +30,7 @@ _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
 # 内置自动化清单（name -> meta）
 REGISTRY: Dict[str, Dict[str, Any]] = {
-    # 2026-06-12 整合:morning_briefing_push 已并入 morning_strategy;northbound_flow_refresh 已删。
+    # 2026-08-30:北向净流入能力正式退役，不再采集或进入任何策略判断。
     # 开关名 = hub.register 的任务名(对齐后 webui 开关经 jobs_hub._wrap 闸门真正生效)。
     # core=True 标记"常驻核心任务"(默认开,建议别关;关掉会影响下游)。
     # ===== 常驻核心:盘前/盘中/盘后主流程(原先不在开关表里 → webui 看不到,现补全)=====
@@ -38,7 +38,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '☀️ 晨间市场报告',
         'schedule': '09:00 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '8 维数据(龙虎榜/美股/新闻/北向/题材/FRED/A股大盘/持仓扫描)综合 AI → 开盘策略+持仓建议+昨日收益,4条推送',
+        'description': '龙虎榜/美股/新闻/题材/A股大盘/持仓综合判断，只推一条“涨跌+加减仓”短消息',
     },
     'strategy_prefetch': {
         'cn': '🏦 问财参考盘前预取',
@@ -113,7 +113,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '📷 大盘快照',
         'schedule': '16:48 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '大盘+北向+龙虎榜快照入库',
+        'description': '龙虎榜市场快照入库',
     },
     'factor_collection': {
         'cn': '🧬 因子采集',

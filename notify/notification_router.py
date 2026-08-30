@@ -28,6 +28,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 try:
+    from .plain_language import compact_notification
+except ImportError:  # 兼容 notify 目录被直接加入 sys.path 的生产启动方式
+    from plain_language import compact_notification
+
+try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
@@ -342,6 +347,8 @@ def send(category: str, title: str, content: str,
         {channel_name: (ok, message)} 每个渠道的发送结果
     """
     targets = only_channels or _get_routes_for(category, title)
+    # 即时消息统一去掉装饰和专业术语，并限制手机端长度；archive 长文保持完整。
+    delivery_content = compact_notification(category, content)
     results: Dict[str, Tuple[bool, str]] = {}
     for ch in targets:
         sender = CHANNELS.get(ch)
@@ -349,7 +356,7 @@ def send(category: str, title: str, content: str,
             results[ch] = (False, 'unknown channel')
             continue
         try:
-            results[ch] = sender(title, content)
+            results[ch] = sender(title, delivery_content)
         except Exception as e:
             results[ch] = (False, str(e))
 
@@ -357,7 +364,7 @@ def send(category: str, title: str, content: str,
     if (fallback and fallback in CHANNELS and fallback not in results
             and results and not any(ok for ok, _ in results.values())):
         try:
-            results[fallback] = CHANNELS[fallback](title, content)
+            results[fallback] = CHANNELS[fallback](title, delivery_content)
         except Exception as e:
             results[fallback] = (False, str(e))
 

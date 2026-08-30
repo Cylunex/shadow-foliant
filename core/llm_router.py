@@ -392,7 +392,7 @@ if __name__ == '__main__':
         print('\n--- 调用测试 ---')
         msgs = [
             {'role': 'system', 'content': '你是一名 A 股资深分析师'},
-            {'role': 'user', 'content': '用一句话说明北向资金对 A 股的指示意义。'}
+            {'role': 'user', 'content': '用一句话说明大盘上涨时是否适合追高。'}
         ]
         text, used = r.call(msgs, max_tokens=200)
         print(f'用了: {used}')

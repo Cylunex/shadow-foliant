@@ -54,7 +54,23 @@ class SelectionFinalizerTests(unittest.TestCase):
         self.assertTrue(all('待AI' in row['final_reason'] for row in final))
         text = format_final_selection(final)
         self.assertIn('10:05', text)
-        self.assertEqual(text.count('优选分'), 5)
+        self.assertEqual(text.count('不动｜'), 5)
+        self.assertNotIn('优选分', text)
+        self.assertNotIn('盈亏比', text)
+
+    def test_plain_output_translates_plan_and_blocks_chasing(self):
+        rows = [
+            {'code': '000001', 'name': '平安银行', 'change_pct': 1.2,
+             'trade_plan': {'available': True, 'action': 'add'}},
+            {'code': '000002', 'name': '万科A', 'change_pct': 4.2,
+             'trade_plan': {'available': True, 'action_cn': '买入'}},
+            {'code': '000003', 'name': '测试股', 'change_pct': -2.5,
+             'trade_plan': {'available': True, 'action': 'reduce'}},
+        ]
+        text = format_final_selection(rows)
+        self.assertIn('加仓｜平安银行(000001)｜涨1.2%', text)
+        self.assertIn('不动｜万科A(000002)｜涨4.2%｜今天涨得较多，别追', text)
+        self.assertIn('减仓｜测试股(000003)｜跌2.5%', text)
 
     def test_calendar_week_resonance_affects_final_ranking(self):
         rows = [

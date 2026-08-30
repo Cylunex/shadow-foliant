@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: F401  路径引导
 """datahub 并列多源 smoke-test —— 校验"新增第二源"与"主源"格式逐字段一致。
 
-背景:2026-06-24 给 datahub 几个单源域补了并列第二源(quotes/capital_flow/stock_news/north_flow)。
+背景:给 datahub 的 quotes/capital_flow/stock_news 等单源域补并列第二源。
 _route 只会返回第一个成功的源,平时跑不到第二源,所以**必须单独把每个源各调一次、比对字段集**,
 否则某天主源挂、备源顶上时字段对不齐会污染回测/因子(177 处调用方依赖逐字段一致)。
 
@@ -19,7 +19,7 @@ _route 只会返回第一个成功的源,平时跑不到第二源,所以**必须
 
 判读:
   ✅ 两源 keys 完全一致 = 安全,备源可放心顶上。
-  ⚠️ 备源返回空 = 该源当前不可达(北向 akshare 大概率如此),无害但没起到兜底;记录待查。
+  ⚠️ 备源返回空 = 该源当前不可达,无害但没起到兜底;记录待查。
   ❌ keys 不一致 = 危险!不要依赖该备源,把对应 _route 里的第二源摘掉或修映射,再重测。
 """
 
@@ -59,13 +59,6 @@ def _cmp(domain, main_rows, alt_rows, alt_name='akshare'):
         print(f'  ❌ 字段不一致!备源缺: {sorted(missing)} | 备源多: {sorted(extra)}')
         print(f'     主源 keys: {sorted(mk)}')
         print(f'     {alt_name} keys: {sorted(ak_)}')
-    # north_flow 额外核对:是否按日序列(日期是否唯一)
-    if domain == 'north_flow' and isinstance(alt_rows, list) and len(alt_rows) > 1:
-        dates = {r.get('trade_date') for r in alt_rows}
-        if len(dates) <= 1:
-            print('  ❌ akshare 北向不是按日序列(日期全同=当日汇总表)→ 已被防御拦截,符合预期')
-
-
 GAP = 6   # 每个外部接口之间至少间隔 6s(>5s 防封,尤其东财各子域共用 IP)
 
 
@@ -103,13 +96,7 @@ def main():
         sn_ak = fetch(lambda: datahub._stock_news_akshare(code, 20))
         _cmp('stock_news', sn_main, sn_ak)
 
-    # 4. north_flow:全市场,只测一次
-    print('\n########## 北向(全市场) ##########')
-    nf_main = fetch(lambda: dsm.get_north_flow_a_data(30))
-    nf_ak = fetch(lambda: datahub._north_flow_akshare(30))
-    _cmp('north_flow', nf_main, nf_ak)
-
-    # 4b. sector_spot:新浪行业 vs 同花顺行业(真跨源,逐字段同构)
+    # 4. sector_spot:新浪行业 vs 同花顺行业(真跨源,逐字段同构)
     print('\n########## 板块快照(新浪行业 vs 同花顺行业) ##########')
     ss_sina = fetch(lambda: datahub._sector_spot_sina())
     ss_ths = fetch(lambda: datahub._sector_spot_ths())

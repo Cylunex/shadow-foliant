@@ -160,16 +160,15 @@ def _cmd_snapshot(args, ctx):
         return f'读取快照失败: {e}'
 
 
-@command('market', '查看大盘当日快照（北向资金等）')
+@command('market', '查看大盘当日龙虎榜快照')
 def _cmd_market(args, ctx):
     try:
         from jobs_hub import get_market_snapshot
         snap = get_market_snapshot()
         if not snap:
             return '大盘快照未生成（jobs_hub 是否启动并跑过 15:35 任务？）'
-        nf = snap.get('north_flow', [])
         dt = snap.get('dragon_tiger', [])
-        return f'今日大盘:\n  北向资金记录数: {len(nf)}\n  龙虎榜上榜股票数: {len(dt)}'
+        return f'今日市场快照:\n  龙虎榜上榜股票数: {len(dt)}'
     except Exception as e:
         return f'读取快照失败: {e}'
 

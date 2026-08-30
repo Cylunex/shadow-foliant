@@ -296,42 +296,53 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
 
 
 def format_final_selection(rows: Iterable[Dict[str, Any]]) -> str:
+    """把正式候选压缩成能直接看懂的操作清单。
+
+    正式成员和顺序仍由本地融合产物决定；这里只翻译展示层，不把候选名单
+    伪装成加仓指令。缺少明确交易计划时一律显示“不动”。
+    """
+    from notify.plain_language import plain_text
+
     rows = list(rows or [])
     lines = [
-        '正式 TOP5 由本地多赛道政策确定；实时行情、持仓和红蓝结论仅作为下方显示复核，不改变成员或顺序。',
-        '是否提高总仓位仍以 10:05 的组合动作分级为准。',
+        f'今日候选 {len(rows)} 只；这是观察名单，不是自动买入。',
+        '总仓位加、减还是不动，以 10:05 持仓通知为准。',
         '',
     ]
     for index, row in enumerate(rows, 1):
-        held = '💼' if row.get('held') else ''
-        price = _number(row.get('price'))
         change = _number(row.get('change_pct'))
-        market = ''
-        if price is not None:
-            market += f' ¥{price:g}'
-        if change is not None:
-            market += f' {change:+.2f}%'
-        lines.append(f'{index}. {held}{row.get("code", "")} {row.get("name") or ""}{market}')
-        lines.append(f'   优选分 {row.get("final_score", 0):.1f}｜{row.get("final_reason", "")}')
-        debate_reason = str(row.get('debate_reason') or '').strip()
-        if debate_reason:
-            lines.append(f'   关键判断：{debate_reason[:80]}')
         plan = row.get('trade_plan') if isinstance(row.get('trade_plan'), dict) else {}
-        if plan.get('available'):
-            rr = plan.get('risk_reward_ratio')
-            rr_text = f'｜盈亏比 {rr:g}' if rr is not None else '｜盈亏比待确认'
-            lines.append(
-                f"   计划：{plan.get('action_cn', '观望')}｜入场 "
-                f"{plan.get('entry_low', '-')}~{plan.get('entry_high', '-')}｜"
-                f"止损 {plan.get('stop_loss', '-')}｜目标 {plan.get('target_price') or '-'}{rr_text}"
-            )
-            if plan.get('target_price_2') is not None:
-                lines.append(f"   形态第二目标：{plan['target_price_2']}（不参与首目标盈亏比）")
-            technical = plan.get('technical_state') or {}
-            positives = technical.get('positives') or []
-            if positives:
-                lines.append(f"   技术确认：{'；'.join(str(x) for x in positives[:3])}")
-            blockers = plan.get('blockers') or []
-            if blockers:
-                lines.append(f"   阻断：{'；'.join(str(x) for x in blockers[:2])}")
+        raw_action = str(plan.get('action') or plan.get('action_cn') or '').lower()
+        if any(word in raw_action for word in ('reduce', 'sell', 'avoid', '减', '卖', '回避')):
+            action = '减仓'
+        elif any(word in raw_action for word in ('buy', 'add', '买', '增')):
+            action = '加仓'
+        else:
+            action = '不动'
+
+        if change is None:
+            move = '涨跌待更新'
+        elif change > 0:
+            move = f'涨{change:.1f}%'
+        elif change < 0:
+            move = f'跌{abs(change):.1f}%'
+        else:
+            move = '没涨没跌'
+
+        if change is not None and change > 3 and action == '加仓':
+            action, reason = '不动', '今天涨得较多，别追'
+        elif action == '加仓':
+            reason = '已有可买条件，只小幅加'
+        elif action == '减仓':
+            reason = '走势转弱，先减一点'
+        elif row.get('held'):
+            reason = '已经持有，等持仓通知'
+        elif change is not None and change < -2:
+            reason = '今天跌得较多，先等稳住'
+        else:
+            reason = '只是候选，先观察'
+
+        name = plain_text(row.get('name') or row.get('code') or '', 24)
+        code = str(row.get('code') or '')
+        lines.append(f'{index}. {action}｜{name}({code})｜{move}｜{reason}')
     return '\n'.join(lines).rstrip()

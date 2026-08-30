@@ -218,12 +218,12 @@ def seed_defaults():
     """填充内置 prompt 模板（首次启动用）"""
     defaults = [
         {
-            'name': 'overnight_strategy_v4',
+            'name': 'overnight_strategy_v5',
             'agent_type': 'strategy_analyst',
             'scene': 'overnight_strategy',
-            'description': '晨间综合策略 8 维数据分析（v4:强制非空结构化输出,失败由规则数据兜底）',
+            'description': '晨间涨跌与加减仓判断（v5:通俗短结论,失败由规则数据兜底）',
             'is_default': True,
-            'content': """你是一名资深 A 股策略分析师。请基于以下 8 维数据，综合判断今日 A 股开盘策略。
+            'content': """你是一名 A 股策略分析师。请基于以下数据判断今日涨跌和是否加减仓。
 
 【1. 昨日 ({lookback_date}) 龙虎榜净流入 TOP 10】
 {dragon_tiger_summary}
@@ -234,34 +234,33 @@ def seed_defaults():
 【3. 隔夜国内新闻头条】
 {news_summary}
 
-【4. 北向资金近 5 日】
-{north_summary}
-
-【5. 昨日强势股 TOP 10 (含题材归因)】
+【4. 昨日强势股 TOP 10 (含题材归因)】
 {hot_summary}
 
-【5b. 昨日题材热度榜 TOP 15 (按强势股出现频次)】
+【5. 昨日题材热度榜 TOP 15 (按强势股出现频次)】
 {themes_summary}
 
-【6. 美国宏观面板（FRED + yfinance）— 利率/通胀/就业/VIX/美元】
+【6. 海外市场】
 {fred_summary}
 
-【7. A股大盘指数】
+【7. A股大盘和板块】
 {cn_index_summary}
-
-【7b. 行业板块强弱】
 {sector_summary}
 
 【8. 我的持仓技术扫描（含昨日盈亏/浮盈/破位/缠论信号）】
 {hold_summary}
 
 请综合以上信息给出今日开盘策略，严格按 JSON 格式输出（不要任何说明文字）。
-open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；
+market_direction、position_action、open_strategy、external_impact、hot_sectors、risk_warning、confidence 必须存在且非空；
+market_direction 只能是看涨/看跌/震荡，position_action 只能是加仓/减仓/不动；
+只说普通话，不使用 VaR、ATR、Alpha、Beta、IC、缠论等术语；
 hot_sectors 至少给出一项，数据不足时明确写“暂无可靠板块信号”，不得用“（无）”或“未知”占位：
 {{
-    "lazy_summary": "3-4句口语化的今日操作要点（大盘基调/该卖谁该留谁/可加谁，像朋友间提醒，直接说人话）",
+    "market_direction": "看涨/看跌/震荡三选一",
+    "position_action": "加仓/减仓/不动三选一",
+    "lazy_summary": "不超过2句，只说涨跌和加减仓",
     "open_strategy": "1-2 句开盘整体策略（高开/低开应对）",
-    "external_impact": "美股+北向资金+美宏观对 A 股的指引",
+    "external_impact": "美股和海外市场对 A 股的影响",
     "hot_sectors": ["板块1（原因）", "板块2（原因）"],
     "risk_warning": "需要规避的风险点",
     "candidate_stocks": [

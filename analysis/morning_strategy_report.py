@@ -18,6 +18,8 @@ _FAILURE_MARKERS = ('api调用失败', 'api返回空响应', '[llm-router]', 'em
                     'request timed out', 'timeout')
 _ALIASES = {
     'lazy_summary': ('lazy_summary', 'summary', '今日一句话'),
+    'market_direction': ('market_direction', 'direction', '市场方向'),
+    'position_action': ('position_action', 'action', '仓位动作'),
     'open_strategy': ('open_strategy', 'opening_strategy', '开盘策略'),
     'external_impact': ('external_impact', '外部影响'),
     'hot_sectors': ('hot_sectors', 'hot_sector', '热点板块'),
@@ -151,7 +153,7 @@ def build_rule_fallback(sources: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     """只基于已采集数据生成保守晨报，不推荐个股、不虚构热点。"""
     source_names = {
         'dragon_tiger_summary': '龙虎榜', 'us_summary': '美股', 'news_summary': '新闻',
-        'north_summary': '北向资金', 'hot_summary': '强势股', 'themes_summary': '题材',
+        'hot_summary': '强势股', 'themes_summary': '题材',
         'fred_summary': '宏观', 'cn_index_summary': 'A股指数',
         'sector_summary': '行业板块', 'hold_summary': '持仓扫描',
     }
@@ -163,18 +165,23 @@ def build_rule_fallback(sources: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     cn_values = _pct_values(sources.get('cn_index_summary'))
     cn_median = statistics.median(cn_values) if cn_values else None
     if cn_median is not None and cn_median <= -1.2:
+        market_direction = '看跌'
+        position_action = '减仓'
         open_strategy = ('最近可用的 A 股核心指数整体偏弱。开盘先看是否继续放量下跌；'
                          '未止跌不急着加仓，出现企稳再分批处理。')
     elif cn_median is not None and cn_median >= 1.2:
+        market_direction = '看涨'
+        position_action = '加仓'
         open_strategy = ('最近可用的 A 股核心指数整体偏强。高开不追，先等开盘量价确认；'
                          '高仓位以持有和去弱留强为主。')
     else:
+        market_direction = '震荡'
+        position_action = '不动'
         open_strategy = ('按震荡方案应对：先观察开盘量价，高开不追、普通小跌不操作；'
                          '只有放量破位或明确止跌信号出现时再调整仓位。')
 
     external_parts = []
-    for key, label in (('us_summary', '隔夜美股'), ('north_summary', '北向资金最近记录'),
-                       ('fred_summary', '海外宏观')):
+    for key, label in (('us_summary', '隔夜美股'), ('fred_summary', '海外宏观')):
         value = sources.get(key)
         if _source_available(value):
             external_parts.append(f'{label}：{_compact_line(value)}')
@@ -186,6 +193,8 @@ def build_rule_fallback(sources: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
                      + ('等。' if len(missing) > 4 else '。'))
     fallback = {
         'lazy_summary': ('AI 分析暂不可用，本次已自动切换为规则版。' + open_strategy),
+        'market_direction': market_direction,
+        'position_action': position_action,
         'open_strategy': open_strategy,
         'external_impact': external_impact,
         'hot_sectors': _hot_sectors(sources),
@@ -225,6 +234,16 @@ def build_diagnosis(raw: Any, sources: Dict[str, Any]) -> Tuple[Dict[str, Any], 
             if value:
                 diagnosis[key] = value
                 used_ai_fields.append(key)
+        direction = _text(parsed.get('market_direction'))
+        if direction:
+            from notify.plain_language import normalize_direction
+            diagnosis['market_direction'] = normalize_direction(direction)
+            used_ai_fields.append('market_direction')
+        action = _text(parsed.get('position_action'))
+        if action:
+            from notify.plain_language import normalize_action
+            diagnosis['position_action'] = normalize_action(action)
+            used_ai_fields.append('position_action')
         sectors = _list(parsed.get('hot_sectors'))
         if sectors:
             diagnosis['hot_sectors'] = sectors
@@ -270,3 +289,22 @@ def build_diagnosis(raw: Any, sources: Dict[str, Any]) -> Tuple[Dict[str, Any], 
         'mode': mode, 'reason': reason, 'ai_fields': sorted(used_ai_fields),
         'coverage': coverage,
     }
+
+
+def format_plain_morning_notification(diagnosis: Dict[str, Any], *,
+                                      market: Any = '', holdings: Any = '',
+                                      as_of: Any = '') -> Tuple[str, str]:
+    """晨报即时通知只保留方向、动作和两句依据。"""
+    from notify.plain_language import build_market_message
+
+    position = diagnosis.get('position_advice') or holdings
+    reason = diagnosis.get('open_strategy') or diagnosis.get('lazy_summary') or ''
+    return build_market_message(
+        label='早盘判断',
+        direction=diagnosis.get('market_direction'),
+        action=diagnosis.get('position_action'),
+        market=market,
+        holdings=position,
+        reason=reason,
+        as_of=as_of,
+    )

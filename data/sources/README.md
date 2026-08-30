@@ -18,7 +18,7 @@
 - `kline(code, period, interval, adjust) -> DataFrame`(`DatetimeIndex` name=`'Date'` + 大写 `Open/High/Low/Close/Volume`,**volume 单位「股」**)
 - `indices() -> [{name, code, price, change_pct}]`
 - `financials(code, report_type) -> [dict]` · `valuation(code) -> dict` · `full_valuation(code) -> dict`
-- `north_flow(days) -> [dict]` · `capital_flow(code, days) -> [dict]` · `dragon_tiger(date) -> [dict]` · `margin(code) -> [dict]`
+- `capital_flow(code, days) -> [dict]` · `dragon_tiger(date) -> [dict]` · `margin(code) -> [dict]`
 - `sector_ranking / sector_fund_flow / sector_spot` · `news / announcements -> [dict]` · `convertible_bonds() -> [dict]` · `fund_nav(code) -> DataFrame`
 
 > 东财能力最多;腾讯只 `quotes/indices`。模块**只实现自己真能提供的能力**。
