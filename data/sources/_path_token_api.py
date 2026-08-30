@@ -72,7 +72,14 @@ class PathTokenApi:
     def _base_url(self) -> str:
         value = str(os.getenv(self.base_url_env) or self.default_base_url).strip().rstrip("/")
         parsed = urlparse(value)
-        if parsed.scheme.lower() != "https" or not parsed.hostname:
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
             raise ProviderRequestFailed(f"{self.provider} requires https base url")
         return value
 
@@ -264,7 +271,11 @@ class PathTokenApi:
                     # Reserve only after the runtime cooldown gate admits the call.
                     self._reserve(capability)
                     response = self._get_session().get(
-                        url, timeout=contract.timeout_seconds
+                        url,
+                        timeout=contract.timeout_seconds,
+                        # The credential is part of the request path.  Never let an
+                        # upstream redirect forward that path to another origin.
+                        allow_redirects=False,
                     )
                     if int(response.status_code) != 200:
                         raise ProviderRequestFailed(

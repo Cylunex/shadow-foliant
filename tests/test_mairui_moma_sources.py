@@ -31,8 +31,8 @@ class _Session:
         self.responses = list(responses)
         self.calls = []
 
-    def get(self, url, timeout):
-        self.calls.append((url, timeout))
+    def get(self, url, timeout, **kwargs):
+        self.calls.append((url, timeout, kwargs))
         return self.responses.pop(0)
 
 
@@ -117,6 +117,19 @@ class PathTokenTransportTest(unittest.TestCase):
             self.assertEqual(client.get("realtime", ["hsrl", "ssjy_more"]), [])
             self.assertEqual(session.calls, [])
 
+    def test_redirect_is_not_followed_with_path_token(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAIRUI_LICENCE": "secret-value",
+            "MAIRUI_STATE_DIR": tmp,
+        }, clear=False):
+            client = self._client()
+            session = _Session([_Response([], 302), _Response([], 302)])
+            client._session = session
+            self.assertEqual(client.get("realtime", ["hsrl", "ssjy_more"]), [])
+            self.assertEqual(len(session.calls), 2)
+            self.assertTrue(all(call[2]["allow_redirects"] is False
+                                for call in session.calls))
+
 
 class CompatibleNormalizationTest(unittest.TestCase):
     def test_quotes_are_batched_by_twenty_and_normalized(self):
@@ -134,6 +147,13 @@ class CompatibleNormalizationTest(unittest.TestCase):
         self.assertEqual(result["600000"]["amount_wan"], 12.0)
         self.assertEqual(result["600000"]["mcap_yi"], 2000.0)
         self.assertEqual(result["600000"]["source"], "mairui")
+
+    def test_quotes_drop_non_finite_or_non_positive_prices(self):
+        source = MairuiCompatibleSource(_Api([[
+            {"dm": "600000", "p": "NaN", "yc": 10.0},
+            {"dm": "600001", "p": 0, "yc": 10.0},
+        ]]))
+        self.assertEqual(source.quotes(["600000", "600001"]), {})
 
     def test_kline_infers_lots_and_preserves_intraday_timestamp(self):
         rows = [

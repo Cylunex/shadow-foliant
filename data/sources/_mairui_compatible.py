@@ -25,7 +25,8 @@ def _num(value, default: float = 0.0) -> float:
     try:
         if value in (None, "", "--"):
             return default
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
@@ -97,6 +98,8 @@ class MairuiCompatibleSource:
                 previous = _first_num(row, ("yc", "last_close", "pre_close"))
                 high = _first_num(row, ("h", "high"))
                 low = _first_num(row, ("l", "low"))
+                if price <= 0:
+                    continue
                 change = _first_num(row, ("ud", "change_amt"), price - previous)
                 change_pct = _first_num(row, ("pc", "change_pct"))
                 if not change_pct and previous:
