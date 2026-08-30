@@ -16,6 +16,7 @@ from analysis.position_sizer import suggest_new_buy_pct
 from analysis.price_levels import analyze_levels
 from analysis.stress_testing import analyze_risk
 from analysis.technical_state import analyze_technical_state
+from core.action_decision import resolve_action
 
 
 ACTION_CN = {
@@ -77,7 +78,7 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
     if closes.empty:
         return {
             "available": False, "code": str(code), "name": name,
-            "action": "watch", "action_cn": "观望",
+            "action": "hold", "action_cn": "不动",
             "blockers": ["无可用日 K，不能计算交易计划"],
         }
 
@@ -165,26 +166,44 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
     evidence.extend(str(x) for x in (technical.get("positives") or [])[:4])
     blockers.extend(str(x) for x in (technical.get("risks") or [])[:4])
 
-    action = "watch"
+    candidate_action = "watch"
     if (timeframe.get("resonance") == "confirmed" and rr is not None and rr >= 2.0
             and market_action not in {"reduce", "sell"}
             and technical.get("grade") != "caution"):
-        action = "buy"
+        candidate_action = "buy"
     if timeframe.get("resonance") == "blocked":
-        action = "avoid"
-    if market_action == "sell":
-        action = "avoid"
+        candidate_action = "avoid"
     prior_action = str((latest_signal or {}).get("action") or "")
     if prior_action in {"sell", "reduce", "avoid", "alert"}:
-        action = prior_action
         blockers.append(f"最新有效决策信号为{ACTION_CN.get(prior_action, prior_action)}")
+
+    action_evidence = [{
+        "source": "formal_signal", "action": candidate_action,
+        "reason": evidence[0] if candidate_action == "buy" and evidence else (
+            blockers[0] if blockers else "尚未形成明确加仓条件"
+        ),
+    }]
+    if market_action in {"reduce", "sell"}:
+        action_evidence.append({
+            "source": "portfolio_risk", "action": market_action,
+            "reason": f"组合环境要求{market.get('action_cn') or '降低仓位'}",
+        })
+    if prior_action in {"sell", "reduce", "avoid", "alert"}:
+        action_evidence.append({
+            "source": "hard_risk", "action": prior_action,
+            "reason": f"最新有效决策信号为{ACTION_CN.get(prior_action, prior_action)}",
+        })
+    action_decision = resolve_action(action_evidence)
+    action = action_decision["action"]
 
     return {
         "available": True,
         "code": str(code),
         "name": name,
         "action": action,
-        "action_cn": ACTION_CN[action],
+        "action_cn": action_decision["action_text"],
+        "action_decision": action_decision,
+        "candidate_action": candidate_action,
         "entry_low": round(entry_low, 2),
         "entry_high": round(entry_high, 2),
         "stop_loss": round(stop_loss, 2),
@@ -193,7 +212,7 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         "measured_pattern_target": (round(measured_pattern_target, 2)
                                     if measured_pattern_target is not None else None),
         "risk_reward_ratio": round(rr, 2) if rr is not None else None,
-        "suggested_position_pct": position_pct if action == "buy" else 0.0,
+        "suggested_position_pct": position_pct if action == "add" else 0.0,
         "horizon": "swing",
         "horizon_cn": "波段（约 2～4 周）",
         "current_price": round(close, 2),
@@ -224,7 +243,7 @@ def build_for_code(code: str, *, name: str = "",
     if not quality.get("actionable"):
         return {
             "available": False, "code": str(code), "name": name,
-            "action": "watch", "action_cn": "观望",
+            "action": "hold", "action_cn": "不动",
             "blockers": [f"日 K 不可用于决策：{quality.get('reason') or 'unknown'}"],
             "data_quality": quality,
         }

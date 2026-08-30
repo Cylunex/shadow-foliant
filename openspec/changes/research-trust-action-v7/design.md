@@ -20,8 +20,10 @@ and marks the result exploratory.
 
 A declarative feature catalog owns the production component key, family, direction,
 weight, lookback and missing-data policy. `LocalStockSelector` consumes catalog weights
-instead of duplicating numeric constants. The catalog is descriptive and deterministic;
-research cannot rewrite it automatically.
+and the catalog's shared time-series/cross-sectional calculators instead of duplicating
+numeric constants or formulas. Scheduled factor evaluation computes the same production
+features alongside explicitly labelled exploratory factor-zoo candidates. The catalog
+is descriptive and deterministic; research cannot rewrite it automatically.
 
 ## Strategy deployment evidence
 
@@ -50,7 +52,16 @@ All actions normalize to `add`, `hold`, `reduce` or `sell`. Evidence precedence 
 
 LLM evidence is advisory-only and cannot upgrade or reverse an action. At equal priority,
 risk reduction wins. The resolver returns the winning reason and all suppressed inputs
-for audit without logging financial content.
+for audit without logging financial content. Trade plans, add-position review, exit advice,
+portfolio health, lockup risk, the market position signal and the consolidated EOD review
+all expose this same action contract. LLM-based portfolio and event narratives are advisory.
+
+## Production migrations
+
+`scripts/migrate.sh` is the standalone schema entry point. It bootstraps an empty database
+once, then applies ordered files from `scripts/migrations/` under a PostgreSQL advisory
+lock and records their versions in `research_schema_migrations`. Deployment calls this
+entry point instead of treating the monolithic bootstrap SQL as the ongoing migration API.
 
 ## Rejected alternatives
 
@@ -58,4 +69,3 @@ for audit without logging financial content.
 - Do not replace the event-driven A-share backtester with a vectorized engine.
 - Do not infer historical industry membership from the current industry label.
 - Do not make trade attribution mandatory for ordinary manual or broker imports.
-

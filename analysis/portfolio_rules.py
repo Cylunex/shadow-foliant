@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 import _bootstrap  # noqa: F401
+from core.action_decision import resolve_action
 
 
 # ── 默认阈值(可被 config 覆盖)──
@@ -218,10 +219,19 @@ def evaluate(holdings: List[dict], quotes: Dict[str, dict], config: Optional[dic
     summary = (f"体检 {score} 分;{passed_n}/{len(scored)} 项达标"
                + (f",{len(alerts)} 项警报" if alerts else "")
                + (f",{len(warns)} 项关注" if warns else ""))
+    decision = resolve_action([{
+        "source": "portfolio_risk" if (alerts or warns) else "position_truth",
+        "action": "reduce" if alerts else "hold",
+        "reason": (alerts[0]["suggestion"] or alerts[0]["detail"]) if alerts
+                  else (warns[0]["suggestion"] or warns[0]["detail"]) if warns
+                  else "组合规则未发现需要减仓的风险",
+    }])
     return {"rules": rules, "score": score, "passed_n": passed_n, "total_n": len(scored),
             "by_category": by_cat, "category_names": CATEGORY,
             "alerts": [r["key"] for r in alerts], "summary": summary,
-            "total_mv": round(ctx["total_mv"], 0), "n": ctx["n"]}
+            "total_mv": round(ctx["total_mv"], 0), "n": ctx["n"],
+            "action": decision["action"], "action_text": decision["action_text"],
+            "action_decision": decision}
 
 
 def run_check(config: Optional[dict] = None) -> dict:
@@ -249,7 +259,9 @@ def format_text(report: dict) -> str:
         return f"组合体检失败:{report['error']}"
     if not report.get("n"):
         return "组合体检:当前无股票持仓"
-    L = [f"🩺 组合体检 {report['score']} 分 — {report['summary']}", ""]
+    L = [f"🩺 组合体检 {report['score']} 分 — {report['summary']}",
+         f"结论:{report.get('action_text', '不动')} — "
+         f"{(report.get('action_decision') or {}).get('reason', '')}", ""]
     # 风控严重度不用行情红绿，避免和 A 股涨跌/买卖方向混淆。
     icon = {"alert": "⛔", "warn": "⚠️", "info": "✅"}
     for cat, rules in report["by_category"].items():

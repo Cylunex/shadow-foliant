@@ -102,6 +102,9 @@ CLS 加红电报（可追溯事实）            │
 
 ## 部署与验证
 
-部署入口是 `scripts/deploy.sh`，必须传入已经推送的 `EXPECTED_COMMIT`。公开 `/healthz` 无状态且不访问数据库；受保护 `/readyz` 才检查依赖。基础设施备份使用 PostgreSQL、Nginx、Identity 与 Supervisor 各自的原生工具，不由应用创建 SQLite 归档。
+部署入口是 `scripts/deploy.sh`，必须传入已经推送的 `EXPECTED_COMMIT`；数据库也可独立执行
+`scripts/migrate.sh`，按 `scripts/migrations/` 的版本记录迁移。公开 `/healthz` 无状态且不访问
+数据库；受保护 `/readyz` 才检查依赖。基础设施备份使用 PostgreSQL、Nginx、Identity 与
+Supervisor 各自的原生工具，不由应用创建 SQLite 归档。
 
 详细变更规格见 [openspec](openspec/)，A 股接口与选股口径见 [docs/A股本地选股与数据接口.md](docs/A股本地选股与数据接口.md)。

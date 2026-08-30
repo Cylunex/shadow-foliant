@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import user_strategy_config as cfg
+from core.action_decision import resolve_action
 
 
 def _portfolio_db():
@@ -186,6 +187,13 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None,
         reasons.append('基本面查不到足够数据,质地看不清')
 
     verdict = 'reject' if reasons else 'approve'
+    coverage_only = bool(reasons) and all('查不到' in reason for reason in reasons)
+    decision = resolve_action([{
+        'source': 'formal_signal' if verdict == 'approve' else 'portfolio_risk',
+        'action': 'add' if verdict == 'approve' else ('hold' if coverage_only else 'reduce'),
+        'reason': ('跌幅触发且仓位、次数和基本面检查通过'
+                   if verdict == 'approve' else ('；'.join(reasons) or '触发持仓风险')),
+    }])
     return {
         'symbol': symbol,
         'name': name,
@@ -199,33 +207,36 @@ def evaluate_one(symbol: str, stock_info: Optional[Dict] = None,
         'cost_price': cost_price,
         'today_change_pct': round(today_change_pct, 2),
         'holding_pnl_pct': round(holding_pnl_pct, 2),
+        'action': decision['action'],
+        'action_text': decision['action_text'],
+        'action_decision': decision,
         'recommendation': _format_recommendation(symbol, name, verdict, reasons,
                                                   today_change_pct, holding_pnl_pct,
-                                                  position_pct, fund_grade, add_times),
+                                                  position_pct, fund_grade, add_times,
+                                                  decision),
     }
 
 
 def _format_recommendation(symbol, name, verdict, reasons,
-                           today_chg, holding_pnl, pos_pct, fund_grade, add_times) -> str:
+                           today_chg, holding_pnl, pos_pct, fund_grade, add_times,
+                           decision) -> str:
     head = f'{symbol} {name}'.strip()
     stat = (f'  今日 {today_chg:+.2f}%，持仓 {holding_pnl:+.2f}%，'
             f'仓位 {pos_pct:.1f}%，已加 {add_times} 次')
-    if verdict == 'approve':
-        return (f'🔴 可以加仓 ｜ {head}\n'
+    if decision['action'] == 'add':
+        return (f'🔴 加仓 ｜ {head}\n'
                 f'{stat}\n'
-                f'  跌到你的抄底点、质地也过关 → 可加 1-2 手')
+                f'  结论:可以小幅加仓，别一次加满')
     why = '；'.join(reasons) if reasons else '触发多项风控'
     # 仅"查不到基本面数据"——这是看不清、不是已知很差,别喊止损,先观望就好
     only_coverage = bool(reasons) and all('查不到' in r for r in reasons)
     if only_coverage:
-        return (f'⚪ 先别加 ｜ {head}\n'
+        return (f'⚪ 不动 ｜ {head}\n'
                 f'{stat}\n'
-                f'  为什么:{why}\n'
-                f'  → 看不清质地,先观望,别越跌越补')
-    return (f'🟢 别加仓,该减就减 ｜ {head}\n'
+                f'  原因:{why}')
+    return (f'🟢 减仓 ｜ {head}\n'
             f'{stat}\n'
-            f'  为什么:{why}\n'
-            f'  → 越跌越买容易越套越深,建议减仓/止损,别补仓')
+            f'  原因:{why}')
 
 
 def evaluate_all_triggered(max_workers: int = 8, limit: int = 0,
@@ -255,16 +266,21 @@ def format_alert(items: List[Dict[str, Any]]) -> str:
     """组合多条审核结果为一份完整推送文本"""
     if not items:
         return '当前无加仓触发的持仓股'
-    approve = [x for x in items if x['verdict'] == 'approve']
-    reject = [x for x in items if x['verdict'] == 'reject']
+    approve = [x for x in items if x.get('action') == 'add']
+    hold = [x for x in items if x.get('action') == 'hold']
+    reject = [x for x in items if x.get('action') in {'reduce', 'sell'}]
     lines = [f'📊 越跌越买·提示 — {datetime.now().strftime("%Y-%m-%d %H:%M")}',
              '_持仓里今天跌到你抄底点的票,哪些能补、哪些该减_']
     if approve:
-        lines.append(f'\n━━━ 🔴 这些可以加 ({len(approve)} 只) ━━━')
+        lines.append(f'\n━━━ 🔴 加仓 ({len(approve)} 只) ━━━')
         for x in approve:
             lines.append(x['recommendation'])
+    if hold:
+        lines.append(f'\n━━━ ⚪ 不动 ({len(hold)} 只) ━━━')
+        for x in hold:
+            lines.append(x['recommendation'])
     if reject:
-        lines.append(f'\n━━━ 🟢 这些别加,该减就减 ({len(reject)} 只) ━━━')
+        lines.append(f'\n━━━ 🟢 减仓 ({len(reject)} 只) ━━━')
         for x in reject:
             lines.append(x['recommendation'])
     return '\n'.join(lines)

@@ -24,7 +24,12 @@ import _bootstrap  # noqa: F401
 import numpy as np
 import pandas as pd
 
-from analysis.selection_feature_catalog import CATALOG_VERSION
+from analysis.selection_feature_catalog import (
+    CATALOG_VERSION,
+    TECHNICAL_FEATURES,
+    compute_cross_sectional_snapshot,
+    compute_stock_feature_series,
+)
 
 # 默认评估股池(沪深300/中证500 代表性样本,跨行业 ~52 只;可被调用方覆盖)。
 # 注:扩到 ~50 只是为压低单期横截面 IC 的噪声(n=30 时 null IC 标准差 ~0.19,n=52 时 ~0.14);
@@ -170,6 +175,20 @@ def _perm_pvalue(period_ranks, direction: int, obs_mean: float, n_perm: int = 20
 MIN_CROSS = 15   # 单期横截面最少有效股票数(原 5 太小,单期 IC 噪声极大)
 FDR_Q = 0.10     # Benjamini-Hochberg 目标错误发现率
 
+_PRODUCTION_NAMES = {
+    "market_excess_60": "60日市场残差趋势",
+    "industry_excess_60": "60日行业残差趋势",
+    "ma60_slope": "MA60斜率",
+    "persistence_60": "60日上涨持续性",
+    "max_drawdown_60": "60日最大回撤",
+    "idiosyncratic_volatility_60": "60日特质波动",
+    "max_return_20": "20日最大单日涨幅",
+    "amount_5_vs_60": "5日成交额/60日均额",
+    "amount_20_vs_60": "20日成交额/60日均额",
+}
+_CROSS_SECTIONAL_KEYS = {
+    "market_excess_60", "industry_excess_60", "idiosyncratic_volatility_60",
+}
 
 def _residualize_cross_section(
     values: Sequence[float], betas: Sequence[Optional[float]],
@@ -260,7 +279,16 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
       - Beta 始终尽力中性化；use_pit_exposures=True 时再从本地 PIT 仓库加载行业/市值暴露。"""
     import datahub
     from factor_zoo import FACTORS, compute
-    keys = [k for k in (factor_keys or list(FACTORS)) if k in FACTORS]
+    production_specs = {item.key: item for item in TECHNICAL_FEATURES}
+    known_keys = set(production_specs) | set(FACTORS)
+    if factor_keys is None:
+        # Production features are always evaluated by the scheduled/default run.
+        # Exploratory zoo factors remain alongside them so existing research and
+        # IC-weighted reference pages retain a comparison history.
+        keys = list(production_specs) + [key for key in FACTORS if key not in production_specs]
+    else:
+        keys = [key for key in factor_keys if key in known_keys]
+    zoo_keys = [key for key in keys if key in FACTORS and key not in production_specs]
     if universe is None:
         uni, universe_meta = _default_research_universe(
             period, limit=lifecycle_sample_limit
@@ -292,7 +320,9 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
             dates = pd.Index(df['date'].dt.strftime('%Y-%m-%d'), name='trade_date')
             close = df["close"].astype(float).reset_index(drop=True)
             entry_open = pd.to_numeric(df.get("open", close), errors="coerce").reset_index(drop=True)
-            fac = compute(df.reset_index(drop=True), keys)
+            fac = compute(df.reset_index(drop=True), zoo_keys) if zoo_keys else {}
+            if any(key in production_specs for key in keys):
+                fac.update(compute_stock_feature_series(df.reset_index(drop=True)))
             if fac:
                 # A zero-volume row is not a valid rebalance observation.  A
                 # one-price bar is also excluded because it is normally not
@@ -350,21 +380,55 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
 
     pit_exposures = _load_pit_exposures(points, list(panel)) if use_pit_exposures else {}
 
+    # Build production residual features at each point using only returns and
+    # classifications visible on that date.  The formal selector calls the same
+    # catalog function for its current-day cross-section.
+    production_cross_sections: Dict[str, pd.DataFrame] = {}
+    if any(key in _CROSS_SECTIONAL_KEYS for key in keys):
+        for trade_date in points:
+            base_rows = {}
+            industries = {}
+            exposures = pit_exposures.get(str(trade_date)) or {}
+            for code, item in panel.items():
+                ret_series = item["factors"].get("ret_60")
+                if ret_series is None or trade_date not in ret_series.index:
+                    continue
+                base_rows[code] = {"ret_60": ret_series.get(trade_date)}
+                industries[code] = str((exposures.get(code) or {}).get("industry") or "")
+            if base_rows:
+                production_cross_sections[str(trade_date)] = compute_cross_sectional_snapshot(
+                    pd.DataFrame.from_dict(base_rows, orient="index"),
+                    daily_returns.loc[:trade_date],
+                    industries,
+                )
+
     # 3) 逐因子:每个调仓点算横截面 IC / Rank-IC,并收集逐期秩用于置换检验
     results = []
     for key in keys:
-        name, cat, direction, _ = FACTORS[key]
+        if key in production_specs:
+            spec = production_specs[key]
+            name, cat, direction = _PRODUCTION_NAMES.get(key, key), spec.family, spec.direction
+            feature_scope = "production"
+        else:
+            name, cat, direction, _ = FACTORS[key]
+            feature_scope = "exploratory"
         ics, ricks, period_ranks = [], [], []
         neutralization_used: set[str] = set()
         for trade_date in points:
             fvals, rets, betas, industries, market_caps = [], [], [], [], []
             for code, p in panel.items():
-                fser = p["factors"].get(key)
-                if (fser is None or trade_date not in fser.index
-                        or trade_date not in p['fwd'].index
+                if key in _CROSS_SECTIONAL_KEYS:
+                    cross = production_cross_sections.get(str(trade_date))
+                    fv = (cross.at[code, key]
+                          if cross is not None and code in cross.index and key in cross.columns
+                          else np.nan)
+                else:
+                    fser = p["factors"].get(key)
+                    fv = (fser.loc[trade_date]
+                          if fser is not None and trade_date in fser.index else np.nan)
+                if (trade_date not in p['fwd'].index
                         or not bool(p['tradable'].get(trade_date, False))):
                     continue
-                fv = fser.loc[trade_date]
                 rv = p["fwd"].loc[trade_date]
                 if pd.notna(fv) and pd.notna(rv):
                     exposure = (pit_exposures.get(str(trade_date)) or {}).get(code) or {}
@@ -403,6 +467,7 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
                               if with_random else (None, None))
         results.append({
             "key": key, "name": name, "category": cat, "direction": direction,
+            "feature_scope": feature_scope,
             "ic_mean": round(ic_mean, 3), "rank_ic": rank_ic, "ic_ir": ic_ir,
             "win_rate": win, "n_periods": len(ics), "random_ic": noise_p95,
             "positive_fold_ratio": positive_fold_ratio,
@@ -459,6 +524,8 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
             "universe_as_of": universe_meta.get("as_of"),
             "universe_evidence": universe_meta,
             "production_feature_catalog_version": CATALOG_VERSION,
+            "factor_scope": "production+exploratory" if factor_keys is None else "caller_selected",
+            "production_trial_count": sum(key in production_specs for key in keys),
             "fdr_q": FDR_Q, "n_perm": n_perm, "trial_count": len(keys)}
 
 

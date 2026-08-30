@@ -4,18 +4,23 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 import pandas as pd
+import numpy as np
 
 import _bootstrap  # noqa: F401
 from analysis import factor_eval
+from analysis.lockup_radar import _resolve_event_action
 from analysis.selection_feature_catalog import (
     DATA_QUALITY_WEIGHT,
     FUNDAMENTAL_FAMILY_WEIGHTS,
     INDUSTRY_FEATURE_WEIGHTS,
     TECHNICAL_FEATURES,
     catalog_manifest,
+    compute_cross_sectional_snapshot,
+    compute_stock_feature_series,
 )
 from core.action_decision import resolve_action
 from notify.notification_service import NotificationService
+from portfolio.portfolio_health_ai import _resolve_health_action
 from rag import store as rag_store
 
 
@@ -43,6 +48,33 @@ class ResearchFeatureContractTests(unittest.TestCase):
         self.assertFalse(evidence["exploratory"])
         self.assertEqual(evidence["basis"], "security_lifecycle_backfill")
 
+    def test_production_feature_formulas_are_reusable_by_research(self):
+        close = pd.Series(np.linspace(10.0, 20.0, 90))
+        frame = pd.DataFrame({"close": close, "amount": np.linspace(1e7, 2e7, 90)})
+        features = compute_stock_feature_series(frame)
+        self.assertEqual(set(item.key for item in TECHNICAL_FEATURES) - {
+            "market_excess_60", "industry_excess_60", "idiosyncratic_volatility_60"
+        }, set(features) - {"ret_60"})
+        self.assertGreater(features["ma60_slope"].iloc[-1], 0)
+        self.assertEqual(features["max_drawdown_60"].iloc[-1], 0)
+        self.assertEqual(features["persistence_60"].iloc[-1], 1)
+
+    def test_cross_sectional_features_use_visible_return_window(self):
+        dates = pd.date_range("2026-01-01", periods=60)
+        matrix = pd.DataFrame({
+            "600001": np.linspace(-0.01, 0.02, 60),
+            "600002": np.linspace(-0.005, 0.015, 60),
+            "600003": np.linspace(0.0, 0.01, 60),
+        }, index=dates)
+        base = pd.DataFrame({"ret_60": [0.20, 0.12, 0.08]},
+                            index=["600001", "600002", "600003"])
+        result = compute_cross_sectional_snapshot(
+            base, matrix, {symbol: "样本行业" for symbol in base.index}
+        )
+        for key in ("market_excess_60", "industry_excess_60",
+                    "idiosyncratic_volatility_60"):
+            self.assertTrue(result[key].notna().all())
+
 
 class ActionResolutionTests(unittest.TestCase):
     def test_hard_risk_beats_llm_add_advice(self):
@@ -67,6 +99,20 @@ class ActionResolutionTests(unittest.TestCase):
             {"source": "formal_signal", "action": "reduce", "reason": "波动过大"},
         ])
         self.assertEqual(result["action"], "reduce")
+
+    def test_lockup_llm_cannot_escalate_below_formal_threshold(self):
+        result = _resolve_event_action(
+            {"days": 45, "ratio": 3.5},
+            {"action_cn": "清仓", "reason": "模型要求清仓"},
+        )
+        self.assertEqual(result["action"], "hold")
+
+    def test_portfolio_llm_cannot_reverse_structured_risk(self):
+        result = _resolve_health_action(
+            {"sell_score": 3, "pnl": -2, "sell_reasons": ["多重破位"]},
+            {"action_cn": "加仓", "reason": "模型看涨"},
+        )
+        self.assertEqual(result["action"], "sell")
 
 
 class NotificationRedactionTests(unittest.TestCase):

@@ -12,6 +12,8 @@ import statistics
 from datetime import date
 from typing import Dict, Iterable, List, Optional
 
+from core.action_decision import resolve_action
+
 
 CORE_INDICES = frozenset({'上证指数', '深证成指', '创业板指', '科创50', '沪深300'})
 
@@ -27,7 +29,12 @@ ACTION_META = {
 
 def _result(action: str, reason: str, **base) -> Dict:
     headline, action_cn, rank, delta = ACTION_META[action]
+    decision = resolve_action([{
+        'source': 'portfolio_risk' if action in {'reduce', 'sell'} else 'formal_signal',
+        'action': action, 'reason': reason,
+    }])
     return dict(base, action=action, action_cn=action_cn, action_rank=rank,
+                resolved_action=decision['action'], action_decision=decision,
                 suggested_position_delta=delta, headline=headline,
                 must_add=(action == 'strong_buy'),
                 allow_buy=(action in {'strong_buy', 'buy'}), reason=reason)

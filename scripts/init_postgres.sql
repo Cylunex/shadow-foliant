@@ -545,22 +545,6 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
 CREATE INDEX IF NOT EXISTS idx_pt_scene ON prompt_templates (scene, is_default);
 
 
--- ---------- northbound_flow_daily (北向资金本地自缓存，来自 northbound_cache.py) ----------
--- eastmoney 全系北向数据 2024-08 起断供（净买额返回 0/NaN）；
--- 本表由 jobs_hub 每日 15:40 task_northbound_flow_refresh 从同花顺 hsgtApi 追加。
--- hgt_yi / sgt_yi 单位：亿元；net_total = hgt_yi + sgt_yi。
-CREATE TABLE IF NOT EXISTS northbound_flow_daily (
-    id          BIGSERIAL PRIMARY KEY,
-    trade_date  DATE NOT NULL UNIQUE,
-    hgt_yi      DOUBLE PRECISION,
-    sgt_yi      DOUBLE PRECISION,
-    net_total   DOUBLE PRECISION,
-    source      TEXT DEFAULT 'hexin',
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_nb_date_desc ON northbound_flow_daily (trade_date DESC);
-
-
 -- ---------- local point-in-time research warehouse ----------
 CREATE TABLE IF NOT EXISTS research_sync_runs (
     run_id TEXT PRIMARY KEY, provider TEXT NOT NULL, capability TEXT NOT NULL,

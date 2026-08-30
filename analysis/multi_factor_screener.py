@@ -462,8 +462,8 @@ def screen_index_cached(index_code: str = DEFAULT_INDEX, n: int = 15,
 
 
 # =============================================================================
-# 价量因子 IC 加权选股 —— 闭环消费 factor_eval 的 IC,让"因子挖掘"从只展示变成进选股
-# (factor_eval 评的是 factor_zoo 的价量因子,本函数正是用同一套价量因子选股,权重来自其 IC)
+# 价量因子 IC 加权参考 —— 只消费 factor_eval 中明确标记的 factor_zoo 键。
+# 正式本地选股使用 production feature catalog；本入口不混用两套列名。
 # =============================================================================
 def pv_ic_weights(cache_key: str = 'factor_eval:10', drop_noise: bool = True) -> Optional[Dict[str, float]]:
     """Build family-balanced weights from validated, correctly directed IC.
@@ -481,6 +481,8 @@ def pv_ic_weights(cache_key: str = 'factor_eval:10', drop_noise: bool = True) ->
         return None
     grouped: Dict[str, List[tuple[str, float]]] = {}
     for f in rep['factors']:
+        if f.get('feature_scope') == 'production':
+            continue
         if drop_noise and f.get('verdict') not in {'✅有效', '⚠️弱'}:
             continue
         rank_ic = float(f.get('rank_ic') or 0.0)

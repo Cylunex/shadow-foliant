@@ -1,137 +1,70 @@
-# 🚀 快速配置指南
+# 快速开始
 
-## 1️⃣ 基础配置（必需）
+本文只描述本地开发。生产入口、身份密钥、数据库地址和代理链路由仓库外受限配置管理。
 
-### 安装依赖
+## 1. 准备环境
+
+Windows 下统一在 Git Bash 中执行：
+
 ```bash
-pip install -r requirements.txt
+cd /f/Project/Shadow/shadow-foliant
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### 配置API密钥
-在 `.env` 文件中添加：
-```env
-DEEPSEEK_API_KEY=your_api_key_here
-```
+运行时使用 PostgreSQL，不再支持 SQLite、Streamlit 或 Docker 启动方式。按需在未提交的
+`.env` 中配置 PostgreSQL、Shadow Identity、LLM 和行情源；密钥不得写入仓库或日志。
 
-### 启动系统
+## 2. 初始化或迁移数据库
+
 ```bash
-python webui/run_dev.py        # → http://localhost:8601
+bash scripts/migrate.sh
 ```
 
-访问：http://localhost:8501
+迁移脚本可独立运行，使用 `PG_HOST`、`PG_PORT`、`PG_DATABASE`、`PG_USER`、
+`PG_PASSWORD`。空库会先执行幂等初始化，已有库只执行尚未登记的版本化迁移。
 
----
+## 3. 启动开发服务
 
-## 2️⃣ 邮件通知配置（可选）
-
-### QQ邮箱（推荐）
-
-#### 第一步：获取授权码
-1. 登录 QQ 邮箱：https://mail.qq.com
-2. 设置 → 账户 → POP3/IMAP/SMTP/Exchange
-3. 开启"IMAP/SMTP服务"
-4. 生成授权码（16位）
-5. 保存授权码备用
-
-#### 第二步：配置.env文件
-在 `.env` 文件中添加：
-```env
-EMAIL_ENABLED=true
-SMTP_SERVER=smtp.qq.com
-SMTP_PORT=587
-EMAIL_FROM=your_email@qq.com
-EMAIL_PASSWORD=your_16_digit_code
-EMAIL_TO=receiver@example.com
+```bash
+python webui/run_dev.py
 ```
 
-#### 第三步：测试邮件
-1. 进入"实时监测"页面
-2. 滚动到"通知管理"区域
-3. 点击"📧 发送测试邮件"
-4. 检查收件箱（包括垃圾邮件箱）
+本地默认地址为 `http://localhost:8601`。Web 登录使用 OIDC Authorization Code + PKCE；
+`stock-users` 可查看普通页面，涉及持仓、成交、环境配置和任务控制的敏感能力要求
+`stock-admins`。
 
-### 163邮箱
+后台任务另开终端运行：
 
-#### 配置示例
-```env
-EMAIL_ENABLED=true
-SMTP_SERVER=smtp.163.com
-SMTP_PORT=465
-EMAIL_FROM=your_email@163.com
-EMAIL_PASSWORD=your_authorization_code
-EMAIL_TO=receiver@example.com
+```bash
+source .venv/Scripts/activate
+python -m jobs.jobs_hub --serve
 ```
 
-**注意**：163邮箱推荐使用465端口（SSL）
+本地 Agent 可使用 stdio MCP：
 
----
+```bash
+python mcp_server.py
+```
 
-## 3️⃣ 使用监测功能
+远程 MCP、HTTP Agent 和外部机器调用必须携带面向 `foliant` audience 的 Agent Bearer；
+浏览器 Session Cookie 不能替代 Agent 身份。
 
-### 添加监测股票
-1. 进入"实时监测"页面
-2. 填写股票信息：
-   - 股票代码（如：600519）
-   - 股票名称
-   - 投资评级
-3. 设置关键位置：
-   - 进场区间（最小-最大价格）
-   - 止盈位
-   - 止损位
-4. 选择监测间隔（30-300秒）
-5. 开启邮件通知开关
-6. 点击"添加监测"
+## 4. 健康检查
 
-### 启动监测服务
-- 点击"▶️ 启动监测"按钮
-- 系统开始后台自动监测
-- 价格触发条件时自动发送通知
+- `/healthz`：公开、无状态，不访问数据库。
+- `/readyz`：受保护的运维就绪检查。
+- `/api/health`：仅保留安全健康语义。
 
-### 管理监测股票
-- **更新**：手动刷新股票价格
-- **编辑**：修改监测参数
-- **通知开关**：启用/禁用通知
-- **删除**：移除监测
+## 5. 常见问题
 
----
+- Web 无法登录：核对 issuer、client ID、回调地址、系统时间和仓库外 client secret。
+- 页面能开但敏感操作返回 403：确认当前用户属于 `stock-admins`。
+- 手动任务一直排队：确认 `jobs_hub` 常驻并能访问 PostgreSQL。
+- 行情不可用：查看数据质量和源健康状态；不要并发猛拉第三方接口。
+- PDF 中文乱码：在运行主机安装 Noto CJK 或文泉驿字体。
 
-## 4️⃣ 导出PDF报告
-
-1. 完成股票分析后
-2. 滚动到分析结果底部
-3. 点击"📄 生成并下载PDF报告"
-4. 等待生成完成
-5. 点击下载链接保存报告
-
----
-
-## ❓ 常见问题
-
-### 邮件无法发送？
-- ✅ 检查是否使用授权码（不是登录密码）
-- ✅ 确认SMTP服务器和端口正确
-- ✅ 尝试切换端口（587 ↔ 465）
-- ✅ 检查网络连接和防火墙
-
-### 监测不工作？
-- ✅ 确认监测服务已启动
-- ✅ 检查股票代码格式是否正确
-- ✅ 查看系统日志中的错误信息
-
-### PDF中文乱码？
-- ✅ 系统已自动注册中文字体
-- ✅ 确保Windows系统字体完整
-- ✅ 重新生成PDF报告
-
----
-
-## 📞 获取帮助
-
-- 查看 README.md 了解详细功能
-- 查看 CHANGELOG.md 了解更新内容
-- 查看界面内的配置说明
-
----
-
-**祝您使用愉快！📈**
-
+更完整的能力说明见 [使用文档](../使用文档.md) 和
+[Shadow 插件接入](SHADOW_PLUGIN_INTEGRATION.md)。

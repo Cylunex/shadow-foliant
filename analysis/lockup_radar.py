@@ -7,7 +7,8 @@ import _bootstrap  # noqa: F401  路径引导
 缺口:持仓股临近大额解禁时,现有 MA/VaR 技术面根本看不到,等破位 already 晚了。解禁是 A股最典型
 **可预知**的下杀。本模块用 `datahub.lockup_expiry`(东财 datacenter,结构化、快,非 pywencai)查持仓股
 未来 N 天的解禁,按解禁比例筛重大事件,结合当前浮盈让 AI 给"解禁前是否减仓"研判 → 即时告警 +
-decision_signal(action='reduce', source_type='lockup_risk')进方向后验。
+decision_signal(action='reduce', source_type='lockup_risk')进方向后验。LLM 只补充解释，不能把
+结构化事件风险升级成交易动作。
 
 接口:run_lockup_radar(codes, forward_days=60, min_ratio=0.03, record_signals=True) -> dict
 """
@@ -15,6 +16,8 @@ decision_signal(action='reduce', source_type='lockup_risk')进方向后验。
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from core.action_decision import resolve_action
 
 
 def _days_to(date_str: str) -> Optional[int]:
@@ -72,6 +75,19 @@ def _ai_review(flagged: List[Dict[str, Any]]) -> Dict[str, str]:
 _ACT = {'清仓': 'sell', '减仓': 'reduce', '持有观察': 'watch'}
 
 
+def _resolve_event_action(item: Dict[str, Any], review: Dict[str, str]) -> dict:
+    formal_action = 'reduce' if item['days'] <= 30 and item['ratio'] >= 5.0 else 'hold'
+    formal_reason = (f"{item['days']}天后解禁{item['ratio']}%，临近且比例较大"
+                     if formal_action == 'reduce'
+                     else f"解禁在{item['days']}天后、占比{item['ratio']}%，未达减仓硬门槛")
+    return resolve_action([
+        {'source': 'hard_risk' if formal_action == 'reduce' else 'position_truth',
+         'action': formal_action, 'reason': formal_reason},
+        {'source': 'llm', 'action': _ACT.get(review.get('action_cn'), 'hold'),
+         'reason': review.get('reason', ''), 'advisory_only': True},
+    ])
+
+
 def run_lockup_radar(codes: List[str], forward_days: int = 60, min_ratio: float = 0.03,
                      record_signals: bool = True) -> Dict[str, Any]:
     """查 codes 未来 forward_days 天解禁(占比≥min_ratio)→ AI 研判减仓。返回 {ok, items, text, summary}。"""
@@ -110,8 +126,10 @@ def run_lockup_radar(codes: List[str], forward_days: int = 60, min_ratio: float 
     items = []
     for f in flagged:
         v = review.get(f['code'], {'action_cn': '持有观察', 'reason': ''})
-        action = _ACT.get(v['action_cn'], 'watch')
-        it = {**f, 'action': action, 'action_cn': v['action_cn'], 'reason': v.get('reason', '')}
+        decision = _resolve_event_action(f, v)
+        action = decision['action']
+        it = {**f, 'action': action, 'action_cn': decision['action_text'],
+              'action_decision': decision, 'reason': decision['reason']}
         items.append(it)
         if record_signals and action in ('reduce', 'sell'):
             try:
@@ -125,7 +143,7 @@ def run_lockup_radar(codes: List[str], forward_days: int = 60, min_ratio: float 
                 create_signal(code=f['code'], name=f['name'], action='reduce' if action == 'reduce' else 'sell',
                               source_type='lockup_risk', source_ref='lockup', confidence='高',
                               horizon='short', ref_price=price,
-                              reason=f"{f['days']}天后解禁{f['ratio']}%:{v.get('reason','')}")
+                              reason=decision['reason'])
             except Exception:
                 pass
 

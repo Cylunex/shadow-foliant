@@ -26,6 +26,8 @@ from analysis.selection_feature_catalog import (
     FUNDAMENTAL_FAMILY_WEIGHTS,
     INDUSTRY_FEATURE_WEIGHTS,
     TECHNICAL_FEATURES,
+    compute_cross_sectional_snapshot,
+    compute_stock_feature_series,
 )
 
 
@@ -76,23 +78,12 @@ def _bounded(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, float(value)))
 
 
-def _trading_return(values: np.ndarray, days: int) -> Optional[float]:
-    if len(values) <= days or values[-days - 1] <= 0:
-        return None
-    return float(values[-1] / values[-days - 1] - 1.0)
-
-
 def _ma_slope(values: np.ndarray, window: int, lag: int = 10) -> Optional[float]:
     if len(values) < window + lag:
         return None
     current = float(np.mean(values[-window:]))
     previous = float(np.mean(values[-window - lag:-lag]))
     return (current / previous - 1.0) if previous else None
-
-
-def _max_drawdown(values: np.ndarray) -> float:
-    peaks = np.maximum.accumulate(values)
-    return float(np.min(values / peaks - 1.0)) if len(values) else -1.0
 
 
 def _price_limit_ratio(symbol: str, name: str, trade_date: object) -> float:
@@ -974,6 +965,11 @@ class LocalStockSelector:
             amounts = pd.to_numeric(bars.get("amount"), errors="coerce").fillna(0).to_numpy(dtype=float)
             return_series = bars.set_index("trade_date")["close"].pct_change().dropna().tail(60)
             rets = return_series.reset_index(drop=True)
+            production_series = compute_stock_feature_series(bars)
+            production_latest = {
+                key: (_number(series.iloc[-1]) if len(series) else None)
+                for key, series in production_series.items()
+            }
             ma60 = float(np.mean(closes[-60:]))
             low60, high60 = float(np.min(closes[-60:])), float(np.max(closes[-60:]))
             industry = str(meta.loc[symbol].get("industry") or "未分类")
@@ -986,21 +982,21 @@ class LocalStockSelector:
             rows.append({
                 "symbol": symbol, "name": meta.loc[symbol].get("name"), "industry": industry,
                 "market": meta.loc[symbol].get("market"),
-                "history_days": len(closes), "close": closes[-1], "ret_60": _trading_return(closes, 60),
-                "ma60_slope": _ma_slope(closes, 60), "above_ma60": closes[-1] / ma60 - 1.0,
+                "history_days": len(closes), "close": closes[-1],
+                "ret_60": production_latest.get("ret_60"),
+                "ma60_slope": production_latest.get("ma60_slope"),
+                "above_ma60": closes[-1] / ma60 - 1.0,
                 "range_pos_60": (closes[-1] - low60) / (high60 - low60) if high60 > low60 else 0.5,
-                "max_drawdown_60": _max_drawdown(closes[-60:]),
+                "max_drawdown_60": production_latest.get("max_drawdown_60"),
                 "volatility_60": float(rets.tail(60).std() * math.sqrt(252)) if len(rets) >= 20 else None,
-                "persistence_60": float((rets.tail(60) > 0).mean()) if len(rets) else None,
+                "persistence_60": production_latest.get("persistence_60"),
                 "volume_5_vs_60": float(np.mean(volumes[-5:]) / np.mean(volumes[-60:]))
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
                 "volume_20_vs_60": float(np.mean(volumes[-20:]) / np.mean(volumes[-60:]))
                     if len(volumes) >= 60 and np.mean(volumes[-60:]) > 0 else None,
-                "amount_5_vs_60": float(np.mean(amounts[-5:]) / np.mean(amounts[-60:]))
-                    if len(amounts) >= 60 and np.mean(amounts[-60:]) > 0 else None,
-                "amount_20_vs_60": float(np.mean(amounts[-20:]) / np.mean(amounts[-60:]))
-                    if len(amounts) >= 60 and np.mean(amounts[-60:]) > 0 else None,
-                "max_return_20": float(rets.tail(20).max()) if len(rets) >= 20 else None,
+                "amount_5_vs_60": production_latest.get("amount_5_vs_60"),
+                "amount_20_vs_60": production_latest.get("amount_20_vs_60"),
+                "max_return_20": production_latest.get("max_return_20"),
                 "average_amount_20": float(np.mean(amounts[-20:])) if len(amounts) >= 20 else None,
                 "average_amount_60": float(np.mean(amounts[-60:])) if len(amounts) >= 60 else None,
                 "paused_days_20": int(pd.to_numeric(
@@ -1021,9 +1017,8 @@ class LocalStockSelector:
         if frame.empty:
             return frame
 
-        # 用每日横截面中位收益构造稳健市场代理，再剔除每只股票的滚动 Beta。
-        # 这比“60 日涨幅减一个市场中位数”更接近可解释的个股残差趋势，也避免
-        # 高 Beta 股票在普涨阶段仅凭系统性暴露获得高分。
+        # Production selection and factor research share this exact residual
+        # momentum implementation through the versioned feature catalog.
         series_by_symbol = {
             str(row["symbol"]): row["return_series_60"]
             for row in rows if isinstance(row.get("return_series_60"), pd.Series)
@@ -1032,71 +1027,11 @@ class LocalStockSelector:
             pd.concat(series_by_symbol, axis=1).sort_index().tail(60)
             if series_by_symbol else pd.DataFrame()
         )
-        market_daily = return_matrix.median(axis=1, skipna=True)
         industry_by_symbol = frame.set_index("symbol")["industry"].astype(str).to_dict()
-        industry_daily: Dict[str, pd.Series] = {}
-        for industry in sorted(set(industry_by_symbol.values())):
-            members = [
-                symbol for symbol, label in industry_by_symbol.items()
-                if label == industry and symbol in return_matrix.columns
-            ]
-            if industry and industry != "未分类" and len(members) >= 3:
-                industry_daily[industry] = return_matrix[members].median(axis=1, skipna=True)
-
-        beta_values: List[Optional[float]] = []
-        market_residual_values: List[Optional[float]] = []
-        industry_residual_values: List[Optional[float]] = []
-        idio_vol_values: List[Optional[float]] = []
-        for _, item in frame.iterrows():
-            symbol = str(item["symbol"])
-            stock_daily = return_matrix.get(symbol)
-            aligned = pd.concat(
-                [stock_daily, market_daily], axis=1, keys=["stock", "market"]
-            ).dropna() if stock_daily is not None else pd.DataFrame()
-            if len(aligned) >= 30 and float(aligned["market"].var()) > 0:
-                beta = float(aligned["stock"].cov(aligned["market"]) / aligned["market"].var())
-                residual = aligned["stock"] - beta * aligned["market"]
-                market_residual = float((1.0 + residual.clip(lower=-0.99)).prod() - 1.0)
-                idio_vol = float(residual.std() * math.sqrt(252))
-            else:
-                beta = None
-                market_residual = None
-                idio_vol = None
-            industry_series = industry_daily.get(str(item.get("industry") or ""))
-            industry_aligned = pd.concat(
-                [stock_daily, industry_series], axis=1, keys=["stock", "industry"]
-            ).dropna() if stock_daily is not None and industry_series is not None else pd.DataFrame()
-            industry_residual = (
-                float((1.0 + (industry_aligned["stock"] - industry_aligned["industry"])
-                       .clip(lower=-0.99)).prod() - 1.0)
-                if len(industry_aligned) >= 30 else None
-            )
-            beta_values.append(beta)
-            market_residual_values.append(market_residual)
-            industry_residual_values.append(industry_residual)
-            idio_vol_values.append(idio_vol)
-
-        frame["beta_60"] = beta_values
-        frame["market_residual_momentum_60"] = market_residual_values
-        frame["industry_residual_momentum_60"] = industry_residual_values
-        frame["idiosyncratic_volatility_60"] = idio_vol_values
-
-        market_return = frame["ret_60"].median(skipna=True)
-        classified = (
-            frame["industry"].fillna("").astype(str).str.strip().ne("")
-            & frame["industry"].fillna("").astype(str).str.strip().ne("未分类")
+        indexed = compute_cross_sectional_snapshot(
+            frame.set_index("symbol"), return_matrix, industry_by_symbol
         )
-        industry_return = pd.Series(np.nan, index=frame.index, dtype=float)
-        industry_return.loc[classified] = frame.loc[classified].groupby(
-            "industry"
-        )["ret_60"].transform("median")
-        frame["market_excess_60"] = frame["market_residual_momentum_60"].where(
-            frame["market_residual_momentum_60"].notna(), frame["ret_60"] - market_return
-        )
-        frame["industry_excess_60"] = frame["industry_residual_momentum_60"].where(
-            frame["industry_residual_momentum_60"].notna(), frame["ret_60"] - industry_return
-        )
-        return frame
+        return indexed.reset_index()
 
     def _liquidity_gates(self, frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:

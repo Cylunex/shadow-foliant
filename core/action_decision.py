@@ -11,7 +11,8 @@ _ACTION_ALIASES = {
     "buy": "add", "strong_buy": "add", "add": "add", "加仓": "add", "买入": "add",
     "hold": "hold", "watch": "hold", "avoid": "hold", "不动": "hold",
     "持有": "hold", "观望": "hold",
-    "reduce": "reduce", "减仓": "reduce", "减持": "reduce",
+    "reduce": "reduce", "alert": "reduce", "risk": "reduce",
+    "减仓": "reduce", "减持": "reduce", "预警": "reduce",
     "sell": "sell", "卖出": "sell", "清仓": "sell",
 }
 SOURCE_PRIORITY = {

@@ -569,7 +569,7 @@ class SectorStrategyDatabase:
         
         Args:
             data_date: 数据日期
-            data_type: 数据类型 ('industry', 'concept', 'fund_flow', 'market_overview', 'north_fund', 'news')
+            data_type: 数据类型 ('industry', 'concept', 'fund_flow', 'market_overview', 'news')
             data_df: 数据DataFrame
         """
         # 兼容不同数据结构的空值判断
@@ -598,8 +598,6 @@ class SectorStrategyDatabase:
                 self._save_fund_flow_data(cursor, data_date, data_df, version)
             elif data_type == 'market_overview':
                 self._save_market_overview_data(cursor, data_date, data_df, version)
-            elif data_type == 'north_fund':
-                self._save_north_fund_data(cursor, data_date, data_df, version)
             elif data_type == 'news':
                 self._save_news_data_raw(cursor, data_date, data_df, version)
             
@@ -682,27 +680,6 @@ class SectorStrategyDatabase:
                 float(row.get('成交量', 0)) if pd.notna(row.get('成交量', 0)) else 0,
                 float(row.get('成交额', 0)) if pd.notna(row.get('成交额', 0)) else 0,
                 0, 0, 0,
-                version
-            ))
-    
-    def _save_north_fund_data(self, cursor, data_date, data_df, version):
-        """保存北向资金数据"""
-        for _, row in data_df.iterrows():
-            _ior(cursor,'''
-            INSERT OR REPLACE INTO sector_raw_data 
-            (data_date, sector_code, sector_name, price, change_pct, volume, 
-             turnover, market_cap, pe_ratio, pb_ratio, data_type, data_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'north_fund', ?)
-            ''', (
-                data_date,
-                str(row.get('代码', '')),
-                str(row.get('名称', '')),
-                float(row.get('收盘价', 0)) if pd.notna(row.get('收盘价', 0)) else 0,
-                float(row.get('涨跌幅', 0)) if pd.notna(row.get('涨跌幅', 0)) else 0,
-                float(row.get('持股数量', 0)) if pd.notna(row.get('持股数量', 0)) else 0,
-                float(row.get('持股市值', 0)) if pd.notna(row.get('持股市值', 0)) else 0,
-                float(row.get('持股变化', 0)) if pd.notna(row.get('持股变化', 0)) else 0,
-                0, 0,
                 version
             ))
     
@@ -848,7 +825,7 @@ class SectorStrategyDatabase:
         """
         获取最近within_hours小时内的原始数据并组装为分析所需结构
         Args:
-            key: 'sectors' | 'concepts' | 'fund_flow' | 'market_overview' | 'north_flow'
+            key: 'sectors' | 'concepts' | 'fund_flow' | 'market_overview'
             within_hours: 有效缓存时长（小时）
         Returns:
             dict 或 None
@@ -858,8 +835,7 @@ class SectorStrategyDatabase:
             'sectors': 'industry',
             'concepts': 'concept',
             'fund_flow': 'fund_flow',
-            'market_overview': 'market_overview',
-            'north_flow': 'north_fund'
+            'market_overview': 'market_overview'
         }
         data_type = key_map.get(key)
         if not data_type:
@@ -958,17 +934,6 @@ class SectorStrategyDatabase:
                 return {
                     'data_date': data_date,
                     'data_content': overview
-                }
-
-            if key == 'north_flow':
-                # 北向资金结构差异较大，返回最简结构用于提示
-                total_value = float(raw_df['turnover'].sum()) if not raw_df.empty else 0
-                return {
-                    'data_date': data_date,
-                    'data_content': {
-                        'north_total_amount': total_value,
-                        'history': []
-                    }
                 }
 
             return None

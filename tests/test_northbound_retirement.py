@@ -11,6 +11,9 @@ def test_northbound_runtime_entry_points_are_retired():
         "webui/api_server.py": ("/api/market/north",),
         "webui/static/pages/market.js": ("north-refresh", "northFlow"),
         "agents/agent_tool_groups.py": ('"north_flow"', "datahub.north_flow"),
+        "sector/sector_strategy_db.py": ("north_fund", "north_flow"),
+        "news_flow/news_flow_model.py": ("'北向'", '"北向"'),
+        "scripts/init_postgres.sql": ("northbound_flow_daily",),
     }
     for relative, forbidden in contracts.items():
         source = (ROOT / relative).read_text(encoding="utf-8")

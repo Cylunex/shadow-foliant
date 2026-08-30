@@ -8,7 +8,7 @@ import _bootstrap  # noqa: F401  路径引导
 拼成文本直推,无推理融合——"破MA60 + 浮亏-12% + 缠论转弱 到底该割还是该扛"没人回答。
 
 本模块对持仓(优先风险分≥1 或浮亏的子集,控 token)做一段 AI 体检:融合每只的结构化信号,
-给出 持有/减仓/清仓 的明确动作 + 一句话理由 + 信心度。**复用现成数据,零额外取数**。
+模型只补充一句解释；持有/减仓/清仓由结构化风险规则裁决。**复用现成数据,零额外取数**。
 
 闭环:每条 AI 动作写一条 decision_signal(source_type='portfolio_health',action=hold/reduce/sell),
 16:10 decision_signal_outcomes 用 K线方向后验自动累积"持仓体检"动作的真实命中率
@@ -19,6 +19,8 @@ import _bootstrap  # noqa: F401  路径引导
 
 import re
 from typing import Any, Dict, List, Optional
+
+from core.action_decision import resolve_action
 
 # 中文动作 → decision_signal 8 态
 _ACT_MAP = {'清仓': 'sell', '卖出': 'sell', '减仓': 'reduce', '减持': 'reduce',
@@ -69,6 +71,26 @@ def _parse(answer: str) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def _resolve_health_action(scan: Dict[str, Any], narrative: Dict[str, str]) -> dict:
+    sell_score = int(scan.get('sell_score') or 0)
+    pnl = _safe_float(scan.get('pnl')) or 0.0
+    if sell_score >= 3 or pnl <= -15:
+        formal_action = 'sell'
+    elif sell_score >= 1 or pnl <= -8:
+        formal_action = 'reduce'
+    else:
+        formal_action = 'hold'
+    formal_reason = ('/'.join(scan.get('sell_reasons') or [])
+                     or (f"浮盈亏{pnl:+.1f}%" if pnl else '未发现明确持仓风险'))
+    return resolve_action([
+        {'source': 'hard_risk' if formal_action == 'sell' else (
+            'portfolio_risk' if formal_action == 'reduce' else 'position_truth'
+         ), 'action': formal_action, 'reason': formal_reason},
+        {'source': 'llm', 'action': _ACT_MAP.get(narrative.get('action_cn'), 'hold'),
+         'reason': narrative.get('reason', ''), 'advisory_only': True},
+    ])
+
+
 def run_health_check(scans: Optional[List[Dict[str, Any]]] = None, max_stocks: int = 15,
                      record_signals: bool = True) -> Dict[str, Any]:
     """对持仓做 AI 体检。scans 为 _scan_holdings_with_snapshot 输出;返回 {ok, summary, items, text}。
@@ -81,6 +103,7 @@ def run_health_check(scans: Optional[List[Dict[str, Any]]] = None, max_stocks: i
     if not targets:
         out['summary'] = '无需体检的持仓'
         return out
+    llm_warning = ''
     try:
         from deepseek_client import DeepSeekClient
         client = DeepSeekClient()
@@ -90,21 +113,20 @@ def run_health_check(scans: Optional[List[Dict[str, Any]]] = None, max_stocks: i
         ]
         answer = client.call_api(messages, max_tokens=1500, call_type='portfolio_health')
     except Exception as e:
-        out['summary'] = f'AI 体检调用失败: {type(e).__name__}: {str(e)[:60]}'
-        return out
+        answer = ''
+        llm_warning = f'；模型解释不可用({type(e).__name__})'
 
     parsed = _parse(answer)
     items, n_reduce, n_sell = [], 0, 0
     for s in targets:
         code = str(s.get('code'))
-        v = parsed.get(code)
-        if not v:
-            continue
-        act_cn = v['action_cn']
-        action = _ACT_MAP.get(act_cn, 'hold')
+        v = parsed.get(code) or {'action_cn': '持有', 'confidence': '低', 'reason': ''}
+        decision = _resolve_health_action(s, v)
+        action = decision['action']
         items.append({'code': code, 'name': s.get('name', ''), 'action': action,
-                      'action_cn': act_cn, 'confidence': v['confidence'],
-                      'reason': v['reason'], 'pnl': s.get('pnl'), 'price': s.get('price')})
+                      'action_cn': decision['action_text'], 'confidence': v['confidence'],
+                      'action_decision': decision, 'reason': decision['reason'],
+                      'pnl': s.get('pnl'), 'price': s.get('price')})
         if action == 'reduce':
             n_reduce += 1
         elif action == 'sell':
@@ -117,13 +139,13 @@ def run_health_check(scans: Optional[List[Dict[str, Any]]] = None, max_stocks: i
                               source_type='portfolio_health', source_ref='ai_health',
                               confidence=v['confidence'], horizon='swing',
                               ref_price=_safe_float(s.get('price')),
-                              reason=f"持仓体检:{v['reason']}")
+                              reason=f"持仓体检:{decision['reason']}")
             except Exception:
                 pass
 
     out['ok'] = True
     out['items'] = items
-    out['summary'] = f'体检 {len(items)} 只:清仓建议 {n_sell}、减仓 {n_reduce}'
+    out['summary'] = f'体检 {len(items)} 只:清仓建议 {n_sell}、减仓 {n_reduce}{llm_warning}'
     out['text'] = _format(items)
     return out
 

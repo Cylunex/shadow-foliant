@@ -24,6 +24,8 @@ import _bootstrap  # noqa: F401  路径引导
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from core.action_decision import resolve_action
+
 
 def _holding_days(created_at) -> Optional[int]:
     if not created_at:
@@ -121,9 +123,18 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
         scan = scans.get(code) or {'code': code, 'name': h.get('name', ''), 'pnl': None, 'sell_score': 0}
         hd = _holding_days(created.get(code))
         sc, cat, act, reasons = _exit_score(scan, hd)
+        decision = resolve_action([{
+            'source': 'hard_risk' if act == 'sell' else (
+                'portfolio_risk' if act == 'reduce' else 'position_truth'
+            ),
+            'action': act,
+            'reason': '；'.join(reasons)[:240],
+        }])
         items.append({
             'code': code, 'name': scan.get('name') or h.get('name', ''),
-            'exit_score': round(sc, 1), 'category': cat, 'action': act,
+            'exit_score': round(sc, 1), 'category': cat,
+            'action': decision['action'], 'action_text': decision['action_text'],
+            'action_decision': decision,
             'pnl': scan.get('pnl'), 'holding_days': hd, 'reason': '；'.join(reasons)[:80],
             'price': scan.get('price'),
         })

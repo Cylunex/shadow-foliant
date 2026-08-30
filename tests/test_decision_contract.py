@@ -52,8 +52,10 @@ class TradePlanTests(unittest.TestCase):
         )
         self.assertTrue(plan["available"])
         for key in ("entry_low", "entry_high", "stop_loss", "target_price",
-                    "risk_reward_ratio", "suggested_position_pct", "evidence", "blockers"):
+                    "risk_reward_ratio", "suggested_position_pct", "evidence", "blockers",
+                    "action_decision"):
             self.assertIn(key, plan)
+        self.assertIn(plan["action"], {"add", "hold", "reduce", "sell"})
         self.assertLess(plan["stop_loss"], plan["entry_low"])
         if plan["action"] == "buy":
             self.assertGreaterEqual(plan["risk_reward_ratio"], 2.0)
