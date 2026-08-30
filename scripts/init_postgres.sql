@@ -949,7 +949,7 @@ INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('8-premarket-facts', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
-VALUES ('9-operational-integrity-v5', NOW()::TEXT)
+VALUES ('09-operational-integrity-v5', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

@@ -421,7 +421,7 @@ class ResearchStore:
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
             )
-        version = "9-operational-integrity-v5"
+        version = "09-operational-integrity-v5"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
             self._add_column(

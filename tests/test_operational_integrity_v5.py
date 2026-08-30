@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import time
 import sqlite3
 
@@ -181,3 +182,32 @@ def test_migration_script_uses_portable_bounded_version_query() -> None:
     assert "version=:'version'" not in script
     assert "^[0-9A-Za-z][0-9A-Za-z._-]*$" in script
     assert "WHERE version='$version'" in script
+
+
+def test_operational_integrity_schema_has_an_incremental_migration() -> None:
+    migration = (
+        REPOSITORY_ROOT / "scripts" / "migrations" / "09-operational-integrity-v5.sql"
+    ).read_text(encoding="utf-8")
+    required_schema = (
+        "trade_import_batches",
+        "trade_import_rows",
+        "research_source_runtime_state",
+        "research_dataset_publications",
+        "research_dataset_publication_history",
+        "publication_generations",
+        "research_artifacts",
+        "research_artifact_annotations",
+        "fencing_token",
+        "foliant_run_attempts",
+        "foliant_run_progress",
+    )
+    for identifier in required_schema:
+        assert identifier in migration
+    assert "VALUES ('09-operational-integrity-v5'" in migration
+
+
+def test_migration_files_record_their_exact_filename_version() -> None:
+    for migration_path in sorted((REPOSITORY_ROOT / "scripts" / "migrations").glob("*.sql")):
+        migration = migration_path.read_text(encoding="utf-8")
+        recorded_versions = re.findall(r"VALUES \('([^']+)'\s*,", migration)
+        assert migration_path.stem in recorded_versions
