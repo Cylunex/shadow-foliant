@@ -38,6 +38,10 @@ class ProviderRequestFailed(RuntimeError):
     """Payload-free provider failure safe for runtime diagnostics."""
 
 
+class ProviderRequestRejected(RuntimeError):
+    """A deterministic provider rejection that must not consume a retry."""
+
+
 class PathTokenApi:
     def __init__(self, *, provider: str, token_env: str, enabled_env: str,
                  base_url_env: str, default_base_url: str,
@@ -277,10 +281,12 @@ class PathTokenApi:
                         # upstream redirect forward that path to another origin.
                         allow_redirects=False,
                     )
-                    if int(response.status_code) != 200:
-                        raise ProviderRequestFailed(
-                            f"{self.provider} http status {int(response.status_code)}"
-                        )
+                    status = int(response.status_code)
+                    if status != 200:
+                        error_type = (ProviderRequestFailed
+                                      if status in {408, 429} or status >= 500
+                                      else ProviderRequestRejected)
+                        raise error_type(f"{self.provider} http status {status}")
                     try:
                         payload = response.json()
                     except Exception as exc:
@@ -290,11 +296,14 @@ class PathTokenApi:
                     if isinstance(payload, dict):
                         code = payload.get("code")
                         if code not in (None, 0, 200, "0", "200", "success"):
-                            raise ProviderRequestFailed(
+                            error_type = (ProviderRequestFailed
+                                          if str(code) in {"500", "502", "503", "504"}
+                                          else ProviderRequestRejected)
+                            raise error_type(
                                 f"{self.provider} api error code {str(code)[:16]}"
                             )
                 return self.rows(payload)
-            except ProviderBudgetExceeded:
+            except (ProviderBudgetExceeded, ProviderRequestRejected):
                 return []
             except Exception:
                 if attempt >= contract.retries:

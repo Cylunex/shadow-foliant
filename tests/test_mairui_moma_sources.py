@@ -126,9 +126,24 @@ class PathTokenTransportTest(unittest.TestCase):
             session = _Session([_Response([], 302), _Response([], 302)])
             client._session = session
             self.assertEqual(client.get("realtime", ["hsrl", "ssjy_more"]), [])
-            self.assertEqual(len(session.calls), 2)
+            self.assertEqual(len(session.calls), 1)
             self.assertTrue(all(call[2]["allow_redirects"] is False
                                 for call in session.calls))
+
+    def test_server_error_is_retried_but_client_rejection_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAIRUI_LICENCE": "secret-value",
+            "MAIRUI_STATE_DIR": tmp,
+        }, clear=False):
+            retried = self._client()
+            retried._session = _Session([_Response([], 503), _Response([])])
+            self.assertEqual(retried.get("realtime", ["hsrl", "ssjy_more"]), [])
+            self.assertEqual(len(retried._session.calls), 2)
+
+            rejected = self._client()
+            rejected._session = _Session([_Response([], 404), _Response([])])
+            self.assertEqual(rejected.get("realtime", ["hsrl", "ssjy_more"]), [])
+            self.assertEqual(len(rejected._session.calls), 1)
 
 
 class CompatibleNormalizationTest(unittest.TestCase):
@@ -203,6 +218,8 @@ class CompatibleNormalizationTest(unittest.TestCase):
         self.assertEqual(
             api.calls[3][1], ["hsstock", "lup", "limit", "600000"]
         )
+        self.assertEqual(api.calls[3][2], {"lt": 30})
+        self.assertEqual(api.calls[4][2], {"lt": 30})
 
 
 class DatahubRoutingTest(unittest.TestCase):

@@ -308,12 +308,11 @@ class MairuiCompatibleSource:
             span = min(max(int(days), 1), 365)
         except (TypeError, ValueError):
             span = 30
-        end = date.today()
-        start = end - timedelta(days=span - 1)
         rows = self.api.get(
             capability, ["hsstock", "lup", leaf, C.norm_code(code)],
-            {"st": start.strftime("%Y%m%d"), "et": end.strftime("%Y%m%d"),
-             "lt": span},
+            # The live endpoint currently rejects st/et despite an earlier
+            # documentation note; ``lt`` is the stable bounded history contract.
+            {"lt": span},
         )
         out = []
         for raw in rows:
