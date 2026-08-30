@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from collections import Counter
 
-# DB 路由（USE_POSTGRES=true 时走 PG）
+# PostgreSQL 生产连接；USE_POSTGRES=False 仅供隔离测试注入。
 from db_compat import connect as db_connect, USE_POSTGRES
 
 logging.basicConfig(level=logging.INFO)
@@ -27,11 +27,11 @@ class NewsFlowDatabase:
         self.init_database()
 
     def get_connection(self):
-        """获取数据库连接（PG / SQLite 自动路由）"""
+        """获取 PostgreSQL 生产连接；路径参数仅保留测试兼容。"""
         return db_connect(self.db_path)
 
     def init_database(self):
-        """初始化数据库表。PG 模式建 PG 方言表(BIGSERIAL/DOUBLE PRECISION),SQLite 走原路径。"""
+        """初始化 PostgreSQL 表；后续分支仅服务显式注入的隔离测试。"""
         if USE_POSTGRES:
             self._init_pg()
             return

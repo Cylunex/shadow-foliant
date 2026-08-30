@@ -64,19 +64,34 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
     n = len(rows)
     over = n > target_positions
 
-    # 2) 一次 LLM:整体瘦身策略 + 逐只最终动作(只让 AI 决策紧迫分高/有风险的子集,控 token)
+    # 2) 一次 LLM 只把确定性动作解释成人话；不得改变动作。
     decide = [r for r in rows if r['exit_score'] >= 15 or (r['sell_score'] or 0) >= 1][:18]
-    _, ai_verdict = _ai_fuse(decide, n, target_positions, over)
+    _, ai_explanations = _ai_fuse(decide, n, target_positions, over)
 
-    # 3) 融合:AI 给了动作用 AI 的,否则用规则;紧迫分继续做排序与紧迫度
+    # 3) 唯一动作裁决：硬风险/组合约束/正式规则优先，LLM 只可解释同一动作。
+    from core.action_decision import resolve_action
     items = []
     for r in rows:
-        v = ai_verdict.get(r['code'])
-        if v:
-            action, reason = v['action'], v['reason'] or r['rule_reason']
-        else:
-            action, reason = r['rule_action'], r['rule_reason']
-        items.append({**r, 'action': action, 'reason': reason})
+        rule_source = (
+            'hard_risk' if r['rule_action'] in ('sell', 'reduce')
+            and ((r.get('sell_score') or 0) >= 3 or r.get('category') == '割肉止损')
+            else 'formal_signal'
+        )
+        evidence = [{
+            'source': rule_source, 'action': r['rule_action'],
+            'reason': r['rule_reason'], 'code': r['code'],
+        }]
+        explanation = ai_explanations.get(r['code'])
+        if explanation:
+            evidence.append({
+                'source': 'llm', 'action': r['rule_action'], 'reason': explanation,
+                'code': r['code'], 'advisory_only': True,
+            })
+        decision = resolve_action(evidence)
+        items.append({
+            **r, 'action': decision['action'], 'reason': decision['reason'],
+            'decision_source': decision['source'],
+        })
 
     n_sell = sum(1 for it in items if it['action'] == 'sell')
     n_reduce = sum(1 for it in items if it['action'] == 'reduce')
@@ -104,35 +119,34 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
 
 
 def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
-    """一次 LLM 只定重点持仓的最终动作；返回 ('', {code:{action,reason}})。"""
+    """Ask the LLM only for a plain explanation of an already fixed action."""
     if not decide:
         return ('', {})
-    lines = [f"{r['code']} {r['name']} 紧迫{r['exit_score']}|{r['category']}|"
+    lines = [f"{r['code']} {r['name']}|既定动作:{r['rule_action']}|紧迫{r['exit_score']}|{r['category']}|"
              f"浮盈亏{(r['pnl'] if r['pnl'] is not None else 0):+.0f}%|持有{r.get('holding_days','?')}天|"
              f"风险分{r['sell_score']}({'/'.join(r['sell_reasons'][:3]) or '无'})" for r in decide]
     prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'，持仓偏多' if over else ''}。
-下面是按"清仓紧迫分"排序、需要决断的持仓(已融合 割肉止损/止盈锁定/破位/死钱 多维信号):
+下面动作已经由确定性风控规则决定：
 
 {chr(10).join(lines)}
 
-只逐只给最终动作(清仓/减仓/持有/加仓 之一)+ 一句通俗理由，严格一行一只，不要总策略和开场白:
-代码 | 动作:X | 理由:≤25字
+不得修改动作，只逐只把原因改写成一句通俗解释，严格一行一只，不要开场白:
+代码 | 理由:≤25字
 
-要求:同一只只给一个结论,综合所有信号(深亏破位→清仓;大浮盈动能弱→减仓锁利;久横盘死钱→清仓换仓;趋势未坏→持有)。"""
+要求:不要输出技术指标缩写、目标价、仓位比例或新的买卖建议。"""
     try:
         from deepseek_client import DeepSeekClient
         ans = DeepSeekClient().call_api(
-            [{'role': 'system', 'content': '你是冷静的持仓瘦身顾问,敢让用户割肉与收敛持仓,逐只给唯一可执行结论。'},
+            [{'role': 'system', 'content': '你只负责把既定持仓动作解释成简短人话，不得改变动作或补充新建议。'},
              {'role': 'user', 'content': prompt}], max_tokens=800, call_type='eod_review') or ''
     except Exception as e:
         print(f'[eod_review] LLM 失败: {type(e).__name__}: {str(e)[:50]}')
         return ('', {})
     verdict = {}
     for line in ans.splitlines():
-        mm = re.search(r'(\d{6})\D.*?动作[:：]\s*([清减持加][仓有])', line)
+        mm = re.search(r'(\d{6})\D.*?理由[:：]\s*(.+)$', line)
         if mm:
-            reason = (re.search(r'理由[:：]\s*(.+)$', line) or [None, ''])[1].strip()[:30]
-            verdict[mm.group(1)] = {'action': _ACT_MAP.get(mm.group(2), 'hold'), 'reason': reason}
+            verdict[mm.group(1)] = mm.group(2).strip()[:30]
     return ('', verdict)
 
 

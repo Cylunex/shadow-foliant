@@ -5,7 +5,7 @@ import _bootstrap  # noqa: F401  路径引导（搬入子目录后定位项目�
 
 设计目标：所有定时/工作流任务默认关闭，用户在 Admin UI 一键开启。
 开关存储优先级：
-  1. PG/SQLite 表 automation_switches（可在 UI 修改，运行时生效）
+  1. PostgreSQL 表 automation_switches（可在 UI 修改，运行时生效）
   2. env var AUTOMATION_<NAME>=true/false（无 DB 记录时回退）
   3. 内置默认（全部 False，保守起步）
 

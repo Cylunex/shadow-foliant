@@ -740,6 +740,10 @@ class ResearchStore:
             reasons = []
             if len(rows) < int(minimum_rows):
                 reasons.append("absolute_count_below_minimum")
+            lifecycle_complete = (df.attrs.get("lifecycle_complete")
+                                  if df is not None else None)
+            if lifecycle_complete is False:
+                reasons.append("lifecycle_statuses_incomplete")
             if len({row[1] for row in rows}) != len(rows):
                 reasons.append("duplicate_symbols")
             if validate_change and previous:
@@ -759,7 +763,16 @@ class ResearchStore:
                 (snapshot_id, snapshot_date, provenance.get("provider", "unknown"),
                  retrieved_at, len(rows), int(minimum_rows), _json(exchange_counts),
                  previous_id, quality, retrieved_at if quality == "ok" else None,
-                 _json({"reasons": reasons})),
+                 _json({
+                     "reasons": reasons,
+                     "requested_list_statuses": list(
+                         (df.attrs.get("requested_list_statuses") if df is not None else []) or []
+                     ),
+                     "available_list_statuses": list(
+                         (df.attrs.get("available_list_statuses") if df is not None else []) or []
+                     ),
+                     "lifecycle_complete": lifecycle_complete,
+                 })),
             )
             cur.executemany(
                 """INSERT INTO research_security_master_rows
@@ -1445,12 +1458,64 @@ class ResearchStore:
             cur.execute(
                 """SELECT symbol,name,exchange,market,industry,list_status,list_date,quality_status
                    FROM research_security_master_rows WHERE snapshot_id=?
+                   AND (list_date='' OR list_date IS NULL OR list_date<=?)
                    AND (delist_date='' OR delist_date IS NULL OR delist_date>?)""",
-                (snapshot_id, _iso_date(as_of)),
+                (snapshot_id, _iso_date(as_of), _iso_date(as_of)),
             )
             frame = self._frame(cur)
             frame.attrs["snapshot_id"] = snapshot_id
             frame.attrs["snapshot_date"] = snapshot_date
+            return frame
+        finally:
+            conn.close()
+
+    def load_lifecycle_universe(self, as_of: str) -> pd.DataFrame:
+        """Reconstruct historical membership from the latest lifecycle observation.
+
+        This method is intentionally separate from :meth:`load_universe`.  It may use a
+        security lifecycle snapshot observed after ``as_of`` to recover listed/delisted
+        membership, but current industry labels are not represented as historical PIT
+        exposures.  Research callers must inspect the returned provenance attributes.
+        """
+        target = _iso_date(as_of)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT snapshot_id,snapshot_date FROM research_master_snapshot_runs
+                   WHERE quality_status='ok' AND published_at IS NOT NULL
+                   ORDER BY snapshot_date DESC,published_at DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            snapshot_id = str(row[0]) if row and row[0] else None
+            snapshot_date = str(row[1]) if row and row[1] else None
+            if not snapshot_id:
+                return pd.DataFrame()
+            cur.execute(
+                """SELECT symbol,name,exchange,market,industry,list_status,list_date,
+                          delist_date,quality_status
+                   FROM research_security_master_rows WHERE snapshot_id=?
+                     AND (list_date='' OR list_date IS NULL OR list_date<=?)
+                     AND (delist_date='' OR delist_date IS NULL OR delist_date>?)""",
+                (snapshot_id, target, target),
+            )
+            frame = self._frame(cur)
+            cur.execute(
+                """SELECT DISTINCT list_status FROM research_security_master_rows
+                   WHERE snapshot_id=?""",
+                (snapshot_id,),
+            )
+            statuses = sorted(str(item[0] or "") for item in cur.fetchall() if item)
+            frame.attrs.update({
+                "snapshot_id": snapshot_id,
+                "snapshot_date": snapshot_date,
+                "membership_as_of": target,
+                "membership_basis": "security_lifecycle_backfill",
+                "observed_after_as_of": bool(snapshot_date and snapshot_date > target),
+                "available_list_statuses": statuses,
+                "lifecycle_complete": "L" in statuses and "D" in statuses,
+                "historical_industry_complete": False,
+            })
             return frame
         finally:
             conn.close()
@@ -2393,6 +2458,66 @@ class ResearchStore:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def resolve_trade_origin(self, symbol: str, *, selection_run_id: str = "",
+                             nomination_id: str = "", strategy_id: str = "") -> Optional[dict]:
+        """Validate optional trade attribution against immutable selection facts."""
+        wanted_symbol = _symbol(symbol)
+        wanted_run = str(selection_run_id or "").strip()
+        wanted_nomination = str(nomination_id or "").strip()
+        wanted_strategy = str(strategy_id or "").strip()
+        if not wanted_symbol or not (wanted_run or wanted_nomination):
+            return None
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            if wanted_nomination:
+                cur.execute(
+                    """SELECT nomination_id,selection_run_id,strategy_id,symbol,lane
+                       FROM selection_candidate_nominations
+                       WHERE nomination_id=? AND symbol=?""",
+                    (wanted_nomination, wanted_symbol),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                resolved = {
+                    "nomination_id": str(row[0]),
+                    "selection_run_id": str(row[1]),
+                    "strategy_id": str(row[2]),
+                    "symbol": str(row[3]),
+                    "lane": str(row[4]),
+                }
+                if wanted_run and resolved["selection_run_id"] != wanted_run:
+                    return None
+                if wanted_strategy and resolved["strategy_id"] != wanted_strategy:
+                    return None
+                return resolved
+            if wanted_run and wanted_strategy:
+                cur.execute(
+                    """SELECT nomination_id,selection_run_id,strategy_id,symbol,lane
+                       FROM selection_candidate_nominations
+                       WHERE selection_run_id=? AND strategy_id=? AND symbol=?
+                       ORDER BY lane_rank ASC LIMIT 1""",
+                    (wanted_run, wanted_strategy, wanted_symbol),
+                )
+                row = cur.fetchone()
+                return ({
+                    "nomination_id": str(row[0]), "selection_run_id": str(row[1]),
+                    "strategy_id": str(row[2]), "symbol": str(row[3]),
+                    "lane": str(row[4]),
+                } if row else None)
+            cur.execute(
+                """SELECT 1 FROM selection_candidates
+                   WHERE run_id=? AND symbol=? LIMIT 1""",
+                (wanted_run, wanted_symbol),
+            )
+            return ({
+                "nomination_id": None, "selection_run_id": wanted_run,
+                "strategy_id": None, "symbol": wanted_symbol, "lane": None,
+            } if cur.fetchone() else None)
         finally:
             conn.close()
 

@@ -16,7 +16,8 @@ import _bootstrap  # noqa: F401  路径引导
 生命周期 status:active 活跃 → expired 过期(超 expires_at,惰性置) /
                 invalidated 被反向信号作废 / closed 手动关闭 / archived 归档。终态不可逆回 active。
 
-存储走 db_compat(SQLite/PG 双模),与 ai_recommendations / llm_usage 同库 jobs_snapshots.db。
+生产存储走 db_compat 的 PostgreSQL 适配层，与 ai_recommendations / llm_usage 同库。
+SQLite 只允许由单元测试显式注入，不是运行模式。
 
 接口:
   create_signal(...) -> (id, created)         # 幂等去重 + 反向作废 + 惰性过期

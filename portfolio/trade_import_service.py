@@ -244,7 +244,8 @@ def preview_position_effects(rows: List[Dict[str, Any]], portfolio_db,
 
 
 def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
-                   portfolio_db=None, allow_name_refresh: bool = True) -> Dict[str, Any]:
+                   portfolio_db=None, allow_name_refresh: bool = True,
+                   origin_resolver=None) -> Dict[str, Any]:
     """标准化并补齐成交，不写库。任一行关键字段有误时仍返回其他预览，但由上层整批拦截。"""
     source_rows: List[Dict[str, Any]] = []
     if isinstance(rows, dict):
@@ -351,6 +352,53 @@ def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
                         optional_invalid = True
                     else:
                         item[target] = note
+        raw_run_id = _clean_text(_pick(item['_input'], 'selection_run_id'))
+        raw_nomination_id = _clean_text(_pick(item['_input'], 'nomination_id'))
+        raw_strategy_id = _clean_text(_pick(item['_input'], 'strategy_id'))
+        if any(len(value) > 160 for value in (
+                raw_run_id, raw_nomination_id, raw_strategy_id)):
+            errors.append(f"第 {item['_row']} 行选股来源标识过长")
+            optional_invalid = True
+        if raw_strategy_id and not (raw_run_id or raw_nomination_id):
+            errors.append(f"第 {item['_row']} 行 strategy_id 缺少 selection_run_id 或 nomination_id")
+            optional_invalid = True
+        if (raw_run_id or raw_nomination_id) and not optional_invalid:
+            resolver = origin_resolver
+            if resolver is None:
+                try:
+                    from data.research_store import ResearchStore
+                    resolver = ResearchStore(ensure_schema=False).resolve_trade_origin
+                except Exception:
+                    resolver = None
+            try:
+                resolved_origin = resolver(
+                    item['code'], selection_run_id=raw_run_id,
+                    nomination_id=raw_nomination_id, strategy_id=raw_strategy_id,
+                ) if resolver else None
+            except Exception:
+                resolved_origin = None
+            if not resolved_origin:
+                errors.append(f"第 {item['_row']} 行选股来源不存在或与股票代码不匹配")
+                optional_invalid = True
+            else:
+                for key in ('selection_run_id', 'nomination_id', 'strategy_id'):
+                    if resolved_origin.get(key):
+                        item[key] = str(resolved_origin[key])
+        raw_signal_id = _pick(item['_input'], 'decision_signal_id')
+        if raw_signal_id not in (None, ''):
+            try:
+                signal_id = int(raw_signal_id)
+                if signal_id <= 0:
+                    raise ValueError
+                from analysis.decision_signal import get_signal
+                signal = get_signal(signal_id)
+                signal_code = _code((signal or {}).get('code'))
+                if not signal or signal_code != item['code']:
+                    raise ValueError
+                item['decision_signal_id'] = signal_id
+            except Exception:
+                errors.append(f"第 {item['_row']} 行决策信号不存在或与股票代码不匹配")
+                optional_invalid = True
         if optional_invalid:
             continue
         item['source'] = _pick(item['_input'], 'source') or 'mcp:import_trades'
@@ -379,13 +427,15 @@ def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
 def import_trade_records(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
                          update_position: bool = True, dry_run: bool = False,
                          skip_existing: bool = True, portfolio_db=None,
-                         allow_name_refresh: bool = True) -> Dict[str, Any]:
+                         allow_name_refresh: bool = True,
+                         origin_resolver=None) -> Dict[str, Any]:
     """高层成交导入；默认幂等，关键字段错误/名称未解析时整批不写。"""
     if portfolio_db is None:
         from portfolio_db import portfolio_db as _portfolio_db
         portfolio_db = _portfolio_db
     prepared = prepare_trades(rows, table, portfolio_db=portfolio_db,
-                              allow_name_refresh=allow_name_refresh)
+                              allow_name_refresh=allow_name_refresh,
+                              origin_resolver=origin_resolver)
     result: Dict[str, Any] = {
         'status': 'ready', 'received': prepared['received'], 'prepared': len(prepared['rows']),
         'imported': 0, 'failed': len(prepared['errors']), 'positions_updated': 0,

@@ -29,7 +29,7 @@ description: A股多智能体分析平台的 Agent 技能文档。提供个股�
 - **miniQMT 实盘交易** `miniqmt_interface` — **真实下单,危险**。若暴露必须加确认/沙箱/白名单,默认**不建议**开放。
 
 ### ❌ 不适合 MCP
-- **所有 `*_ui.py` / `app.py`(46 个文件含 streamlit)** — 是 Streamlit 界面渲染,无请求/响应语义,无法 MCP 化。
+- **浏览器 UI 渲染代码** — 当前由 FastAPI + Vue3 SPA 承担；页面布局不是 MCP 能力，不做工具化。
 - **调度器/守护进程本身**：`jobs_hub` / `monitor_service` / `*_scheduler` 的常驻生命周期由 Supervisor 管理，不由 MCP 或旧 `autostart.py` 托管；一次性任务可通过异步 `trigger_task` 提交，由 `task_run_status` 查询。
 - **通知服务** `notification_service`(可包一个"发送"工具,但非核心)。
 

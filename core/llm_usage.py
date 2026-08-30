@@ -10,7 +10,8 @@ import _bootstrap  # noqa: F401  路径引导
   - 任何异常都被吞掉(record 永不抛),绝不阻塞/拖慢真实 LLM 调用;
   - 拿不到 usage(provider 未回 usage 字段)也记一行(tokens=0,标 ok),保留调用计数。
 
-存储走 db_compat(SQLite/PG 双模),与 ai_recommendations 同库 jobs_snapshots.db。
+生产存储走 db_compat 的 PostgreSQL 适配层，与 ai_recommendations 同库。
+SQLite 兼容分支只服务隔离单元测试。
 聚合在 Python 端做(窗口内行数不大),规避 SQL 方言差异。
 
 接口:

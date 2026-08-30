@@ -1,6 +1,5 @@
 """
-持仓股票数据库管理模块 — PostgreSQL 版
-替代原有的 portfolio_db.py (SQLite)
+持仓股票数据库管理模块 — PostgreSQL 生产实现
 
 使用:
     from portfolio_db_pg import portfolio_db
@@ -10,7 +9,7 @@
 
 import os
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
@@ -397,7 +396,11 @@ class PortfolioDBPG:
                        ('account_ref', 'account_ref'),
                        ('external_fingerprint', 'external_fingerprint'),
                        ('created_by_shadow_user_id', 'created_by_shadow_user_id'),
-                       ('import_batch_id', 'import_batch_id')):
+                       ('import_batch_id', 'import_batch_id'),
+                       ('selection_run_id', 'selection_run_id'),
+                       ('nomination_id', 'nomination_id'),
+                       ('strategy_id', 'strategy_id'),
+                       ('decision_signal_id', 'decision_signal_id')):
             if t.get(cn) not in (None, '') and en not in extra:
                 extra[en] = t.get(cn)
         extra['source'] = t.get('source') or 'import_trades'
@@ -612,10 +615,11 @@ class PortfolioDBPG:
                              pos_quantity, pos_cost_price, delta_qty, trade_time, source,
                              note, commission, tax, extra, profit_loss, order_id,
                              broker_execution_id, account_ref, import_batch_id,
-                             external_fingerprint, position_effect, created_by_shadow_user_id)
+                             external_fingerprint, position_effect, created_by_shadow_user_id,
+                             selection_run_id, nomination_id, strategy_id, decision_signal_id)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s, %s)
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (n['code'], n['name'], n['ttype'], n['qty'], n['price'], n['amount'],
                           pos_q, pos_c, delta, n['tt'], n['extra'].get('source'),
                           n['extra'].get('note'), n['extra'].get('commission'),
@@ -624,7 +628,9 @@ class PortfolioDBPG:
                           n['extra'].get('broker_execution_id'), n['extra'].get('account_ref'),
                           n['extra'].get('import_batch_id'), n['extra'].get('external_fingerprint'),
                           ('apply' if update_position else 'record_only'),
-                          n['extra'].get('created_by_shadow_user_id')))
+                          n['extra'].get('created_by_shadow_user_id'),
+                          n['extra'].get('selection_run_id'), n['extra'].get('nomination_id'),
+                          n['extra'].get('strategy_id'), n['extra'].get('decision_signal_id')))
                     if not atomic:
                         cur.execute('RELEASE SAVEPOINT _tr')
                     imported += 1

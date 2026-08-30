@@ -14,13 +14,17 @@
 """
 from __future__ import annotations
 
+import hashlib
 import random
+import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import _bootstrap  # noqa: F401
 
 import numpy as np
 import pandas as pd
+
+from analysis.selection_feature_catalog import CATALOG_VERSION
 
 # 默认评估股池(沪深300/中证500 代表性样本,跨行业 ~52 只;可被调用方覆盖)。
 # 注:扩到 ~50 只是为压低单期横截面 IC 的噪声(n=30 时 null IC 标准差 ~0.19,n=52 时 ~0.14);
@@ -35,6 +39,59 @@ DEFAULT_UNIVERSE = [
     "600009", "601985", "600438", "002714", "300760", "000538", "601628", "601398",
     "601288", "600000", "600406", "002352", "601766", "600547",
 ]
+
+
+def _research_start_date(period: str) -> str:
+    """Translate the supported compact history period into a deterministic start date."""
+    today = pd.Timestamp.today().normalize()
+    match = re.fullmatch(r"\s*(\d+)\s*([ymd])\s*", str(period or "2y"), re.I)
+    if not match:
+        return (today - pd.DateOffset(years=2)).date().isoformat()
+    value, unit = int(match.group(1)), match.group(2).lower()
+    if unit == "y":
+        start = today - pd.DateOffset(years=value)
+    elif unit == "m":
+        start = today - pd.DateOffset(months=value)
+    else:
+        start = today - pd.Timedelta(days=value)
+    return start.date().isoformat()
+
+
+def _default_research_universe(period: str, limit: int = 80) -> Tuple[List[str], dict]:
+    """Return a bounded lifecycle cohort, falling back explicitly to the legacy sample."""
+    start_date = _research_start_date(period)
+    fallback = {
+        "basis": "fixed_current_representative_sample",
+        "as_of": start_date,
+        "lifecycle_complete": False,
+        "exploratory": True,
+    }
+    try:
+        from data.research_store import ResearchStore
+
+        frame = ResearchStore(ensure_schema=False).load_lifecycle_universe(start_date)
+        if frame.empty or not bool(frame.attrs.get("lifecycle_complete")):
+            return list(DEFAULT_UNIVERSE), fallback
+        symbols = sorted({str(value) for value in frame["symbol"].dropna() if str(value)})
+        if len(symbols) < MIN_CROSS:
+            return list(DEFAULT_UNIVERSE), fallback
+        # Stable sampling avoids selecting yesterday's winners while keeping the scheduled
+        # research workload bounded.  Membership itself comes from the requested date.
+        symbols.sort(key=lambda value: hashlib.sha256(
+            f"{start_date}:{value}".encode("utf-8")
+        ).hexdigest())
+        selected = symbols[:max(MIN_CROSS, int(limit))]
+        return selected, {
+            "basis": str(frame.attrs.get("membership_basis")),
+            "as_of": start_date,
+            "observation_date": frame.attrs.get("snapshot_date"),
+            "lifecycle_complete": True,
+            "historical_industry_complete": False,
+            "exploratory": False,
+            "eligible_count": len(symbols),
+        }
+    except Exception:
+        return list(DEFAULT_UNIVERSE), fallback
 
 
 def _spearman(x: np.ndarray, y: np.ndarray) -> float:
@@ -188,7 +245,8 @@ def _load_pit_exposures(points: Sequence[str], symbols: Sequence[str]) -> Dict[s
 def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[str]] = None,
              horizon: int = 10, rebalance: Optional[int] = None, period: str = "2y",
              with_random: bool = True, n_perm: int = 200,
-             use_pit_exposures: bool = False) -> dict:
+             use_pit_exposures: bool = False,
+             lifecycle_sample_limit: int = 80) -> dict:
     """评估因子(2026-06-28 统计加固)。返回 {factors:[{key,name,category,direction,ic_mean,
        rank_ic,ic_ir,win_rate,n_periods,random_ic(=噪声p95),p_value,fdr_significant,verdict}],
        horizon, rebalance, universe_n, n_points, period, neutralized, fdr_q}。
@@ -203,7 +261,18 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
     import datahub
     from factor_zoo import FACTORS, compute
     keys = [k for k in (factor_keys or list(FACTORS)) if k in FACTORS]
-    uni = universe or DEFAULT_UNIVERSE
+    if universe is None:
+        uni, universe_meta = _default_research_universe(
+            period, limit=lifecycle_sample_limit
+        )
+    else:
+        uni = list(universe)
+        universe_meta = {
+            "basis": "caller_supplied",
+            "as_of": _research_start_date(period),
+            "lifecycle_complete": False,
+            "exploratory": False,
+        }
     rebalance = rebalance or horizon   # 非重叠:步长≥持有期,消除样本重叠对 IR 的高估
 
     # 1) Build a real date-indexed panel.  Positional alignment is invalid when a
@@ -385,7 +454,11 @@ def evaluate(factor_keys: Optional[List[str]] = None, universe: Optional[List[st
                 and sum(len(exposures) >= MIN_CROSS for exposures in pit_exposures.values())
                 == len(points)
             ),
-            "survivorship_warning": universe is None,
+            "survivorship_warning": bool(universe_meta.get("exploratory")),
+            "universe_basis": universe_meta.get("basis"),
+            "universe_as_of": universe_meta.get("as_of"),
+            "universe_evidence": universe_meta,
+            "production_feature_catalog_version": CATALOG_VERSION,
             "fdr_q": FDR_Q, "n_perm": n_perm, "trial_count": len(keys)}
 
 
@@ -405,6 +478,9 @@ def format_text(rep: dict, top_n: int = 8) -> str:
         L.append("  ⚠️ 已尽力剔除 Beta；当前缺少完整 PIT 行业/市值暴露，不能称为完整纯因子检验。")
     if rep.get("survivorship_warning"):
         L.append("  ⚠️ 默认样本仍是当前固定股池；正式研究应传入历史时点股池。")
+    else:
+        L.append(f"  股票池:{rep.get('universe_basis', 'caller_supplied')}"
+                 f" · 特征目录:{rep.get('production_feature_catalog_version', CATALOG_VERSION)}")
     return "\n".join(L)
 
 

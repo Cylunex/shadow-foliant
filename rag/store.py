@@ -1,17 +1,17 @@
 """pgvector 向量库 —— doc_embeddings 表 + upsert + 余弦检索。优雅降级(PG/pgvector 挂了 no-op/[])。
 
 向量以字符串 '[v1,v2,...]'::vector 传参,免装 pgvector python 包(零额外依赖)。
-仅 PG 后端有效(USE_POSTGRES=true);SQLite 环境直接降级(检索功能停用,不影响主功能)。
+仅 PostgreSQL 后端有效；缺少 PostgreSQL 配置时检索降级，不影响主功能。
 """
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import List, Dict, Optional
 
 from embed_client import DIM
+from db_compat import PG_CONFIG
 
 _down_until = 0.0
 _schema_ready = False
@@ -23,14 +23,9 @@ def _conn():
     global _down_until, _warned
     if _down_until and time.time() < _down_until:
         return None
-    if os.getenv('USE_POSTGRES', '').lower() not in ('1', 'true', 'yes', 'on'):
-        return None
     try:
         import psycopg2
-        return psycopg2.connect(
-            host=os.getenv('PG_HOST', '127.0.0.1'), port=int(os.getenv('PG_PORT', '5432')),
-            dbname=os.getenv('PG_DATABASE'), user=os.getenv('PG_USER'),
-            password=os.getenv('PG_PASSWORD'), connect_timeout=8)
+        return psycopg2.connect(**PG_CONFIG)
     except Exception as e:
         global _warned
         if not _warned:
@@ -73,7 +68,7 @@ def ensure_schema() -> bool:
         return True
     except Exception as e:
         conn.rollback()
-        print(f'[rag.store] 建表失败: {type(e).__name__}: {e}')
+        print(f'[rag.store] 建表失败: category={type(e).__name__}')
         return False
     finally:
         conn.close()
@@ -106,7 +101,7 @@ def upsert(items: List[Dict]) -> int:
         return n
     except Exception as e:
         conn.rollback()
-        print(f'[rag.store] upsert 失败: {type(e).__name__}: {e}')
+        print(f'[rag.store] upsert 失败: category={type(e).__name__}')
         return 0
     finally:
         conn.close()
@@ -138,7 +133,7 @@ def search(query_vec: List[float], top_n: int = 40,
         cols = ['source_type', 'ref_id', 'title', 'content', 'meta', 'distance']
         return [dict(zip(cols, r)) for r in cur.fetchall()]
     except Exception as e:
-        print(f'[rag.store] 检索失败: {type(e).__name__}: {e}')
+        print(f'[rag.store] 检索失败: category={type(e).__name__}')
         return []
     finally:
         conn.close()

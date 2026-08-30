@@ -20,6 +20,13 @@ import pandas as pd
 
 from data.research_store import ResearchStore
 from core.decision_context import DecisionContext, dependency_lock_hash
+from analysis.selection_feature_catalog import (
+    CATALOG_VERSION,
+    DATA_QUALITY_WEIGHT,
+    FUNDAMENTAL_FAMILY_WEIGHTS,
+    INDUSTRY_FEATURE_WEIGHTS,
+    TECHNICAL_FEATURES,
+)
 
 
 def _number(value) -> Optional[float]:
@@ -641,6 +648,7 @@ class LocalStockSelector:
             "policy_version": self.policy.version,
             "policy_hash": self.policy.policy_hash,
             "policy": self.policy.as_dict(),
+            "feature_catalog_version": CATALOG_VERSION,
             "fusion_policy": fusion_policy.as_dict(),
             "strategy_snapshot": locked_strategy_snapshot,
             "code_revision": context.code_revision,
@@ -688,6 +696,7 @@ class LocalStockSelector:
                 "calendar_consensus": calendar,
                 "snapshot_id": snapshot_id,
                 "rule_version": rule_version,
+                "feature_catalog_version": CATALOG_VERSION,
                 "policy_hash": self.policy.policy_hash,
                 "policy": self.policy.as_dict(),
                 "universe_snapshot_id": universe_snapshot_id,
@@ -1231,11 +1240,11 @@ class LocalStockSelector:
             growth.gt(50) & revenue_growth.lt(0)
         ).astype(float) * 3.0
         out["fundamental_score"] = (
-            profitability_quality * 10
-            + growth_quality * 8
-            + balance_quality * 6
-            + cash_flow_quality * 6
-            + valuation_quality * 10
+            profitability_quality * FUNDAMENTAL_FAMILY_WEIGHTS["profitability_quality"]
+            + growth_quality * FUNDAMENTAL_FAMILY_WEIGHTS["growth_quality"]
+            + balance_quality * FUNDAMENTAL_FAMILY_WEIGHTS["balance_quality"]
+            + cash_flow_quality * FUNDAMENTAL_FAMILY_WEIGHTS["cash_flow_quality"]
+            + valuation_quality * FUNDAMENTAL_FAMILY_WEIGHTS["valuation_quality"]
             - growth_divergence_penalty
         ).clip(0.0, 40.0)
         out["growth_divergence_penalty"] = growth_divergence_penalty
@@ -1252,19 +1261,13 @@ class LocalStockSelector:
     @staticmethod
     def _score_technical(frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
-        out["technical_60_score"] = (
-            _percentile(out["market_excess_60"]) * 7
-            + _percentile(out["industry_excess_60"]) * 6
-            + _percentile(out["ma60_slope"]) * 4
-            + _percentile(out["persistence_60"]) * 3
-            + _percentile(out["max_drawdown_60"]) * 3
-            + _percentile(
-                out["idiosyncratic_volatility_60"], higher_is_better=False
-            ) * 3
-            + _percentile(out["max_return_20"], higher_is_better=False) * 2
-            + _percentile(out["amount_5_vs_60"]) * 1
-            + _percentile(out["amount_20_vs_60"]) * 1
-        )
+        score = pd.Series(0.0, index=out.index, dtype=float)
+        for feature in TECHNICAL_FEATURES:
+            values = out.get(feature.key, pd.Series(np.nan, index=out.index))
+            score += _percentile(
+                values, higher_is_better=feature.direction > 0
+            ) * feature.weight
+        out["technical_60_score"] = score
         return out
 
     @staticmethod
@@ -1290,13 +1293,9 @@ class LocalStockSelector:
         out["industry_near_high"] = out["industry"].map(high_breadth)
         out["industry_participation"] = out["industry"].map(participation)
         out["industry_return"] = out["industry"].map(sector_return)
-        out["industry_score"] = (
-            _percentile(out["industry_breadth"]) * 3
-            + _percentile(out["industry_above_ma60"]) * 3
-            + _percentile(out["industry_positive_slope"]) * 3
-            + _percentile(out["industry_near_high"]) * 2
-            + _percentile(out["industry_participation"]) * 2
-            + _percentile(out["industry_return"]) * 2
+        out["industry_score"] = sum(
+            _percentile(out[key]) * weight
+            for key, weight in INDUSTRY_FEATURE_WEIGHTS.items()
         )
         out["industry_classified"] = (
             out["industry"].fillna("").astype(str).str.strip().ne("")
@@ -1311,7 +1310,7 @@ class LocalStockSelector:
             out["history_coverage"] * 0.45 + out["fundamental_coverage"] * 0.40
             + valuation_present * 0.15
         ).clip(0, 1)
-        out["data_quality_score"] = out["data_coverage"] * 15
+        out["data_quality_score"] = out["data_coverage"] * DATA_QUALITY_WEIGHT
         # Database compatibility only; formal payloads use data_quality_score.
         out["quality_score"] = out["data_quality_score"]
         return out

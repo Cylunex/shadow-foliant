@@ -240,8 +240,11 @@ class SourceContractTest(unittest.TestCase):
 
     def test_zzshare_security_master_normalizes_numeric_listed_status(self):
         class Api:
+            def __init__(self):
+                self.calls = []
+
             def stock_basic(self, **kwargs):
-                self.kwargs = kwargs
+                self.calls.append(kwargs)
                 return pd.DataFrame([{
                     "ts_code": "600000.SH", "name": "样本", "list_status": 1,
                 }])
@@ -256,7 +259,30 @@ class SourceContractTest(unittest.TestCase):
             zzshare._reset_for_tests()
         self.assertEqual(result["list_status"].tolist(), ["L"])
         self.assertEqual(result["provider_list_status"].tolist(), [1])
-        self.assertEqual(api.kwargs["list_status"], "L")
+        self.assertEqual([call["list_status"] for call in api.calls], ["L", "D", "P"])
+        self.assertFalse(result.attrs["lifecycle_complete"])
+
+    def test_zzshare_security_master_keeps_verified_lifecycle_states(self):
+        class Api:
+            def stock_basic(self, **kwargs):
+                status = kwargs["list_status"]
+                rows = {
+                    "L": [{"ts_code": "600000.SH", "name": "在市", "list_status": "L"}],
+                    "D": [{"ts_code": "600001.SH", "name": "退市", "list_status": "D",
+                           "delist_date": "2025-12-31"}],
+                    "P": [],
+                }
+                return pd.DataFrame(rows[status])
+
+        zzshare._api = Api()
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                result = zzshare.get_security_master()
+        finally:
+            zzshare._reset_for_tests()
+        self.assertEqual(set(result["list_status"]), {"L", "D"})
+        self.assertTrue(result.attrs["lifecycle_complete"])
 
     def test_unknown_volume_unit_is_rejected_instead_of_guessed(self):
         raw = pd.DataFrame({
@@ -311,6 +337,40 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertIsNone(second)
         universe = self.store.load_universe('2026-08-22')
         self.assertEqual(universe['symbol'].tolist(), ['600000'])
+
+    def test_lifecycle_universe_includes_later_delisted_names(self):
+        frame = pd.DataFrame([
+            {'ts_code': '600000.SH', 'name': '在市', 'exchange': 'SSE',
+             'list_status': 'L', 'list_date': '1999-01-01', 'delist_date': ''},
+            {'ts_code': '600001.SH', 'name': '后来退市', 'exchange': 'SSE',
+             'list_status': 'D', 'list_date': '2000-01-01', 'delist_date': '2025-12-31'},
+            {'ts_code': '600002.SH', 'name': '后来上市', 'exchange': 'SSE',
+             'list_status': 'L', 'list_date': '2025-01-01', 'delist_date': ''},
+        ])
+        frame.attrs['provenance'] = self._provenance('2026-08-21')
+        frame.attrs['lifecycle_complete'] = True
+        frame.attrs['available_list_statuses'] = ['L', 'D']
+        self.store.publish_security_master(frame, minimum_rows=1, validate_change=False)
+
+        historical = self.store.load_lifecycle_universe('2024-12-31')
+        self.assertEqual(set(historical['symbol']), {'600000', '600001'})
+        self.assertTrue(historical.attrs['lifecycle_complete'])
+        self.assertTrue(historical.attrs['observed_after_as_of'])
+        current = self.store.load_lifecycle_universe('2026-01-01')
+        self.assertEqual(set(current['symbol']), {'600000', '600002'})
+
+    def test_incomplete_lifecycle_snapshot_is_not_published(self):
+        frame = pd.DataFrame([{
+            'ts_code': '600000.SH', 'name': '样本', 'exchange': 'SSE',
+            'list_status': 'L', 'list_date': '1999-01-01', 'delist_date': '',
+        }])
+        frame.attrs['provenance'] = self._provenance('2026-08-21')
+        frame.attrs['lifecycle_complete'] = False
+        result = self.store.publish_security_master(
+            frame, minimum_rows=1, validate_change=False
+        )
+        self.assertFalse(result['published'])
+        self.assertIn('lifecycle_statuses_incomplete', result['reasons'])
 
     def test_financial_upsert_repairs_missing_first_seen_timestamp(self):
         frame = pd.DataFrame([{

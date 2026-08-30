@@ -776,7 +776,10 @@ def task_daily_backtest():
                 pool[code] = s.get('name', '')
         try:
             from analysis.strategy_genome import evolution_fitness_pool
-            pool = evolution_fitness_pool(pool)
+            pool = evolution_fitness_pool(
+                pool,
+                as_of=(datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d'),
+            )
         except Exception:
             pass
 

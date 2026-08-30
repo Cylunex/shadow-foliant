@@ -5,6 +5,7 @@ import _bootstrap  # noqa: F401  保持与 MCP 入口相同的扁平模块路径
 from portfolio.trade_import_service import (
     import_trade_records, parse_markdown_table, prepare_trades, preview_position_effects,
 )
+from portfolio.portfolio_db_pg import PortfolioDBPG
 
 
 class _FakePortfolioDB:
@@ -146,6 +147,44 @@ class TradeImportServiceTests(unittest.TestCase):
         self.assertEqual(result['imported'], 2)
         self.assertNotEqual(db.imported_rows[0]['external_fingerprint'],
                             db.imported_rows[1]['external_fingerprint'])
+
+    def test_validated_selection_origin_is_preserved(self):
+        db = _FakePortfolioDB()
+        row = {'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+               'quantity': 100, 'price': 1500, 'selection_run_id': 'run-1',
+               'strategy_id': 'low_price_bull'}
+        resolver = lambda *_a, **_k: {
+            'selection_run_id': 'run-1', 'nomination_id': 'nom-1',
+            'strategy_id': 'low_price_bull', 'symbol': '600519',
+        }
+        result = import_trade_records(
+            rows=[row], dry_run=True, portfolio_db=db, origin_resolver=resolver
+        )
+        self.assertEqual(result['status'], 'preview')
+        self.assertEqual(result['preview'][0]['nomination_id'], 'nom-1')
+        self.assertEqual(result['preview'][0]['strategy_id'], 'low_price_bull')
+
+    def test_mismatched_selection_origin_blocks_whole_batch(self):
+        db = _FakePortfolioDB()
+        row = {'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+               'quantity': 100, 'price': 1500, 'selection_run_id': 'wrong-run'}
+        result = import_trade_records(
+            rows=[row], portfolio_db=db, origin_resolver=lambda *_a, **_k: None
+        )
+        self.assertEqual(result['status'], 'needs_input')
+        self.assertEqual(db.imported_rows, [])
+        self.assertIn('选股来源不存在', result['errors'][0])
+
+    def test_postgres_normalizer_keeps_verified_attribution_fields(self):
+        normalized = PortfolioDBPG._normalize_trade(PortfolioDBPG.__new__(PortfolioDBPG), {
+            'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+            'quantity': 100, 'price': 1500, 'selection_run_id': 'run-1',
+            'nomination_id': 'nom-1', 'strategy_id': 'low_price_bull',
+            'decision_signal_id': 42,
+        })
+        self.assertEqual(normalized['extra']['selection_run_id'], 'run-1')
+        self.assertEqual(normalized['extra']['nomination_id'], 'nom-1')
+        self.assertEqual(normalized['extra']['decision_signal_id'], 42)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 """股票持仓组合净值快照(借鉴 portfolio-tracker 思路)—— 每日落一行组合市值,供画净值曲线。
 
-独立于现有 portfolio_db(PG)与 portfolio_db_pg,走 db_compat 统一 PG/SQLite,
+独立于现有 portfolio_db 与 portfolio_db_pg，生产存储走 db_compat 的 PostgreSQL 连接，
 不改动现有持仓逻辑。市值 = Σ(数量 × 实时价),实时价用 a_stock_data_adapter 批量报价,取不到退成本价。
 """
 

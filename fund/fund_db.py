@@ -1,4 +1,4 @@
-"""基金数据库 —— 走 db_compat 统一层(USE_POSTGRES=true 用 PG,否则 SQLite db/fund.db)。
+"""基金数据库 —— 生产运行统一使用 db_compat 的 PostgreSQL 连接。
 
 表:
   funds             基金基本信息(代码/简称/类型/经理/规模,缓存自数据源)
@@ -8,7 +8,7 @@
   fund_transactions 申赎/定投流水 + 持仓快照(对齐股票 trade_records 设计)
 
 申赎流水写入时自动更新 fund_holdings(买入加仓重算移动加权成本、赎回减仓)。
-SQL 用 SQLite 风格 `?` 占位符(db_compat 自动转 PG 的 %s);DDL 按后端分支。
+历史 SQL 仍用 `?` 占位符，由 db_compat 转成 PostgreSQL `%s`；非 PG 分支仅供测试注入。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def _conn():
 
 
 # --------------------------------------------------------------------------
-# 建表(幂等)。PG / SQLite 类型分支。
+# 建表(幂等)。生产使用 PG 类型；另一分支仅供显式注入的测试连接。
 # --------------------------------------------------------------------------
 def _ddl() -> List[str]:
     if is_postgres():

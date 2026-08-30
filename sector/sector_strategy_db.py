@@ -15,8 +15,8 @@ import logging
 from db_compat import connect as db_connect, USE_POSTGRES
 
 
-# ── SQLite → PG upsert 方言适配 ─────────────────────────────────────────────
-# 背景:本模块 12 处 `INSERT OR REPLACE`(SQLite 语法),PG 拒收 → 服务器每天 sector_rotation
+# ── 旧 qmark/INSERT OR REPLACE → PG 方言适配 ───────────────────────────────
+# 背景:本模块历史 SQL 有 12 处 `INSERT OR REPLACE`,PG 拒收 → 服务器每天 sector_rotation
 # 任务表面成功、数据默默丢失(2026-06-30 起实测)。改法:_ior() 自动翻译成 PG 的
 # `INSERT ... ON CONFLICT DO UPDATE`。table 与 conflict 键从建表 UNIQUE 一一对应。
 _IOR_CONFLICT = {
@@ -27,7 +27,7 @@ _IOR_CONFLICT = {
 
 
 def _ior(cursor, sql, params=()):
-    """执行 `INSERT OR REPLACE INTO ...`。SQLite 原生执行;PG 转 `ON CONFLICT DO UPDATE`。"""
+    """生产环境转为 PG `ON CONFLICT`;直通分支只供显式注入的隔离测试。"""
     if not USE_POSTGRES:
         cursor.execute(sql, params); return
     import re as _re
@@ -63,11 +63,11 @@ class SectorStrategyDatabase:
         self.init_database()
     
     def get_connection(self):
-        """获取数据库连接（PG / SQLite 自动路由）"""
+        """获取 PostgreSQL 生产连接；路径参数仅保留测试兼容。"""
         return db_connect(self.db_path)
 
     def init_database(self):
-        """初始化数据库表。PG 模式建 PG 方言表;SQLite 走原路径。"""
+        """初始化 PostgreSQL 表；后续分支仅服务显式注入的隔离测试。"""
         if USE_POSTGRES:
             self._init_pg()
             return

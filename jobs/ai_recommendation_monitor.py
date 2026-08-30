@@ -42,7 +42,7 @@ _perf_cols_ready = False
 
 
 def _ensure_perf_columns():
-    """幂等创建推荐表并补齐真实盈亏列，PG/SQLite 都可独立启动。"""
+    """幂等创建 PostgreSQL 推荐表并补齐真实盈亏列。"""
     global _perf_cols_ready
     if _perf_cols_ready:
         return

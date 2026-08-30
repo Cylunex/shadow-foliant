@@ -6,7 +6,7 @@ import _bootstrap  # noqa: F401  路径引导（搬入子目录后定位项目�
 借鉴 go-stock 的 PromptTemplate 表设计 — 让 prompt 从代码硬编码解耦，
 支持运行时增删改查 + 按 agent_type / scene 分类。
 
-数据库表：prompt_templates（PG/SQLite 双兼容）
+数据库表：PostgreSQL `prompt_templates`（旧 qmark SQL 由 db_compat 转换）
   - id, name (唯一), agent_type, scene, content, description, version
   - is_default, is_active, created_at, updated_at
 
@@ -36,7 +36,7 @@ _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
 
 def _init_table():
-    """SQLite 模式自动建表；PG 模式靠 init_postgres.sql"""
+    """生产表由 init_postgres.sql 管理；分支仅供显式注入的隔离测试。"""
     if USE_POSTGRES:
         return
     conn = db_connect(_DB_PATH)

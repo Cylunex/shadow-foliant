@@ -4,7 +4,7 @@
 
 定时调度仍由 jobs_hub 负责；本模块只处理按需触发：
   - 提交后立即返回 run_id，不阻塞 MCP/HTTP
-  - PG/SQLite 持久队列由常驻 jobs_hub 消费，提交进程退出也不会丢任务
+  - PostgreSQL 持久队列由常驻 jobs_hub 消费，提交进程退出也不会丢任务
   - worker 心跳 + 超时重入队，jobs_hub 重启后可恢复未完成任务
   - 支持幂等键，避免 Agent 重试造成同一任务重复执行
 """
@@ -169,7 +169,7 @@ def _init_db() -> None:
         conn = db_connect(_DB_PATH)
         cur = conn.cursor()
         if not USE_POSTGRES:
-            # 让 Agent 控制面可在全新 SQLite 环境先于 jobs_hub 启动。
+            # 仅供隔离单测在显式注入临时连接时先于 jobs_hub 初始化。
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS job_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

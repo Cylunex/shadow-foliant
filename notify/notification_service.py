@@ -69,16 +69,16 @@ class NotificationService:
         
         for notification in notifications:
             try:
-                print(f"\n处理通知: {notification.get('symbol', '')} - {notification.get('type', '')}")
+                notification_id = notification.get('id', 'unknown')
+                notification_type = notification.get('type', 'unknown')
+                print(f"\n处理通知: id={notification_id} type={notification_type}")
                 if self.send_notification(notification):
                     monitor_db.mark_notification_sent(notification['id'])
-                    print(f"✅ 通知已成功发送并标记: {notification['message']}")
+                    print(f"✅ 通知已成功发送并标记: id={notification_id}")
                 else:
-                    print(f"❌ 通知发送失败: {notification['message']}")
+                    print(f"❌ 通知发送失败: id={notification_id}")
             except Exception as e:
-                print(f"❌ 发送通知时出错: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"❌ 发送通知时出错: category={type(e).__name__}")
         
         print(f"{'='*50}\n")
     
@@ -106,7 +106,7 @@ class NotificationService:
                 return False
         except Exception as e:
             # router 加载失败(导入循环 / 配置异常)→ 退回老逻辑兜底
-            print(f"⚠️ notification_router 不可用, 退回老路径: {type(e).__name__}: {str(e)[:80]}")
+            print(f"⚠️ notification_router 不可用,退回老路径: category={type(e).__name__}")
 
         # ---- 兜底: 老路径(webhook + email 都推, 行为不变, 向后兼容) ----
         success = False
@@ -137,11 +137,7 @@ class NotificationService:
             # 检查邮件配置是否完整
             if not all([self.config['smtp_server'], self.config['email_from'], 
                        self.config['email_password'], self.config['email_to']]):
-                print("⚠️ 邮件配置不完整")
-                print(f"  - SMTP服务器: {self.config['smtp_server'] or '未配置'}")
-                print(f"  - 发件人: {self.config['email_from'] or '未配置'}")
-                print(f"  - 收件人: {self.config['email_to'] or '未配置'}")
-                print(f"  - 密码: {'已配置' if self.config['email_password'] else '未配置'}")
+                print("⚠️ 邮件配置不完整（敏感字段不写日志）")
                 return False
             
             # 创建邮件
@@ -164,29 +160,23 @@ class NotificationService:
             
             msg.attach(MIMEText(body, 'html'))
             
-            print(f"📧 正在发送邮件...")
-            print(f"  - 收件人: {self.config['email_to']}")
-            print(f"  - 主题: 股票监测提醒 - {notification.get('symbol', '')}")
+            print(f"📧 正在发送邮件: id={notification.get('id', 'unknown')}")
             
             # 根据端口选择连接方式
             if self.config['smtp_port'] == 465:
-                print(f"  - 使用 SMTP_SSL 连接 {self.config['smtp_server']}:{self.config['smtp_port']}")
                 server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
             else:
-                print(f"  - 使用 SMTP+TLS 连接 {self.config['smtp_server']}:{self.config['smtp_port']}")
                 server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
                 server.starttls()
             
-            print(f"  - 正在登录...")
             server.login(self.config['email_from'], self.config['email_password'])
-            print(f"  - 正在发送...")
             server.send_message(msg)
             server.quit()
-            print(f"✅ 邮件发送成功: {notification.get('symbol', '')}")
+            print(f"✅ 邮件发送成功: id={notification.get('id', 'unknown')}")
             return True
             
         except Exception as e:
-            print(f"邮件发送失败: {e}")
+            print(f"邮件发送失败: category={type(e).__name__}")
             return False
     
     def test_email_config(self) -> bool:
@@ -205,7 +195,7 @@ class NotificationService:
             server.quit()
             return True
         except Exception as e:
-            print(f"邮件配置测试失败: {e}")
+            print(f"邮件配置测试失败: category={type(e).__name__}")
             return False
     
     def send_test_email(self) -> tuple[bool, str]:
@@ -259,10 +249,10 @@ class NotificationService:
             
         except smtplib.SMTPAuthenticationError:
             return False, "邮箱认证失败，请检查邮箱和授权码是否正确"
-        except smtplib.SMTPException as e:
-            return False, f"SMTP错误: {str(e)}"
-        except Exception as e:
-            return False, f"发送失败: {str(e)}"
+        except smtplib.SMTPException:
+            return False, "SMTP连接或发送失败，请检查服务配置"
+        except Exception:
+            return False, "发送失败，请检查服务配置和网络"
     
     def get_email_config_status(self) -> Dict:
         """获取邮件配置状态"""
@@ -299,7 +289,7 @@ class NotificationService:
                 return False
         
         except Exception as e:
-            print(f"Webhook发送失败: {e}")
+            print(f"Webhook发送失败: category={type(e).__name__}")
             return False
     
     def _send_dingtalk_webhook(self, notification: Dict) -> bool:
@@ -351,8 +341,7 @@ _此消息由AI股票分析系统自动发送_"""
                 }
             }
             
-            print(f"[钉钉] 正在发送Webhook...")
-            print(f"  - URL: {self.config['webhook_url'][:50]}...")
+            print("[钉钉] 正在发送Webhook")
             
             response = requests.post(
                 self.config['webhook_url'],
@@ -367,14 +356,14 @@ _此消息由AI股票分析系统自动发送_"""
                     print(f"[成功] 钉钉Webhook发送成功")
                     return True
                 else:
-                    print(f"[失败] 钉钉Webhook返回错误: {result.get('errmsg')}")
+                    print("[失败] 钉钉Webhook返回业务错误")
                     return False
             else:
                 print(f"[失败] 钉钉Webhook请求失败: HTTP {response.status_code}")
                 return False
         
         except Exception as e:
-            print(f"钉钉Webhook发送异常: {e}")
+            print(f"钉钉Webhook发送异常: category={type(e).__name__}")
             return False
     
     def _send_feishu_webhook(self, notification: Dict) -> bool:
@@ -455,8 +444,7 @@ _此消息由AI股票分析系统自动发送_"""
                 }
             }
             
-            print(f"[飞书] 正在发送Webhook...")
-            print(f"  - URL: {self.config['webhook_url'][:50]}...")
+            print("[飞书] 正在发送Webhook")
             
             response = requests.post(
                 self.config['webhook_url'],
@@ -471,14 +459,14 @@ _此消息由AI股票分析系统自动发送_"""
                     print(f"[成功] 飞书Webhook发送成功")
                     return True
                 else:
-                    print(f"[失败] 飞书Webhook返回错误: {result.get('msg')}")
+                    print("[失败] 飞书Webhook返回业务错误")
                     return False
             else:
                 print(f"[失败] 飞书Webhook请求失败: HTTP {response.status_code}")
                 return False
         
         except Exception as e:
-            print(f"飞书Webhook发送异常: {e}")
+            print(f"飞书Webhook发送异常: category={type(e).__name__}")
             return False
     
     def send_test_webhook(self) -> tuple[bool, str]:
@@ -516,15 +504,14 @@ _此消息由AI股票分析系统自动发送_"""
             else:
                 return False, f"不支持的webhook类型: {webhook_type}"
         
-        except Exception as e:
-            return False, f"发送失败: {str(e)}"
+        except Exception:
+            return False, "发送失败，请检查服务配置和网络"
     
     def get_webhook_config_status(self) -> Dict:
         """获取Webhook配置状态"""
         return {
             'enabled': self.config['webhook_enabled'],
             'webhook_type': self.config['webhook_type'],
-            'webhook_url': self.config['webhook_url'][:50] + '...' if self.config['webhook_url'] else '未配置',
             'configured': bool(self.config['webhook_url'])
         }
 
@@ -553,7 +540,7 @@ _此消息由AI股票分析系统自动发送_"""
                         + '</pre>'
             return self._send_custom_email(subject, html_body, content)
         except Exception as e:
-            print(f"[NotificationService] send_email 失败: {e}")
+            print(f"[NotificationService] send_email 失败: category={type(e).__name__}")
             return False
 
     def send_webhook(self, subject: str, content: str) -> bool:
@@ -595,10 +582,10 @@ _此消息由AI股票分析系统自动发送_"""
             ret = r.json()
             if ret.get('errcode') == 0 or ret.get('StatusCode') == 0 or ret.get('code') == 0:
                 return True
-            print(f"[NotificationService] send_webhook 失败: {ret}")
+            print("[NotificationService] send_webhook 返回业务错误")
             return False
         except Exception as e:
-            print(f"[NotificationService] send_webhook 异常: {e}")
+            print(f"[NotificationService] send_webhook 异常: category={type(e).__name__}")
             return False
 
     def send_analysis_result(self, subject: str, content: str,
@@ -790,9 +777,7 @@ _此消息由AI股票分析系统自动发送_"""
             return success
             
         except Exception as e:
-            print(f"[ERROR] 发送持仓分析通知失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"[ERROR] 发送持仓分析通知失败: category={type(e).__name__}")
             return False
     
     def _send_custom_email(self, subject: str, html_body: str, text_body: str) -> bool:
@@ -829,7 +814,7 @@ _此消息由AI股票分析系统自动发送_"""
             return True
 
         except Exception as e:
-            print(f"[ERROR] 邮件发送失败: {str(e)}")
+            print(f"[ERROR] 邮件发送失败: category={type(e).__name__}")
             return False
 
     def _send_portfolio_webhook(self, analysis_results: dict, sync_result: dict = None) -> bool:
@@ -877,7 +862,7 @@ _此消息由AI股票分析系统自动发送_"""
             return response.status_code == 200
             
         except Exception as e:
-            print(f"[ERROR] Webhook发送失败: {str(e)}")
+            print(f"[ERROR] Webhook发送失败: category={type(e).__name__}")
             return False
 
 # 全局通知服务实例

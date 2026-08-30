@@ -13,6 +13,7 @@
   4. 个股适配度更新 → stock_strategy_affinity
 """
 
+import hashlib
 import json
 import random
 from datetime import datetime, timedelta
@@ -820,13 +821,13 @@ def _default_live_set(reason: str = 'default_fallback') -> Dict[str, Any]:
     }
 
 
-def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 45,
+def get_live_strategy_set(max_composed: int = 5, composed_min_score: float = 50,
                           require_holdout: bool = True,
-                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 5,
-                          holdout_min_win_rate: float = 40.0,
-                          max_eval_age_days: int = 21,
+                          holdout_min_ret: float = 0.0, holdout_min_trigger: int = 12,
+                          holdout_min_win_rate: float = 45.0,
+                          max_eval_age_days: int = 14,
                           auto_revert: bool = True,
-                          base_min_score: float = 45.0) -> Dict[str, Any]:
+                          base_min_score: float = 50.0) -> Dict[str, Any]:
     """给实盘选股用的"当前最优策略集":
       base: {策略id: 最优变体参数}; base_meta 给出实际部署的变体、部署分和回退原因。
       composed: [{'vid','cn','genes','score'}](达标的组合策略 TopN)
@@ -984,12 +985,35 @@ EVOLUTION_FITNESS_UNIVERSE: Dict[str, str] = {
 }
 
 
-def evolution_fitness_pool(holdings: Dict[str, str] = None) -> Dict[str, str]:
-    """进化适应度评估股池 = 持仓 ∪ 固定多元基准样本(EVOLUTION_FITNESS_UNIVERSE)。
-    持仓是你真实持有的(合理纳入);基准样本替代"昨日强势股"以消除近期表现选择偏差。
-    返回 {code: name}(持仓优先保留其名称)。"""
+def evolution_fitness_pool(holdings: Dict[str, str] = None, *, as_of: str = None,
+                           sample_limit: int = 60) -> Dict[str, str]:
+    """Build a bounded fitness cohort from historical lifecycle membership.
+
+    Current holdings stay in the pool for account relevance.  The benchmark portion is
+    selected deterministically from securities that existed at ``as_of`` and includes
+    later-delisted names when lifecycle evidence is complete.  The fixed representative
+    sample remains an explicit compatibility fallback for cold stores.
+    """
     pool = dict(holdings or {})
-    for code, name in EVOLUTION_FITNESS_UNIVERSE.items():
+    sample = None
+    if as_of:
+        try:
+            from data.research_store import ResearchStore
+
+            frame = ResearchStore(ensure_schema=False).load_lifecycle_universe(as_of)
+            if not frame.empty and bool(frame.attrs.get("lifecycle_complete")):
+                rows = []
+                for _, row in frame.iterrows():
+                    code = str(row.get("symbol") or "")
+                    if code:
+                        rows.append((code, str(row.get("name") or code)))
+                rows.sort(key=lambda item: hashlib.sha256(
+                    f"{as_of}:{item[0]}".encode("utf-8")
+                ).hexdigest())
+                sample = dict(rows[:max(20, int(sample_limit))])
+        except Exception:
+            sample = None
+    for code, name in (sample or EVOLUTION_FITNESS_UNIVERSE).items():
         pool.setdefault(code, name)
     return pool
 

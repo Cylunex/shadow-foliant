@@ -321,32 +321,80 @@ def get_quote(symbol: str) -> Optional[dict]:
     return get_quotes([symbol]).get(code)
 
 
+def _canonical_list_status(value: object) -> str:
+    raw = str(value if value is not None else "").strip().upper()
+    aliases = {
+        "1": "L", "1.0": "L", "L": "L", "LISTED": "L", "上市": "L", "正常": "L",
+        "2": "D", "2.0": "D", "D": "D", "DELISTED": "D", "退市": "D",
+        "3": "P", "3.0": "P", "P": "P", "PAUSED": "P", "暂停上市": "P", "暂停": "P",
+    }
+    return aliases.get(raw, "")
+
+
 def get_security_master() -> pd.DataFrame:
-    """Return the listed A-share universe, normalized but otherwise lossless."""
+    """Return the complete A-share security lifecycle.
+
+    Active-only master data creates survivorship bias in historical research.  Fetch
+    active (L), delisted (D) and paused (P) states through the same serialized source
+    contract and retain both the provider value and the requested canonical state.
+    """
     api = _get_api()
     if api is None:
         return pd.DataFrame()
-    df = _safe_frame(
-        "security_master", lambda: api.stock_basic(
-            exchange="ALL", list_status="L",
-            fields="ts_code,symbol,name,area,industry,market,exchange,list_status,list_date,delist_date,is_hs"
-        )
+    frames = []
+    available_statuses = []
+    fields = (
+        "ts_code,symbol,name,area,industry,market,exchange,list_status,"
+        "list_date,delist_date,is_hs"
     )
-    if df.empty:
-        return df
-    out = df.copy()
+    for requested_status in ("L", "D", "P"):
+        frame = _safe_frame(
+            "security_master", lambda status=requested_status: api.stock_basic(
+                exchange="ALL", list_status=status, fields=fields
+            )
+        )
+        if frame.empty:
+            continue
+        item = frame.copy()
+        if "list_status" in item.columns:
+            item["provider_list_status"] = item["list_status"]
+            canonical = item["provider_list_status"].map(_canonical_list_status)
+            if requested_status == "D" and "delist_date" in item.columns:
+                # A populated delisting date is acceptable evidence when an older SDK
+                # omits or renames the lifecycle status value.
+                has_delist_date = item["delist_date"].fillna("").astype(str).str.strip().ne("")
+                canonical = canonical.where(canonical.ne(""), has_delist_date.map(
+                    lambda present: "D" if present else ""
+                ))
+            item = item[canonical.eq(requested_status)].copy()
+        elif requested_status == "D" and "delist_date" in item.columns:
+            has_delist_date = item["delist_date"].fillna("").astype(str).str.strip().ne("")
+            item = item[has_delist_date].copy()
+            item["provider_list_status"] = ""
+        else:
+            # Without provider evidence a successful HTTP response is not proof that
+            # the SDK honoured the lifecycle filter.
+            item = item.iloc[0:0].copy()
+        if item.empty:
+            continue
+        item["list_status"] = requested_status
+        frames.append(item)
+        available_statuses.append(requested_status)
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True, sort=False)
     code_col = next((c for c in ("ts_code", "code", "symbol") if c in out.columns), None)
     if not code_col:
         return pd.DataFrame()
     out["ts_code"] = out[code_col].map(_ts_code)
-    # stock_basic was requested with list_status="L", but released SDK/API
-    # combinations may encode an active listing as integer/string 1. Preserve
-    # the provider value in the payload and expose one canonical store value.
-    if "list_status" in out.columns:
-        out["provider_list_status"] = out["list_status"]
-    out["list_status"] = "L"
-    out = out[out["ts_code"] != ""].drop_duplicates("ts_code", keep="last")
-    return _with_provenance(out.reset_index(drop=True), as_of=datetime.now().date().isoformat())
+    out = out[out["ts_code"] != ""].drop_duplicates("ts_code", keep="first")
+    result = _with_provenance(
+        out.reset_index(drop=True), as_of=datetime.now().date().isoformat()
+    )
+    result.attrs["requested_list_statuses"] = ["L", "D", "P"]
+    result.attrs["available_list_statuses"] = available_statuses
+    result.attrs["lifecycle_complete"] = "L" in available_statuses and "D" in available_statuses
+    return result
 
 
 def get_trade_calendar_evidence(start_date: str, end_date: str) -> List[tuple[str, bool]]:

@@ -449,7 +449,7 @@ class PortfolioManager:
         """保存单只股票的分析结果到 portfolio_analysis_history，返回 analysis_id
 
         被 batch_analyze_sequential/parallel（增量入库）和 save_analysis_results（批量补存）共用。
-        线程安全：每次调用通过 self.db 取新连接（PG/SQLite 都是 per-call connect）。
+        线程安全：每次调用通过 self.db 获取新的 PostgreSQL 连接。
         """
         if not code or not isinstance(result, dict):
             return None

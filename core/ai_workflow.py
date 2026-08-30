@@ -265,7 +265,7 @@ def run_workflow(config: Dict, params: Dict) -> Dict:
             "final": final, "provider": provider}
 
 
-# ============================ 持久化(PG/SQLite via db_compat) ============================
+# ============================ PostgreSQL 持久化(qmark 由 db_compat 转换) ============================
 def _conn():
     from db_compat import connect
     return connect(_bootstrap.db_path("ai_workflow.db"))

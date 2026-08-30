@@ -104,29 +104,23 @@ if stop_loss_str:
 ```python
 # 评级颜色标识
 if "强烈买入" in rating or "买入" in rating:
-    rating_color = "🟢"
-elif "卖出" in rating:
     rating_color = "🔴"
+elif "卖出" in rating:
+    rating_color = "🟢"
 else:
     rating_color = "🟡"
 
-# UI展示（Streamlit示例）
-with st.expander(f"{rating_color} {code} - {rating} (信心度: {confidence})"):
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**进出场位置**")
-        st.write(f"进场区间: {entry_range}")
-        st.write(f"目标价: {target_price}")
-    
-    with col2:
-        st.markdown("**风控位置**")
-        st.write(f"止盈位: {take_profit}")
-        st.write(f"止损位: {stop_loss}")
-    
-    if advice:
-        st.markdown("**投资建议**")
-        st.info(advice)
+# FastAPI 返回结构化结果，Vue 页面仅负责展示，不在前端重算评级或动作。
+return {
+    "code": code,
+    "rating": rating,
+    "confidence": confidence,
+    "entry_range": entry_range,
+    "target_price": target_price,
+    "take_profit": take_profit,
+    "stop_loss": stop_loss,
+    "advice": advice,
+}
 ```
 
 ---
