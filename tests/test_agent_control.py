@@ -296,6 +296,9 @@ class ScheduledDependencyTests(unittest.TestCase):
     def test_execution_timeout_is_error_not_generic_data_source_report(self):
         name = 'test_execution_timeout'
         with mock.patch.dict(jobs_hub._TASK_HARD_TIMEOUTS, {name: 0.02}), \
+                mock.patch('jobs.isolated_runtime.run_isolated_task', return_value={
+                    'status': 'timeout', 'terminated': True, 'isolation': 'spawn',
+                }), \
                 mock.patch.object(jobs_hub, '_log_run') as log_run, \
                 mock.patch.object(jobs_hub, '_notify_execution_timeout') as notify, \
                 mock.patch.object(jobs_hub, '_notify_data_unavailable') as data_notice:
@@ -308,20 +311,15 @@ class ScheduledDependencyTests(unittest.TestCase):
 
     def test_dependency_timeout_is_skipped_and_cancels_barrier(self):
         name = 'test_dependency_timeout'
-
-        def wait_for_parent():
-            with jobs_hub._TASK_LOCK:
-                jobs_hub._TASK_WAITING_ON[name] = 'parent_job'
-                cancel = jobs_hub._TASK_CANCEL_EVENTS[name]
-            cancel.wait(0.2)
-            jobs_hub._log_run(
-                name, 'skipped', error='dependency parent_job not ready')
-
         with mock.patch.dict(jobs_hub._TASK_HARD_TIMEOUTS, {name: 0.02}), \
+                mock.patch('jobs.isolated_runtime.run_isolated_task', return_value={
+                    'status': 'deadline_exceeded', 'terminated': True,
+                    'waiting_on': 'parent_job', 'isolation': 'spawn',
+                }), \
                 mock.patch.object(jobs_hub, '_log_run') as log_run, \
                 mock.patch.object(jobs_hub, '_notify_dependency_wait') as notify, \
                 mock.patch.object(jobs_hub, '_notify_execution_timeout') as execution_notice:
-            jobs_hub._run_with_log(name, wait_for_parent)
+            jobs_hub._run_with_log(name, lambda: None)
 
         statuses = [call.args[1] for call in log_run.call_args_list]
         self.assertIn('skipped', statuses)

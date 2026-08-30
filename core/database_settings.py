@@ -30,6 +30,9 @@ class DatabaseSettings:
         return {
             "host": self.host, "port": self.port, "dbname": self.dbname,
             "user": self.user, "password": self.password,
+            "connect_timeout": max(
+                1, min(30, int(os.getenv("PG_CONNECT_TIMEOUT", "5") or "5"))
+            ),
         }
 
     def safe_dict(self) -> dict:

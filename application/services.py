@@ -309,13 +309,21 @@ class SecurityResearchService:
             code_revision=embedded.get("code_revision"),
         )
         rating = final_decision.get("rating") if isinstance(final_decision, dict) else None
+        from application.research_artifacts import build_research_artifact
+
+        artifact = build_research_artifact(
+            subject=symbol, run_id=record_id, facts=stock_info,
+            provenance=prov, data_quality={"level": "legacy" if warnings else "formal"},
+            analysis=final_decision, formal=True, created_at=created_at,
+        )
         return tool_result(
             summary=f"Latest formal research for {symbol}: rating {rating or 'unavailable'}.",
             resource_uri=f"shadow://foliant/securities/{symbol}/research/{record_id}",
             status="degraded" if warnings else "complete",
             provenance_value=prov,
             warnings=warnings,
-            data={"symbol": symbol, "period": record.get("period"), "facts": stock_info},
+            data={"symbol": symbol, "period": record.get("period"), "facts": stock_info,
+                  "research_artifact": artifact},
             model_payload={
                 "symbol": symbol,
                 "period": record.get("period"),
@@ -413,6 +421,13 @@ class SecurityResearchService:
             "data_quality": quality,
             "fact_boundary": "facts are returned by deterministic Foliant collectors",
         }
+        from application.research_artifacts import build_research_artifact
+
+        artifact = build_research_artifact(
+            subject=symbol, run_id=run_id, facts=rendered, provenance=prov,
+            data_quality=quality, analysis=None, formal=False,
+        )
+        data["research_artifact"] = artifact
         return tool_result(
             summary=(f"{depth} preview research for {symbol}; data quality "
                      f"{quality.get('level', 'unknown')}."),
@@ -735,7 +750,9 @@ class ResearchRunQueryService:
         run = self.repository.get(run_id)
         if not run or run.get("actor_id") != actor_id:
             raise ApplicationError("run_not_found", "Run was not found", status_code=404)
-        return _public_run(run)
+        public = _public_run(run)
+        public["progress"] = self.repository.progress(run_id)
+        return public
 
     def result(self, run_id: str, *, actor_id: str, offset: int = 0,
                limit: int = 50) -> dict[str, Any]:
@@ -795,8 +812,11 @@ class TradeEntryService:
         return portfolio_db
 
     def preview(self, *, rows: list[dict[str, Any]] | None = None, table: str = "",
-                update_position: bool = True) -> dict[str, Any]:
-        from portfolio.trade_import_service import prepare_trades
+                update_position: bool = True, actor_id: str = "preview",
+                persist: bool = True) -> dict[str, Any]:
+        from portfolio.trade_import_service import (
+            prepare_trades, preview_position_effects, trade_execution_key,
+        )
 
         prepared = prepare_trades(
             rows=rows, table=table, portfolio_db=self._db(), allow_name_refresh=False
@@ -805,19 +825,46 @@ class TradeEntryService:
         for item in prepared.get("rows") or []:
             row = dict(item)
             row["source"] = "web:trade-entry"
+            row["external_fingerprint"] = trade_execution_key(row)
             normalized.append(row)
-        digest_payload = {"rows": normalized, "update_position": bool(update_position)}
-        return {
-            "status": "ready" if not prepared.get("errors") else "needs_input",
-            "preview_hash": payload_hash(digest_payload),
+        effects = preview_position_effects(
+            normalized, self._db(), update_position=bool(update_position)
+        )
+        errors = list(prepared.get("errors") or []) + list(effects.get("errors") or [])
+        digest_payload = {
+            "rows": normalized,
+            "update_position": bool(update_position),
+            "position_watermark": effects["position_watermark"],
+        }
+        preview_hash = payload_hash(digest_payload)
+        batch_id = "tb_" + payload_hash({
+            "actor_id": str(actor_id), "preview_hash": preview_hash,
+        })[:24]
+        response = {
+            "status": "ready" if not errors else "needs_input",
+            "batch_id": batch_id,
+            "preview_hash": preview_hash,
+            "position_watermark": effects["position_watermark"],
             "received": prepared.get("received", 0),
             "prepared": len(normalized),
             "rows": clean_json(normalized),
+            "effects": clean_json(effects.get("effects") or []),
             "update_position": bool(update_position),
             "warnings": clean_json(prepared.get("warnings") or []),
-            "errors": clean_json(prepared.get("errors") or []),
+            "errors": clean_json(errors),
             "unresolved": clean_json(prepared.get("unresolved") or []),
         }
+        db = self._db()
+        if persist and not errors and hasattr(db, "stage_trade_import_batch"):
+            db.stage_trade_import_batch(
+                batch_id=batch_id,
+                actor_id=str(actor_id),
+                preview_hash=preview_hash,
+                position_watermark=effects["position_watermark"],
+                update_position=bool(update_position),
+                rows=normalized,
+            )
+        return response
 
     def confirm(self, *, actor_id: str, idempotency_key: str, preview_hash: str,
                 rows: list[dict[str, Any]] | None = None, table: str = "",
@@ -829,13 +876,18 @@ class TradeEntryService:
             raise ApplicationError(
                 "idempotency_key_required", "Idempotency-Key must contain 8 to 160 characters"
             )
-        preview = self.preview(rows=rows, table=table, update_position=update_position)
+        preview = self.preview(
+            rows=rows, table=table, update_position=update_position,
+            actor_id=actor_id, persist=False,
+        )
         if preview.get("errors"):
             raise ApplicationError("invalid_trade", "trade validation failed")
         if not preview_hash or preview_hash != preview.get("preview_hash"):
             raise ApplicationError("preview_mismatch", "trade preview no longer matches")
         request_payload = {
+            "batch_id": preview["batch_id"],
             "preview_hash": preview_hash,
+            "position_watermark": preview["position_watermark"],
             "rows": preview["rows"],
             "update_position": bool(update_position),
         }
@@ -856,8 +908,14 @@ class TradeEntryService:
         from portfolio.trade_import_service import import_trade_records
 
         try:
+            confirmed_rows = []
+            for item in preview["rows"]:
+                row = dict(item)
+                row["import_batch_id"] = preview["batch_id"]
+                row["created_by_shadow_user_id"] = str(actor_id)
+                confirmed_rows.append(row)
             result = import_trade_records(
-                rows=preview["rows"],
+                rows=confirmed_rows,
                 update_position=bool(update_position),
                 dry_run=False,
                 skip_existing=True,
@@ -871,6 +929,7 @@ class TradeEntryService:
             raise
         response = {
             "status": result.get("status"),
+            "batch_id": preview["batch_id"],
             "imported": int(result.get("imported") or 0),
             "failed": int(result.get("failed") or 0),
             "positions_updated": int(result.get("positions_updated") or 0),
@@ -879,6 +938,12 @@ class TradeEntryService:
         }
         if result.get("errors"):
             response["errors"] = ["one or more trade records could not be stored"]
+        db = self._db()
+        if hasattr(db, "mark_trade_import_batch"):
+            db.mark_trade_import_batch(
+                preview["batch_id"],
+                "confirmed" if response["status"] in {"success", "noop"} else "failed",
+            )
         self.repository.save_write_result(actor_id, self.action, key, request_payload, response)
         return response
 

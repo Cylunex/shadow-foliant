@@ -314,6 +314,43 @@ def test_terminal_failure_cannot_be_overwritten_by_late_completion(repository) -
     assert repository.pending_outbox() == []
 
 
+def test_reclaimed_worker_fence_rejects_late_progress_and_completion(repository) -> None:
+    created = repository.create_or_get(
+        actor_id="agent-owner", capability="foliant.selection.preview",
+        run_kind="selection", idempotency_key="fence-example",
+        request_payload={"selection_date": "2026-08-21"},
+        resource_uri_factory=lambda run_id: f"shadow://foliant/selection-runs/{run_id}",
+        max_attempts=2,
+    ).run
+    first = repository.claim_next("worker-one", lease_seconds=30)
+    assert first["fencing_token"]
+    assert repository.append_progress(
+        created["run_id"], worker_id="worker-one", fencing_token=first["fencing_token"],
+        phase="loading_inputs",
+    )
+    with repository.connect() as conn:
+        conn.execute(
+            "UPDATE foliant_runs SET lease_until=? WHERE run_id=?",
+            ("2000-01-01T00:00:00+00:00", created["run_id"]),
+        )
+        conn.commit()
+    second = repository.claim_next("worker-two", lease_seconds=30)
+    assert second["fencing_token"] != first["fencing_token"]
+    assert not repository.append_progress(
+        created["run_id"], worker_id="worker-one", fencing_token=first["fencing_token"],
+        phase="publishing",
+    )
+    assert not repository.complete(
+        created["run_id"], _result(created["run_id"]),
+        event_type="foliant.selection.completed", worker_id="worker-one",
+        fencing_token=first["fencing_token"],
+    )
+    assert repository.get(created["run_id"])["status"] == "running"
+    assert [item["phase"] for item in repository.progress(created["run_id"])] == [
+        "loading_inputs"
+    ]
+
+
 def test_outbox_publisher_marks_only_successful_metadata_events(repository) -> None:
     coordinator = RunCoordinator(repository, executor=InlineExecutor())
     created = coordinator.submit(

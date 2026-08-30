@@ -2915,15 +2915,17 @@ class StockTradeConfirmReq(StockTradePreviewReq):
 
 
 @app.post("/api/portfolio/trade-records/preview")
-def portfolio_trade_preview(req: StockTradePreviewReq):
+def portfolio_trade_preview(req: StockTradePreviewReq, request: Request):
     """Normalize and validate stock trades without changing the portfolio."""
     from application.runtime import get_application_services
 
     try:
+        identity = request.state.browser_identity
         return _ok(get_application_services().trade_entry.preview(
             rows=req.rows,
             table=req.table,
             update_position=req.update_position,
+            actor_id=str(identity.shadow_user_id),
         ))
     except Exception as exc:
         _log_webui.error("trade_preview_failed category=%s", type(exc).__name__)
@@ -3195,6 +3197,12 @@ def health():
 
 
 # 静态 SPA(放最后,catch-all 不影响上面的 /api 路由)
+from webui.runtime_integrity_routes import register_runtime_integrity_routes
+
+register_runtime_integrity_routes(
+    app, agent_result=_agent_result, agent_error=_agent_error, browser_ok=_ok
+)
+
 if os.path.isdir(_STATIC):
     app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")
 

@@ -50,19 +50,26 @@ def execute_run_payload(run: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("unsupported_run_kind")
 
 
-def _execute_claimed(run: dict[str, Any], worker_id: str) -> None:
+def _execute_claimed(run: dict[str, Any], worker_id: str, fencing_token: str) -> None:
     repository = RunRepository(ensure_schema=False)
     run_id = str(run["run_id"])
     try:
+        repository.append_progress(
+            run_id, worker_id=worker_id, fencing_token=fencing_token,
+            phase="executing", message_code=f"run.{run.get('run_kind', 'unknown')}.started",
+        )
         result = execute_run_payload(run)
         repository.complete(
             run_id,
             result,
             event_type=_EVENT_TYPES[str(run["run_kind"])],
             worker_id=worker_id,
+            fencing_token=fencing_token,
         )
     except Exception as exc:  # noqa: BLE001 - every claimed Run must converge
-        repository.fail(run_id, stable_failure(exc), worker_id=worker_id)
+        repository.fail(
+            run_id, stable_failure(exc), worker_id=worker_id, fencing_token=fencing_token
+        )
 
 
 class FoliantRunWorker:
@@ -100,11 +107,12 @@ class FoliantRunWorker:
         if not run:
             return False
         run_id = str(run["run_id"])
+        fencing_token = str(run.get("fencing_token") or "")
         timeout_seconds = max(30, int(run.get("timeout_seconds") or 1800))
         context = multiprocessing.get_context("spawn")
         process = context.Process(
             target=_execute_claimed,
-            args=(run, self.worker_id),
+            args=(run, self.worker_id, fencing_token),
             name=f"foliant-run-{run_id[:10]}",
         )
         process.daemon = True
@@ -118,15 +126,21 @@ class FoliantRunWorker:
             if now - started >= timeout_seconds:
                 process.terminate()
                 process.join(timeout=10)
-                self.repository.fail(run_id, "execution_timeout", worker_id=self.worker_id)
+                self.repository.fail(
+                    run_id, "execution_timeout", worker_id=self.worker_id,
+                    fencing_token=fencing_token,
+                )
                 break
             if now >= next_heartbeat:
                 if not self.repository.heartbeat(
-                    run_id, self.worker_id, lease_seconds=self.lease_seconds
+                    run_id, self.worker_id, fencing_token=fencing_token,
+                    lease_seconds=self.lease_seconds
                 ):
                     process.terminate()
                     process.join(timeout=10)
-                    self.repository.finalize_cancel(run_id, self.worker_id)
+                    self.repository.finalize_cancel(
+                        run_id, self.worker_id, fencing_token=fencing_token
+                    )
                     break
                 next_heartbeat = now + heartbeat_every
         if process.is_alive():
@@ -136,9 +150,14 @@ class FoliantRunWorker:
         current = self.repository.get(run_id) or {}
         if current.get("status") == "running":
             if current.get("cancel_requested"):
-                self.repository.finalize_cancel(run_id, self.worker_id)
+                self.repository.finalize_cancel(
+                    run_id, self.worker_id, fencing_token=fencing_token
+                )
             else:
-                self.repository.fail(run_id, "worker_process_exited", worker_id=self.worker_id)
+                self.repository.fail(
+                    run_id, "worker_process_exited", worker_id=self.worker_id,
+                    fencing_token=fencing_token,
+                )
         return True
 
     def run_forever(self) -> None:

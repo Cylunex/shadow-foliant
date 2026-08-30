@@ -87,6 +87,8 @@ _add(
     "/api/signals/outcomes/stats",
     "/api/screen/latest",
     "/api/research/source-contracts",
+    "/api/research/data-capabilities",
+    "/api/research/artifacts/latest",
     "/api/convertible/screen",
     "/api/screen/strategy/{name}",
     "/api/strategy-genome/scores",
@@ -197,6 +199,8 @@ _add(
     "/api/machine/research/{code}",
     "/api/machine/v1/agent/market/overview",
     "/api/machine/v1/agent/market/data-quality",
+    "/api/machine/v1/agent/market/data-capabilities",
+    "/api/machine/v1/agent/research-artifacts/latest",
     "/api/machine/v1/agent/securities/{symbol}/research/latest",
     "/api/machine/v1/agent/selection-runs/latest",
     "/api/machine/v1/agent/runs/{run_id}",
@@ -218,6 +222,8 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/research/{code}"): "stock.research",
     ("GET", "/api/machine/v1/agent/market/overview"): "stock.read",
     ("GET", "/api/machine/v1/agent/market/data-quality"): "stock.read",
+    ("GET", "/api/machine/v1/agent/market/data-capabilities"): "stock.read",
+    ("GET", "/api/machine/v1/agent/research-artifacts/latest"): "stock.research",
     ("GET", "/api/machine/v1/agent/securities/{symbol}/research/latest"): "stock.research",
     ("POST", "/api/machine/v1/agent/securities/{symbol}/research-runs"): "stock.research",
     ("GET", "/api/machine/v1/agent/selection-runs/latest"): "stock.research",
@@ -230,6 +236,9 @@ MACHINE_SCOPES = {
 MACHINE_CAPABILITIES = {
     ("GET", "/api/machine/v1/agent/market/overview"): "foliant.market.read",
     ("GET", "/api/machine/v1/agent/market/data-quality"): "foliant.market.read",
+    ("GET", "/api/machine/v1/agent/market/data-capabilities"): "foliant.market.read",
+    ("GET", "/api/machine/v1/agent/research-artifacts/latest"):
+        "foliant.security-research.read",
     ("GET", "/api/machine/v1/agent/securities/{symbol}/research/latest"):
         "foliant.security-research.read",
     ("POST", "/api/machine/v1/agent/securities/{symbol}/research-runs"):

@@ -39,12 +39,20 @@ export default {
         <span v-if="entry.message" :class="entry.ok?'pill':'err'">{{entry.message}}</span>
       </div>
       <div v-if="entry.preview" style="margin-top:12px">
-        <div class="sub" style="margin-bottom:6px">将录入 {{entry.preview.prepared}} 笔；请核对代码、方向、价格、数量和持仓更新选项。</div>
+        <div class="sub" style="margin-bottom:6px">批次 {{entry.preview.batch_id}} · 将录入 {{entry.preview.prepared}} 笔；请核对代码、方向、价格、数量和持仓更新选项。</div>
         <table v-if="entry.preview.rows&&entry.preview.rows.length">
           <thead><tr><th>时间</th><th>方向</th><th>代码</th><th>名称</th><th>价格</th><th>数量</th><th>金额</th></tr></thead>
           <tbody><tr v-for="(x,i) in entry.preview.rows" :key="i">
             <td>{{x.trade_time||'当前时间'}}</td><td :class="x.trade_type==='买入'?'red':'green'">{{x.trade_type}}</td>
             <td>{{x.code}}</td><td>{{x.name}}</td><td>{{fmt(x.price)}}</td><td>{{x.quantity}}</td><td>{{money(x.amount)}}</td>
+          </tr></tbody>
+        </table>
+        <table v-if="entry.preview.effects&&entry.preview.effects.length" style="margin-top:8px">
+          <thead><tr><th>代码</th><th>持仓前</th><th>持仓后</th><th>费用</th><th>现金净影响</th><th>模式</th></tr></thead>
+          <tbody><tr v-for="x in entry.preview.effects" :key="'effect-'+x.row">
+            <td>{{x.code}}</td><td>{{x.position_before}}</td><td>{{x.position_after}}</td>
+            <td>{{money(x.fees)}}</td><td :class="cls(x.net_cash_effect)">{{money(x.net_cash_effect)}}</td>
+            <td>{{x.position_effect==='record_only'?'仅记历史':'更新持仓'}}</td>
           </tr></tbody>
         </table>
         <div v-if="entry.preview.warnings&&entry.preview.warnings.length" class="sub" style="color:var(--amber);margin-top:6px">{{entry.preview.warnings.join('；')}}</div>

@@ -106,6 +106,39 @@ class StockAnalysisDatabasePG:
             created_at
         ))
         record_id = cur.fetchone()[0]
+        try:
+            from application.research_artifacts import build_research_artifact
+
+            embedded = final_decision.get('provenance') if isinstance(final_decision, dict) else {}
+            embedded = embedded if isinstance(embedded, dict) else {}
+            provenance = {
+                'run_id': str(record_id), 'decision_at': str(created_at),
+                'market_as_of': embedded.get('market_as_of'),
+                'financial_cutoff_at': embedded.get('financial_cutoff_at'),
+                'universe_snapshot_id': embedded.get('universe_snapshot_id'),
+                'input_manifest_id': embedded.get('input_manifest_id'),
+                'policy_hash': embedded.get('policy_hash'),
+                'code_revision': embedded.get('code_revision'),
+            }
+            artifact = build_research_artifact(
+                subject=str(symbol), run_id=str(record_id), facts=slim_info,
+                provenance=provenance, data_quality={'level': 'formal'},
+                analysis=final_decision if isinstance(final_decision, dict) else {}, formal=True,
+                created_at=str(created_at),
+            )
+            cur.execute(
+                """INSERT INTO research_artifacts
+                   (artifact_id,subject,artifact_kind,run_id,formal,schema_version,
+                    payload_hash,payload,created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                   ON CONFLICT(run_id,artifact_kind) DO NOTHING""",
+                (artifact['artifact_id'], artifact['subject'], artifact['artifact_kind'],
+                 str(record_id), 1, artifact['schema_version'], artifact['payload_hash'],
+                 to_json(artifact), artifact['created_at']),
+            )
+        except Exception:
+            conn.rollback()
+            raise
         conn.commit()
         cur.close()
         conn.close()

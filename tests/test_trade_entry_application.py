@@ -121,3 +121,18 @@ def test_trade_entry_rejects_unconfirmed_mismatch_and_key_reuse(service) -> None
         )
     assert conflict.value.status_code == 409
     assert db.import_calls == 1
+
+
+def test_trade_entry_preview_binds_position_watermark_and_effects(service) -> None:
+    entry, db = service
+    db.holdings = [{
+        "code": "600519", "name": "贵州茅台", "quantity": 100, "cost_price": 1400,
+    }]
+    row = _row()
+    row["trade_type"] = "卖出"
+    preview = entry.preview(rows=[row], actor_id="shadow-user-example")
+    assert preview["status"] == "ready"
+    assert preview["batch_id"].startswith("tb_")
+    assert len(preview["position_watermark"]) == 64
+    assert preview["effects"][0]["position_before"] == 100
+    assert preview["effects"][0]["position_after"] == 0

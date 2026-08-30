@@ -193,6 +193,21 @@ def breaker_open() -> bool:
     """对外查询冷却状态(供 _notify_data_unavailable 显示具体卡死的源)。"""
     return any(_in_cooldown(capability) for capability in _BREAKER_STATE)
 
+
+def runtime_status(capability: str) -> dict:
+    """Expose bounded breaker metadata without provider messages or request details."""
+    state = _breaker_state(capability)
+    cooldown_until = None
+    if _in_cooldown(capability):
+        cooldown_until = datetime.fromtimestamp(
+            state["last_fail"] + _COOLDOWN_SEC
+        ).astimezone().isoformat(timespec="seconds")
+    return {
+        "available": not _in_cooldown(capability),
+        "cooldown_until": cooldown_until,
+        "last_error_category": "provider_failures" if state["fail_count"] else None,
+    }
+
 # 与 datahub._PERIOD_DAYS 对齐(自然日)
 _PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095, "5y": 1825}
 

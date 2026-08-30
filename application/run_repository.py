@@ -72,6 +72,7 @@ class RunRepository:
                 completed_at TEXT,
                 failed_at TEXT,
                 worker_id TEXT,
+                fencing_token TEXT,
                 lease_until TEXT,
                 heartbeat_at TEXT,
                 attempt INTEGER NOT NULL DEFAULT 0,
@@ -80,6 +81,49 @@ class RunRepository:
                 timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                 updated_at TEXT NOT NULL,
                 UNIQUE(actor_id, capability, idempotency_key)
+            )""",
+            """CREATE TABLE IF NOT EXISTS foliant_run_attempts (
+                run_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                fencing_token TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                heartbeat_at TEXT,
+                completed_at TEXT,
+                error_code TEXT,
+                PRIMARY KEY(run_id, attempt),
+                UNIQUE(fencing_token)
+            )""",
+            """CREATE TABLE IF NOT EXISTS foliant_run_progress (
+                event_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                current_value INTEGER,
+                total_value INTEGER,
+                message_code TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                artifact_kind TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                formal INTEGER NOT NULL,
+                schema_version TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id,artifact_kind)
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_artifact_annotations (
+                annotation_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                annotation_kind TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )""",
             """CREATE TABLE IF NOT EXISTS foliant_domain_outbox (
                 event_id TEXT PRIMARY KEY,
@@ -107,6 +151,7 @@ class RunRepository:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_foliant_runs_status ON foliant_runs(status, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_foliant_runs_actor ON foliant_runs(actor_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_foliant_run_progress_run ON foliant_run_progress(run_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_foliant_outbox_pending ON foliant_domain_outbox(published_at, created_at)",
         ]
         conn = self.connect()
@@ -115,7 +160,7 @@ class RunRepository:
             for statement in statements:
                 cur.execute(statement)
             columns = (
-                ("worker_id", "TEXT"), ("lease_until", "TEXT"),
+                ("worker_id", "TEXT"), ("fencing_token", "TEXT"), ("lease_until", "TEXT"),
                 ("heartbeat_at", "TEXT"), ("attempt", "INTEGER NOT NULL DEFAULT 0"),
                 ("max_attempts", "INTEGER NOT NULL DEFAULT 2"),
                 ("next_attempt_at", "TEXT"),
@@ -161,7 +206,7 @@ class RunRepository:
             "request_hash", "request_payload", "request_id", "status", "cancellable",
             "cancel_requested", "resource_uri", "summary", "result_payload", "provenance",
             "warnings", "error_code", "created_at", "started_at", "completed_at", "failed_at",
-            "worker_id", "lease_until", "heartbeat_at", "attempt", "max_attempts",
+            "worker_id", "fencing_token", "lease_until", "heartbeat_at", "attempt", "max_attempts",
             "next_attempt_at", "timeout_seconds", "updated_at",
         )
 
@@ -217,6 +262,17 @@ class RunRepository:
         conn = self.connect()
         try:
             cur = conn.cursor()
+            cur.execute(
+                """UPDATE foliant_run_attempts SET status='expired',completed_at=?,
+                   error_code='worker_lease_expired'
+                   WHERE status='running' AND EXISTS (
+                     SELECT 1 FROM foliant_runs r
+                     WHERE r.run_id=foliant_run_attempts.run_id
+                       AND r.fencing_token=foliant_run_attempts.fencing_token
+                       AND r.status='running' AND r.lease_until IS NOT NULL AND r.lease_until<?
+                   )""",
+                (now_value, now_value),
+            )
             cur.execute(
                 "SELECT COUNT(*) FROM foliant_runs WHERE actor_id=? AND status IN ('queued','running')",
                 (actor_id,),
@@ -307,7 +363,7 @@ class RunRepository:
         try:
             cur = conn.cursor()
             cur.execute(
-                """UPDATE foliant_runs SET status='queued',worker_id=NULL,lease_until=NULL,
+                """UPDATE foliant_runs SET status='queued',worker_id=NULL,fencing_token=NULL,lease_until=NULL,
                    heartbeat_at=NULL,next_attempt_at=?,updated_at=?
                    WHERE status='running' AND lease_until IS NOT NULL AND lease_until<?
                      AND cancel_requested=0 AND attempt<max_attempts""",
@@ -339,12 +395,22 @@ class RunRepository:
                 conn.commit()
                 return None
             run_id = str(row[0])
+            fencing_token = uuid.uuid4().hex
             cur.execute(
                 """UPDATE foliant_runs SET status='running',cancellable=1,worker_id=?,
-                   lease_until=?,heartbeat_at=?,attempt=attempt+1,
+                   fencing_token=?,lease_until=?,heartbeat_at=?,attempt=attempt+1,
                    started_at=COALESCE(started_at,?),updated_at=?
                    WHERE run_id=? AND status='queued' AND cancel_requested=0""",
-                (worker_id, lease_until, now_value, now_value, now_value, run_id),
+                (worker_id, fencing_token, lease_until, now_value,
+                 now_value, now_value, run_id),
+            )
+            cur.execute(
+                """INSERT INTO foliant_run_attempts
+                   (run_id,attempt,worker_id,fencing_token,status,started_at,heartbeat_at)
+                   SELECT run_id,attempt,worker_id,fencing_token,'running',?,?
+                   FROM foliant_runs WHERE run_id=? AND worker_id=? AND fencing_token=?
+                   ON CONFLICT(run_id,attempt) DO NOTHING""",
+                (now_value, now_value, run_id, worker_id, fencing_token),
             )
             claimed = self._select(cur, "run_id=? AND worker_id=?", (run_id, worker_id))
             conn.commit()
@@ -355,7 +421,8 @@ class RunRepository:
         finally:
             conn.close()
 
-    def heartbeat(self, run_id: str, worker_id: str, *, lease_seconds: int = 120) -> bool:
+    def heartbeat(self, run_id: str, worker_id: str, *, fencing_token: str | None = None,
+                  lease_seconds: int = 120) -> bool:
         now = datetime.now().astimezone()
         now_value = now.isoformat(timespec="seconds")
         lease_until = (now + timedelta(seconds=max(30, int(lease_seconds)))).isoformat(
@@ -364,13 +431,25 @@ class RunRepository:
         conn = self.connect()
         try:
             cur = conn.cursor()
+            fence_clause = " AND fencing_token=?" if fencing_token else ""
+            params = (now_value, lease_until, now_value, run_id, worker_id) + (
+                (fencing_token,) if fencing_token else ()
+            )
             cur.execute(
                 """UPDATE foliant_runs SET heartbeat_at=?,lease_until=?,updated_at=?
-                   WHERE run_id=? AND worker_id=? AND status='running' AND cancel_requested=0""",
-                (now_value, lease_until, now_value, run_id, worker_id),
+                   WHERE run_id=? AND worker_id=? AND status='running' AND cancel_requested=0"""
+                + fence_clause,
+                params,
             )
+            changed = cur.rowcount == 1
+            if changed and fencing_token:
+                cur.execute(
+                    """UPDATE foliant_run_attempts SET heartbeat_at=?
+                       WHERE run_id=? AND worker_id=? AND fencing_token=? AND status='running'""",
+                    (now_value, run_id, worker_id, fencing_token),
+                )
             conn.commit()
-            return cur.rowcount == 1
+            return changed
         finally:
             conn.close()
 
@@ -391,7 +470,7 @@ class RunRepository:
             conn.close()
 
     def complete(self, run_id: str, result: dict[str, Any], *, event_type: str,
-                 worker_id: str | None = None) -> None:
+                 worker_id: str | None = None, fencing_token: str | None = None) -> bool:
         now = now_iso()
         summary = str(result.get("summary") or "")[:2000]
         provenance = clean_json(result.get("provenance") or {})
@@ -400,10 +479,12 @@ class RunRepository:
         try:
             cur = conn.cursor()
             owner_clause = " AND worker_id=?" if worker_id else ""
+            if fencing_token:
+                owner_clause += " AND fencing_token=?"
             params: tuple[Any, ...] = (
                 summary, canonical_json(result), canonical_json(provenance),
                 canonical_json(warnings), now, now, run_id,
-            ) + ((worker_id,) if worker_id else ())
+            ) + ((worker_id,) if worker_id else ()) + ((fencing_token,) if fencing_token else ())
             cur.execute(
                 """UPDATE foliant_runs SET status='complete',cancellable=0,summary=?,
                    result_payload=?,provenance=?,warnings=?,completed_at=?,updated_at=?
@@ -413,6 +494,27 @@ class RunRepository:
             changed = cur.rowcount == 1
             run = self._select(cur, "run_id=?", (run_id,))
             if changed and run:
+                data = result.get("data") if isinstance(result, dict) else None
+                artifact = data.get("research_artifact") if isinstance(data, dict) else None
+                if isinstance(artifact, dict) and artifact.get("artifact_id"):
+                    cur.execute(
+                        """INSERT INTO research_artifacts
+                           (artifact_id,subject,artifact_kind,run_id,formal,schema_version,
+                            payload_hash,payload,created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(run_id,artifact_kind) DO NOTHING""",
+                        (artifact["artifact_id"], artifact.get("subject", ""),
+                         artifact.get("artifact_kind", "security-research"), run_id,
+                         int(bool(artifact.get("formal"))), artifact.get("schema_version", ""),
+                         artifact.get("payload_hash", ""), canonical_json(artifact),
+                         artifact.get("created_at") or now),
+                    )
+                if fencing_token:
+                    cur.execute(
+                        """UPDATE foliant_run_attempts SET status='complete',completed_at=?
+                           WHERE run_id=? AND worker_id=? AND fencing_token=? AND status='running'""",
+                        (now, run_id, worker_id, fencing_token),
+                    )
                 event_payload = {
                     "event_id": uuid.uuid4().hex,
                     "run_id": run_id,
@@ -431,6 +533,7 @@ class RunRepository:
                     ),
                 )
             conn.commit()
+            return changed
         except Exception:
             conn.rollback()
             raise
@@ -548,21 +651,34 @@ class RunRepository:
         finally:
             conn.close()
 
-    def fail(self, run_id: str, error_code: str, *, worker_id: str | None = None) -> None:
+    def fail(self, run_id: str, error_code: str, *, worker_id: str | None = None,
+             fencing_token: str | None = None) -> bool:
         now = now_iso()
         conn = self.connect()
         try:
             owner_clause = " AND worker_id=?" if worker_id else ""
+            if fencing_token:
+                owner_clause += " AND fencing_token=?"
             params: tuple[Any, ...] = (str(error_code)[:80], now, now, run_id) + (
                 (worker_id,) if worker_id else ()
-            )
-            conn.execute(
+            ) + ((fencing_token,) if fencing_token else ())
+            cur = conn.cursor()
+            cur.execute(
                 """UPDATE foliant_runs SET status='failed',cancellable=0,error_code=?,
                    failed_at=?,updated_at=? WHERE run_id=? AND status IN ('queued','running')"""
                 + owner_clause,
                 params,
             )
+            changed = cur.rowcount == 1
+            if changed and fencing_token:
+                cur.execute(
+                    """UPDATE foliant_run_attempts
+                       SET status='failed',completed_at=?,error_code=?
+                       WHERE run_id=? AND worker_id=? AND fencing_token=? AND status='running'""",
+                    (now, str(error_code)[:80], run_id, worker_id, fencing_token),
+                )
             conn.commit()
+            return changed
         finally:
             conn.close()
 
@@ -589,19 +705,29 @@ class RunRepository:
         finally:
             conn.close()
 
-    def finalize_cancel(self, run_id: str, worker_id: str) -> bool:
+    def finalize_cancel(self, run_id: str, worker_id: str,
+                        fencing_token: str | None = None) -> bool:
         now = now_iso()
         conn = self.connect()
         try:
             cur = conn.cursor()
+            fence_clause = " AND fencing_token=?" if fencing_token else ""
             cur.execute(
                 """UPDATE foliant_runs SET status='cancelled',cancellable=0,
                    completed_at=?,updated_at=?
-                   WHERE run_id=? AND worker_id=? AND status='running' AND cancel_requested=1""",
-                (now, now, run_id, worker_id),
+                   WHERE run_id=? AND worker_id=? AND status='running' AND cancel_requested=1"""
+                + fence_clause,
+                (now, now, run_id, worker_id) + ((fencing_token,) if fencing_token else ()),
             )
+            changed = cur.rowcount == 1
+            if changed and fencing_token:
+                cur.execute(
+                    """UPDATE foliant_run_attempts SET status='cancelled',completed_at=?
+                       WHERE run_id=? AND worker_id=? AND fencing_token=? AND status='running'""",
+                    (now, run_id, worker_id, fencing_token),
+                )
             conn.commit()
-            return cur.rowcount == 1
+            return changed
         finally:
             conn.close()
 
@@ -623,6 +749,55 @@ class RunRepository:
             changed = max(0, int(cur.rowcount or 0))
             conn.commit()
             return changed
+        finally:
+            conn.close()
+
+    def append_progress(self, run_id: str, *, worker_id: str, fencing_token: str,
+                        phase: str, current: int | None = None, total: int | None = None,
+                        message_code: str = "") -> bool:
+        """Append bounded metadata-only progress when the caller still owns the Run."""
+        safe_phase = str(phase or "working")[:48]
+        safe_message = str(message_code or "")[:80]
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT attempt FROM foliant_runs WHERE run_id=? AND worker_id=?
+                   AND fencing_token=? AND status='running'""",
+                (run_id, worker_id, fencing_token),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return False
+            attempt = int(row[0] or 0)
+            cur.execute(
+                """INSERT INTO foliant_run_progress
+                   (event_id,run_id,attempt,phase,current_value,total_value,message_code,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (uuid.uuid4().hex, run_id, attempt, safe_phase,
+                 None if current is None else int(current),
+                 None if total is None else max(0, int(total)), safe_message, now_iso()),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def progress(self, run_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT attempt,phase,current_value,total_value,message_code,created_at
+                   FROM foliant_run_progress WHERE run_id=?
+                   ORDER BY created_at ASC LIMIT ?""",
+                (run_id, max(1, min(200, int(limit)))),
+            )
+            return [{
+                "attempt": int(row[0]), "phase": row[1], "current": row[2],
+                "total": row[3], "message_code": row[4] or "", "created_at": row[5],
+            } for row in cur.fetchall()]
         finally:
             conn.close()
 

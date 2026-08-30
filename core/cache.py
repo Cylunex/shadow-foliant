@@ -8,7 +8,7 @@
   - key 统一加 'aiagents:' 命名空间(与他人共用同一 Redis 不冲突)。
   - cache_get/set(JSON 序列化)、@cached(prefix, ttl) 装饰器、lock(name, ttl) 分布式锁上下文。
 
-配置(.env,可选,缺省连 localhost:6379):
+配置(.env,可选；未显式配置时不探测隐式 localhost):
   REDIS_URL=redis://your_redis_host:6379/0   或   REDIS_HOST / REDIS_PORT / REDIS_DB
 """
 
@@ -36,14 +36,39 @@ def _redis():
         return None
     try:
         import redis
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
+
         url = os.getenv('REDIS_URL')
+        host = os.getenv('REDIS_HOST')
+        if not url and not host:
+            _tried = True
+            _down_until = now + 30
+            return None
+        try:
+            connect_timeout = max(
+                0.1, min(3.0, float(os.getenv('REDIS_CONNECT_TIMEOUT_SECONDS', '1') or '1'))
+            )
+            socket_timeout = max(
+                0.1, min(5.0, float(os.getenv('REDIS_SOCKET_TIMEOUT_SECONDS', '1') or '1'))
+            )
+        except (TypeError, ValueError):
+            connect_timeout = socket_timeout = 1.0
+        options = {
+            'socket_timeout': socket_timeout,
+            'socket_connect_timeout': connect_timeout,
+            'decode_responses': True,
+            'retry': Retry(NoBackoff(), 0),
+            'retry_on_timeout': False,
+            'health_check_interval': 0,
+        }
         if url:
-            c = redis.Redis.from_url(url, socket_timeout=2, socket_connect_timeout=2, decode_responses=True)
+            c = redis.Redis.from_url(url, **options)
         else:
-            c = redis.Redis(host=os.getenv('REDIS_HOST', ''),
+            c = redis.Redis(host=host,
                             port=int(os.getenv('REDIS_PORT', '6379')),
                             db=int(os.getenv('REDIS_DB', '0')),
-                            socket_timeout=2, socket_connect_timeout=2, decode_responses=True)
+                            **options)
         c.ping()
         _client = c
         return c

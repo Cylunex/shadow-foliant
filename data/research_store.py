@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "9"
 
 
 def _json(value) -> str:
@@ -129,6 +129,21 @@ class ResearchStore:
                 retrieved_at TEXT NOT NULL, schema_version TEXT NOT NULL,
                 quality_status TEXT NOT NULL, row_count INTEGER NOT NULL,
                 payload_hash TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_dataset_publications (
+                capability TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL,
+                dataset_id TEXT NOT NULL,
+                effective_as_of TEXT,
+                published_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_dataset_publication_history (
+                capability TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                dataset_id TEXT NOT NULL,
+                effective_as_of TEXT,
+                published_at TEXT NOT NULL,
+                PRIMARY KEY(capability,generation)
             )""",
             """CREATE TABLE IF NOT EXISTS research_market_observations (
                 observation_id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL,
@@ -243,6 +258,26 @@ class ResearchStore:
                 payload TEXT NOT NULL, first_seen_at TEXT NOT NULL, retrieved_at TEXT NOT NULL,
                 UNIQUE(event_id,content_hash)
             )""",
+            """CREATE TABLE IF NOT EXISTS research_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                artifact_kind TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                formal INTEGER NOT NULL,
+                schema_version TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id,artifact_kind)
+            )""",
+            """CREATE TABLE IF NOT EXISTS research_artifact_annotations (
+                annotation_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                annotation_kind TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
             f"""CREATE TABLE IF NOT EXISTS selection_runs (
                 run_id {id_type}, selection_date TEXT NOT NULL, created_at TEXT NOT NULL,
                 status TEXT NOT NULL, primary_source TEXT NOT NULL,
@@ -269,6 +304,7 @@ class ResearchStore:
                 policy_version TEXT NOT NULL, policy_hash TEXT NOT NULL,
                 policy_payload TEXT NOT NULL, code_revision TEXT NOT NULL,
                 dependency_lock_hash TEXT, strategy_snapshot TEXT,
+                publication_generations TEXT,
                 schema_version TEXT NOT NULL, created_at TEXT NOT NULL
             )""",
             """CREATE TABLE IF NOT EXISTS selection_artifacts (
@@ -329,6 +365,7 @@ class ResearchStore:
             "CREATE INDEX IF NOT EXISTS idx_selection_runs_date ON selection_runs(selection_date, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_selection_nominations_symbol ON selection_candidate_nominations(symbol,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_selection_strategy_runs ON selection_strategy_runs(strategy_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_publication_history ON research_dataset_publication_history(capability,generation)",
         ]
         try:
             for sql in statements:
@@ -380,6 +417,16 @@ class ResearchStore:
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
             self._add_column(cur, "selection_input_manifests", "strategy_snapshot", "TEXT")
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, datetime.now().astimezone().isoformat()),
+            )
+        version = "9-operational-integrity-v5"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(
+                cur, "selection_input_manifests", "publication_generations", "TEXT"
+            )
             cur.execute(
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
@@ -561,6 +608,59 @@ class ResearchStore:
             conn.close()
         return run_id
 
+    @staticmethod
+    def _advance_generation(cur, capability: str, dataset_id: str,
+                            effective_as_of: Optional[str] = None) -> int:
+        """Advance one publication fence in the caller's data transaction."""
+        now = datetime.now().astimezone().isoformat()
+        cur.execute(
+            """SELECT generation,dataset_id,effective_as_of
+               FROM research_dataset_publications WHERE capability=?""",
+            (str(capability),),
+        )
+        row = cur.fetchone()
+        if row and str(row[1]) == str(dataset_id) and str(row[2] or "") == str(
+            effective_as_of or ""
+        ):
+            return int(row[0] or 0)
+        generation = int(row[0] or 0) + 1 if row else 1
+        cur.execute(
+            """INSERT INTO research_dataset_publications
+               (capability,generation,dataset_id,effective_as_of,published_at)
+               VALUES (?,?,?,?,?) ON CONFLICT(capability) DO UPDATE SET
+                 generation=excluded.generation,dataset_id=excluded.dataset_id,
+                 effective_as_of=excluded.effective_as_of,published_at=excluded.published_at""",
+            (str(capability), generation, str(dataset_id), effective_as_of, now),
+        )
+        cur.execute(
+            """INSERT INTO research_dataset_publication_history
+               (capability,generation,dataset_id,effective_as_of,published_at)
+               VALUES (?,?,?,?,?) ON CONFLICT(capability,generation) DO NOTHING""",
+            (str(capability), generation, str(dataset_id), effective_as_of, now),
+        )
+        return generation
+
+    def generation_vector(self, capabilities: Optional[Iterable[str]] = None) -> dict[str, int]:
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            requested = sorted({str(value) for value in (capabilities or []) if value})
+            if requested:
+                placeholders = ",".join(["?"] * len(requested))
+                cur.execute(
+                    f"SELECT capability,generation FROM research_dataset_publications "
+                    f"WHERE capability IN ({placeholders}) ORDER BY capability",
+                    tuple(requested),
+                )
+            else:
+                cur.execute(
+                    "SELECT capability,generation FROM research_dataset_publications ORDER BY capability"
+                )
+            found = {str(row[0]): int(row[1] or 0) for row in cur.fetchall()}
+            return {name: found.get(name, 0) for name in requested} if requested else found
+        finally:
+            conn.close()
+
     def finish_sync(self, run_id: str, *, status: str, row_count: int,
                     quality_status: str, detail: Optional[dict] = None) -> None:
         conn = self.connect()
@@ -669,6 +769,8 @@ class ResearchStore:
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 rows,
             )
+            if quality == "ok":
+                self._advance_generation(cur, "security_master", snapshot_id, snapshot_date)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -782,6 +884,9 @@ class ResearchStore:
                 schema_version=excluded.schema_version,quality_status=excluded.quality_status,
                 dataset_id=excluded.dataset_id""", rows,
             )
+            self._advance_generation(
+                cur, "daily_market", dataset_id, max(row[1] for row in rows)
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -875,6 +980,7 @@ class ResearchStore:
                 provider_effective_as_of=excluded.provider_effective_as_of,
                 dataset_id=excluded.dataset_id,payload=excluded.payload""", rows,
             )
+            self._advance_generation(cur, "valuation", dataset_id, requested_as_of)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -912,8 +1018,16 @@ class ResearchStore:
                 provenance.get("schema_version", SCHEMA_VERSION),
                 provenance.get("quality_status", "ok"), payload,
             ))
-        self._executemany(
-            """INSERT INTO research_financial_facts
+        if not rows:
+            return 0
+        dataset_id = hashlib.sha256(
+            (str(table) + "\n" + "\n".join(sorted(str(row[-1]) for row in rows))).encode("utf-8")
+        ).hexdigest()
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.executemany(
+                """INSERT INTO research_financial_facts
                (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
                 first_seen_at,origin,effective_at,retrieved_at,schema_version,quality_status,payload)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -921,8 +1035,16 @@ class ResearchStore:
                 first_seen_at=COALESCE(NULLIF(research_financial_facts.first_seen_at,''),
                                        excluded.first_seen_at),
                 retrieved_at=excluded.retrieved_at,
-                quality_status=excluded.quality_status""", rows,
-        )
+                quality_status=excluded.quality_status""",
+                rows,
+            )
+            self._advance_generation(cur, "financial_pit", dataset_id, _iso_date(as_of))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         return len(rows)
 
     def upsert_fund_flow_daily(self, df: pd.DataFrame, *, trade_date: str) -> int:
@@ -953,7 +1075,8 @@ class ResearchStore:
             return 0
         conn = self.connect()
         try:
-            conn.cursor().executemany(
+            cur = conn.cursor()
+            cur.executemany(
                 """INSERT INTO research_fund_flow_daily
                    (symbol,trade_date,name,close,change_pct,main_net_inflow,
                     main_net_inflow_ratio,provider,origin,effective_at,retrieved_at,
@@ -969,6 +1092,8 @@ class ResearchStore:
                     quality_status=excluded.quality_status,payload=excluded.payload""",
                 rows,
             )
+            dataset_id = hashlib.sha256(_json(rows).encode("utf-8")).hexdigest()
+            self._advance_generation(cur, "fund_flow", dataset_id, effective_date)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1012,6 +1137,7 @@ class ResearchStore:
         conn = self.connect()
         try:
             cur = conn.cursor()
+            revision_added = False
             for row in rows:
                 event_id = str(row[0])
                 content = {
@@ -1047,6 +1173,7 @@ class ResearchStore:
                        ON CONFLICT(event_id,content_hash) DO NOTHING""",
                     (revision_id, event_id, content_hash, supersedes, *row[1:-1], now, row[-1]),
                 )
+                revision_added = revision_added or bool(cur.rowcount)
                 cur.execute(
                     """INSERT INTO research_event_records
                        (event_id,symbol,event_type,event_date,effective_at,direction,confidence,
@@ -1067,6 +1194,23 @@ class ResearchStore:
                         retrieved_at=excluded.retrieved_at""",
                     row,
                 )
+            if revision_added:
+                max_effective = max(str(row[4]) for row in rows)
+                cur.execute(
+                    """SELECT revision_id,content_hash FROM (
+                         SELECT revision_id,content_hash,event_id,confirmation_status,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY event_id ORDER BY retrieved_at DESC,revision_id DESC
+                           ) AS row_no
+                         FROM research_event_revisions WHERE effective_at<=?
+                       ) visible WHERE row_no=1 AND confirmation_status='confirmed'
+                       ORDER BY revision_id""",
+                    (max_effective,),
+                )
+                event_dataset = hashlib.sha256(
+                    "\n".join(f"{row[0]}:{row[1]}" for row in cur.fetchall()).encode("utf-8")
+                ).hexdigest()
+                self._advance_generation(cur, "events", event_dataset, max_effective)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1138,6 +1282,13 @@ class ResearchStore:
                        (trade_date,provider,is_open,retrieved_at) VALUES (?,?,?,?)""",
                     rows,
                 )
+            calendar_dataset = hashlib.sha256(
+                _json({"provider": provider, "start": _iso_date(start_date),
+                       "end": _iso_date(end_date), "rows": rows}).encode("utf-8")
+            ).hexdigest()
+            self._advance_generation(
+                cur, "trade_calendar", calendar_dataset, _iso_date(end_date)
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1577,6 +1728,7 @@ class ResearchStore:
                           market_dataset_ids,valuation_dataset_ids,financial_revision_set_id,
                           event_dataset_id,policy_version,policy_hash,policy_payload,
                           code_revision,dependency_lock_hash,strategy_snapshot,
+                          publication_generations,
                           schema_version,created_at
                    FROM selection_input_manifests WHERE manifest_id=?""",
                 (str(manifest_id),),
@@ -1589,6 +1741,7 @@ class ResearchStore:
                 "market_dataset_ids", "valuation_dataset_ids", "financial_revision_set_id",
                 "event_dataset_id", "policy_version", "policy_hash", "policy",
                 "code_revision", "dependency_lock_hash", "strategy_snapshot",
+                "publication_generations",
                 "schema_version", "created_at",
             )
             value = dict(zip(keys, row))
@@ -1596,6 +1749,7 @@ class ResearchStore:
                 ("decision_context", {}), ("market_dataset_ids", []),
                 ("valuation_dataset_ids", []), ("policy", {}),
                 ("strategy_snapshot", {}),
+                ("publication_generations", {}),
             ):
                 if not isinstance(value[key], (dict, list)):
                     value[key] = json.loads(value[key] or _json(fallback))
@@ -1955,8 +2109,8 @@ class ResearchStore:
                         market_dataset_ids,valuation_dataset_ids,financial_revision_set_id,
                         event_dataset_id,policy_version,policy_hash,policy_payload,
                         code_revision,dependency_lock_hash,strategy_snapshot,
-                        schema_version,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        publication_generations,schema_version,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (manifest_id, run_id, _json(input_manifest.get("decision_context", {})),
                      input_manifest.get("universe_snapshot_id", ""),
                      _json(input_manifest.get("market_dataset_ids", [])),
@@ -1968,11 +2122,29 @@ class ResearchStore:
                      _json(input_manifest.get("policy", {})),
                      input_manifest.get("code_revision", "unknown"),
                      input_manifest.get("dependency_lock_hash", "unknown"),
-                     _json(input_manifest.get("strategy_snapshot", {})), SCHEMA_VERSION,
+                     _json(input_manifest.get("strategy_snapshot", {})),
+                     _json(input_manifest.get("publication_generations", {})), SCHEMA_VERSION,
                      datetime.now().astimezone().isoformat()),
                 )
                 self._insert_selection_artifact(conn, run_id, "formal_top15", formal_top15, metadata)
                 self._insert_selection_artifact(conn, run_id, "formal_top5", formal_top5, metadata)
+                from application.research_artifacts import build_selection_research_artifact
+
+                research_artifact = build_selection_research_artifact(
+                    run_id=run_id, selection_date=run["selection_date"],
+                    candidates=formal_top5, metadata=metadata, input_manifest=input_manifest,
+                )
+                conn.execute(
+                    """INSERT INTO research_artifacts
+                       (artifact_id,subject,artifact_kind,run_id,formal,schema_version,
+                        payload_hash,payload,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(run_id,artifact_kind) DO NOTHING""",
+                    (research_artifact["artifact_id"], research_artifact["subject"],
+                     research_artifact["artifact_kind"], run_id, 1,
+                     research_artifact["schema_version"], research_artifact["payload_hash"],
+                     _json(research_artifact), research_artifact["created_at"]),
+                )
             conn.commit()
             return run_id
         except Exception:

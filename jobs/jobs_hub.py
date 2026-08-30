@@ -1723,11 +1723,9 @@ HARD_DEADLINE_SEC = int(_os.environ.get('JOBS_HUB_TASK_HARD_DEADLINE_SEC',
 # 兼容旧变量名(配置 / 文档引用过 TASK_DEADLINE_SEC, 不破坏)
 TASK_DEADLINE_SEC = SOFT_DEADLINE_SEC
 
-# ─── 全局任务硬超时(2026-06-23): 任何任务超过阈值都被外层 future 切断 ────────
-# 背景:不少任务(fund_valuation_signal / morning_portfolio / selection_debate /
-# InStock 取因子 等)就算我加了内层 timeout, 实际还是被某些底层 socket / lock
-# 卡 30+ 分钟, 拖累后续任务窗口。最稳:在 _run_with_log 调用 func 时套外层 future,
-# 任意任务超 _TASK_HARD_TIMEOUTS[name] 必抛 TimeoutError(孤儿线程留底层自然结束)。
+# ─── 全局任务硬超时: 每个可变任务在可终止子进程中执行 ──────────────────────
+# 超时先发协作取消信号，宽限期后 terminate/kill；返回前保证子进程不再存活，
+# 避免旧线程在任务已标记失败后继续写数据库或占满调度线程池。
 #
 # 配置默认每任务 10 分钟(_DEFAULT_TASK_TIMEOUT), 慢任务用 _TASK_HARD_TIMEOUTS 单独
 # 调高(rag_ingest / daily_backtest 等)。可通过 env JOBS_HUB_DEFAULT_TASK_TIMEOUT 覆盖。
@@ -1762,22 +1760,13 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
                                          # 默认 Top-20,见 PORTFOLIO_DEEP_TOP_N)。5400s 给降级日(每股~300s)足量头量(2026-06-28)
     'eod_outcomes':              900,    # 依赖等待在 worker 外；这里只计推荐池回填 + 信号后验
 }
-_TASK_TIMEOUT_POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
-
-
 def _run_with_log(name, func, *a, **kw):
     """Run task in thread pool and log result (module-level, usable by _wrap)。
 
     1. 进 / 出 / 失败时都在 stdout 打一行带耗时的标识, 方便 grep 出某任务的执行窗口。
-    2. 套全局外层 future 硬超时(_DEFAULT_TASK_TIMEOUT, 慢任务在 _TASK_HARD_TIMEOUTS 覆盖):
-       任何任务超时一律切断, 不再卡 30 分钟拖累后续。孤儿线程留底层自然结束。
+    2. 套可终止子进程硬超时(_DEFAULT_TASK_TIMEOUT, 慢任务单独覆盖)。
     3. 异常 → 记 job_runs(带 traceback 尾) + 推 alert 告警(限频)。
     """
-    global _TASK_TIMEOUT_POOL
-    if _TASK_TIMEOUT_POOL is None:
-        _TASK_TIMEOUT_POOL = concurrent.futures.ThreadPoolExecutor(
-            max_workers=24, thread_name_prefix='task-hard-timeout')
-
     t0 = time.time()
     pool_busy = len(_TASK_START_TS) + 1
     timeout = _TASK_HARD_TIMEOUTS.get(name, _DEFAULT_TASK_TIMEOUT)
@@ -1787,10 +1776,40 @@ def _run_with_log(name, func, *a, **kw):
         _TASK_START_TS[name] = t0
         _TASK_CANCEL_EVENTS[name] = cancel_event
         _TASK_WAITING_ON.pop(name, None)
-    fut = _TASK_TIMEOUT_POOL.submit(func, *a, **kw)
     try:
-        fut.result(timeout=timeout)
+        from jobs.isolated_runtime import run_isolated_task
+
+        isolated = run_isolated_task(
+            name, func, tuple(a), dict(kw), timeout_seconds=timeout,
+            cancel_grace_seconds=15,
+        )
         elapsed = time.time() - t0
+        if isolated.get('status') in {'timeout', 'deadline_exceeded'}:
+            waiting_on = str(isolated.get('waiting_on') or '')
+            if waiting_on:
+                msg = f'dependency {waiting_on} not ready before task deadline'
+                print(f'[jobs_hub] ⏭️ {name} 依赖等待超时: {waiting_on}', flush=True)
+                _log_run(name, 'skipped', error=msg,
+                         started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                         finished_at=datetime.now().astimezone().isoformat(), notify=False)
+                _notify_dependency_wait(name, waiting_on, msg)
+                return
+            msg = f'execution_timeout: exceeded {timeout}s; child_terminated=true'
+            print(f'[jobs_hub] ⏱️ {name} 执行阶段超时 '
+                  f'(耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
+            _log_run(name, 'error', error=msg,
+                     started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                     finished_at=datetime.now().astimezone().isoformat(), notify=False)
+            _notify_execution_timeout(name, elapsed, timeout)
+            return
+        if isolated.get('status') == 'error':
+            category = str(isolated.get('error_category') or 'execution_failed')[:80]
+            print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): {category}', flush=True)
+            _log_run(name, 'error', error=f'isolated_task_failed:{category}',
+                     started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
+                     finished_at=datetime.now().astimezone().isoformat(), notify=False)
+            _notify_task_error(name, RuntimeError(category), '')
+            return
         outcome = _latest_job_run_since(
             name, datetime.fromtimestamp(t0).astimezone().isoformat()
         )
@@ -1807,60 +1826,13 @@ def _run_with_log(name, func, *a, **kw):
                   f'{detail[:120]}', flush=True)
         else:
             print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
-    except concurrent.futures.TimeoutError as timeout_exc:
-        elapsed = time.time() - t0
-        if fut.done():
-            # 任务主体自己抛出的 TimeoutError 与 future 等待超时是同一个异常类型；
-            # fut.done() 可可靠区分。前者属于真实代码/接口异常，必须保留 traceback。
-            import traceback
-            tb = ''.join(traceback.format_exception(
-                type(timeout_exc), timeout_exc, timeout_exc.__traceback__))
-            print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
-                  f'TimeoutError: {str(timeout_exc)[:120]}', flush=True)
-            _log_run(name, 'error', error=f'TimeoutError: {timeout_exc}\n{tb[-900:]}',
-                     started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
-                     finished_at=datetime.now().astimezone().isoformat(), notify=False)
-            _notify_task_error(name, timeout_exc, tb)
-        else:
-            with _TASK_LOCK:
-                dependency = _TASK_WAITING_ON.get(name)
-            cancel_event.set()
-            fut.cancel()
-            if dependency:
-                # 正常的依赖等待降级：明确记 skipped，并给 barrier 最多 15s 响应取消，
-                # 避免留下继续等待/随后又执行主体的孤儿线程。
-                settled = False
-                try:
-                    fut.result(timeout=15)
-                    settled = True
-                except Exception:
-                    pass
-                msg = (f'dependency_wait_timeout: {dependency}; waited={elapsed:.0f}s '
-                       f'outer_limit={timeout}s')
-                print(f'[jobs_hub] ⏳ {name} 等待依赖 {dependency} 超限，'
-                      f'按 skipped 收尾 (耗时 {elapsed:.1f}s)', flush=True)
-                if not settled:
-                    _log_run(name, 'skipped', error=msg,
-                             started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
-                             finished_at=datetime.now().astimezone().isoformat(),
-                             notify=False)
-                _notify_dependency_wait(
-                    name, dependency, f'已等待 {elapsed:.0f}s(外层阈值 {timeout}s)。')
-            else:
-                msg = f'execution_timeout: exceeded {timeout}s (orphan may still be running)'
-                print(f'[jobs_hub] ⏱️ {name} 执行阶段超时 '
-                      f'(耗时 {elapsed:.1f}s, 阈值 {timeout}s)', flush=True)
-                _log_run(name, 'error', error=msg,
-                         started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
-                         finished_at=datetime.now().astimezone().isoformat(), notify=False)
-                _notify_execution_timeout(name, elapsed, timeout)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         elapsed = time.time() - t0
         print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
               f'{type(e).__name__}: {str(e)[:120]}', flush=True)
-        _log_run(name, 'error', error=f'{type(e).__name__}: {e}\n{tb[-900:]}',
+        _log_run(name, 'error', error=f'task_runtime_failed:{type(e).__name__}',
                  started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
                  finished_at=datetime.now().astimezone().isoformat(), notify=False)
         _notify_task_error(name, e, tb)

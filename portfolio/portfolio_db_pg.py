@@ -390,14 +390,160 @@ class PortfolioDBPG:
         tt = t.get('trade_time') or t.get('成交时间') or t.get('日期') or t.get('date')
         extra = {}
         for cn, en in (('note', 'note'), ('commission', 'commission'), ('tax', 'tax'),
-                       ('备注', 'note'), ('佣金', 'commission'), ('印花税', 'tax')):
+                       ('备注', 'note'), ('佣金', 'commission'), ('印花税', 'tax'),
+                       ('broker_execution_id', 'broker_execution_id'),
+                       ('execution_id', 'broker_execution_id'),
+                       ('broker_order_id', 'broker_order_id'), ('order_id', 'broker_order_id'),
+                       ('account_ref', 'account_ref'),
+                       ('external_fingerprint', 'external_fingerprint'),
+                       ('created_by_shadow_user_id', 'created_by_shadow_user_id'),
+                       ('import_batch_id', 'import_batch_id')):
             if t.get(cn) not in (None, '') and en not in extra:
                 extra[en] = t.get(cn)
         extra['source'] = t.get('source') or 'import_trades'
         return {'code': code, 'name': name, 'ttype': ttype, 'qty': qty,
                 'price': price, 'amount': amount, 'tt': (str(tt) if tt else None), 'extra': extra}
 
-    def import_trades(self, trades: List[Dict], update_position: bool = True) -> Dict[str, int]:
+    def existing_trade_execution_keys(
+        self, keys: List[str], *, legacy_keys: Optional[List[tuple]] = None
+    ) -> List[Any]:
+        """Look up execution identities directly, including identity-less legacy rows.
+
+        Legacy comparison is intentionally limited to new rows that also lack broker/account
+        identity.  This preserves old import idempotency without collapsing distinct broker fills.
+        """
+        wanted = sorted({str(key) for key in keys if key})
+        if not wanted:
+            return []
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            placeholders = ','.join(['%s'] * len(wanted))
+            cur.execute(
+                f"SELECT external_fingerprint FROM trade_records "
+                f"WHERE external_fingerprint IN ({placeholders})",
+                wanted,
+            )
+            found: List[Any] = [str(row[0]) for row in cur.fetchall() if row and row[0]]
+            legacy = sorted(set(legacy_keys or []))
+            if legacy:
+                values_sql = ','.join(['(%s,%s,%s,%s,%s)'] * len(legacy))
+                params: List[Any] = []
+                for code, trade_time, trade_type, quantity, price in legacy:
+                    params.extend([code, trade_time, trade_type, int(quantity), float(price)])
+                cur.execute(
+                    f"""WITH wanted(stock_code,wall_time,trade_type,quantity,price) AS (
+                           VALUES {values_sql}
+                         )
+                         SELECT DISTINCT t.stock_code,
+                           to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
+                                   'YYYY-MM-DD HH24:MI:SS'),
+                           t.trade_type,t.quantity,round(t.price::numeric,4)
+                         FROM trade_records t JOIN wanted w
+                           ON t.stock_code=w.stock_code AND t.trade_type=w.trade_type
+                          AND t.quantity=w.quantity AND round(t.price::numeric,4)=w.price
+                          AND to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
+                                      'YYYY-MM-DD HH24:MI:SS')=w.wall_time
+                         WHERE t.external_fingerprint IS NULL""",
+                    tuple(params),
+                )
+                found.extend(
+                    (str(row[0]), str(row[1]), str(row[2]), int(row[3]), round(float(row[4]), 4))
+                    for row in cur.fetchall()
+                )
+            return found
+        finally:
+            cur.close()
+            conn.close()
+
+    def stage_trade_import_batch(self, *, batch_id: str, actor_id: str,
+                                 preview_hash: str, position_watermark: str,
+                                 update_position: bool, rows: List[Dict]) -> None:
+        """Persist an immutable normalized preview without writing any trade or position."""
+        import json
+
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """INSERT INTO trade_import_batches
+                   (batch_id,actor_id,status,update_position,preview_hash,
+                    position_watermark,row_count)
+                   VALUES (%s,%s,'staged',%s,%s,%s,%s)
+                   ON CONFLICT(batch_id) DO NOTHING""",
+                (batch_id, actor_id, bool(update_position), preview_hash,
+                 position_watermark, len(rows)),
+            )
+            for index, row in enumerate(rows, 1):
+                cur.execute(
+                    """INSERT INTO trade_import_rows
+                       (batch_id,row_number,external_fingerprint,normalized_payload,
+                        validation_status,error_codes)
+                       VALUES (%s,%s,%s,%s,'valid','[]'::jsonb)
+                       ON CONFLICT(batch_id,row_number) DO NOTHING""",
+                    (batch_id, index, row.get('external_fingerprint'),
+                     json.dumps(row, ensure_ascii=False)),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+    def mark_trade_import_batch(self, batch_id: str, status: str) -> None:
+        allowed = {'confirmed', 'failed', 'abandoned'}
+        if status not in allowed:
+            raise ValueError('invalid_trade_batch_status')
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            timestamp_column = 'confirmed_at' if status == 'confirmed' else (
+                'abandoned_at' if status == 'abandoned' else None
+            )
+            if timestamp_column:
+                cur.execute(
+                    f"UPDATE trade_import_batches SET status=%s,{timestamp_column}=NOW() "
+                    "WHERE batch_id=%s AND status='staged'",
+                    (status, batch_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE trade_import_batches SET status=%s "
+                    "WHERE batch_id=%s AND status='staged'",
+                    (status, batch_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def _position_watermark(cur, codes: List[str]) -> str:
+        import hashlib
+        import json
+
+        snapshot = {}
+        for code in sorted(set(codes)):
+            cur.execute(
+                "SELECT quantity,cost_price FROM portfolio_stocks WHERE code=%s FOR UPDATE",
+                (code,),
+            )
+            row = cur.fetchone()
+            snapshot[code] = {
+                'quantity': int((row[0] if row else 0) or 0),
+                'cost_price': (float(row[1]) if row and row[1] is not None else None),
+            }
+        payload = json.dumps(snapshot, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def import_trades(self, trades: List[Dict], update_position: bool = True,
+                      expected_position_watermark: Optional[str] = None,
+                      atomic: bool = True) -> Dict[str, int]:
         """批量导入成交记录(真实买卖流水)到 trade_records，并按成交更新持仓。
 
         trades 字段(中英文皆可): code/股票代码(必填)、trade_type/方向(买入/卖出)、
@@ -419,11 +565,21 @@ class PortfolioDBPG:
                 failed += 1
         norm.sort(key=lambda x: x['tt'] or '')
 
+        if atomic and failed:
+            return {
+                'imported': 0, 'failed': failed, 'positions_updated': 0,
+                'errors': ['trade_batch_invalid'],
+            }
+
         imported = pos_updated = 0
         errors = []
         conn = get_conn()
         cur = conn.cursor()
         try:
+            if update_position:
+                current_watermark = self._position_watermark(cur, [n['code'] for n in norm])
+                if expected_position_watermark and current_watermark != expected_position_watermark:
+                    raise ValueError('trade_position_changed')
             for n in norm:
                 try:
                     # ⚠️ 每行套 SAVEPOINT(2026-07-17 修):单行 INSERT 失败(典型:trade_time
@@ -431,7 +587,8 @@ class PortfolioDBPG:
                     # 后续行全抛 InFailedSqlTransaction、批末 commit 被 PG 当 ROLLBACK 静默执行,
                     # 持仓更新与流水必须复用本连接并处在同一个 SAVEPOINT 中；否则流水失败
                     # 时持仓可能已经被另一连接提交，形成不可恢复的不一致。
-                    cur.execute('SAVEPOINT _tr')
+                    if not atomic:
+                        cur.execute('SAVEPOINT _tr')
                     # 先按时序更新持仓,拿到这笔成交后的持仓快照(数量/成本/增减)
                     pos_q = pos_c = delta = None
                     position_changed = False
@@ -453,18 +610,29 @@ class PortfolioDBPG:
                         INSERT INTO trade_records
                             (stock_code, stock_name, trade_type, quantity, price, amount,
                              pos_quantity, pos_cost_price, delta_qty, trade_time, source,
-                             note, commission, tax, extra, profit_loss)
+                             note, commission, tax, extra, profit_loss, order_id,
+                             broker_execution_id, account_ref, import_batch_id,
+                             external_fingerprint, position_effect, created_by_shadow_user_id)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s, %s)
+                                COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s)
                     """, (n['code'], n['name'], n['ttype'], n['qty'], n['price'], n['amount'],
                           pos_q, pos_c, delta, n['tt'], n['extra'].get('source'),
                           n['extra'].get('note'), n['extra'].get('commission'),
-                          n['extra'].get('tax'), json.dumps(n['extra'], ensure_ascii=False), pl))
-                    cur.execute('RELEASE SAVEPOINT _tr')
+                          n['extra'].get('tax'), json.dumps(n['extra'], ensure_ascii=False), pl,
+                          n['extra'].get('broker_order_id'),
+                          n['extra'].get('broker_execution_id'), n['extra'].get('account_ref'),
+                          n['extra'].get('import_batch_id'), n['extra'].get('external_fingerprint'),
+                          ('apply' if update_position else 'record_only'),
+                          n['extra'].get('created_by_shadow_user_id')))
+                    if not atomic:
+                        cur.execute('RELEASE SAVEPOINT _tr')
                     imported += 1
                     if position_changed:
                         pos_updated += 1
                 except Exception as e:
+                    if atomic:
+                        raise
                     failed += 1
                     if len(errors) < 5:
                         errors.append(f"trade_row_failed:{type(e).__name__}")
@@ -473,10 +641,28 @@ class PortfolioDBPG:
                         cur.execute('RELEASE SAVEPOINT _tr')
                     except Exception:
                         pass
+            batch_ids = sorted({
+                str(n['extra'].get('import_batch_id'))
+                for n in norm if n['extra'].get('import_batch_id')
+            })
+            for batch_id in batch_ids:
+                cur.execute(
+                    """UPDATE trade_import_batches
+                       SET status='confirmed',confirmed_at=NOW()
+                       WHERE batch_id=%s AND status='staged'""",
+                    (batch_id,),
+                )
             conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            raise
+            return {
+                'imported': 0,
+                'failed': max(len(norm), 1),
+                'positions_updated': 0,
+                'errors': [str(exc) if str(exc) in {
+                    'trade_position_changed', 'trade_no_position', 'trade_oversell'
+                } else f'trade_batch_failed:{type(exc).__name__}'],
+            }
         finally:
             cur.close()
             conn.close()
@@ -536,7 +722,11 @@ class PortfolioDBPG:
             if existing:
                 old_q = existing.get('quantity') or 0
                 old_c = existing.get('cost_price')
-                new_q = max(0, old_q - qty)
+                if old_q <= 0:
+                    raise ValueError('trade_no_position')
+                if qty > old_q:
+                    raise ValueError('trade_oversell')
+                new_q = old_q - qty
                 if cur is None:
                     self.update_stock(existing['id'], quantity=new_q,
                                       source='import_trades', trade_time=tt, log_change=False)
@@ -546,7 +736,7 @@ class PortfolioDBPG:
                         (new_q, datetime.now(), existing['id']),
                     )
                 return (new_q, (float(old_c) if old_c else None), new_q - old_q)
-            return None  # 未持有该股的卖出,只记流水不动持仓(pos_* 留空)
+            raise ValueError('trade_no_position')
 
     def get_trades(self, code: Optional[str] = None, limit: int = 200) -> List[Dict]:
         """查询成交记录(真实买卖,trade_type in 买入/卖出),按时间倒序。"""
@@ -556,7 +746,9 @@ class PortfolioDBPG:
             # id/created_at 是快照现金流的“录入水位”。成交时间可以补录或回填，不能
             # 单独用来判断这笔资金是否已经反映在上一张持仓快照中。
             sel = ("id, stock_code, stock_name, trade_type, quantity, price, amount, "
-                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra, created_at")
+                   "pos_quantity, pos_cost_price, delta_qty, trade_time, extra, created_at, "
+                   "source, commission, tax, order_id, broker_execution_id, account_ref, "
+                   "import_batch_id, external_fingerprint, position_effect")
             if code:
                 cur.execute(f"""SELECT {sel} FROM trade_records
                                WHERE stock_code=%s AND trade_type IN ('买入','卖出')
@@ -566,7 +758,9 @@ class PortfolioDBPG:
                                ORDER BY trade_time DESC LIMIT %s""", (limit,))
             cols = ['id', 'code', 'name', 'trade_type', 'quantity', 'price', 'amount',
                     'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra',
-                    'created_at']
+                    'created_at', 'source', 'commission', 'tax', 'order_id',
+                    'broker_execution_id', 'account_ref', 'import_batch_id',
+                    'external_fingerprint', 'position_effect']
             return [dict(zip(cols, r)) for r in cur.fetchall()]
         finally:
             cur.close()

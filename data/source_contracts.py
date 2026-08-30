@@ -204,11 +204,24 @@ _GATES: Dict[Tuple[str, str, EndpointContract], _Gate] = {}
 _GATES_LOCK = threading.Lock()
 
 
+class SourceCooldownActive(RuntimeError):
+    """A safe, payload-free signal that routing must skip one endpoint."""
+
+
 @contextmanager
 def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
     """Apply the endpoint's concurrency and minimum-interval boundary."""
     contract = get_contract(provider, endpoint)
     key = (provider.lower(), endpoint.lower(), contract)
+    try:
+        from data.runtime_capabilities import active_cooldown_until
+
+        if active_cooldown_until(key[0], key[1]):
+            raise SourceCooldownActive(
+                f"source cooldown active: {key[0]}.{key[1]}"
+            )
+    except ImportError:
+        pass
     with _GATES_LOCK:
         gate = _GATES.setdefault(key, _Gate(contract))
     rate_slot = None
@@ -219,16 +232,32 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
             from cache import rate_slot
         except Exception:
             rate_slot = None
-    with gate.enter():
-        if rate_slot is None:
-            yield contract
-        else:
-            with rate_slot(
-                f"source:{key[0]}:{key[1]}",
-                contract.min_interval_seconds,
-                contract.timeout_seconds,
-            ):
+    try:
+        with gate.enter():
+            if rate_slot is None:
                 yield contract
+            else:
+                with rate_slot(
+                    f"source:{key[0]}:{key[1]}",
+                    contract.min_interval_seconds,
+                    contract.timeout_seconds,
+                ):
+                    yield contract
+    except Exception as exc:
+        try:
+            from data.runtime_capabilities import record_failure
+
+            record_failure(key[0], key[1], exc)
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            from data.runtime_capabilities import record_success
+
+            record_success(key[0], key[1])
+        except Exception:
+            pass
 
 
 def _reset_for_tests() -> None:

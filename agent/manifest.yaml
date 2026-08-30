@@ -1,6 +1,6 @@
 version: 2
 app_id: foliant
-package_version: 0.2.0
+package_version: 0.3.0
 skills:
   - id: foliant-security-research
     path: skills/foliant-security-research/SKILL.md
@@ -55,6 +55,17 @@ capabilities:
         timeout_ms: 12000
         concurrency_safe: true
         retry_policy: idempotent
+      - name: foliant.market.data-capabilities
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_data_capabilities
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 131072
+        max_model_chars: 10000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
     effect: read
     data_classification: internal
     risk_level: L0
@@ -73,6 +84,17 @@ capabilities:
         operation_id: get_agent_security_research_latest
         exposure: on-demand
         result_mode: summary
+        max_result_bytes: 131072
+        max_model_chars: 12000
+        timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
+      - name: foliant.security-research.artifact-latest
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_research_artifact_latest
+        exposure: on-demand
+        result_mode: structured
         max_result_bytes: 131072
         max_model_chars: 12000
         timeout_ms: 10000

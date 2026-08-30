@@ -303,7 +303,7 @@ class LocalStockSelector:
             decision_mode: str = "preopen",
             wencai_reference: Optional[Iterable[object]] = None,
             strategy_snapshot: Optional[dict] = None,
-            persist: bool = True) -> dict:
+            persist: bool = True, _generation_retry: int = 0) -> dict:
         selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
         try:
             context = DecisionContext.build(
@@ -320,6 +320,14 @@ class LocalStockSelector:
             )
         cutoff = context.market_cutoff
         reference = _normalize_reference(wencai_reference)
+        generation_capabilities = (
+            "security_master", "trade_calendar", "daily_market", "valuation",
+            "financial_pit", "fund_flow", "events",
+        )
+        generation_reader = getattr(self.store, "generation_vector", None)
+        generation_before = (
+            generation_reader(generation_capabilities) if callable(generation_reader) else {}
+        )
         pit = self.store.pit_coverage(context.universe_cutoff)
         if pit.get("pit_coverage_start_date") and not pit.get("historical_pit_available"):
             return self._failed(
@@ -482,6 +490,30 @@ class LocalStockSelector:
         eligible_scored = self._score_technical(frame)
         eligible_scored = self._score_industry_and_quality(eligible_scored, breadth_frame)
         eligible_scored = self._apply_events(eligible_scored, context)
+        generation_after = (
+            generation_reader(generation_capabilities) if callable(generation_reader) else {}
+        )
+        if generation_after != generation_before:
+            if _generation_retry < 2:
+                return self.run(
+                    selection_date,
+                    data_cutoff=data_cutoff,
+                    decision_at=decision_at,
+                    decision_mode=decision_mode,
+                    wencai_reference=reference,
+                    strategy_snapshot=strategy_snapshot,
+                    persist=persist,
+                    _generation_retry=_generation_retry + 1,
+                )
+            return self._failed(
+                selection_date, "dataset_publication_unstable", pit_universe_count,
+                reference, persist, coverage=coverage,
+                metadata={
+                    "decision_context": context.as_dict(),
+                    "publication_generations_before": generation_before,
+                    "publication_generations_after": generation_after,
+                },
+            )
         from analysis.local_reference_strategies import LocalReferenceStrategyEngine
         try:
             local_strategy_reference = LocalReferenceStrategyEngine(
@@ -610,6 +642,7 @@ class LocalStockSelector:
             "strategy_snapshot": locked_strategy_snapshot,
             "code_revision": context.code_revision,
             "dependency_lock_hash": dependency_lock_hash(),
+            "publication_generations": generation_after,
         }
         manifest_id = hashlib.sha256(json.dumps(
             input_manifest, ensure_ascii=False, sort_keys=True,

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.2.0
+  version: 0.3.0
 servers:
   - url: https://stock.example.com
 security:
@@ -26,6 +26,35 @@ paths:
       responses:
         "200":
           description: Data quality summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/market/data-capabilities:
+    get:
+      operationId: get_agent_data_capabilities
+      summary: Read safe provider capability, quota, cooldown and dataset routing metadata
+      responses:
+        "200":
+          description: Runtime data capability matrix
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/research-artifacts/latest:
+    get:
+      operationId: get_agent_research_artifact_latest
+      summary: Read the latest append-only formal research artifact
+      parameters:
+        - name: subject
+          in: query
+          required: false
+          schema: { type: string, maxLength: 160 }
+      responses:
+        "200":
+          description: Structured artifact or explicit missing status
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ToolResult" }
@@ -231,6 +260,9 @@ components:
         failed_at: { type: string, nullable: true }
         cancellable: { type: boolean }
         cancellation_note: { type: string }
+        progress:
+          type: array
+          items: { type: object, additionalProperties: true }
     RunStatus:
       type: object
       additionalProperties: false
@@ -252,6 +284,9 @@ components:
         failed_at: { type: string, nullable: true }
         cancellable: { type: boolean }
         cancellation_note: { type: string }
+        progress:
+          type: array
+          items: { type: object, additionalProperties: true }
     ResearchPreviewCreate:
       type: object
       additionalProperties: false

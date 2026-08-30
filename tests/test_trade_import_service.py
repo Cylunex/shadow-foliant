@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import patch
 
 import _bootstrap  # noqa: F401  保持与 MCP 入口相同的扁平模块路径
-from portfolio.trade_import_service import import_trade_records, parse_markdown_table
+from portfolio.trade_import_service import (
+    import_trade_records, parse_markdown_table, prepare_trades, preview_position_effects,
+)
 
 
 class _FakePortfolioDB:
@@ -90,6 +92,16 @@ class TradeImportServiceTests(unittest.TestCase):
         self.assertEqual(result['skipped_existing'], 1)
         self.assertEqual(db.imported_rows, [])
 
+    def test_duplicate_sell_is_removed_before_position_validation(self):
+        existing = [{'code': '600519', 'name': '贵州茅台', 'trade_type': '卖出',
+                     'quantity': 100, 'price': 1500,
+                     'trade_time': '2026-01-02 10:00:00'}]
+        db = _FakePortfolioDB(trades=existing)
+        result = import_trade_records(rows=[dict(existing[0])], portfolio_db=db)
+        self.assertEqual(result['status'], 'noop')
+        self.assertEqual(result['skipped_existing'], 1)
+        self.assertEqual(result['errors'], [])
+
     def test_wrong_amount_is_recomputed_with_warning(self):
         db = _FakePortfolioDB()
         rows = [{'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
@@ -97,6 +109,43 @@ class TradeImportServiceTests(unittest.TestCase):
         result = import_trade_records(rows=rows, dry_run=True, portfolio_db=db)
         self.assertEqual(result['preview'][0]['amount'], 150000.0)
         self.assertTrue(result['warnings'])
+
+    def test_position_changing_oversell_is_rejected_before_write(self):
+        db = _FakePortfolioDB(holdings=[{
+            'code': '600519', 'name': '贵州茅台', 'quantity': 100, 'cost_price': 1400,
+        }])
+        rows = [{'code': '600519', 'name': '贵州茅台', 'trade_type': '卖出',
+                 'quantity': 200, 'price': 1500}]
+        result = import_trade_records(rows=rows, update_position=True, portfolio_db=db)
+        self.assertEqual(result['status'], 'needs_input')
+        self.assertEqual(result['imported'], 0)
+        self.assertIn('超过可用持仓', result['errors'][0])
+        self.assertEqual(db.imported_rows, [])
+
+    def test_record_only_sell_does_not_require_current_position(self):
+        db = _FakePortfolioDB()
+        rows = [{'code': '600519', 'name': '贵州茅台', 'trade_type': '卖出',
+                 'quantity': 100, 'price': 1500}]
+        result = import_trade_records(
+            rows=rows, update_position=False, dry_run=True, portfolio_db=db
+        )
+        self.assertEqual(result['status'], 'preview')
+        self.assertEqual(result['effects'][0]['position_effect'], 'record_only')
+
+    def test_equal_fills_with_distinct_execution_ids_are_not_collapsed(self):
+        db = _FakePortfolioDB()
+        base = {'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+                'quantity': 100, 'price': 1500, 'trade_time': '2026-01-02 10:00:00',
+                'source': 'broker-example', 'account_ref': 'account-example'}
+        rows = [
+            {**base, 'broker_execution_id': 'execution-example-1'},
+            {**base, 'broker_execution_id': 'execution-example-2'},
+        ]
+        result = import_trade_records(rows=rows, portfolio_db=db)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['imported'], 2)
+        self.assertNotEqual(db.imported_rows[0]['external_fingerprint'],
+                            db.imported_rows[1]['external_fingerprint'])
 
 
 if __name__ == '__main__':

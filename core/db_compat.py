@@ -19,6 +19,8 @@ surface needed while legacy modules are converted to native PostgreSQL SQL:
 
 from __future__ import annotations
 
+import os
+
 from database_settings import DatabaseSettings
 
 USE_POSTGRES = True
@@ -34,6 +36,7 @@ PG_CONFIG = {
     'host': _SETTINGS.host, 'port': _SETTINGS.port,
     'dbname': _SETTINGS.dbname, 'user': _SETTINGS.user,
     'password': _SETTINGS.password,
+    'connect_timeout': max(1, min(30, int(os.getenv('PG_CONNECT_TIMEOUT', '5') or '5'))),
 }
 
 
