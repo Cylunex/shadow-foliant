@@ -23,6 +23,7 @@ import os
 import sys
 import json
 import math
+import re
 import threading
 import time
 import concurrent.futures
@@ -1803,11 +1804,14 @@ def _run_with_log(name, func, *a, **kw):
             return
         if isolated.get('status') == 'error':
             category = str(isolated.get('error_category') or 'execution_failed')[:80]
-            print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): {category}', flush=True)
-            _log_run(name, 'error', error=f'isolated_task_failed:{category}',
+            reason = str(isolated.get('error_message') or '')[:240]
+            suffix = f':{reason}' if reason else ''
+            print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
+                  f'{category}{suffix}', flush=True)
+            _log_run(name, 'error', error=f'isolated_task_failed:{category}{suffix}',
                      started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
                      finished_at=datetime.now().astimezone().isoformat(), notify=False)
-            _notify_task_error(name, RuntimeError(category), '')
+            _notify_task_error(name, RuntimeError(reason or category), '')
             return
         outcome = _latest_job_run_since(
             name, datetime.fromtimestamp(t0).astimezone().isoformat()
@@ -4366,10 +4370,20 @@ def task_unified_selection():
         )
         syncer = ResearchSynchronizer()
         syncer.refresh_calendar_for_day(context.market_cutoff)
-        repair = syncer.repair_daily_market_if_missing(context.market_cutoff)
+        # preopen 的原始边界是“前一自然日”。周一/节后该日期可能是休市日，
+        # 补数必须改用双源日历确认的最近开市日，不能向数据源请求周末行情。
+        effective_market_date = syncer.store.expected_market_as_of(
+            context.market_cutoff, inclusive=True
+        )
+        if not effective_market_date:
+            raise RuntimeError(
+                "stage=calendar latest confirmed open market date unavailable"
+            )
+        repair = syncer.repair_daily_market_if_missing(effective_market_date)
         if repair.get('repaired'):
             print('[unified_selection] 🧰 已在正式选股前补齐前一交易日市场快照 '
-                  f"({context.market_cutoff}, coverage={float(repair.get('coverage') or 0):.1%})",
+                  f"({effective_market_date}, "
+                  f"coverage={float(repair.get('coverage') or 0):.1%})",
                   flush=True)
         local_result = selector.run(selection_date, persist=True)
         local_candidates = local_result.get('candidates', [])

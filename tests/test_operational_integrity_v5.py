@@ -12,7 +12,7 @@ from application.research_artifacts import append_ai_annotation, build_research_
 from data import runtime_capabilities
 from data.research_store import ResearchStore
 from data.source_contracts import SourceCooldownActive, source_call
-from jobs.isolated_runtime import run_isolated_task
+from jobs.isolated_runtime import _safe_error_message, run_isolated_task
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +24,10 @@ def _quick_task():
 
 def _slow_task():
     time.sleep(5)
+
+
+def _failing_task():
+    raise RuntimeError("stage=calendar latest confirmed open market date unavailable")
 
 
 def test_research_artifact_has_evidence_freshness_and_invalidation() -> None:
@@ -175,6 +179,27 @@ def test_isolated_runtime_completes_and_terminates_timeout() -> None:
     )
     assert timed_out["status"] == "timeout"
     assert timed_out["terminated"] is True
+
+
+def test_isolated_runtime_reports_bounded_safe_failure_reason(monkeypatch) -> None:
+    failed = run_isolated_task(
+        "failure-example", _failing_task, (), {}, timeout_seconds=5,
+        cancel_grace_seconds=1,
+    )
+    assert failed["status"] == "error"
+    assert failed["error_category"] == "RuntimeError"
+    assert failed["error_message"] == (
+        "stage=calendar latest confirmed open market date unavailable"
+    )
+
+    monkeypatch.setenv("EXAMPLE_API_TOKEN", "sensitive-example-value")
+    sanitized = _safe_error_message(RuntimeError(
+        "token=sensitive-example-value request=https://api.example/path/credential"
+    ))
+    assert "sensitive-example-value" not in sanitized
+    assert "api.example" not in sanitized
+    assert "<redacted>" in sanitized
+    assert "<url>" in sanitized
 
 
 def test_migration_script_uses_portable_bounded_version_query() -> None:

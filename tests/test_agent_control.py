@@ -164,6 +164,35 @@ class ScheduledDependencyTests(unittest.TestCase):
         fallback.assert_not_called()
         log_run.assert_not_called()
 
+    def test_monday_preopen_repair_uses_latest_confirmed_open_day(self):
+        selector = mock.MagicMock()
+        selector.policy.version = 'test-policy'
+        selector.policy.policy_hash = 'test-hash'
+        selector.run.side_effect = RuntimeError('stop after repair-date assertion')
+        syncer = mock.MagicMock()
+        syncer.store.expected_market_as_of.return_value = '2026-08-28'
+        syncer.repair_daily_market_if_missing.return_value = {
+            'repaired': False, 'status': 'ready',
+        }
+        context = mock.MagicMock()
+        context.market_cutoff = '2026-08-30'
+
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('analysis.local_stock_selector.LocalStockSelector',
+                           return_value=selector), \
+                mock.patch('core.decision_context.DecisionContext.build',
+                           return_value=context), \
+                mock.patch('data.research_sync.ResearchSynchronizer',
+                           return_value=syncer):
+            with self.assertRaisesRegex(RuntimeError, 'stop after repair-date assertion'):
+                jobs_hub.task_unified_selection()
+
+        syncer.refresh_calendar_for_day.assert_called_once_with('2026-08-30')
+        syncer.store.expected_market_as_of.assert_called_once_with(
+            '2026-08-30', inclusive=True
+        )
+        syncer.repair_daily_market_if_missing.assert_called_once_with('2026-08-28')
+
     def test_research_sync_failure_propagates_to_scheduler(self):
         syncer = mock.MagicMock()
         syncer.sync_master.return_value = {'rows': 5569}

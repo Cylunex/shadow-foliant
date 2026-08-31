@@ -6,9 +6,35 @@ import multiprocessing
 import os
 import pickle
 import queue
+import re
 import sys
 import time
 from typing import Any, Callable
+
+
+_SECRET_NAME_SUFFIXES = (
+    "api_key", "key", "token", "secret", "password", "licence", "license",
+)
+
+
+def _safe_error_message(exc: BaseException, *, limit: int = 240) -> str:
+    """Return a useful bounded reason without leaking credentials or request URLs."""
+    message = " ".join(str(exc).split())
+    if not message:
+        return ""
+    for name, value in os.environ.items():
+        if (
+            value and len(value) >= 4
+            and any(name.lower().endswith(suffix) for suffix in _SECRET_NAME_SUFFIXES)
+        ):
+            message = message.replace(value, "<redacted>")
+    message = re.sub(r"https?://\S+", "<url>", message, flags=re.IGNORECASE)
+    message = re.sub(
+        r"(?i)\b(api[_ -]?key|token|secret|password|licen[cs]e)\s*[=:]\s*\S+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        message,
+    )
+    return message[: max(0, int(limit))]
 
 
 def _child_entry(name: str, func: Callable[..., Any], args: tuple[Any, ...],
@@ -31,6 +57,7 @@ def _child_entry(name: str, func: Callable[..., Any], args: tuple[Any, ...],
         result_queue.put({
             "status": "error",
             "error_category": type(exc).__name__[:80],
+            "error_message": _safe_error_message(exc),
         })
     finally:
         if isinstance(cancel_map, dict):
@@ -71,6 +98,7 @@ def run_isolated_task(name: str, func: Callable[..., Any], args: tuple[Any, ...]
                     "isolation": "compatibility-inline"}
         except BaseException as exc:
             return {"status": "error", "error_category": type(exc).__name__[:80],
+                    "error_message": _safe_error_message(exc),
                     "elapsed": time.monotonic() - started,
                     "isolation": "compatibility-inline"}
 
