@@ -132,7 +132,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🔁 本地研究数据补跑',
         'schedule': f"{MARKET_DATA_TIMES['research_data_sync_retry']} 每交易日（仅首轮未完成时）",
         'category': '数据', 'default': True,
-        'description': '仅当18:05全市场研究快照未完整入库时补跑；已完成则立即跳过，避免与后续大批量K线预热争用数据源',
+        'description': '仅当18:05全市场研究快照未完整入库时，在估值晚到窗口后轻量补行情与估值；不重抓财务或可选主力资金，已完成则立即跳过',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',

@@ -308,11 +308,12 @@ class ResearchSynchronizer:
     def repair_daily_market_if_missing(self, trade_date: str) -> dict:
         """Bounded pre-selection repair for a missed previous-evening snapshot.
 
-        The normal 18:05/18:20 jobs remain the authoritative full ingestion path.
+        The normal 18:05 job remains the authoritative full ingestion path and the
+        evening retry uses this same bounded repair path.
         This guard runs only when their completed marker is absent.  It deliberately
-        skips financial PIT and per-symbol BaoStock repair: one zzshare market batch
-        plus valuation is sufficient to restore the formal selector, while BaoStock
-        is kept out of a potentially large morning catch-up loop.
+        skips financial PIT, optional fund-flow references and per-symbol BaoStock
+        repair: one zzshare market batch plus valuation is sufficient to restore the
+        formal selector, while optional/external sources are kept out of the repair.
         """
         trade_date = pd.Timestamp(trade_date).date().isoformat()
         if self.store.completed_sync("daily_market", trade_date):
@@ -322,11 +323,16 @@ class ResearchSynchronizer:
             fundamentals=False,
             fallback=False,
             refresh_calendar=False,
+            optional_fund_flow=False,
         )
         if result.get("quality_status") != "ok":
             raise RuntimeError(
                 "pre-selection daily market repair did not pass quality gate: "
-                f"coverage={result.get('coverage')} quality={result.get('quality_status')}"
+                f"market_coverage={result.get('coverage')} "
+                f"valuation_rows={result.get('valuation_rows', 0)} "
+                f"valuation_coverage={result.get('valuation_coverage', 0)} "
+                f"valuation_quality={result.get('valuation_quality_status', 'unknown')} "
+                f"quality={result.get('quality_status')}"
             )
         return {
             **result,
@@ -336,7 +342,8 @@ class ResearchSynchronizer:
         }
 
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
-                 fallback: bool = True, refresh_calendar: bool = True) -> dict:
+                 fallback: bool = True, refresh_calendar: bool = True,
+                 optional_fund_flow: bool = True) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()
         calendar_result = {}
         if refresh_calendar:
@@ -386,19 +393,22 @@ class ResearchSynchronizer:
             # This is an optional local-reference dataset.  Failure does not poison
             # the formal selector; the "主力资金" local strategy simply reports
             # unavailable rather than inventing a volume/turnover proxy.
-            stage = "optional_fund_flow"
-            try:
-                fund_flow = akshare.stock_fund_flow_rank(trade_date)
-                result["fund_flow_rows"] = self.store.upsert_fund_flow_daily(
-                    fund_flow, trade_date=trade_date
-                )
-                result["fund_flow_quality_status"] = (
-                    "ok" if int(result["fund_flow_rows"]) > 0 else "unavailable"
-                )
-            except Exception as fund_flow_error:
-                result["fund_flow_rows"] = 0
-                result["fund_flow_quality_status"] = "unavailable"
-                result["fund_flow_error_type"] = type(fund_flow_error).__name__
+            result["fund_flow_rows"] = 0
+            result["fund_flow_quality_status"] = "not_requested"
+            if optional_fund_flow:
+                stage = "optional_fund_flow"
+                try:
+                    fund_flow = akshare.stock_fund_flow_rank(trade_date)
+                    result["fund_flow_rows"] = self.store.upsert_fund_flow_daily(
+                        fund_flow, trade_date=trade_date
+                    )
+                    result["fund_flow_quality_status"] = (
+                        "ok" if int(result["fund_flow_rows"]) > 0 else "unavailable"
+                    )
+                except Exception as fund_flow_error:
+                    result["fund_flow_rows"] = 0
+                    result["fund_flow_quality_status"] = "unavailable"
+                    result["fund_flow_error_type"] = type(fund_flow_error).__name__
             result["finance_rows"] = {}
             if fundamentals:
                 stage = "finance_pit"

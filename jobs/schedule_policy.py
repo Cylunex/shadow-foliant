@@ -18,9 +18,10 @@ BAOSTOCK_READY_TIMES = {
 }
 
 MARKET_DATA_TIMES = {
-    # 正式 PIT 数据优先：18:00 复权因子完成后先同步，失败再轻量补跑。
+    # 正式 PIT 数据优先：18:00 复权因子完成后先同步。估值提供方偶尔
+    # 晚于日线发布，因此只在 20:05 做一次不含财务/主力资金的轻量补跑。
     'research_data_sync': '18:05',
-    'research_data_sync_retry': '18:20',
+    'research_data_sync_retry': '20:05',
     # 大批量预热放在 PIT 同步之后，避免并发争用 BaoStock 单会话/熔断器。
     'kline_prefetch': '18:35',
     # 下游仍有显式依赖；这些时间只是进入 deferred 队列的最早时刻。

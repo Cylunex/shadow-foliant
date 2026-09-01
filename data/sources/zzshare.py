@@ -514,7 +514,13 @@ def get_valuation(trade_date: str) -> pd.DataFrame:
         )
     )
     if df.empty:
-        return _with_provenance(df, as_of=day, unit="provider_documented")
+        # 空响应不等于一份质量正常但恰好没有股票的估值快照。若继续标记
+        # 为 ok，质量门只能看到 coverage=0 + quality=ok，既误导日志，也
+        # 无法区分提供方尚未发布与真实的零行数据集。
+        return _with_provenance(
+            df, as_of=day, unit="provider_documented",
+            quality_status="unavailable",
+        )
     out = df.copy()
     effective_column = next(
         (column for column in (

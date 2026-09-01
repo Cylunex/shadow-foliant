@@ -207,6 +207,35 @@ class ScheduledDependencyTests(unittest.TestCase):
                 jobs_hub.task_research_data_sync()
         log_run.assert_not_called()
 
+    def test_research_sync_treats_late_valuation_as_expected_degradation(self):
+        syncer = mock.MagicMock()
+        syncer.sync_master.return_value = {
+            'rows': 5570, 'quality_status': 'incomplete',
+        }
+        syncer.sync_day.return_value = {
+            'quality_status': 'incomplete',
+            'providers': {'zzshare': 5553},
+            'coverage': 0.997,
+            'market_quality_status': 'ok',
+            'valuation_rows': 0,
+            'valuation_coverage': 0.0,
+            'valuation_quality_status': 'unavailable',
+            'fund_flow_rows': 0,
+            'calendar_quality_status': 'ok',
+        }
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer',
+                           return_value=syncer), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            jobs_hub.task_research_data_sync()
+
+        self.assertEqual(log_run.call_args.args[:2], ('research_data_sync', 'success'))
+        detail = log_run.call_args.kwargs['error']
+        self.assertIn('degraded: valuation_source_not_ready', detail)
+        self.assertIn('valuation_coverage=0.0%', detail)
+        self.assertIn('fund_flow=0(optional)', detail)
+        syncer.store.update_selection_candidate_outcomes.assert_not_called()
+
     def test_research_sync_retry_skips_when_today_is_complete(self):
         syncer = mock.MagicMock()
         syncer.store.completed_sync.return_value = True
@@ -219,6 +248,28 @@ class ScheduledDependencyTests(unittest.TestCase):
         run_sync.assert_not_called()
         self.assertEqual(log_run.call_args.args[:2],
                          ('research_data_sync_retry', 'skipped'))
+
+    def test_research_sync_retry_uses_bounded_repair(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = False
+        syncer.repair_daily_market_if_missing.return_value = {
+            'repair_mode': 'bulk_market_without_baostock_fallback',
+            'coverage': 0.997,
+            'valuation_rows': 5212,
+            'valuation_coverage': 0.936,
+        }
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer',
+                           return_value=syncer), \
+                mock.patch.object(jobs_hub, 'task_research_data_sync') as full_sync, \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            jobs_hub.task_research_data_sync_retry()
+
+        full_sync.assert_not_called()
+        syncer.repair_daily_market_if_missing.assert_called_once()
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_retry', 'success'))
+        self.assertIn('valuation=5212', log_run.call_args.kwargs['error'])
 
     def test_scheduled_consumers_read_today_formal_artifacts_only(self):
         formal = {

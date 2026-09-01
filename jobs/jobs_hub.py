@@ -3642,6 +3642,40 @@ def task_factor_collection():
         _log_run(job, 'error', error=str(e), started_at=started, finished_at=datetime.now().isoformat())
 
 
+def _research_sync_detail(result, master):
+    """Render the fields that actually participate in the formal quality gate."""
+    return (
+        f"market={result.get('providers', {}).get('zzshare', 0)} "
+        f"market_coverage={float(result.get('coverage') or 0):.1%} "
+        f"market_quality={result.get('market_quality_status') or 'unknown'} "
+        f"valuation={result.get('valuation_rows', 0)} "
+        f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%} "
+        f"valuation_quality={result.get('valuation_quality_status') or 'unknown'} "
+        f"master={master.get('rows', 0)} "
+        f"master_quality={master.get('quality_status') or 'unknown'} "
+        f"fund_flow={result.get('fund_flow_rows', 0)}(optional) "
+        f"calendar={result.get('calendar_quality_status') or 'unknown'}"
+    )
+
+
+def _valuation_release_pending(result):
+    """True only when the core market snapshot is ready but valuation is not published yet."""
+    try:
+        minimum_market = float(os.getenv('RESEARCH_DAILY_MIN_COVERAGE', '0.90'))
+    except (TypeError, ValueError):
+        minimum_market = 0.90
+    market_quality = str(result.get('market_quality_status') or 'unknown')
+    valuation_quality = str(result.get('valuation_quality_status') or 'unknown')
+    return bool(
+        result.get('quality_status') != 'ok'
+        and int(result.get('providers', {}).get('zzshare') or 0) > 0
+        and float(result.get('coverage') or 0) >= minimum_market
+        and market_quality not in {'failed', 'unknown', 'unknown_unit', 'possibly_truncated'}
+        and int(result.get('valuation_rows') or 0) == 0
+        and valuation_quality in {'unavailable', 'empty', 'source_unavailable'}
+    )
+
+
 def task_research_data_sync():
     """盘后同步全市场本地研究快照，并在新行情入库后更新正式选股后验。"""
     job = 'research_data_sync'
@@ -3657,27 +3691,27 @@ def task_research_data_sync():
         stage = 'daily_market'
         result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
         stage = 'quality_gate'
-        status = 'success' if result.get('quality_status') == 'ok' else 'error'
-        detail = (
-            f"market={result.get('providers', {}).get('zzshare', 0)} "
-            f"coverage={float(result.get('coverage') or 0):.1%} "
-            f"master={master.get('rows', 0)} "
-            f"fund_flow={result.get('fund_flow_rows', 0)} "
-            f"calendar={result.get('calendar_quality_status') or 'unknown'}"
-        )
-        if status == 'success':
+        detail = _research_sync_detail(result, master)
+        if result.get('quality_status') == 'ok':
             try:
                 stage = 'selection_outcomes'
                 outcome = syncer.store.update_selection_candidate_outcomes()
                 detail += (f" outcomes={outcome.get('updated', 0)}"
                            f" pending={outcome.get('pending', 0)}")
             except Exception as outcome_error:
-                status = 'error'
                 detail += f" outcome_error={type(outcome_error).__name__}"
-        if status != 'success':
-            raise RuntimeError(f'{stage} quality gate failed: {detail}')
-        _log_run(job, 'success', error=detail,
-                 started_at=started, finished_at=datetime.now().isoformat())
+                raise RuntimeError(f'{stage} quality gate failed: {detail}') from outcome_error
+            _log_run(job, 'success', error=detail,
+                     started_at=started, finished_at=datetime.now().isoformat())
+            return
+        if _valuation_release_pending(result):
+            _log_run(
+                job, 'success',
+                error=f'degraded: valuation_source_not_ready; {detail}; retry=20:05',
+                started_at=started, finished_at=datetime.now().isoformat(), notify=False,
+            )
+            return
+        raise RuntimeError(f'{stage} quality gate failed: {detail}')
     except Exception as e:
         raise RuntimeError(
             f'{job} stage={stage} failed ({type(e).__name__}): {str(e)[:240]}'
@@ -3685,7 +3719,7 @@ def task_research_data_sync():
 
 
 def task_research_data_sync_retry():
-    """18:20 条件补跑：当天正式研究快照已完整则秒级跳过。"""
+    """20:05 轻量补跑：只修复正式选股所需的行情与估值。"""
     job = 'research_data_sync_retry'
     if _skip_if_not_trading(job):
         return
@@ -3697,9 +3731,23 @@ def task_research_data_sync_retry():
         _log_run(job, 'skipped', error='daily_market already complete',
                  started_at=started, finished_at=datetime.now().isoformat())
         return
-    task_research_data_sync()
-    _log_run(job, 'success', error='daily_market repaired',
-             started_at=started, finished_at=datetime.now().isoformat())
+    try:
+        result = syncer.repair_daily_market_if_missing(today)
+    except Exception as exc:
+        raise RuntimeError(
+            f'{job} stage=lightweight_repair failed ({type(exc).__name__}): '
+            f'{str(exc)[:320]}'
+        ) from exc
+    _log_run(
+        job, 'success',
+        error=(
+            f"daily_market repaired mode={result.get('repair_mode', 'unknown')} "
+            f"market_coverage={float(result.get('coverage') or 0):.1%} "
+            f"valuation={result.get('valuation_rows', 0)} "
+            f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
+        ),
+        started_at=started, finished_at=datetime.now().isoformat(),
+    )
 
 
 def task_weekly_backtest():
@@ -4314,9 +4362,12 @@ def task_strategy_prefetch():
     # ② 4 个普通问财策略：每条只发一次精确问句，成功写 strategy_cache。
     done += _prefetch_wencai_strategies(
         use_cache=False, log_job='strategy_prefetch')
-    _log_run(job, 'success' if done else 'error',
-             error=f'prefetched {done}/{total}' if done else 'all_empty(问财参考不可达;本地主链继续)',
-             started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+    _log_run(
+        job, 'success' if done else 'skipped',
+        error=(f'prefetched {done}/{total}' if done
+               else 'source_unavailable 0/5(问财参考不可达;本地主链继续)'),
+        started_at=started, finished_at=datetime.now().isoformat(), notify=False,
+    )
 
 
 def task_strategy_prefetch_retry():
@@ -5901,7 +5952,7 @@ def register_default_jobs():
       —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
       —— 盘后(日线17:30、复权因子18:00就绪;读暖缓存任务仍显式等依赖)——
       16:48 daily_market_snapshot       — 📷 龙虎榜市场快照
-      18:05/18:20 research_data_sync    — 🗄️ 全市场复权日线/估值/PIT 首轮与条件补跑
+      18:05/20:05 research_data_sync    — 🗄️ 全市场复权日线/估值/PIT 首轮与轻量条件补跑
       18:30 dragon_tiger_archive        — 🐉 龙虎榜归档(晚间出全量)
       18:35 kline_prefetch/announcement — 📥 K线预热链头 / 📢 公告扫描（相互独立）
       18:40 factor_collection           — 🧬 因子采集(prefetch 成功后由 deferred 队列提交)

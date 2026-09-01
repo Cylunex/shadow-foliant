@@ -189,11 +189,13 @@ class WencaiRetryScheduleTests(unittest.TestCase):
                     "_prefetch_wencai_strategies",
                     side_effect=lambda **_kwargs: calls.append("others") or 0,
                 ), \
-                patch.object(module, "_log_run"), \
+                patch.object(module, "_log_run") as log_run, \
                 patch.object(mx_strategies, "MX_STRATEGIES", []):
             module.task_strategy_prefetch()
 
         self.assertEqual(calls, ["main_force", "others"])
+        self.assertEqual(log_run.call_args.args[:2], ("strategy_prefetch", "skipped"))
+        self.assertIn("source_unavailable 0/5", log_run.call_args.kwargs["error"])
 
     def test_retry_also_prioritizes_main_force(self):
         from jobs import jobs_hub as module

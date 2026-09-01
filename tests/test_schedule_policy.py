@@ -72,12 +72,12 @@ class SchedulePolicyTests(unittest.TestCase):
             adjustment_ready + 5,
         )
         self.assertGreater(
-            minute_of_day(MARKET_DATA_TIMES['research_data_sync_retry']),
+            minute_of_day(MARKET_DATA_TIMES['kline_prefetch']),
             minute_of_day(MARKET_DATA_TIMES['research_data_sync']),
         )
-        self.assertGreater(
-            minute_of_day(MARKET_DATA_TIMES['kline_prefetch']),
+        self.assertGreaterEqual(
             minute_of_day(MARKET_DATA_TIMES['research_data_sync_retry']),
+            minute_of_day(BAOSTOCK_READY_TIMES['minute_kline']) + 5,
         )
 
     def test_kline_consumers_keep_explicit_dependency(self):

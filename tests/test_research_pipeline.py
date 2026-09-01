@@ -149,7 +149,8 @@ class SourceContractTest(unittest.TestCase):
         with patch.object(syncer, "sync_day", return_value=repaired) as sync_day:
             result = syncer.repair_daily_market_if_missing("2026-08-27")
         sync_day.assert_called_once_with(
-            "2026-08-27", fundamentals=False, fallback=False, refresh_calendar=False
+            "2026-08-27", fundamentals=False, fallback=False, refresh_calendar=False,
+            optional_fund_flow=False,
         )
         self.assertTrue(result["repaired"])
         self.assertEqual(result["repair_mode"], "bulk_market_without_baostock_fallback")
@@ -206,6 +207,24 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(api.calls[0][0], "market/trade/days")
         self.assertEqual(api.calls[1][0], "v3/fundamentals/valuation/2026-08-21")
         self.assertEqual(api.calls[2][0], "v3/fundamentals/indicator/pit/2026-08-21")
+
+    def test_zzshare_empty_valuation_is_not_reported_as_ok(self):
+        class Api:
+            @staticmethod
+            def query(_path, params=None):
+                return []
+
+        zzshare._api = Api()
+        try:
+            with patch.dict(os.environ, {"ZZSHARE_TOKEN": "not-logged"}), \
+                    patch("data.sources.zzshare.source_call"):
+                result = zzshare.get_valuation("2026-09-01")
+        finally:
+            zzshare._reset_for_tests()
+        self.assertTrue(result.empty)
+        self.assertEqual(
+            result.attrs["provenance"]["quality_status"], "unavailable"
+        )
 
     def test_zzshare_calendar_filters_explicit_closed_dates(self):
         class Api:
