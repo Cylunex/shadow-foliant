@@ -45,7 +45,7 @@ def test_plugin_definition_manifest_and_project_versions_match() -> None:
     assert plugin.plugin_id == "shadow-foliant"
     assert plugin.version == version == plugin.agent_manifest["package_version"]
     if PLATFORM_DISTRIBUTION_VERSION is not None:
-        assert PLATFORM_DISTRIBUTION_VERSION == "0.7.1"
+        assert PLATFORM_DISTRIBUTION_VERSION == "0.8.0"
     assert plugin.definition["spec"]["compatibility"]["dsh"] == {
         "distribution": ">=0.1.1-rc.2 <0.2.0",
         "tools_api": ">=0.1.1-rc.2 <0.2.0",

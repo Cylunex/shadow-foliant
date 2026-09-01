@@ -80,7 +80,7 @@ observation，事件按当时可见的 append-only revision set 读取，财务�
 ## 合同与本地验证
 
 示例只使用 `https://stock.example.com` 和环境变量名。插件版本来自 `VERSION`，必须与
-Definition 和 Manifest 相同。Platform Python 包精确固定为 `0.7.1`，DSH distribution 与
+Definition 和 Manifest 相同。Platform Python 包精确固定为 `0.8.0`，DSH distribution 与
 Tools API 精确 Profile 基线都是 `0.1.1-rc.2`。
 生产 Release 通过仓库外 `SHADOW_PLATFORM_WHEEL` 注入该 wheel，并在安装前校验
 `SHADOW_PLATFORM_WHEEL_SHA256`；路径和摘要不写入仓库。
