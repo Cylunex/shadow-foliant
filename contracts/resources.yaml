@@ -20,3 +20,11 @@ resources:
     uri_template: shadow://foliant/reports/{report_id}
     owner: foliant
     resource_grant_required: false
+  - type: foliant-primary-portfolio
+    uri_template: shadow://foliant/portfolios/primary
+    owner: foliant
+    resource_grant_required: true
+  - type: foliant-trade-import
+    uri_template: shadow://foliant/trade-imports/{batch_id}
+    owner: foliant
+    resource_grant_required: true

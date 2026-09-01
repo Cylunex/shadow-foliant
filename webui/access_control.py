@@ -205,6 +205,9 @@ _add(
     "/api/machine/v1/agent/selection-runs/latest",
     "/api/machine/v1/agent/runs/{run_id}",
     "/api/machine/v1/agent/runs/{run_id}/result",
+    "/api/machine/v1/agent/portfolio/summary",
+    "/api/machine/v1/agent/portfolio/trade-records",
+    "/api/machine/v1/agent/nexus/reviews",
 )
 
 _add(
@@ -214,6 +217,9 @@ _add(
     "/api/machine/v1/agent/securities/{symbol}/research-runs",
     "/api/machine/v1/agent/selection-runs",
     "/api/machine/v1/agent/backtest-runs",
+    "/api/machine/v1/agent/nexus/reviews",
+    "/api/machine/v1/agent/nexus/reviews/{review_id}/commit",
+    "/api/machine/v1/agent/nexus/reviews/{review_id}/reject",
 )
 
 MACHINE_SCOPES = {
@@ -231,6 +237,14 @@ MACHINE_SCOPES = {
     ("POST", "/api/machine/v1/agent/backtest-runs"): "stock.research",
     ("GET", "/api/machine/v1/agent/runs/{run_id}"): "stock.research",
     ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "stock.research",
+    ("GET", "/api/machine/v1/agent/portfolio/summary"): "stock.portfolio.read",
+    ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "stock.portfolio.read",
+    ("GET", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
+    ("POST", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
+    ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/commit"):
+        "stock.portfolio.write",
+    ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/reject"):
+        "stock.portfolio.write",
 }
 
 MACHINE_CAPABILITIES = {
@@ -248,6 +262,14 @@ MACHINE_CAPABILITIES = {
     ("POST", "/api/machine/v1/agent/backtest-runs"): "foliant.backtest.preview",
     ("GET", "/api/machine/v1/agent/runs/{run_id}"): "foliant.run.read",
     ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "foliant.run.read",
+    ("GET", "/api/machine/v1/agent/portfolio/summary"): "foliant.portfolio.read",
+    ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "foliant.trades.read",
+    ("GET", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.write",
+    ("POST", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.draft",
+    ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/commit"):
+        "foliant.trades.write",
+    ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/reject"):
+        "foliant.trades.write",
 }
 
 _audit_logger = logging.getLogger("webui.security_audit")

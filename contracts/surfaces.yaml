@@ -1,0 +1,56 @@
+version: 1
+presentation:
+  short_id: foliant
+  title: Foliant
+  caption: 选股、持仓、成交与市场研究
+  icon: stock
+  color: "#F59E0B"
+  order: 25
+entities:
+  - id: holdings
+    label: 当前持仓
+    class: counter
+    source_surface_id: portfolio
+    value_pointer: /data/holdings_count
+    unit: 只
+    sensitivity: sensitive
+    freshness_seconds: 3600
+    order: 10
+surfaces:
+  - id: portfolio
+    type: summary
+    capability: foliant.portfolio.read
+    operation_id: get_agent_portfolio_summary
+    display:
+      detail_pointer: /summary
+      metrics:
+        - id: holdings
+          label: 持仓
+          value_pointer: /data/holdings_count
+          unit: 只
+          tone: neutral
+        - id: total-cost
+          label: 成本口径
+          value_pointer: /data/total_cost
+          unit: 元
+          tone: neutral
+  - id: capture
+    type: capture
+    capability: foliant.trades.draft
+    operation_id: create_nexus_foliant_review
+    risk_level: L2
+    intent_prefixes: [foliant.trade.import]
+  - id: review
+    type: review
+    capability: foliant.trades.write
+    risk_level: L2
+    intent_prefixes: [foliant.trade.import]
+  - id: app
+    type: app-link
+review:
+  protocol: shadow.review.v1
+  mode: commit
+  list_operation_id: list_nexus_foliant_reviews
+  create_operation_id: create_nexus_foliant_review
+  commit_operation_id: commit_nexus_foliant_review
+  reject_operation_id: reject_nexus_foliant_review

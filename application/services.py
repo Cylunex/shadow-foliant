@@ -7,13 +7,15 @@ versus preview semantics and return stable domain-shaped results.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import re
 from collections.abc import Callable, Mapping
 from concurrent.futures import Executor
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import _bootstrap  # noqa: F401
 from application.results import (
@@ -813,9 +815,12 @@ class TradeEntryService:
 
     def preview(self, *, rows: list[dict[str, Any]] | None = None, table: str = "",
                 update_position: bool = True, actor_id: str = "preview",
-                persist: bool = True) -> dict[str, Any]:
+                persist: bool = True,
+                source: str = "web:trade-entry") -> dict[str, Any]:
         from portfolio.trade_import_service import (
-            prepare_trades, preview_position_effects, trade_execution_key,
+            prepare_trades,
+            preview_position_effects,
+            trade_execution_key,
         )
 
         prepared = prepare_trades(
@@ -824,7 +829,7 @@ class TradeEntryService:
         normalized = []
         for item in prepared.get("rows") or []:
             row = dict(item)
-            row["source"] = "web:trade-entry"
+            row["source"] = source
             row["external_fingerprint"] = trade_execution_key(row)
             normalized.append(row)
         effects = preview_position_effects(
@@ -868,7 +873,9 @@ class TradeEntryService:
 
     def confirm(self, *, actor_id: str, idempotency_key: str, preview_hash: str,
                 rows: list[dict[str, Any]] | None = None, table: str = "",
-                update_position: bool = True, confirmed: bool = False) -> dict[str, Any]:
+                update_position: bool = True, confirmed: bool = False,
+                source: str = "web:trade-entry",
+                created_by_id: str | None = None) -> dict[str, Any]:
         if not confirmed:
             raise ApplicationError("confirmation_required", "explicit confirmation is required")
         key = str(idempotency_key or "").strip()
@@ -878,7 +885,7 @@ class TradeEntryService:
             )
         preview = self.preview(
             rows=rows, table=table, update_position=update_position,
-            actor_id=actor_id, persist=False,
+            actor_id=actor_id, persist=False, source=source,
         )
         if preview.get("errors"):
             raise ApplicationError("invalid_trade", "trade validation failed")
@@ -912,7 +919,7 @@ class TradeEntryService:
             for item in preview["rows"]:
                 row = dict(item)
                 row["import_batch_id"] = preview["batch_id"]
-                row["created_by_shadow_user_id"] = str(actor_id)
+                row["created_by_shadow_user_id"] = str(created_by_id or actor_id)
                 confirmed_rows.append(row)
             result = import_trade_records(
                 rows=confirmed_rows,
@@ -960,4 +967,288 @@ class TradeEntryService:
             dry_run=dry_run,
             skip_existing=skip_existing,
             portfolio_db=self._db(),
+        )
+
+    @staticmethod
+    def _parse_review_fields(fields: Mapping[str, Any]) -> tuple[list[dict[str, Any]] | None,
+                                                                  str, bool]:
+        raw_rows = fields.get("trades")
+        if raw_rows is None:
+            raw_rows = fields.get("rows")
+        if raw_rows is None:
+            raw_rows = fields.get("tradesJson") or fields.get("rowsJson")
+        if isinstance(raw_rows, str):
+            try:
+                raw_rows = json.loads(raw_rows)
+            except json.JSONDecodeError as exc:
+                raise ApplicationError("invalid_trades", "trades JSON is invalid") from exc
+        rows = raw_rows if isinstance(raw_rows, list) else None
+        if rows is not None and any(not isinstance(item, dict) for item in rows):
+            raise ApplicationError("invalid_trades", "trades must be an array of objects")
+        table = str(fields.get("table") or fields.get("tradeTable") or "").strip()
+        if not rows and not table:
+            raise ApplicationError("invalid_trades", "trades or table is required")
+        raw_update = fields.get("updatePosition", fields.get("update_position", True))
+        if isinstance(raw_update, str):
+            normalized = raw_update.strip().lower()
+            if normalized not in {"true", "false", "1", "0", "yes", "no"}:
+                raise ApplicationError("invalid_update_position", "updatePosition is invalid")
+            update_position = normalized in {"true", "1", "yes"}
+        else:
+            update_position = bool(raw_update)
+        return rows, table, update_position
+
+    @staticmethod
+    def _review_state(status: str) -> str:
+        return {
+            "staged": "pending", "confirmed": "approved",
+            "abandoned": "rejected", "failed": "failed",
+        }.get(str(status), "failed")
+
+    def _review_envelope(self, batch: Mapping[str, Any], *, replayed: bool = False,
+                         trace_id: str = "") -> dict[str, Any]:
+        rows = []
+        for item in batch.get("rows") or []:
+            payload = item.get("normalized_payload") if isinstance(item, Mapping) else None
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+            if isinstance(payload, Mapping):
+                rows.append(clean_json(dict(payload)))
+        batch_id = str(batch.get("batch_id") or "")
+        count = int(batch.get("row_count") or len(rows))
+        state = self._review_state(str(batch.get("status") or ""))
+        reference = f"shadow://foliant/trade-imports/{batch_id}"
+        return {
+            "protocol": "shadow.review.v1",
+            "review_id": batch_id,
+            "reference": reference,
+            "revision": 1,
+            "domain": "foliant",
+            "intent": "foliant.trade.import",
+            "summary": f"导入 {count} 条成交记录" + (
+                "并更新持仓" if batch.get("update_position") else "，不更新持仓"
+            ),
+            "fields": {
+                "trades": rows,
+                "updatePosition": bool(batch.get("update_position")),
+                "previewHash": str(batch.get("preview_hash") or ""),
+                "positionWatermark": str(batch.get("position_watermark") or ""),
+            },
+            "risk_level": "L2",
+            "state": state,
+            "created_at": clean_json(batch.get("created_at") or now_iso()),
+            "source_refs": [],
+            "trace_id": str(trace_id or ""),
+            "receipt": reference if state == "approved" else None,
+            "replayed": bool(replayed),
+        }
+
+    def create_review(self, *, actor_id: str, fields: Mapping[str, Any],
+                      idempotency_key: str, trace_id: str = "") -> dict[str, Any]:
+        key = str(idempotency_key or "").strip()
+        if len(key) < 8 or len(key) > 160:
+            raise ApplicationError(
+                "idempotency_key_required",
+                "Idempotency-Key must contain 8 to 160 characters",
+            )
+        request_payload = {"fields": clean_json(dict(fields))}
+        action = "portfolio.trade-review.create"
+        try:
+            claimed, existing_result = self.repository.claim_write(
+                actor_id, action, key, request_payload
+            )
+        except IdempotencyConflict as exc:
+            raise ApplicationError("idempotency_conflict", str(exc), status_code=409) from exc
+        if not claimed and existing_result is not None:
+            if existing_result.get("status") == "processing":
+                raise ApplicationError(
+                    "write_in_progress",
+                    "an identical trade review is already being created",
+                    status_code=409,
+                )
+            replayed_result = dict(existing_result)
+            replayed_result["replayed"] = True
+            if trace_id:
+                replayed_result["trace_id"] = trace_id
+            return replayed_result
+
+        try:
+            rows, table, update_position = self._parse_review_fields(fields)
+            preview = self.preview(
+                rows=rows, table=table, update_position=update_position,
+                actor_id=actor_id, persist=False, source="nexus:trade-entry",
+            )
+            if preview.get("errors"):
+                raise ApplicationError("invalid_trade", "trade validation failed")
+            db = self._db()
+            existing = db.get_trade_import_batch(preview["batch_id"], actor_id)
+            replayed = existing is not None
+            if existing is None:
+                db.stage_trade_import_batch(
+                    batch_id=preview["batch_id"], actor_id=actor_id,
+                    preview_hash=preview["preview_hash"],
+                    position_watermark=preview["position_watermark"],
+                    update_position=update_position, rows=preview["rows"],
+                )
+                existing = db.get_trade_import_batch(preview["batch_id"], actor_id)
+            if existing is None:
+                raise ApplicationError(
+                    "trade_review_unavailable",
+                    "trade review could not be stored",
+                    status_code=503,
+                )
+            response = self._review_envelope(
+                existing, replayed=replayed, trace_id=trace_id
+            )
+        except Exception:
+            self.repository.release_write_claim(actor_id, action, key, request_payload)
+            raise
+        self.repository.save_write_result(actor_id, action, key, request_payload, response)
+        return response
+
+    def list_reviews(self, *, actor_id: str, limit: int = 100,
+                     trace_id: str = "") -> dict[str, Any]:
+        batches = self._db().list_trade_import_batches(actor_id, status="staged", limit=limit)
+        detailed = [
+            self._db().get_trade_import_batch(str(item.get("batch_id") or ""), actor_id)
+            for item in batches
+        ]
+        return {
+            "protocol": "shadow.review.v1",
+            "items": [
+                self._review_envelope(item, trace_id=trace_id)
+                for item in detailed if item is not None
+            ],
+        }
+
+    def get_review(self, review_id: str, *, actor_id: str) -> dict[str, Any]:
+        batch = self._db().get_trade_import_batch(review_id, actor_id)
+        if batch is None:
+            raise ApplicationError("trade_review_not_found", "trade review was not found",
+                                   status_code=404)
+        return batch
+
+    def commit_review(self, review_id: str, *, actor_id: str, idempotency_key: str,
+                      trace_id: str = "") -> dict[str, Any]:
+        batch = self.get_review(review_id, actor_id=actor_id)
+        if batch.get("status") == "confirmed":
+            return self._review_envelope(batch, replayed=True, trace_id=trace_id)
+        if batch.get("status") != "staged":
+            raise ApplicationError("trade_review_state_invalid",
+                                   "trade review is not pending", status_code=409)
+        rows = [item.get("normalized_payload") for item in batch.get("rows") or []]
+        result = self.confirm(
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            preview_hash=str(batch.get("preview_hash") or ""),
+            rows=[dict(item) for item in rows if isinstance(item, Mapping)],
+            update_position=bool(batch.get("update_position")),
+            confirmed=True,
+            source="nexus:trade-entry",
+        )
+        if result.get("status") not in {"success", "noop"}:
+            raise ApplicationError("trade_import_failed", "trade import failed", status_code=409)
+        refreshed = self.get_review(review_id, actor_id=actor_id)
+        return self._review_envelope(refreshed, trace_id=trace_id)
+
+    def reject_review(self, review_id: str, *, actor_id: str,
+                      trace_id: str = "") -> dict[str, Any]:
+        batch = self.get_review(review_id, actor_id=actor_id)
+        if batch.get("status") == "abandoned":
+            return self._review_envelope(batch, replayed=True, trace_id=trace_id)
+        if batch.get("status") != "staged":
+            raise ApplicationError("trade_review_state_invalid",
+                                   "trade review is not pending", status_code=409)
+        if not self._db().abandon_trade_import_batch(review_id, actor_id):
+            raise ApplicationError("trade_review_conflict", "trade review changed", status_code=409)
+        refreshed = self.get_review(review_id, actor_id=actor_id)
+        return self._review_envelope(refreshed, trace_id=trace_id)
+
+
+class PortfolioAccessService:
+    """Bounded, read-only personal portfolio and trade projections for Nexus."""
+
+    def __init__(self, *, portfolio_db: Any = None) -> None:
+        self._portfolio_db = portfolio_db
+
+    def _db(self):
+        if self._portfolio_db is not None:
+            return self._portfolio_db
+        from portfolio_db import portfolio_db
+
+        return portfolio_db
+
+    @staticmethod
+    def _local_date(value: Any, timezone: ZoneInfo) -> date | None:
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone)
+        return value.date()
+
+    def summary(self) -> dict[str, Any]:
+        holdings = self._db().get_all_stocks() or []
+        active = [row for row in holdings if float(row.get("quantity") or 0) > 0]
+        total_cost = sum(
+            float(row.get("cost_price") or 0) * float(row.get("quantity") or 0)
+            for row in active
+        )
+        data = {
+            "portfolio_ref": "primary",
+            "holdings_count": len(active),
+            "total_cost": round(total_cost, 2),
+            "holdings": clean_json(active[:100]),
+        }
+        return tool_result(
+            summary=f"当前持仓 {len(active)} 只，成本口径合计 {total_cost:.2f} 元",
+            resource_uri="shadow://foliant/portfolios/primary",
+            status="complete",
+            provenance_value=provenance(run_id="portfolio-primary"),
+            data=data,
+            model_payload=data,
+        )
+
+    def trades(self, *, code: str = "", import_date: str = "", trade_date: str = "",
+               limit: int = 200, timezone_name: str = "Asia/Shanghai") -> dict[str, Any]:
+        if import_date and trade_date:
+            raise ApplicationError("invalid_trade_filter",
+                                   "import_date and trade_date are mutually exclusive")
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except Exception as exc:
+            raise ApplicationError("invalid_timezone", "timezone is invalid") from exc
+        target_text = import_date or trade_date
+        try:
+            target = date.fromisoformat(target_text) if target_text else None
+        except ValueError as exc:
+            raise ApplicationError("invalid_date", "date must use YYYY-MM-DD") from exc
+        bounded_limit = max(1, min(500, int(limit)))
+        rows = self._db().get_trades(code or None, 10000 if target else bounded_limit) or []
+        field = "created_at" if import_date else "trade_time" if trade_date else ""
+        if target is not None:
+            rows = [row for row in rows if self._local_date(row.get(field), timezone) == target]
+        rows = rows[:bounded_limit]
+        cleaned = clean_json(rows)
+        data = {
+            "portfolio_ref": "primary",
+            "filter": {"field": field or "latest", "date": target_text or None,
+                       "timezone": timezone_name},
+            "count": len(cleaned),
+            "records": cleaned,
+        }
+        return tool_result(
+            summary=f"读取到 {len(cleaned)} 条成交记录",
+            resource_uri="shadow://foliant/portfolios/primary/trades",
+            status="complete",
+            provenance_value=provenance(run_id="portfolio-primary-trades"),
+            data=data,
+            model_payload=data,
         )

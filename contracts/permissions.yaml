@@ -28,3 +28,19 @@ permissions:
     audience: foliant
     scopes: [stock.research]
     resource_grant: creator-agent-only
+  - capability: foliant.portfolio.read
+    audience: foliant
+    scopes: [stock.portfolio.read]
+    resource_grant: portfolio-primary
+  - capability: foliant.trades.read
+    audience: foliant
+    scopes: [stock.portfolio.read]
+    resource_grant: portfolio-primary
+  - capability: foliant.trades.draft
+    audience: foliant
+    scopes: [stock.portfolio.write]
+    resource_grant: portfolio-primary
+  - capability: foliant.trades.write
+    audience: foliant
+    scopes: [stock.portfolio.write]
+    resource_grant: portfolio-primary

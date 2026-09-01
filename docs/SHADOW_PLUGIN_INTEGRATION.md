@@ -34,7 +34,8 @@ Web、Agent HTTP 和兼容 MCP 从不同适配器进入上述服务。Agent HTTP
 `Idempotency-Key`，同一 Agent、Capability 和键只有相同请求可以复用。完整结果长期留在
 Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 continuation。
 
-该 Profile 不含持仓、成交、监控、环境配置、任务控制、正式发布、MiniQMT 或券商执行。
+该研究 Profile 不含持仓、成交、监控、环境配置、任务控制、正式发布、MiniQMT 或券商执行。
+生产 `shadow-nexus` Profile 可另外选择个人组合只读能力；写能力只供 Nexus 隐藏 Host 使用。
 
 ## 成交录入
 
@@ -46,9 +47,11 @@ Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 c
 4. `TradeEntryService` 复用既有成交导入与移动加权持仓逻辑；
 5. 服务端审计只记录路由、actor、结果和状态，不记录成交正文。
 
-这里的 OIDC 管理员确认属于浏览器业务操作。Agent 交易写入仍被明确保留：Platform 完成
-delegated actor、固定 portfolio grant 以及 `ConfirmationReceipt` 签发、验签、消费和防重放
-之前，不能把 DSH Approval 或 `dry_run=false` 当成授权。
+Nexus 的专用 Agent 通过 `owner_app=nexus`、精确 capability 和固定 `portfolio-primary`
+grant 访问个人主组合。对话中明确要求“导入已成交记录”会生成 L2 Proposal，隐藏 Host 调用
+标准 Review 的 create/commit 两步；服务端重新校验规范化行、持仓水位和幂等键后才写入。
+这不是券商执行能力，因此不使用 L3 `ConfirmationReceipt`。任何下单、撤单、账户配置或券商
+同步仍然不可用，不能用 DSH Approval 或 `dry_run=false` 绕过。
 
 ## Run 与来源
 

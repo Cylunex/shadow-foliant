@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 import sqlite3
 
 import pytest
 
 from application.run_repository import RunRepository
-from application.services import ApplicationError, TradeEntryService
+from application.services import ApplicationError, PortfolioAccessService, TradeEntryService
 
 
 class FakePortfolioDB:
@@ -13,6 +14,7 @@ class FakePortfolioDB:
         self.holdings = []
         self.trades = []
         self.import_calls = 0
+        self.batches = {}
 
     def get_all_stocks(self):
         return self.holdings
@@ -28,6 +30,43 @@ class FakePortfolioDB:
             "positions_updated": len(rows) if update_position else 0,
             "errors": [],
         }
+
+    def stage_trade_import_batch(self, *, batch_id, actor_id, preview_hash,
+                                 position_watermark, update_position, rows):
+        self.batches.setdefault(batch_id, {
+            "batch_id": batch_id, "actor_id": actor_id, "status": "staged",
+            "update_position": update_position, "preview_hash": preview_hash,
+            "position_watermark": position_watermark, "row_count": len(rows),
+            "created_at": "2026-09-01T12:00:00+08:00",
+            "confirmed_at": None, "abandoned_at": None,
+            "rows": [
+                {"row_number": index, "normalized_payload": dict(row)}
+                for index, row in enumerate(rows, 1)
+            ],
+        })
+
+    def get_trade_import_batch(self, batch_id, actor_id=None):
+        value = self.batches.get(batch_id)
+        if value is None or (actor_id and value["actor_id"] != actor_id):
+            return None
+        return value
+
+    def list_trade_import_batches(self, actor_id, status=None, limit=100):
+        return [
+            value for value in self.batches.values()
+            if value["actor_id"] == actor_id and (status is None or value["status"] == status)
+        ][:limit]
+
+    def mark_trade_import_batch(self, batch_id, status):
+        if batch_id in self.batches:
+            self.batches[batch_id]["status"] = status
+
+    def abandon_trade_import_batch(self, batch_id, actor_id):
+        value = self.get_trade_import_batch(batch_id, actor_id)
+        if value is None or value["status"] != "staged":
+            return False
+        value["status"] = "abandoned"
+        return True
 
 
 @pytest.fixture()
@@ -136,3 +175,54 @@ def test_trade_entry_preview_binds_position_watermark_and_effects(service) -> No
     assert len(preview["position_watermark"]) == 64
     assert preview["effects"][0]["position_before"] == 100
     assert preview["effects"][0]["position_after"] == 0
+
+
+def test_nexus_trade_review_stages_commits_and_replays(service) -> None:
+    entry, db = service
+    fields = {"tradesJson": __import__("json").dumps([_row()]), "updatePosition": "true"}
+    created = entry.create_review(
+        actor_id="nexus-agent", fields=fields,
+        idempotency_key="nexus-review-create-0001", trace_id="trace-1",
+    )
+    repeated_create = entry.create_review(
+        actor_id="nexus-agent", fields=fields,
+        idempotency_key="nexus-review-create-0001",
+    )
+    assert created["protocol"] == "shadow.review.v1"
+    assert created["state"] == "pending"
+    assert repeated_create["review_id"] == created["review_id"]
+    assert repeated_create["replayed"] is True
+
+    with pytest.raises(ApplicationError) as conflict:
+        entry.create_review(
+            actor_id="nexus-agent",
+            fields={"trades": [_row(price=1600)]},
+            idempotency_key="nexus-review-create-0001",
+        )
+    assert conflict.value.status_code == 409
+
+    committed = entry.commit_review(
+        created["review_id"], actor_id="nexus-agent",
+        idempotency_key="nexus-trade-import-0001",
+    )
+    replayed_commit = entry.commit_review(
+        created["review_id"], actor_id="nexus-agent",
+        idempotency_key="nexus-trade-import-0001",
+    )
+    assert committed["state"] == "approved"
+    assert committed["receipt"].startswith("shadow://foliant/trade-imports/")
+    assert replayed_commit["replayed"] is True
+    assert db.import_calls == 1
+
+
+def test_portfolio_access_distinguishes_import_and_trade_dates() -> None:
+    db = FakePortfolioDB()
+    db.trades = [{
+        **_row(), "created_at": "2026-09-01 09:48:14",
+        "trade_time": datetime.fromisoformat("2026-08-28T10:38:28+08:00"),
+    }]
+    access = PortfolioAccessService(portfolio_db=db)
+    imported = access.trades(import_date="2026-09-01")
+    executed = access.trades(trade_date="2026-09-01")
+    assert imported["data"]["count"] == 1
+    assert executed["data"]["count"] == 0

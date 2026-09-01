@@ -10,6 +10,7 @@ from application.services import (
     BacktestRunService,
     DataQualityService,
     MarketOverviewService,
+    PortfolioAccessService,
     ResearchRunQueryService,
     RunCoordinator,
     SecurityResearchService,
@@ -30,6 +31,7 @@ class ApplicationServices:
         self.selection = SelectionRunService(self.coordinator)
         self.backtest = BacktestRunService(self.coordinator)
         self.run_query = ResearchRunQueryService(self.runs)
+        self.portfolio = PortfolioAccessService()
         self.trade_entry = TradeEntryService(self.runs)
 
 

@@ -21,3 +21,15 @@ confirmations:
   - capability: foliant.run.read
     mode: none
     receipt_required: false
+  - capability: foliant.portfolio.read
+    mode: none
+    receipt_required: false
+  - capability: foliant.trades.read
+    mode: none
+    receipt_required: false
+  - capability: foliant.trades.draft
+    mode: notify
+    receipt_required: false
+  - capability: foliant.trades.write
+    mode: policy
+    receipt_required: false

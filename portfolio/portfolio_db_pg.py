@@ -525,6 +525,86 @@ class PortfolioDBPG:
             cur.close()
             conn.close()
 
+    def get_trade_import_batch(self, batch_id: str,
+                               actor_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Read one staged/confirmed trade import with its immutable normalized rows."""
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            where = ["b.batch_id=%s"]
+            params: List[Any] = [batch_id]
+            if actor_id:
+                where.append("b.actor_id=%s")
+                params.append(actor_id)
+            cur.execute(
+                f"""SELECT b.batch_id,b.actor_id,b.status,b.update_position,
+                           b.preview_hash,b.position_watermark,b.row_count,b.created_at,
+                           b.confirmed_at,b.abandoned_at
+                    FROM trade_import_batches b
+                    WHERE {' AND '.join(where)}""",
+                tuple(params),
+            )
+            batch = cur.fetchone()
+            if batch is None:
+                return None
+            cur.execute(
+                """SELECT row_number,external_fingerprint,normalized_payload,
+                          validation_status,error_codes,trade_record_id
+                   FROM trade_import_rows WHERE batch_id=%s ORDER BY row_number""",
+                (batch_id,),
+            )
+            value = dict(batch)
+            value["rows"] = [dict(row) for row in cur.fetchall()]
+            return value
+        finally:
+            cur.close()
+            conn.close()
+
+    def list_trade_import_batches(self, actor_id: str, *, status: Optional[str] = None,
+                                  limit: int = 100) -> List[Dict[str, Any]]:
+        """List an Agent's own trade import reviews without exposing other actors."""
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            where = ["actor_id=%s"]
+            params: List[Any] = [actor_id]
+            if status:
+                where.append("status=%s")
+                params.append(status)
+            params.append(max(1, min(200, int(limit))))
+            cur.execute(
+                f"""SELECT batch_id,actor_id,status,update_position,preview_hash,
+                           position_watermark,row_count,created_at,confirmed_at,abandoned_at
+                    FROM trade_import_batches WHERE {' AND '.join(where)}
+                    ORDER BY created_at DESC LIMIT %s""",
+                tuple(params),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            cur.close()
+            conn.close()
+
+    def abandon_trade_import_batch(self, batch_id: str, actor_id: str) -> bool:
+        """Reject one still-staged trade import owned by the calling Agent."""
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """UPDATE trade_import_batches
+                   SET status='abandoned',abandoned_at=NOW()
+                   WHERE batch_id=%s AND actor_id=%s AND status='staged'""",
+                (batch_id, actor_id),
+            )
+            changed = cur.rowcount == 1
+            conn.commit()
+            return changed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
     @staticmethod
     def _position_watermark(cur, codes: List[str]) -> str:
         import hashlib

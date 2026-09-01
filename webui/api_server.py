@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、对外回通用文案
 
@@ -565,8 +565,34 @@ class AgentBacktestPreviewReq(StrictAgentRequest):
         return self
 
 
+class AgentNexusTradeReviewReq(StrictAgentRequest):
+    intent: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    summary: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    fields: dict[str, Any]
+    source_text: Annotated[str, StringConstraints(max_length=12000)] = ""
+    source_refs: list[Annotated[str, StringConstraints(max_length=500)]] = Field(
+        default_factory=list, max_length=50
+    )
+
+
+class AgentNexusReviewDecisionReq(StrictAgentRequest):
+    revision: int | None = Field(default=None, ge=1)
+
+
 def _agent_actor(request: Request) -> str:
     return str(getattr(request.state.agent_identity, "agent_id", ""))
+
+
+def _nexus_actor(request: Request) -> str:
+    from application.services import ApplicationError
+
+    identity = request.state.agent_identity
+    if str(getattr(identity, "owner_app", "")) != "nexus":
+        raise ApplicationError(
+            "delegated_actor_required", "this capability is restricted to Nexus",
+            status_code=403,
+        )
+    return str(identity.agent_id)
 
 
 @app.get("/api/machine/v1/agent/market/overview", operation_id="get_agent_market_overview")
@@ -721,6 +747,141 @@ def agent_run_result(
             run_id, actor_id=_agent_actor(request), offset=offset, limit=limit
         )
         return _agent_result(value, max_bytes=262144)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/portfolio/summary",
+    operation_id="get_agent_portfolio_summary",
+)
+def agent_portfolio_summary():
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(get_application_services().portfolio.summary(), max_bytes=131072)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/portfolio/trade-records",
+    operation_id="list_agent_trade_records",
+)
+def agent_portfolio_trade_records(
+    code: str = Query(default="", max_length=20),
+    import_date: str = Query(default="", max_length=10),
+    trade_date: str = Query(default="", max_length=10),
+    limit: int = Query(default=200, ge=1, le=500),
+    timezone: str = Query(default="Asia/Shanghai", max_length=80),
+):
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(
+            get_application_services().portfolio.trades(
+                code=code, import_date=import_date, trade_date=trade_date,
+                limit=limit, timezone_name=timezone,
+            ),
+            max_bytes=262144,
+        )
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/nexus/reviews",
+    status_code=201,
+    operation_id="create_nexus_foliant_review",
+)
+def create_nexus_foliant_review(
+    req: AgentNexusTradeReviewReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    from application.runtime import get_application_services
+
+    try:
+        if req.intent != "foliant.trade.import":
+            from application.services import ApplicationError
+            raise ApplicationError("invalid_intent", "unsupported Foliant review intent")
+        value = get_application_services().trade_entry.create_review(
+            actor_id=_nexus_actor(request), fields=req.fields,
+            idempotency_key=idempotency_key,
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=131072, status_code=201)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
+    "/api/machine/v1/agent/nexus/reviews",
+    operation_id="list_nexus_foliant_reviews",
+)
+def list_nexus_foliant_reviews(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    from application.runtime import get_application_services
+
+    try:
+        value = get_application_services().trade_entry.list_reviews(
+            actor_id=_nexus_actor(request), limit=limit,
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=262144)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/nexus/reviews/{review_id}/commit",
+    operation_id="commit_nexus_foliant_review",
+)
+def commit_nexus_foliant_review(
+    review_id: str,
+    req: AgentNexusReviewDecisionReq,
+    request: Request,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+):
+    from application.runtime import get_application_services
+
+    try:
+        if req.revision not in {None, 1}:
+            from application.services import ApplicationError
+            raise ApplicationError("review_revision_conflict", "trade review revision changed",
+                                   status_code=409)
+        value = get_application_services().trade_entry.commit_review(
+            review_id, actor_id=_nexus_actor(request), idempotency_key=idempotency_key,
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=131072)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/nexus/reviews/{review_id}/reject",
+    operation_id="reject_nexus_foliant_review",
+)
+def reject_nexus_foliant_review(
+    review_id: str,
+    req: AgentNexusReviewDecisionReq,
+    request: Request,
+):
+    from application.runtime import get_application_services
+
+    try:
+        if req.revision not in {None, 1}:
+            from application.services import ApplicationError
+            raise ApplicationError("review_revision_conflict", "trade review revision changed",
+                                   status_code=409)
+        value = get_application_services().trade_entry.reject_review(
+            review_id, actor_id=_nexus_actor(request),
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        return _agent_result(value, max_bytes=131072)
     except Exception as exc:
         return _agent_error(exc)
 

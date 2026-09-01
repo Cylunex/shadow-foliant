@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.3.0
+  version: 0.4.0
 servers:
   - url: https://stock.example.com
 security:
@@ -184,6 +184,112 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/machine/v1/agent/portfolio/summary:
+    get:
+      operationId: get_agent_portfolio_summary
+      summary: Read the delegated primary portfolio summary and bounded holdings
+      responses:
+        "200":
+          description: Bounded personal portfolio summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/portfolio/trade-records:
+    get:
+      operationId: list_agent_trade_records
+      summary: Read delegated portfolio trades by import date, trade date or security code
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string, maxLength: 20 } }
+        - { name: import_date, in: query, required: false, schema: { type: string, format: date } }
+        - { name: trade_date, in: query, required: false, schema: { type: string, format: date } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
+        - { name: timezone, in: query, required: false, schema: { type: string, default: Asia/Shanghai } }
+      responses:
+        "200":
+          description: Bounded trade record list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/nexus/reviews:
+    get:
+      operationId: list_nexus_foliant_reviews
+      summary: List pending trade-import reviews owned by the Nexus Agent
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+      responses:
+        "200":
+          description: Standard Nexus review collection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewCollection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: create_nexus_foliant_review
+      summary: Validate and stage a delegated trade import without writing trades
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NexusReviewCreate" }
+      responses:
+        "201":
+          description: Standard pending Nexus review
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/machine/v1/agent/nexus/reviews/{review_id}/commit:
+    post:
+      operationId: commit_nexus_foliant_review
+      summary: Commit exactly one staged and validated trade import
+      parameters:
+        - $ref: "#/components/parameters/ReviewId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewDecision" }
+      responses:
+        "200":
+          description: Standard approved Nexus review with canonical receipt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/machine/v1/agent/nexus/reviews/{review_id}/reject:
+    post:
+      operationId: reject_nexus_foliant_review
+      summary: Reject one staged trade import without writing trades
+      parameters:
+        - $ref: "#/components/parameters/ReviewId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewDecision" }
+      responses:
+        "200":
+          description: Standard rejected Nexus review
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 components:
   securitySchemes:
     agentBearer:
@@ -201,6 +307,16 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: "^[a-f0-9]{32}$" }
+    ReviewId:
+      name: review_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^tb_[a-f0-9]{24}$" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 160 }
   schemas:
     Provenance:
       type: object
@@ -317,6 +433,56 @@ components:
         target_pct: { type: number, minimum: 0, maximum: 500, default: 15 }
         max_positions: { type: integer, minimum: 1, maximum: 20, default: 5 }
         benchmark: { type: string, pattern: "^[0-9]{6}$", default: "000300" }
+    NexusReviewCreate:
+      type: object
+      additionalProperties: false
+      required: [intent, summary, fields]
+      properties:
+        intent: { const: foliant.trade.import }
+        summary: { type: string, minLength: 1, maxLength: 500 }
+        fields:
+          type: object
+          additionalProperties: true
+          description: Contains trades or tradesJson, and optional updatePosition
+        source_text: { type: string, maxLength: 12000, default: "" }
+        source_refs:
+          type: array
+          maxItems: 50
+          items: { type: string, maxLength: 500 }
+    ReviewDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        revision: { type: integer, minimum: 1, nullable: true }
+    ReviewEnvelope:
+      type: object
+      additionalProperties: false
+      required: [protocol, review_id, reference, revision, domain, intent, summary, fields, risk_level, state, created_at, source_refs, trace_id, receipt, replayed]
+      properties:
+        protocol: { const: shadow.review.v1 }
+        review_id: { type: string }
+        reference: { type: string, pattern: "^shadow://foliant/trade-imports/" }
+        revision: { type: integer, minimum: 1 }
+        domain: { const: foliant }
+        intent: { const: foliant.trade.import }
+        summary: { type: string }
+        fields: { type: object, additionalProperties: true }
+        risk_level: { const: L2 }
+        state: { enum: [pending, approved, rejected, failed] }
+        created_at: { type: string }
+        source_refs: { type: array, items: { type: string } }
+        trace_id: { type: string }
+        receipt: { type: [string, "null"] }
+        replayed: { type: boolean }
+    ReviewCollection:
+      type: object
+      additionalProperties: false
+      required: [protocol, items]
+      properties:
+        protocol: { const: shadow.review.v1 }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ReviewEnvelope" }
     ErrorEnvelope:
       type: object
       additionalProperties: false

@@ -26,9 +26,10 @@ Run 完成与元数据 Outbox 同事务提交；后台 publisher 只依赖注入
 Runtime 或消息总线 SDK 带入应用层。
 
 普通 `shadow-finance-research` Profile 只有市场、研究、选股、回测 preview 和 Run 查询。
-持仓、成交、配置、运维和券商执行不进入该 Profile。股票成交由 Stock Web 管理员在服务端
-预览并确认后录入；未来 Agent 写入须等待 delegated actor、资源授权和完整
-`ConfirmationReceipt` 闭环。
+个人 `shadow-nexus` Profile 额外为 owner_app=`nexus` 的专用 Agent 固定授权主组合读取及
+成交记录导入。导入只登记已经发生的成交，按 Nexus `shadow.review.v1` 完成服务端预览、
+持仓水位校验、幂等提交和回读，风险级别为 L2；它不下单、不撤单，也不接触券商执行。
+配置、运维和券商执行仍不进入任何普通 Agent Profile。
 
 ## 研究主链
 
