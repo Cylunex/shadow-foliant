@@ -3676,6 +3676,39 @@ def _valuation_release_pending(result):
     )
 
 
+def _valuation_unavailable_detail(trade_date, result, *, next_retry):
+    return (
+        f"zzshare valuation {trade_date} not published; "
+        f"market_coverage={float(result.get('coverage') or 0):.1%}; "
+        f"valuation_rows={int(result.get('valuation_rows') or 0)}; "
+        f"next_retry={next_retry}"
+    )
+
+
+def _preopen_research_context(syncer, selection_date=None):
+    """Build the same PIT boundary for the 08:35 repair and 09:45 selection."""
+    from analysis.local_stock_selector import LocalStockSelector
+    from core.decision_context import DecisionContext
+
+    selected = selection_date or datetime.now().strftime('%Y-%m-%d')
+    selector = LocalStockSelector()
+    context = DecisionContext.build(
+        selected,
+        mode='preopen',
+        policy_version=selector.policy.version,
+        policy_hash=selector.policy.policy_hash,
+    )
+    syncer.refresh_calendar_for_day(context.market_cutoff)
+    effective_market_date = syncer.store.expected_market_as_of(
+        context.market_cutoff, inclusive=True
+    )
+    if not effective_market_date:
+        raise RuntimeError(
+            "stage=calendar latest confirmed open market date unavailable"
+        )
+    return selector, context, effective_market_date
+
+
 def task_research_data_sync():
     """盘后同步全市场本地研究快照，并在新行情入库后更新正式选股后验。"""
     job = 'research_data_sync'
@@ -3724,7 +3757,7 @@ def task_research_data_sync_retry():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    from data.research_sync import ResearchSynchronizer
+    from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
     syncer = ResearchSynchronizer()
     today = datetime.now().strftime('%Y-%m-%d')
     if syncer.store.completed_sync('daily_market', today):
@@ -3733,6 +3766,16 @@ def task_research_data_sync_retry():
         return
     try:
         result = syncer.repair_daily_market_if_missing(today)
+    except ResearchSourceUnavailable as exc:
+        detail = _valuation_unavailable_detail(
+            today, exc.result, next_retry='next_trading_day_08:35'
+        )
+        _log_run(
+            job, 'skipped', error=f'source_unavailable: {detail}',
+            started_at=started, finished_at=datetime.now().isoformat(), notify=False,
+        )
+        _notify_data_unavailable(job, detail)
+        return
     except Exception as exc:
         raise RuntimeError(
             f'{job} stage=lightweight_repair failed ({type(exc).__name__}): '
@@ -3742,6 +3785,55 @@ def task_research_data_sync_retry():
         job, 'success',
         error=(
             f"daily_market repaired mode={result.get('repair_mode', 'unknown')} "
+            f"market_coverage={float(result.get('coverage') or 0):.1%} "
+            f"valuation={result.get('valuation_rows', 0)} "
+            f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
+        ),
+        started_at=started, finished_at=datetime.now().isoformat(),
+    )
+
+
+def task_research_data_sync_premarket_retry():
+    """08:35 retry for the latest confirmed open day before formal selection."""
+    job = 'research_data_sync_premarket_retry'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
+
+    syncer = ResearchSynchronizer()
+    stage = 'preopen_boundary'
+    try:
+        _, _, trade_date = _preopen_research_context(syncer)
+        if syncer.store.completed_sync('daily_market', trade_date):
+            _log_run(
+                job, 'skipped', error=f'daily_market {trade_date} already complete',
+                started_at=started, finished_at=datetime.now().isoformat(),
+            )
+            return
+        stage = 'lightweight_repair'
+        result = syncer.repair_daily_market_if_missing(trade_date)
+    except ResearchSourceUnavailable as exc:
+        detail = _valuation_unavailable_detail(
+            getattr(exc, 'result', {}).get('trade_date') or locals().get('trade_date', 'unknown'),
+            exc.result,
+            next_retry='unified_selection_09:45',
+        )
+        _log_run(
+            job, 'skipped', error=f'source_unavailable: {detail}; formal_selection=fail_closed',
+            started_at=started, finished_at=datetime.now().isoformat(), notify=False,
+        )
+        _notify_data_unavailable(job, f'{detail}; 正式选股将保持数据门禁')
+        return
+    except Exception as exc:
+        raise RuntimeError(
+            f'{job} stage={stage} failed ({type(exc).__name__}): {str(exc)[:320]}'
+        ) from exc
+    _log_run(
+        job, 'success',
+        error=(
+            f"daily_market {trade_date} repaired "
+            f"mode={result.get('repair_mode', 'unknown')} "
             f"market_coverage={float(result.get('coverage') or 0):.1%} "
             f"valuation={result.get('valuation_rows', 0)} "
             f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
@@ -4409,27 +4501,12 @@ def task_unified_selection():
         #    已完成市场截止日，不能要求独立数据源提前证明选择日当天；瞬时
         #    失败时 refresh_calendar_for_day 会复用同截止日的完整双源缓存。
         from data.research_sync import ResearchSynchronizer
-        from analysis.local_stock_selector import LocalStockSelector, _normalize_reference
-        from core.decision_context import DecisionContext
+        from analysis.local_stock_selector import _normalize_reference
         selection_date = datetime.now().strftime('%Y-%m-%d')
-        selector = LocalStockSelector()
-        context = DecisionContext.build(
-            selection_date,
-            mode='preopen',
-            policy_version=selector.policy.version,
-            policy_hash=selector.policy.policy_hash,
-        )
         syncer = ResearchSynchronizer()
-        syncer.refresh_calendar_for_day(context.market_cutoff)
-        # preopen 的原始边界是“前一自然日”。周一/节后该日期可能是休市日，
-        # 补数必须改用双源日历确认的最近开市日，不能向数据源请求周末行情。
-        effective_market_date = syncer.store.expected_market_as_of(
-            context.market_cutoff, inclusive=True
+        selector, context, effective_market_date = _preopen_research_context(
+            syncer, selection_date
         )
-        if not effective_market_date:
-            raise RuntimeError(
-                "stage=calendar latest confirmed open market date unavailable"
-            )
         repair = syncer.repair_daily_market_if_missing(effective_market_date)
         if repair.get('repaired'):
             print('[unified_selection] 🧰 已在正式选股前补齐前一交易日市场快照 '
@@ -5940,6 +6017,7 @@ def register_default_jobs():
     """注册整合后的任务时间表（2026-06-12 二次整合，CST 时区）
 
     时间表（CST；盘后数据链按提供方完成时间留安全缓冲）：
+      08:35 research_data_sync_premarket_retry — 🌅 前夜估值晚到时轻量补跑
       08:55 fund_premarket              — 🏦 基金盘前合并(E:定投提醒 + 宽基估值分位,原 08:55+09:05 两条)
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:15/09:30 strategy_prefetch     — 问财外部参考首取 / 仅补缓存缺口
@@ -5983,6 +6061,11 @@ def register_default_jobs():
         持仓扫描改读盘后快照(不再逐只拉K线);AI 加 lazy_summary 口语化一句话。
     """
     # ---- 🟢 盘前 ----
+    hub.register(
+        'research_data_sync_premarket_retry',
+        MARKET_DATA_TIMES['research_data_sync_premarket_retry'],
+        task_research_data_sync_premarket_retry,
+    )
     hub.register('morning_strategy',            '09:00', task_morning_strategy)
     # 基金盘前合并(2026-06-27):fund_dca_reminder(08:55)+fund_valuation_signal(09:05)→ 一条 fund_premarket
     hub.register('fund_premarket',              '08:55', task_fund_premarket)

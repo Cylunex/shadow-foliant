@@ -18,8 +18,11 @@ BAOSTOCK_READY_TIMES = {
 }
 
 MARKET_DATA_TIMES = {
+    # 若前夜估值源晚到，开盘前先补一次；09:45 正式选股仍保留最终的
+    # fail-closed 自愈，不会用陈旧估值生成候选。
+    'research_data_sync_premarket_retry': '08:35',
     # 正式 PIT 数据优先：18:00 复权因子完成后先同步。估值提供方偶尔
-    # 晚于日线发布，因此只在 20:05 做一次不含财务/主力资金的轻量补跑。
+    # 晚于日线发布，因此 20:05 做一次不含财务/主力资金的轻量补跑。
     'research_data_sync': '18:05',
     'research_data_sync_retry': '20:05',
     # 大批量预热放在 PIT 同步之后，避免并发争用 BaoStock 单会话/熔断器。

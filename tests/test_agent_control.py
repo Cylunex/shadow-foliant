@@ -16,6 +16,7 @@ from jobs import ai_recommendation_monitor
 from jobs import jobs_hub
 from jobs.automation_config import REGISTRY
 from data.factor_collector import _snapshot_date
+from data.research_sync import ResearchSourceUnavailable
 from monitor import monitor_db as monitor_db_module
 from monitor.monitor_db import StockMonitorDatabase
 
@@ -270,6 +271,78 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(log_run.call_args.args[:2],
                          ('research_data_sync_retry', 'success'))
         self.assertIn('valuation=5212', log_run.call_args.kwargs['error'])
+
+    def test_research_sync_retry_classifies_unpublished_valuation_as_source_skip(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = False
+        pending = {
+            'trade_date': datetime.now().strftime('%Y-%m-%d'),
+            'coverage': 0.997,
+            'market_quality_status': 'ok',
+            'valuation_rows': 0,
+            'valuation_quality_status': 'unavailable',
+        }
+        syncer.repair_daily_market_if_missing.side_effect = ResearchSourceUnavailable(
+            'valuation pending', result=pending,
+        )
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
+            jobs_hub.task_research_data_sync_retry()
+
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_retry', 'skipped'))
+        self.assertFalse(log_run.call_args.kwargs['notify'])
+        self.assertIn('next_trading_day_08:35', log_run.call_args.kwargs['error'])
+        notify.assert_called_once()
+
+    def test_premarket_research_retry_uses_confirmed_previous_open_day(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = False
+        syncer.repair_daily_market_if_missing.return_value = {
+            'repair_mode': 'bulk_market_without_baostock_fallback',
+            'coverage': 0.997,
+            'valuation_rows': 5212,
+            'valuation_coverage': 0.936,
+        }
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch.object(
+                    jobs_hub, '_preopen_research_context',
+                    return_value=(mock.MagicMock(), mock.MagicMock(), '2026-09-01'),
+                ), mock.patch.object(jobs_hub, '_log_run') as log_run:
+            jobs_hub.task_research_data_sync_premarket_retry()
+
+        syncer.store.completed_sync.assert_called_once_with('daily_market', '2026-09-01')
+        syncer.repair_daily_market_if_missing.assert_called_once_with('2026-09-01')
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_premarket_retry', 'success'))
+
+    def test_premarket_unpublished_valuation_keeps_formal_selection_fail_closed(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = False
+        pending = {
+            'trade_date': '2026-09-01', 'coverage': 0.997,
+            'market_quality_status': 'ok',
+            'valuation_rows': 0, 'valuation_quality_status': 'unavailable',
+        }
+        syncer.repair_daily_market_if_missing.side_effect = ResearchSourceUnavailable(
+            'valuation pending', result=pending,
+        )
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch.object(
+                    jobs_hub, '_preopen_research_context',
+                    return_value=(mock.MagicMock(), mock.MagicMock(), '2026-09-01'),
+                ), mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
+            jobs_hub.task_research_data_sync_premarket_retry()
+
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_premarket_retry', 'skipped'))
+        self.assertIn('formal_selection=fail_closed', log_run.call_args.kwargs['error'])
+        notify.assert_called_once()
 
     def test_scheduled_consumers_read_today_formal_artifacts_only(self):
         formal = {

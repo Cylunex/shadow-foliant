@@ -19,6 +19,14 @@ _CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+class ResearchSourceUnavailable(RuntimeError):
+    """A required research dataset is not published yet, not a code failure."""
+
+    def __init__(self, message: str, *, result: Optional[dict] = None):
+        super().__init__(message)
+        self.result = dict(result or {})
+
+
 def _calendar_chunks(start_date: str, end_date: str, *, days: int = 92):
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
@@ -326,6 +334,26 @@ class ResearchSynchronizer:
             optional_fund_flow=False,
         )
         if result.get("quality_status") != "ok":
+            try:
+                minimum_market = float(os.getenv("RESEARCH_DAILY_MIN_COVERAGE", "0.90"))
+            except (TypeError, ValueError):
+                minimum_market = 0.90
+            market_quality = str(result.get("market_quality_status") or "unknown")
+            if (
+                float(result.get("coverage") or 0) >= minimum_market
+                and market_quality
+                not in {"failed", "unknown", "unknown_unit", "possibly_truncated"}
+                and int(result.get("valuation_rows") or 0) == 0
+                and str(result.get("valuation_quality_status") or "unknown")
+                in {"unavailable", "empty", "source_unavailable"}
+            ):
+                raise ResearchSourceUnavailable(
+                    "required valuation snapshot is not published yet: "
+                    f"market_coverage={result.get('coverage')} "
+                    f"valuation_rows={result.get('valuation_rows', 0)} "
+                    f"valuation_quality={result.get('valuation_quality_status', 'unknown')}",
+                    result=result,
+                )
             raise RuntimeError(
                 "pre-selection daily market repair did not pass quality gate: "
                 f"market_coverage={result.get('coverage')} "

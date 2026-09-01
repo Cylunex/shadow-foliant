@@ -13,7 +13,8 @@ from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy
 from analysis.selection_finalizer import finalize_local_selection
 from core.research_health import snapshot as research_health_snapshot
 from data.research_sync import (
-    ResearchSynchronizer, _calendar_chunk_quality, _fetch_calendar_sources,
+    ResearchSourceUnavailable, ResearchSynchronizer,
+    _calendar_chunk_quality, _fetch_calendar_sources,
 )
 from data.research_store import ResearchStore, _iso_date
 from data.source_contracts import contracts, get_contract
@@ -160,6 +161,26 @@ class SourceContractTest(unittest.TestCase):
             result = syncer.repair_daily_market_if_missing("2026-08-27")
         sync_day.assert_not_called()
         self.assertFalse(result["repaired"])
+
+    def test_preselection_repair_exposes_unpublished_valuation_as_typed_state(self):
+        store = unittest.mock.MagicMock()
+        store.completed_sync.return_value = False
+        syncer = ResearchSynchronizer(store=store)
+        pending = {
+            "trade_date": "2026-09-01",
+            "quality_status": "incomplete",
+            "coverage": 0.997,
+            "market_quality_status": "ok",
+            "providers": {"zzshare": 5553},
+            "valuation_rows": 0,
+            "valuation_coverage": 0.0,
+            "valuation_quality_status": "unavailable",
+        }
+        with patch.object(syncer, "sync_day", return_value=pending):
+            with self.assertRaises(ResearchSourceUnavailable) as raised:
+                syncer.repair_daily_market_if_missing("2026-09-01")
+        self.assertEqual(raised.exception.result["trade_date"], "2026-09-01")
+        self.assertEqual(raised.exception.result["valuation_rows"], 0)
 
     def test_zzshare_pit_rejects_future_publication(self):
         class Api:
