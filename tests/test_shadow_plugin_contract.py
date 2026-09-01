@@ -132,7 +132,9 @@ def test_agent_http_layer_never_imports_mcp_server_and_manifest_has_bounded_tool
 
     manifest = yaml.safe_load((ROOT / "agent" / "manifest.yaml").read_text("utf-8"))
     tools = [tool for capability in manifest["capabilities"] for tool in capability["tools"]]
-    assert 8 <= len(tools) <= 12
+    # Keep the catalog bounded while allowing the personal-portfolio read and
+    # hidden review operations that are unavailable to the research-only profile.
+    assert 8 <= len(tools) <= 20
     for tool in tools:
         assert 256 <= tool["max_result_bytes"] <= 1048576
         assert 128 <= tool["max_model_chars"] <= 100000
