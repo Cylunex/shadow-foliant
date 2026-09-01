@@ -587,7 +587,10 @@ def _nexus_actor(request: Request) -> str:
     from application.services import ApplicationError
 
     identity = request.state.agent_identity
-    if str(getattr(identity, "owner_app", "")) != "nexus":
+    if (
+        str(getattr(identity, "agent_id", "")) != "shadow-nexus"
+        or str(getattr(identity, "owner_app", "")) != "shadow-platform"
+    ):
         raise ApplicationError(
             "delegated_actor_required", "this capability is restricted to Nexus",
             status_code=403,
