@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from data.research_store import ResearchStore
+from data.research_readiness import resolve_valuation, valuation_lag_budget
 from core.decision_context import DecisionContext, dependency_lock_hash
 from analysis.selection_feature_catalog import (
     CATALOG_VERSION,
@@ -151,6 +152,8 @@ class SelectionPolicy:
     min_financial_universe_coverage: float = 0.70
     min_stock_fundamental_metrics: int = 4
     min_valuation_coverage: float = 0.70
+    # Old manifests without this field replay with their original exact-date gate.
+    max_valuation_lag: int = 0
     min_listing_trading_days: int = 70
     min_average_amount_20: float = 20_000_000.0
     min_correlation_days: int = 40
@@ -203,6 +206,7 @@ class SelectionPolicy:
             min_valuation_coverage=max(base.min_valuation_coverage, _bounded(
                 float(os.getenv("LOCAL_SELECTION_MIN_VALUATION_COVERAGE", "0.70")), 0.1, 1.0
             )),
+            max_valuation_lag=valuation_lag_budget(),
             min_listing_trading_days=max(
                 base.min_listing_trading_days,
                 int(os.getenv("LOCAL_SELECTION_MIN_LISTING_TRADING_DAYS", "70"))
@@ -248,7 +252,12 @@ class SelectionPolicy:
         )
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        policy = asdict(self)
+        # Zero is the historical default; do not change old policy hashes merely
+        # by replaying a manifest written before the optional lag field existed.
+        if not self.max_valuation_lag:
+            policy.pop("max_valuation_lag")
+        return policy
 
     @property
     def policy_hash(self) -> str:
@@ -425,18 +434,15 @@ class LocalStockSelector:
                 metadata={**pit, "decision_context": context.as_dict()},
             )
         breadth_frame = features.copy()
-        latest_valuation_as_of = self.store.latest_valuation_as_of(actual_market_as_of)
-        valuations = self.store.load_valuations(actual_market_as_of, exact=True)
-        valuation_symbols = set(valuations.get("symbol", pd.Series(dtype=str)).astype(str))
-        valuation_coverage = float(
-            features["symbol"].isin(valuation_symbols).mean()
-        ) if len(features) else 0.0
-        valuation_stale_days = (
-            self.store.stale_trading_days(latest_valuation_as_of, actual_market_as_of)
-            if latest_valuation_as_of else None
+        valuations, valuation_state = resolve_valuation(
+            self.store, actual_market_as_of, features["symbol"],
+            min_coverage=self.policy.min_valuation_coverage,
+            max_lag=self.policy.max_valuation_lag,
         )
-        if (latest_valuation_as_of != actual_market_as_of
-                or valuation_coverage < self.policy.min_valuation_coverage):
+        latest_valuation_as_of = valuation_state["valuation_as_of"]
+        valuation_coverage = valuation_state["valuation_coverage"]
+        valuation_stale_days = valuation_state["valuation_stale_trading_days"]
+        if not valuation_state["ready"]:
             return self._failed(
                 selection_date, "valuation snapshot stale or incomplete", pit_universe_count,
                 reference, persist, coverage=coverage, metadata={
@@ -681,6 +687,8 @@ class LocalStockSelector:
                 "valuation_coverage": round(valuation_coverage, 6),
                 "valuation_stale_trading_days": valuation_stale_days,
                 "financial_coverage": round(financial_coverage, 6),
+                "valuation_status": valuation_state["status"],
+                "data_degraded": valuation_state["status"] == "lagged",
                 "financial_as_of": pit.get("financial_pit_end_date"),
                 "data_cutoff": cutoff,
                 "decision_context": context.as_dict(),

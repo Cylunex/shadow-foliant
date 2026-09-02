@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 from data.research_store import ResearchStore
+from data.research_readiness import resolve_valuation, valuation_lag_budget
 from data.sources import akshare, baostock, zzshare
 
 
@@ -347,12 +348,27 @@ class ResearchSynchronizer:
                 and str(result.get("valuation_quality_status") or "unknown")
                 in {"unavailable", "empty", "source_unavailable"}
             ):
+                _, valuation_state = resolve_valuation(
+                    self.store, trade_date,
+                    self.store.load_universe(trade_date).get("symbol", pd.Series(dtype=str)),
+                    min_coverage=max(0.70, float(os.getenv(
+                        "LOCAL_SELECTION_MIN_VALUATION_COVERAGE", "0.70"
+                    ))),
+                    max_lag=valuation_lag_budget(),
+                )
+                if valuation_state["ready"]:
+                    return {
+                        **result, "status": "ready", "selection_ready": True,
+                        "data_degraded": True, "repaired": True,
+                        "repair_mode": "bulk_market_with_lagged_valuation",
+                        "selection_valuation": valuation_state,
+                    }
                 raise ResearchSourceUnavailable(
                     "required valuation snapshot is not published yet: "
                     f"market_coverage={result.get('coverage')} "
                     f"valuation_rows={result.get('valuation_rows', 0)} "
                     f"valuation_quality={result.get('valuation_quality_status', 'unknown')}",
-                    result=result,
+                    result={**result, "selection_valuation": valuation_state},
                 )
             raise RuntimeError(
                 "pre-selection daily market repair did not pass quality gate: "

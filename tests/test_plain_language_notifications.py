@@ -4,6 +4,7 @@ from notify.plain_language import (
     compact_notification,
     normalize_action,
     normalize_direction,
+    plain_text,
 )
 from notify import notification_router
 
@@ -80,3 +81,51 @@ def test_router_compacts_content_before_delivery(monkeypatch):
     assert len(delivered["content"].splitlines()) == 8
     assert "60日均线" in delivered["content"]
     assert "VaR" not in delivered["content"]
+
+
+def test_buy_rows_survive_real_report_delivery_with_many_sell_rows(monkeypatch):
+    delivered = {}
+    def send(title, content):
+        delivered["body"] = content
+        return True, "ok"
+    monkeypatch.setitem(notification_router.CHANNELS, "fake", send)
+    sells = [{"code": f"S{i}", "name": f"减仓股{i}", "sell_reasons": ["破MA60"]}
+             for i in range(5)]
+    buys = [{"code": f"B{i}", "name": f"加仓股{i}", "buy_reason": "走势转强"}
+            for i in range(8)]
+    title, body = build_portfolio_message(
+        label="早盘持仓", signal={"action": "strong_buy", "median_change": -2.03,
+                                  "reason": "全市场急跌"},
+        sell_rows=sells, buy_rows=buys, market="市场下跌", as_of="10:05",
+    )
+    notification_router.send("report", title, body, only_channels=["fake"])
+    actual = delivered["body"]
+    assert "减仓关注5只、加仓候选8只" in actual
+    assert "加仓：加仓股0" in actual and "加仓：加仓股1" in actual
+    assert "减仓：减仓股0" in actual
+    assert len(actual.splitlines()) <= 8
+    assert actual.index("加仓：") < actual.index("减仓：")
+
+
+def test_conflicting_and_duplicate_rows_do_not_inflate_buy_count():
+    row = {"code": "A", "name": "冲突股", "sell_score": 2}
+    _, body = build_portfolio_message(
+        label="早盘持仓", signal={"action": "buy"},
+        sell_rows=[row, row], buy_rows=[row, row],
+    )
+    assert "减仓关注1只、加仓候选0只" in body
+    assert "暂无合适个股，先等" in body
+    assert "加仓：" not in body
+
+
+def test_zero_item_limit_does_not_emit_an_item():
+    _, body = build_portfolio_message(
+        label="早盘持仓", signal={"action": "buy"},
+        buy_rows=[{"code": "A", "name": "示例"}], item_limit=0,
+    )
+    assert "加仓：" not in body
+
+
+def test_task_identifiers_are_not_destroyed_by_markdown_cleanup():
+    assert plain_text("research_data_sync_premarket_retry") == "research_data_sync_premarket_retry"
+    assert plain_text("_说明_ **重点**") == "说明 重点"

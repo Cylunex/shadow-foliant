@@ -165,6 +165,8 @@ class SourceContractTest(unittest.TestCase):
     def test_preselection_repair_exposes_unpublished_valuation_as_typed_state(self):
         store = unittest.mock.MagicMock()
         store.completed_sync.return_value = False
+        store.latest_valuation_as_of.return_value = None
+        store.load_universe.return_value = pd.DataFrame({"symbol": ["600000"]})
         syncer = ResearchSynchronizer(store=store)
         pending = {
             "trade_date": "2026-09-01",
@@ -757,6 +759,81 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         )
         self.assertEqual(result["metadata"]["valuation_as_of"], "2026-08-20")
 
+    def _lag_valuation(self, day="2026-08-20"):
+        frame = self.store.load_valuations("2026-08-21")
+        frame["trade_date"] = day
+        frame["provider_effective_as_of"] = day
+        frame.attrs["provenance"] = self._provenance(day)
+        self.store.upsert_valuations(frame, as_of=day)
+        conn = self.store.connect()
+        try:
+            conn.execute("DELETE FROM research_valuations WHERE trade_date='2026-08-21'")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_previous_trading_day_valuation_is_usable_audited_and_replayable(self):
+        selected = self._seed()
+        self._lag_valuation()
+        result = LocalStockSelector(self.store).run(selected, persist=True)
+        self.assertEqual(result["status"], "success", result.get("metadata"))
+        self.assertTrue(result["metadata"]["data_degraded"])
+        self.assertEqual(result["metadata"]["valuation_as_of"], "2026-08-20")
+        self.assertEqual(result["metadata"]["market_as_of"], "2026-08-21")
+        self.assertEqual(result["metadata"]["valuation_stale_trading_days"], 1)
+        self.assertEqual(result["metadata"]["valuation_status"], "lagged")
+        self.assertTrue(self.store.load_valuations("2026-08-21", exact=True).empty)
+        replay = self.store.replay_selection(result["metadata"]["manifest_id"])
+        self.assertTrue(replay["exact_match"], replay)
+
+        run_id = self.store.start_sync("zzshare", "daily_market", "2026-08-21")
+        self.store.finish_sync(run_id, status="success", row_count=24, quality_status="incomplete")
+        readiness = research_health_snapshot(store=self.store, selection_date=selected)
+        self.assertTrue(readiness["ready"], readiness)
+        self.assertFalse(readiness["data_complete"])
+        self.assertTrue(readiness["data_degraded"])
+        self.assertFalse(readiness["ingestion_checks"]["valuation_fresh"])
+        self.assertFalse(self.store.completed_sync("daily_market", "2026-08-21"))
+
+    def test_one_day_fallback_does_not_relax_strict_or_older_valuation_gate(self):
+        selected = self._seed()
+        self._lag_valuation()
+        strict = LocalStockSelector(self.store, policy=SelectionPolicy()).run(
+            selected, persist=False
+        )
+        self.assertEqual(strict["status"], "incomplete")
+        self._lag_valuation("2026-08-19")
+        conn = self.store.connect()
+        try:
+            conn.execute("DELETE FROM research_valuations WHERE trade_date='2026-08-20'")
+            conn.commit()
+        finally:
+            conn.close()
+        result = LocalStockSelector(self.store).run(selected, persist=False)
+        self.assertEqual(result["status"], "incomplete")
+
+    def test_lagged_repair_is_success_without_marking_current_valuation_complete(self):
+        self._seed()
+        self._lag_valuation()
+        syncer = ResearchSynchronizer(self.store)
+        pending = {
+            "trade_date": "2026-08-21", "quality_status": "incomplete",
+            "coverage": 0.997, "market_quality_status": "ok",
+            "valuation_rows": 0, "valuation_quality_status": "unavailable",
+        }
+        with patch.object(syncer, "sync_day", return_value=pending) as sync:
+            result = syncer.repair_daily_market_if_missing("2026-08-21")
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["quality_status"], "incomplete")
+        self.assertTrue(result["selection_ready"])
+        self.assertEqual(result["valuation_rows"], 0)
+        self.assertEqual(result["selection_valuation"]["valuation_as_of"], "2026-08-20")
+        sync.assert_called_once_with(
+            "2026-08-21", fundamentals=False, fallback=False,
+            refresh_calendar=False, optional_fund_flow=False,
+        )
+        self.assertFalse(self.store.completed_sync("daily_market", "2026-08-21"))
+
     def test_calendar_disagreement_fails_closed(self):
         selection_date = self._seed()
         self.store.upsert_calendar_evidence(
@@ -789,6 +866,16 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertTrue(readiness["ready"], readiness)
         self.assertEqual(readiness["expected_market_date"], "2026-08-21")
         self.assertNotIn("symbols", readiness)
+
+    def test_data_completeness_does_not_require_a_selection_output(self):
+        selection_date = self._seed()
+        sync_id = self.store.start_sync("zzshare", "daily_market", "2026-08-21")
+        self.store.finish_sync(sync_id, status="success", row_count=24, quality_status="ok")
+        readiness = research_health_snapshot(
+            store=self.store, selection_date=selection_date, mode="preopen"
+        )
+        self.assertFalse(readiness["ready"])
+        self.assertTrue(readiness["data_complete"], readiness)
 
     def test_final_top_five_ignores_llm_and_quote_fields(self):
         formal = {

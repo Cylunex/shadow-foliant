@@ -344,6 +344,79 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertIn('formal_selection=fail_closed', log_run.call_args.kwargs['error'])
         notify.assert_called_once()
 
+    def test_premarket_lagged_snapshot_reports_success_with_explicit_dates(self):
+        syncer = mock.MagicMock()
+        syncer.store.completed_sync.return_value = False
+        syncer.repair_daily_market_if_missing.return_value = {
+            'data_degraded': True, 'coverage': 0.997, 'valuation_rows': 0,
+            'selection_valuation': {
+                'valuation_as_of': '2026-08-31', 'valuation_stale_trading_days': 1,
+                'valuation_coverage': .936,
+            },
+        }
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch.object(jobs_hub, '_preopen_research_context',
+                                  return_value=(None, None, '2026-09-01')), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
+            jobs_hub.task_research_data_sync_premarket_retry()
+        self.assertEqual(log_run.call_args.args[:2],
+                         ('research_data_sync_premarket_retry', 'success'))
+        self.assertIn('selection_ready=true data_complete=false', log_run.call_args.kwargs['error'])
+        self.assertIn('valuation_as_of=2026-08-31', log_run.call_args.kwargs['error'])
+        notify.assert_not_called()
+
+    def test_unified_selection_without_usable_valuation_skips_without_traceback(self):
+        syncer = mock.MagicMock()
+        selector = mock.MagicMock()
+        syncer.repair_daily_market_if_missing.side_effect = ResearchSourceUnavailable(
+            'pending', result={'coverage': .997, 'valuation_rows': 0},
+        )
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch.object(jobs_hub, '_preopen_research_context',
+                                  return_value=(selector, None, '2026-09-01')), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
+            jobs_hub.task_unified_selection()
+        self.assertEqual(log_run.call_args.args[:2], ('unified_selection', 'skipped'))
+        self.assertEqual(notify.call_args.kwargs['source'], 'zzshare/valuation')
+        selector.run.assert_not_called()
+
+    def test_unavailable_notice_uses_known_source_and_keeps_retry_visible(self):
+        from notify.plain_language import compact_notification
+        detail = jobs_hub._valuation_unavailable_detail(
+            '2026-09-01', {'coverage': .997, 'valuation_rows': 0},
+            next_retry='unified_selection_09:45',
+        )
+        with mock.patch.dict(jobs_hub._ERR_NOTIFY_LAST, {}, clear=True), \
+                mock.patch('notification_router.send') as send, \
+                mock.patch.object(jobs_hub, '_current_unhealthy_sources',
+                                  return_value=['unrelated']):
+            jobs_hub._notify_data_unavailable(
+                'research_data_sync_premarket_retry', detail, source='zzshare/valuation'
+            )
+        body = compact_notification('report', send.call_args.args[2])
+        self.assertIn('日K 2026-09-01：覆盖 99.7%，已达标', body)
+        self.assertIn('next_retry=unified_selection_09:45', body)
+        self.assertNotIn('妙想', body)
+        self.assertNotIn('unrelated', body)
+
+    def test_selection_warning_does_not_truncate_any_of_five_final_candidates(self):
+        from analysis.selection_finalizer import format_final_selection
+        from notify.plain_language import compact_notification
+        note = jobs_hub._selection_data_note({
+            'data_degraded': True, 'market_as_of': '2026-09-01',
+            'valuation_as_of': '2026-08-31', 'valuation_stale_trading_days': 1,
+        })
+        rows = [{'code': str(i), 'name': f'候选{i}'} for i in range(5)]
+        body = compact_notification('report', note + format_final_selection(rows))
+        self.assertIn('行情 2026-09-01', body)
+        self.assertIn('2026-08-31 估值', body)
+        for i in range(5):
+            self.assertIn(f'候选{i}', body)
+
     def test_scheduled_consumers_read_today_formal_artifacts_only(self):
         formal = {
             'selection_date': datetime.now().strftime('%Y-%m-%d'),

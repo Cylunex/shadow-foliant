@@ -9,6 +9,7 @@ import pandas as pd
 
 from core.decision_context import A_SHARE_TIMEZONE, DecisionContext
 from data.research_store import ResearchStore
+from data.research_readiness import resolve_valuation
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -58,14 +59,6 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         row = cur.fetchone()
         actual = str(row[0]) if row and row[0] else None
         usable_count = store.daily_bar_symbol_count(actual, adjustment="qfq") if actual else 0
-        valuation_as_of = store.latest_valuation_as_of(expected or context.market_cutoff)
-        cur.execute(
-            """SELECT COUNT(DISTINCT symbol) FROM research_valuations
-               WHERE trade_date=? AND provider_effective_as_of=trade_date
-                 AND quality_status NOT IN ('failed','unknown_unit','unknown_effective_date')""",
-            (valuation_as_of or "",),
-        )
-        valuation_count = int((cur.fetchone() or [0])[0] or 0)
         cur.execute(
             """SELECT as_of,status,quality_status FROM research_sync_runs
                WHERE capability='daily_market' AND as_of<=?
@@ -77,10 +70,15 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         conn.close()
 
     financial_coverage = 0.0
+    valuation_frame, valuation_state = resolve_valuation(
+        store, expected or context.market_cutoff,
+        universe.get("symbol", pd.Series(dtype=str)),
+        min_coverage=policy.min_valuation_coverage, max_lag=policy.max_valuation_lag,
+    )
+    valuation_as_of = valuation_state["valuation_as_of"]
     try:
         selector = LocalStockSelector(store=store, policy=policy)
         fundamentals = selector._fundamentals(context)
-        valuation_frame = store.load_valuations(expected or context.market_cutoff, exact=True)
         base = (universe[["symbol", "industry"]].drop_duplicates("symbol")
                 if universe_count else pd.DataFrame())
         if not base.empty:
@@ -121,19 +119,22 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         }
 
     usable_coverage = _ratio(usable_count, universe_count)
-    valuation_coverage = _ratio(valuation_count, universe_count)
+    valuation_coverage = valuation_state["valuation_coverage"]
     last_sync = ({"as_of": str(sync_row[0]), "status": str(sync_row[1]),
                   "quality_status": str(sync_row[2])} if sync_row else None)
     checks = {
         "calendar_consensus": bool(calendar.get("ready") and expected),
         "market_fresh": bool(expected and actual == expected),
         "market_coverage": usable_coverage >= policy.min_warehouse_coverage,
-        "valuation_fresh": bool(expected and valuation_as_of == expected),
+        "valuation_usable": valuation_state["ready"],
         "valuation_coverage": valuation_coverage >= policy.min_valuation_coverage,
         "financial_coverage": financial_coverage >= policy.min_financial_universe_coverage,
         "last_sync": bool(
             last_sync and last_sync["as_of"] == expected
-            and last_sync["status"] == "success" and last_sync["quality_status"] == "ok"
+            and last_sync["status"] == "success"
+            and (last_sync["quality_status"] == "ok"
+                 or (last_sync["quality_status"] == "incomplete"
+                     and valuation_state["status"] == "lagged"))
         ),
         "pit_boundary": bool(
             pit.get("historical_pit_available") and pit.get("market_history_ready")
@@ -142,6 +143,13 @@ def snapshot(*, store: Optional[ResearchStore] = None,
     if require_selection:
         checks["formal_selection"] = selection_valid
     ready = all(checks.values())
+    ingestion_checks = {
+        "valuation_fresh": valuation_state["valuation_fresh"],
+        "exact_sync_complete": bool(
+            last_sync and last_sync["as_of"] == expected
+            and last_sync["status"] == "success" and last_sync["quality_status"] == "ok"
+        ),
+    }
     return {
         "service": "shadow-foliant-research",
         "kind": "selection" if require_selection else "data",
@@ -151,6 +159,13 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         "usable_qfq_coverage": round(usable_coverage, 6),
         "valuation_date": valuation_as_of,
         "valuation_coverage": round(valuation_coverage, 6),
+        "valuation_status": valuation_state["status"],
+        "valuation_stale_trading_days": valuation_state["valuation_stale_trading_days"],
+        "data_degraded": valuation_state["status"] == "lagged",
+        "data_complete": all(
+            value for key, value in checks.items() if key != "formal_selection"
+        ) and all(ingestion_checks.values()),
+        "ingestion_checks": ingestion_checks,
         "financial_coverage": round(financial_coverage, 6),
         "last_sync": last_sync, "last_selection": last_selection,
         "pit_coverage": pit, "calendar": calendar, "checks": checks,

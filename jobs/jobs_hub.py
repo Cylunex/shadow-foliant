@@ -1621,7 +1621,7 @@ def _current_unhealthy_sources() -> List[str]:
     return list(dict.fromkeys(str(src) for src in bad_srcs if src))
 
 
-def _notify_data_unavailable(name: str, detail: str = ''):
+def _notify_data_unavailable(name: str, detail: str = '', *, source: str = ''):
     """全靠外部数据的任务因数据源不可用/超时而结束 → 推一条平和提示(非告警, 不带 traceback)。
     按用户要求:"外部接口失败了就提示, 然后任务结束"。同任务 2h 内限一条(复用告警限频表)。"""
     try:
@@ -1637,12 +1637,13 @@ def _notify_data_unavailable(name: str, detail: str = ''):
             pass
         # 具体到源:列出当前卡死/冷却中的外部源(datahub _route 各源 + 问财熔断),
         # 让通知不只是笼统的"数据源暂不可用"。
-        bad_srcs = _current_unhealthy_sources()
+        bad_srcs = [source] if source else _current_unhealthy_sources()
         src_line = (f"\n⛔ 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
-                    else "\n(未捕到具体源,可能是妙想等非 _route 慢源或整体网络抽风)")
+                    else "\n具体数据源尚未定位，请查看任务日志。")
         title_hint = f" ({bad_srcs[0].split(':')[0].split('×')[0]})" if bad_srcs else ""
-        body = (f"任务「{cn}」({name}) 因外部数据源暂不可用而结束本次"
-                f"{('(' + detail + ')') if detail else ''}, 已自动跳过, 下个周期重试。{src_line}")
+        body = (f"任务「{cn}」({name})\n"
+                f"{detail}\n"
+                f"本次因必需数据暂不可用跳过，下个周期重试。{src_line}")
         from notification_router import send
         send('report', f"📡 数据源暂不可用: {cn}{title_hint}", body)
     except Exception:
@@ -3678,11 +3679,37 @@ def _valuation_release_pending(result):
 
 def _valuation_unavailable_detail(trade_date, result, *, next_retry):
     return (
-        f"zzshare valuation {trade_date} not published; "
-        f"market_coverage={float(result.get('coverage') or 0):.1%}; "
-        f"valuation_rows={int(result.get('valuation_rows') or 0)}; "
+        f"日K {trade_date}：覆盖 {float(result.get('coverage') or 0):.1%}，已达标\n"
+        f"zzshare 估值：{trade_date} 尚未发布（{int(result.get('valuation_rows') or 0)} 行）\n"
+        "未找到时效和覆盖均达标的估值快照，暂不能选股\n"
         f"next_retry={next_retry}"
     )
+
+
+def _research_repair_detail(trade_date, result):
+    detail = (
+        f"daily_market {trade_date} mode={result.get('repair_mode', 'unknown')} "
+        f"market_coverage={float(result.get('coverage') or 0):.1%} "
+        f"valuation={result.get('valuation_rows', 0)} "
+        f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
+    )
+    if result.get('data_degraded'):
+        used = result.get('selection_valuation') or {}
+        detail += (
+            f" selection_ready=true data_complete=false "
+            f"valuation_as_of={used.get('valuation_as_of')} "
+            f"valuation_lag={used.get('valuation_stale_trading_days')} "
+            f"usable_valuation_coverage={float(used.get('valuation_coverage') or 0):.1%}"
+        )
+    return detail
+
+
+def _selection_data_note(metadata):
+    if not metadata.get('data_degraded'):
+        return ''
+    return (f"⚠️ 估值晚到：行情 {metadata.get('market_as_of')}，"
+            f"使用 {metadata.get('valuation_as_of')} 估值"
+            f"（晚 {metadata.get('valuation_stale_trading_days')} 个交易日）\n")
 
 
 def _preopen_research_context(syncer, selection_date=None):
@@ -3774,7 +3801,7 @@ def task_research_data_sync_retry():
             job, 'skipped', error=f'source_unavailable: {detail}',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, detail)
+        _notify_data_unavailable(job, detail, source='zzshare/valuation')
         return
     except Exception as exc:
         raise RuntimeError(
@@ -3783,12 +3810,7 @@ def task_research_data_sync_retry():
         ) from exc
     _log_run(
         job, 'success',
-        error=(
-            f"daily_market repaired mode={result.get('repair_mode', 'unknown')} "
-            f"market_coverage={float(result.get('coverage') or 0):.1%} "
-            f"valuation={result.get('valuation_rows', 0)} "
-            f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
-        ),
+        error=_research_repair_detail(today, result),
         started_at=started, finished_at=datetime.now().isoformat(),
     )
 
@@ -3823,7 +3845,7 @@ def task_research_data_sync_premarket_retry():
             job, 'skipped', error=f'source_unavailable: {detail}; formal_selection=fail_closed',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, f'{detail}; 正式选股将保持数据门禁')
+        _notify_data_unavailable(job, detail, source='zzshare/valuation')
         return
     except Exception as exc:
         raise RuntimeError(
@@ -3831,13 +3853,7 @@ def task_research_data_sync_premarket_retry():
         ) from exc
     _log_run(
         job, 'success',
-        error=(
-            f"daily_market {trade_date} repaired "
-            f"mode={result.get('repair_mode', 'unknown')} "
-            f"market_coverage={float(result.get('coverage') or 0):.1%} "
-            f"valuation={result.get('valuation_rows', 0)} "
-            f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
-        ),
+        error=_research_repair_detail(trade_date, result),
         started_at=started, finished_at=datetime.now().isoformat(),
     )
 
@@ -4500,18 +4516,25 @@ def task_unified_selection():
         #    交易日历是本地准入的一部分。盘前只能刷新决策上下文允许使用的
         #    已完成市场截止日，不能要求独立数据源提前证明选择日当天；瞬时
         #    失败时 refresh_calendar_for_day 会复用同截止日的完整双源缓存。
-        from data.research_sync import ResearchSynchronizer
+        from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
         from analysis.local_stock_selector import _normalize_reference
         selection_date = datetime.now().strftime('%Y-%m-%d')
         syncer = ResearchSynchronizer()
         selector, context, effective_market_date = _preopen_research_context(
             syncer, selection_date
         )
-        repair = syncer.repair_daily_market_if_missing(effective_market_date)
+        try:
+            repair = syncer.repair_daily_market_if_missing(effective_market_date)
+        except ResearchSourceUnavailable as exc:
+            detail = _valuation_unavailable_detail(
+                effective_market_date, exc.result, next_retry='next_selection_cycle'
+            )
+            _log_run(job, 'skipped', error=f'source_unavailable: {detail}',
+                     started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+            _notify_data_unavailable(job, detail, source='zzshare/valuation')
+            return
         if repair.get('repaired'):
-            print('[unified_selection] 🧰 已在正式选股前补齐前一交易日市场快照 '
-                  f"({effective_market_date}, "
-                  f"coverage={float(repair.get('coverage') or 0):.1%})",
+            print('[unified_selection] 🧰 ' + _research_repair_detail(effective_market_date, repair),
                   flush=True)
         local_result = selector.run(selection_date, persist=True)
         local_candidates = local_result.get('candidates', [])
@@ -4675,6 +4698,8 @@ def task_unified_selection():
         # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
         body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
         body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
+        data_note = _selection_data_note(local_result.get('metadata') or {})
+        body += data_note
         # 结论先行(2026-07-02):红蓝复核结果放最上面,不用滚到表格底部才知道几只可买
         if debate_map:
             _nb = sum(1 for v in debate_map.values() if v.get('verdict') == '买入')
@@ -4932,7 +4957,7 @@ def task_unified_selection():
         if final_rows:
             try:
                 from analysis.selection_finalizer import format_final_selection
-                _final_body = format_final_selection(final_rows)
+                _final_body = data_note + format_final_selection(final_rows)
                 _push_daily('今日候选：加、减还是不动', _final_body)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
@@ -5009,7 +5034,7 @@ def task_morning_portfolio():
 
         sell_list = sorted([s for s in scans if s['sell_score'] > 0],
                            key=lambda x: x['sell_score'], reverse=True)[:5]
-        buy_list = [s for s in scans if s['buy_signal']][:8]
+        buy_list = [s for s in scans if s['buy_signal'] and not s['sell_score']][:8]
         # 盘中异动(开盘40分钟):涨>3% 或 跌>3%
         movers = sorted([s for s in scans if abs(s.get('change') or 0) >= 3],
                         key=lambda x: x['change'], reverse=True)[:6]
