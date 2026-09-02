@@ -20,24 +20,38 @@ def resolve_valuation(store, market_date: str, symbols, *, min_coverage: float,
     """Return one dated, quality-checked snapshot and aggregate selection readiness.
 
     Missing current rows may use the immediately preceding confirmed trading day.
-    A partial current snapshot is not mixed with older rows. Missing/mismatched dates,
+    A partial current snapshot is never mixed with older rows; a complete previous
+    snapshot may replace it as a whole. Missing/mismatched dates,
     bad quality, insufficient coverage and calendar uncertainty still fail closed.
     This is selection usability, NOT an exact-date ingestion completion marker.
     """
     latest = store.latest_valuation_as_of(market_date)
     frame = store.load_valuations(latest, exact=True) if latest else pd.DataFrame()
     required = {"symbol", "trade_date", "provider_effective_as_of", "quality_status"}
-    if not required.issubset(frame.columns):
-        frame = pd.DataFrame()
-    else:
-        frame = frame.loc[
-            frame["trade_date"].astype(str).eq(latest)
-            & frame["provider_effective_as_of"].astype(str).eq(latest)
-            & frame["quality_status"].eq("ok")
+    def eligible(candidate, day):
+        if not required.issubset(candidate.columns):
+            return pd.DataFrame()
+        return candidate.loc[
+            candidate["trade_date"].astype(str).eq(day)
+            & candidate["provider_effective_as_of"].astype(str).eq(day)
+            & candidate["quality_status"].eq("ok")
         ].drop_duplicates("symbol").copy()
+
+    frame = eligible(frame, latest)
     wanted = set(str(symbol) for symbol in symbols)
     available = set(frame.get("symbol", pd.Series(dtype=str)).astype(str))
     coverage = len(wanted & available) / len(wanted) if wanted else 0.0
+    if latest == market_date and coverage < min_coverage and int(max_lag) > 0:
+        calendar = store.calendar_consensus(market_date, inclusive=True)
+        days = sorted(set(store.trade_days_through(market_date)))
+        if (calendar.get("ready") and calendar.get("latest_confirmed_open_date") == market_date
+                and len(days) >= 2 and days[-1] == market_date):
+            previous = days[-2]
+            previous_frame = eligible(store.load_valuations(previous, exact=True), previous)
+            previous_symbols = set(previous_frame.get("symbol", pd.Series(dtype=str)).astype(str))
+            previous_coverage = len(wanted & previous_symbols) / len(wanted) if wanted else 0.0
+            if previous_coverage >= min_coverage:
+                latest, frame, coverage = previous, previous_frame, previous_coverage
     lag = store.stale_trading_days(latest, market_date) if latest else None
     fresh = bool(latest and latest == market_date)
     fallback_allowed = False

@@ -254,7 +254,7 @@ class ScheduledDependencyTests(unittest.TestCase):
         syncer = mock.MagicMock()
         syncer.store.completed_sync.return_value = False
         syncer.repair_daily_market_if_missing.return_value = {
-            'repair_mode': 'bulk_market_without_baostock_fallback',
+            'repair_mode': 'bulk_market_with_multi_source_valuation',
             'coverage': 0.997,
             'valuation_rows': 5212,
             'valuation_coverage': 0.936,
@@ -301,7 +301,7 @@ class ScheduledDependencyTests(unittest.TestCase):
         syncer = mock.MagicMock()
         syncer.store.completed_sync.return_value = False
         syncer.repair_daily_market_if_missing.return_value = {
-            'repair_mode': 'bulk_market_without_baostock_fallback',
+            'repair_mode': 'bulk_market_with_multi_source_valuation',
             'coverage': 0.997,
             'valuation_rows': 5212,
             'valuation_coverage': 0.936,
@@ -381,8 +381,13 @@ class ScheduledDependencyTests(unittest.TestCase):
                 mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
             jobs_hub.task_unified_selection()
         self.assertEqual(log_run.call_args.args[:2], ('unified_selection', 'skipped'))
-        self.assertEqual(notify.call_args.kwargs['source'], 'zzshare/valuation')
+        self.assertEqual(notify.call_args.kwargs['source'], 'valuation/multi-source')
         selector.run.assert_not_called()
+
+    def test_research_outer_timeouts_allow_valuation_to_finish(self):
+        self.assertEqual(jobs_hub._TASK_HARD_TIMEOUTS['research_data_sync'], 1200)
+        self.assertEqual(jobs_hub._TASK_HARD_TIMEOUTS['research_data_sync_retry'], 900)
+        self.assertEqual(jobs_hub._TASK_HARD_TIMEOUTS['research_data_sync_premarket_retry'], 600)
 
     def test_unavailable_notice_uses_known_source_and_keeps_retry_visible(self):
         from notify.plain_language import compact_notification
@@ -395,7 +400,7 @@ class ScheduledDependencyTests(unittest.TestCase):
                 mock.patch.object(jobs_hub, '_current_unhealthy_sources',
                                   return_value=['unrelated']):
             jobs_hub._notify_data_unavailable(
-                'research_data_sync_premarket_retry', detail, source='zzshare/valuation'
+                'research_data_sync_premarket_retry', detail, source='valuation/multi-source'
             )
         body = compact_notification('report', send.call_args.args[2])
         self.assertIn('日K 2026-09-01：覆盖 99.7%，已达标', body)

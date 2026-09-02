@@ -69,7 +69,17 @@ def test_partial_current_snapshot_does_not_mix_dates():
     store = make_store("2026-09-01", coverage=5)
     _, state = resolve(store)
     assert not state["ready"]
-    store.load_valuations.assert_called_once_with("2026-09-01", exact=True)
+    assert store.load_valuations.call_count == 2
+
+
+def test_partial_current_snapshot_can_use_whole_previous_snapshot():
+    store = make_store("2026-09-01", coverage=5)
+    current = store.load_valuations.return_value
+    previous = make_store().load_valuations.return_value
+    store.load_valuations.side_effect = lambda day, **_: current if day == '2026-09-01' else previous
+    frame, state = resolve(store)
+    assert state['ready'] and state['status'] == 'lagged'
+    assert len(frame) == 10 and set(frame['trade_date']) == {'2026-08-31'}
 
 
 @pytest.mark.parametrize("value,expected", [("0", 0), ("1", 1), ("20", 1),

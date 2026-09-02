@@ -306,6 +306,55 @@ def trade_days(start_date: str, end_date: str):
             if is_open]
 
 
+def valuation_day(code: str, day: str):
+    """One dated, unadjusted daily-bar request for genuine PE-TTM / PB-MRQ.
+
+    Shares the host-wide lock, login/request budget and daily circuit breaker.
+    Empty success is distinct from failure. Unsupported Beijing stocks are skipped.
+    """
+    import pandas as pd
+    from ._baostock_deadline import sdk_deadline
+    from data.valuation_contract import iso_day
+
+    out = pd.DataFrame()
+    if not str(code).startswith(('00', '30', '60', '68')):
+        out.attrs['status'] = 'unsupported'
+        return out
+    if _in_cooldown('daily'):
+        out.attrs['status'] = 'cooldown'
+        return out
+    with _provider_slot() as guard:
+        if guard is None:
+            out.attrs['status'] = 'busy'
+            return out
+        try:
+            with sdk_deadline(15):
+                bs = _ensure(guard)
+                _reserve_request(guard, 'daily')
+                with source_call('baostock', 'daily'):
+                    rs = bs.query_history_k_data_plus(
+                        _bs_code(code), 'date,code,peTTM,pbMRQ,psTTM,pcfNcfTTM',
+                        start_date=day, end_date=day, frequency='d', adjustflag='3')
+                    if getattr(rs, 'error_code', '1') != '0':
+                        raise RuntimeError('baostock valuation query failed')
+                    rows = []
+                    while rs.next():
+                        rows.append(rs.get_row_data())
+                    if getattr(rs, 'error_code', '1') != '0':
+                        raise RuntimeError('baostock valuation response incomplete')
+            out = pd.DataFrame(rows, columns=['trade_date', 'symbol', 'pe_ttm', 'pb',
+                                              'ps', 'pcf_ncf_ttm'])
+            out = out[out['trade_date'].map(iso_day).eq(day)].copy()
+            out.attrs['status'] = 'ok' if not out.empty else 'empty'
+            _mark_ok('daily')
+        except BaoStockBudgetExceeded:
+            out.attrs['status'] = 'budget_exhausted'
+        except Exception:
+            _mark_fail('daily')
+            out.attrs['status'] = 'failed'
+    return out
+
+
 def kline(code: str, period: str = "1y", interval: str = "1d", adjust: str = "raw",
           bs_code: str = None):
     """返回 datahub 同款 K线 DataFrame(DatetimeIndex='Date' + 大写 OCHLV)或空 DF。

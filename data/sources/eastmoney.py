@@ -169,7 +169,7 @@ def ulist_quote(codes: List[str]) -> dict:
     # f7=振幅 f51=涨停价 f52=跌停价 f114=静态市盈率(2026-07-17 补齐:与腾讯/新浪源逐键同构,
     # 否则 _batch_quote 用腾讯主源+东财补缺失代码时,同一次返回里两种键集混存,
     # 下游按 q['limit_up']/amplitude_pct 取值对东财补的票 KeyError 或静默丢字段)
-    fields = 'f2,f3,f4,f5,f6,f7,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10,f51,f52,f114'
+    fields = 'f2,f3,f4,f5,f6,f7,f8,f9,f12,f14,f15,f16,f17,f18,f20,f21,f23,f10,f51,f52,f114,f124'
     url = ('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2'
            f'&ut=bd1d9ddb04089700cf9c27f6f7426281&fields={fields}&secids=' + ','.join(secids))
     try:
@@ -199,6 +199,8 @@ def ulist_quote(codes: List[str]) -> dict:
         if not code:
             continue
         result[code] = {
+            'quote_time': (pd.to_datetime(_f(r.get('f124')), unit='s', utc=True).isoformat()
+                           if _f(r.get('f124')) > 0 else ''),
             'name': r.get('f14'), 'price': _f(r.get('f2')), 'last_close': _f(r.get('f18')),
             'open': _f(r.get('f17')), 'change_amt': _f(r.get('f4')), 'change_pct': _f(r.get('f3')),
             'high': _f(r.get('f15')), 'low': _f(r.get('f16')),

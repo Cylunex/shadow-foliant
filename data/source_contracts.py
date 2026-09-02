@@ -91,6 +91,19 @@ def contracts() -> Dict[str, Dict[str, dict]]:
 
 
 _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
+    ("tushare", "valuation"): EndpointContract(
+        "tushare", "valuation", "valuation_snapshot", "token", 6000, 6000,
+        1.0, 1, 15.0, 0, supports_pit=True, quota_basis="published",
+        notes="daily_basic requires eligible points; total_mv/circ_mv are CNY 10000.",
+    ),
+    ("tencent", "valuation"): EndpointContract(
+        "tencent", "valuation", "closing_valuation_snapshot", "none", None, 80,
+        0.5, 1, 6.0, 0, notes="Require same-day quote timestamp after 15:00; no historical backfill.",
+    ),
+    ("eastmoney", "valuation"): EndpointContract(
+        "eastmoney", "valuation", "closing_valuation_snapshot", "none", None, 80,
+        0.5, 1, 6.0, 0, notes="Require f124 timestamp; f9 is not PE-TTM.",
+    ),
     ("zzshare", "daily_symbol"): EndpointContract(
         "zzshare", "daily_symbol", "daily_ohlcv", "token", 1000, 1000,
         1.0, 1, 15.0, 2, adjustment="raw/qfq/hfq", volume_unit="runtime_validated",

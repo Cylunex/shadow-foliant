@@ -139,7 +139,7 @@ class SourceContractTest(unittest.TestCase):
         with patch.dict(os.environ, {"BAOSTOCK_DAILY_REQUEST_BUDGET": "999999"}):
             self.assertEqual(baostock_source._daily_budget(), 50_000)
 
-    def test_preselection_repair_is_bulk_only_and_idempotent(self):
+    def test_preselection_repair_skips_optional_data_and_is_idempotent(self):
         store = unittest.mock.MagicMock()
         store.completed_sync.return_value = False
         syncer = ResearchSynchronizer(store=store)
@@ -154,7 +154,7 @@ class SourceContractTest(unittest.TestCase):
             optional_fund_flow=False,
         )
         self.assertTrue(result["repaired"])
-        self.assertEqual(result["repair_mode"], "bulk_market_without_baostock_fallback")
+        self.assertEqual(result["repair_mode"], "bulk_market_with_multi_source_valuation")
 
         store.completed_sync.return_value = True
         with patch.object(syncer, "sync_day") as sync_day:

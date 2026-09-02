@@ -930,7 +930,7 @@ class ResearchStore:
                 symbol, provider_effective, _plain(record.get("market_cap")),
                 _plain(record.get("circulating_market_cap")), _plain(record.get("turnover_ratio")),
                 _plain(record.get("pe_ratio", record.get("pe_ttm"))),
-                _plain(record.get("pe_ratio_lyr")), _plain(record.get("pb_ratio", record.get("pb"))),
+                _plain(record.get("pe_ratio_lyr", record.get("pe_lyr"))), _plain(record.get("pb_ratio", record.get("pb"))),
                 _plain(record.get("ps_ratio", record.get("ps"))),
                 _plain(record.get("pcf_ratio", record.get("pcf"))),
                 _plain(next((record.get(key) for key in (
@@ -938,7 +938,8 @@ class ResearchStore:
                 ) if record.get(key) is not None), None)),
                 provenance.get("provider", "unknown"), provenance.get("origin", "provider_api"),
                 provider_effective, now, provenance.get("schema_version", SCHEMA_VERSION),
-                provenance.get("quality_status", "ok"),
+                (record.get("quality_status", "partial") if record.get("valuation_contract") == "composite-v1"
+                 else provenance.get("quality_status", "ok")),
                 requested_as_of, provider_effective, None, payload,
             ))
         if not rows:
@@ -1578,6 +1579,41 @@ class ResearchStore:
         finally:
             conn.close()
 
+    def load_valuation_evidence(self, as_of: str) -> list:
+        """Resume same-day composite checkpoints, including not-yet-usable rows.
+
+        Legacy zzshare data is already denominated in 亿元. Preserve its priority;
+        do not allow an empty fallback response to wipe a previously valid field.
+        """
+        from data.valuation_contract import FIELDS, ALIASES, PRIORITY, number
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT symbol,provider,provider_effective_as_of,payload
+                   FROM research_valuations WHERE trade_date=?
+                   AND quality_status IN ('ok','partial')""", (_iso_date(as_of),))
+            result = []
+            for symbol, provider, effective, payload in cur.fetchall():
+                if str(effective) != _iso_date(as_of):
+                    continue
+                payload = payload if isinstance(payload, dict) else json.loads(payload or '{}')
+                if payload.get('valuation_contract') == 'composite-v1':
+                    result.append(payload)
+                elif provider in PRIORITY:
+                    row = {'symbol': symbol, 'trade_date': str(effective),
+                           'provider_effective_as_of': str(effective),
+                           'market_cap_unit': 'CNY_100M', 'field_sources': {}}
+                    for field in FIELDS:
+                        value = number(payload.get(field, payload.get(ALIASES.get(field))))
+                        if value is not None:
+                            row[field] = value
+                            row['field_sources'][field] = {'provider': provider, 'as_of': str(effective)}
+                    result.append(row)
+            return result
+        finally:
+            conn.close()
+
     def load_valuations(self, as_of: str, *, exact: bool = False) -> pd.DataFrame:
         conn = self.connect()
         try:
@@ -1905,7 +1941,9 @@ class ResearchStore:
                     "dividend_yield": next((payload.get(key) for key in (
                         "dividend_yield", "dividend_yield_ratio", "dv_ratio", "dividend_ratio",
                     ) if payload.get(key) is not None), None),
-                    "quality_status": row[3], "requested_as_of": row[2],
+                    "quality_status": (payload.get("quality_status", "partial")
+                                       if payload.get("valuation_contract") == "composite-v1" else row[3]),
+                    "requested_as_of": row[2],
                     "provider_effective_as_of": row[1], "dataset_id": row[4],
                 })
         return pd.DataFrame(values)

@@ -13,6 +13,7 @@ import pandas as pd
 from data.research_store import ResearchStore
 from data.research_readiness import resolve_valuation, valuation_lag_budget
 from data.sources import akshare, baostock, zzshare
+from data.valuation_sync import ValuationSynchronizer
 
 
 _CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -21,7 +22,7 @@ _CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 
 class ResearchSourceUnavailable(RuntimeError):
-    """A required research dataset is not published yet, not a code failure."""
+    """A required research dataset is temporarily unavailable, not a code failure."""
 
     def __init__(self, message: str, *, result: Optional[dict] = None):
         super().__init__(message)
@@ -320,9 +321,9 @@ class ResearchSynchronizer:
         The normal 18:05 job remains the authoritative full ingestion path and the
         evening retry uses this same bounded repair path.
         This guard runs only when their completed marker is absent.  It deliberately
-        skips financial PIT, optional fund-flow references and per-symbol BaoStock
-        repair: one zzshare market batch plus valuation is sufficient to restore the
-        formal selector, while optional/external sources are kept out of the repair.
+        skips financial PIT, optional fund-flow references and per-symbol OHLCV
+        repair. Valuations use bounded multi-source enrichment (including serial
+        BaoStock), with a smaller premarket budget than the evening run.
         """
         trade_date = pd.Timestamp(trade_date).date().isoformat()
         if self.store.completed_sync("daily_market", trade_date):
@@ -344,9 +345,8 @@ class ResearchSynchronizer:
                 float(result.get("coverage") or 0) >= minimum_market
                 and market_quality
                 not in {"failed", "unknown", "unknown_unit", "possibly_truncated"}
-                and int(result.get("valuation_rows") or 0) == 0
                 and str(result.get("valuation_quality_status") or "unknown")
-                in {"unavailable", "empty", "source_unavailable"}
+                in {"ok", "unavailable", "empty", "source_unavailable"}
             ):
                 _, valuation_state = resolve_valuation(
                     self.store, trade_date,
@@ -357,14 +357,16 @@ class ResearchSynchronizer:
                     max_lag=valuation_lag_budget(),
                 )
                 if valuation_state["ready"]:
+                    lagged = valuation_state["status"] == "lagged"
                     return {
                         **result, "status": "ready", "selection_ready": True,
-                        "data_degraded": True, "repaired": True,
-                        "repair_mode": "bulk_market_with_lagged_valuation",
+                        "data_degraded": lagged, "repaired": True,
+                        "repair_mode": ("bulk_market_with_lagged_valuation" if lagged
+                                        else "bulk_market_with_partial_valuation"),
                         "selection_valuation": valuation_state,
                     }
                 raise ResearchSourceUnavailable(
-                    "required valuation snapshot is not published yet: "
+                    "required valuation snapshot is unavailable or incomplete: "
                     f"market_coverage={result.get('coverage')} "
                     f"valuation_rows={result.get('valuation_rows', 0)} "
                     f"valuation_quality={result.get('valuation_quality_status', 'unknown')}",
@@ -382,12 +384,12 @@ class ResearchSynchronizer:
             **result,
             "status": "ready",
             "repaired": True,
-            "repair_mode": "bulk_market_without_baostock_fallback",
+            "repair_mode": "bulk_market_with_multi_source_valuation",
         }
 
     def sync_day(self, trade_date: str, *, fundamentals: bool = True,
                  fallback: bool = True, refresh_calendar: bool = True,
-                 optional_fund_flow: bool = True) -> dict:
+                 optional_fund_flow: bool = True, valuation_bulk_only: bool = False) -> dict:
         trade_date = pd.Timestamp(trade_date).date().isoformat()
         calendar_result = {}
         if refresh_calendar:
@@ -432,8 +434,10 @@ class ResearchSynchronizer:
             result["providers"]["baostock_qfq_fallback"] = fallback_rows
 
             stage = "valuation"
-            valuation = zzshare.get_valuation(trade_date)
-            result["valuation_rows"] = self.store.upsert_valuations(valuation, as_of=trade_date)
+            result.update(ValuationSynchronizer(self.store).sync(
+                trade_date, universe.get("symbol", pd.Series(dtype=str)),
+                bulk_only=valuation_bulk_only,
+            ))
             # This is an optional local-reference dataset.  Failure does not poison
             # the formal selector; the "主力资金" local strategy simply reports
             # unavailable rather than inventing a volume/turnover proxy.
@@ -471,7 +475,7 @@ class ResearchSynchronizer:
                 0.70, float(os.getenv("RESEARCH_DAILY_MIN_VALUATION_COVERAGE", "0.70"))
             )
             primary_quality = str(frame.attrs.get("provenance", {}).get("quality_status") or "unknown")
-            valuation_quality = str(valuation.attrs.get("provenance", {}).get("quality_status") or "unknown")
+            valuation_quality = str(result.get("valuation_quality_status") or "unknown")
             quality = "ok" if (
                 expected and usable_coverage >= minimum_ratio
                 and valuation_coverage >= minimum_valuation
@@ -497,6 +501,8 @@ class ResearchSynchronizer:
                                            "valuation_coverage": result["valuation_coverage"],
                                            "market_quality_status": primary_quality,
                                            "valuation_quality_status": valuation_quality,
+                                           "valuation_field_coverage": result.get("valuation_field_coverage"),
+                                           "valuation_attempts": result.get("valuation_attempts"),
                                            "fallback_repaired_count": fallback_rows})
             return result
         except Exception as exc:
@@ -524,7 +530,8 @@ class ResearchSynchronizer:
                 skipped += 1
                 continue
             result = self.sync_day(
-                trade_day, fundamentals=False, fallback=False, refresh_calendar=False
+                trade_day, fundamentals=False, fallback=False, refresh_calendar=False,
+                valuation_bulk_only=True,
             )
             completed += int(result.get("providers", {}).get("zzshare", 0) > 0)
             incomplete += int(result.get("quality_status") != "ok")

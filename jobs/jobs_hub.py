@@ -1737,6 +1737,10 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'daily_backtest':            3600,   # 历史回测
     'strategy_policy_weekly':     600,   # 一次有界 LLM + 策略政策校验
     'factor_collection':         1200,
+    # 估值有内部 480s/120s 预算；外层还需容纳主数据、行情、财务和入库收尾。
+    'research_data_sync':        1200,
+    'research_data_sync_retry':   900,
+    'research_data_sync_premarket_retry': 600,
     'kline_prefetch':            2700,   # 焐 raw+qfq 两套 K线 + 因子/海选;源况差实测 K线段 33min(7-2),
                                          # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
     'mx_daily_analysis':         1500,   # LLM 慢
@@ -3652,6 +3656,7 @@ def _research_sync_detail(result, master):
         f"valuation={result.get('valuation_rows', 0)} "
         f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%} "
         f"valuation_quality={result.get('valuation_quality_status') or 'unknown'} "
+        f"valuation_fields={result.get('valuation_field_coverage') or {}} "
         f"master={master.get('rows', 0)} "
         f"master_quality={master.get('quality_status') or 'unknown'} "
         f"fund_flow={result.get('fund_flow_rows', 0)}(optional) "
@@ -3660,7 +3665,7 @@ def _research_sync_detail(result, master):
 
 
 def _valuation_release_pending(result):
-    """True only when the core market snapshot is ready but valuation is not published yet."""
+    """Core market ready, but multi-source valuation coverage is still insufficient."""
     try:
         minimum_market = float(os.getenv('RESEARCH_DAILY_MIN_COVERAGE', '0.90'))
     except (TypeError, ValueError):
@@ -3672,15 +3677,23 @@ def _valuation_release_pending(result):
         and int(result.get('providers', {}).get('zzshare') or 0) > 0
         and float(result.get('coverage') or 0) >= minimum_market
         and market_quality not in {'failed', 'unknown', 'unknown_unit', 'possibly_truncated'}
-        and int(result.get('valuation_rows') or 0) == 0
-        and valuation_quality in {'unavailable', 'empty', 'source_unavailable'}
+        and float(result.get('valuation_coverage') or 0) < max(
+            .70, float(os.getenv('RESEARCH_DAILY_MIN_VALUATION_COVERAGE', '.70')))
+        and valuation_quality in {'ok', 'unavailable', 'empty', 'source_unavailable'}
     )
 
 
 def _valuation_unavailable_detail(trade_date, result, *, next_retry):
+    fields = result.get('valuation_field_coverage') or {}
+    field_detail = (
+        f"字段覆盖：PE {float(fields.get('pe_ttm') or 0):.1%}、"
+        f"PB {float(fields.get('pb') or 0):.1%}、"
+        f"市值 {float(fields.get('market_cap') or 0):.1%}\n"
+    ) if fields else ''
     return (
         f"日K {trade_date}：覆盖 {float(result.get('coverage') or 0):.1%}，已达标\n"
-        f"zzshare 估值：{trade_date} 尚未发布（{int(result.get('valuation_rows') or 0)} 行）\n"
+        f"多源估值：{trade_date} 尚未补齐（可用 {int(result.get('valuation_rows') or 0)} 行）\n"
+        f"{field_detail}"
         "未找到时效和覆盖均达标的估值快照，暂不能选股\n"
         f"next_retry={next_retry}"
     )
@@ -3691,6 +3704,7 @@ def _research_repair_detail(trade_date, result):
         f"daily_market {trade_date} mode={result.get('repair_mode', 'unknown')} "
         f"market_coverage={float(result.get('coverage') or 0):.1%} "
         f"valuation={result.get('valuation_rows', 0)} "
+        f"valuation_fields={result.get('valuation_field_coverage') or {}} "
         f"valuation_coverage={float(result.get('valuation_coverage') or 0):.1%}"
     )
     if result.get('data_degraded'):
@@ -3801,7 +3815,7 @@ def task_research_data_sync_retry():
             job, 'skipped', error=f'source_unavailable: {detail}',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, detail, source='zzshare/valuation')
+        _notify_data_unavailable(job, detail, source='valuation/multi-source')
         return
     except Exception as exc:
         raise RuntimeError(
@@ -3845,7 +3859,7 @@ def task_research_data_sync_premarket_retry():
             job, 'skipped', error=f'source_unavailable: {detail}; formal_selection=fail_closed',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, detail, source='zzshare/valuation')
+        _notify_data_unavailable(job, detail, source='valuation/multi-source')
         return
     except Exception as exc:
         raise RuntimeError(
@@ -4531,7 +4545,7 @@ def task_unified_selection():
             )
             _log_run(job, 'skipped', error=f'source_unavailable: {detail}',
                      started_at=started, finished_at=datetime.now().isoformat(), notify=False)
-            _notify_data_unavailable(job, detail, source='zzshare/valuation')
+            _notify_data_unavailable(job, detail, source='valuation/multi-source')
             return
         if repair.get('repaired'):
             print('[unified_selection] 🧰 ' + _research_repair_detail(effective_market_date, repair),

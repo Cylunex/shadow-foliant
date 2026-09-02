@@ -132,13 +132,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🔁 本地研究数据补跑',
         'schedule': f"{MARKET_DATA_TIMES['research_data_sync_retry']} 每交易日（仅首轮未完成时）",
         'category': '数据', 'default': True,
-        'description': '仅当18:05全市场研究快照未完整入库时轻量补行情与估值；估值源未发布记数据源跳过而非程序失败，次交易日盘前再试',
+        'description': '仅当18:05研究快照未完整入库时补行情与多源估值；复用部分进度，有界串行调用BaoStock，源数据不足记跳过，盘前再试',
     },
     'research_data_sync_premarket_retry': {
         'cn': '🌅 盘前研究数据补跑',
         'schedule': f"{MARKET_DATA_TIMES['research_data_sync_premarket_retry']} 每交易日（仅前一交易日未完成时）",
         'category': '数据', 'default': True,
-        'description': '08:35 按双源交易日历定位前一交易日，仅轻量补行情与估值；仍不完整时正式选股保持 fail-closed',
+        'description': '08:35 按双源交易日历补前一交易日行情与多源估值，估值默认120秒预算；允许整份估值最多晚一个交易日，不混用不同日期',
     },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',

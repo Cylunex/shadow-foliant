@@ -41,7 +41,8 @@ def _pro():
     try:
         import tushare as ts
         ts.set_token(token)
-        _PRO = ts.pro_api()
+        from tushare.pro.client import DataApi
+        _PRO = DataApi(token=token, timeout=15)
     except Exception:
         _PRO = None
     return _PRO
