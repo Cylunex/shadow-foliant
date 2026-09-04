@@ -73,7 +73,7 @@ def archive_raw(content, *, root, retention_allowed=False, max_bytes=1048576):
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if path.is_symlink() or path.stat().st_mode & 0o077 or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError("raw_archive_integrity_failure")
     else:
         with os.fdopen(fd, "wb") as output:

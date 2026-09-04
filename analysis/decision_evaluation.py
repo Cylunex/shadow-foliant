@@ -18,6 +18,14 @@ def money(value) -> Decimal:
     return result.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def unit_price(value) -> Decimal:
+    """Keep quoted precision (e.g. ETF 1.408); only currency totals use cents."""
+    result = Decimal(str(value))
+    if not result.is_finite() or result <= 0:
+        raise ValueError("invalid_unit_price")
+    return result
+
+
 def price_metrics(entry, closes, lows=()):
     """Percentage points. MAE includes zero; MDD is close-to-close peak drawdown."""
     entry = float(entry)

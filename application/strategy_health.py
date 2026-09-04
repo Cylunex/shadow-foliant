@@ -63,4 +63,4 @@ def record_policy_arms(store, *, current, current_hash, evidence, llm_proposal):
                       "rules_and_llm": lp if lv else deepcopy(current)},
              "decisions": {"rules_only": {"accepted": rv, "reason": rr}, "rules_and_llm": {"accepted": lv, "reason": lr}},
              "created_at": utcnow(), "causal_claim": False}
-    return repo.once("policy_study", payload_hash(value), value)
+    return repo.once("policy_study", payload_hash({k: v for k, v in value.items() if k != "created_at"}), value)

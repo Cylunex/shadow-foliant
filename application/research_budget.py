@@ -46,7 +46,8 @@ def committee_call(store, *, prompt, system, call):
         text, provider = call([{ "role": "system", "content": system},
                                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
                               temperature=.1, max_tokens=1800, timeout=90, call_type="strategy_policy_committee")
-        result = {"status": "complete", "text": text, "provider": provider, "cache_hit": False}
+        result = {"status": "llm_unavailable" if not provider or provider == "none" else "complete",
+                  "text": text, "provider": provider, "cache_hit": False}
     except Exception as exc:
         result = {"status": "llm_unavailable", "error_category": type(exc).__name__, "cache_hit": False}
     conn = store.connect()

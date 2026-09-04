@@ -276,6 +276,8 @@ _audit_logger = logging.getLogger("webui.security_audit")
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/research/decision-loop")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/action-plan")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/research/cases")
+_add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/account-facts")
+_add(ROUTE_POLICIES, Access.ADMIN, "POST", "/api/research/cases/acknowledge")
 for _research_path in ("/api/research/thesis/draft", "/api/research/thesis/lock",
                        "/api/portfolio/account-facts/preview", "/api/portfolio/account-facts/confirm"):
     _add(ROUTE_POLICIES, Access.ADMIN, "POST", _research_path)

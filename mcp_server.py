@@ -1127,6 +1127,20 @@ def research_cases() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def research_private_state() -> Dict[str, Any]:
+    """本机 operator 专用：读取私人草稿版本、论点、概率判断和待确认账户预览。
+    用于继续修改草稿或在 Web 确认已有预览；不确认、不锁定、不下单。
+    公共研究 Agent HTTP 不暴露此私人入口。
+    """
+    from application.research_cases import ResearchCases
+    from application.account_reconciliation import AccountReconciliation
+    from data.research_store import ResearchStore
+    store = ResearchStore(ensure_schema=False)
+    return {"research": ResearchCases(store).view(owner="portfolio-primary"),
+            "account_facts": AccountReconciliation(store).view(owner="portfolio-primary")}
+
+
+@mcp.tool()
 def research_thesis_draft(symbol: str, text: str, claims: list, expected_revision: int = 0) -> Dict[str, Any]:
     """保存私人研究草稿，不锁定论点、不改变选股和仓位。symbol 为六位代码。
     claims 可为空（会标未核实）；每项必须有 text/passages/expires_at。

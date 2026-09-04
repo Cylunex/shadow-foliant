@@ -189,7 +189,10 @@ def test_holdout_requires_real_evaluation_and_reserves_before_view(store):
         assert conn.execute("SELECT state FROM research_holdout_batches WHERE batch_id='b'").fetchone()[0] == "evaluating"
         conn.close()
         return [dict(symbol="600001", label_start="2026-01-01", label_end="2026-01-10", gross_return_pct=5, cost_pct=.2,
-                     baseline_return_pct=1, strategy_version="test", data_class="strict_observed_pit",
+                     baseline_return_pct=1, strategy_version=trial["formula_hash"], data_class="strict_observed_pit",
+                     trial_id=trial["trial_id"], dataset_id=trial["dataset_id"], code_revision=trial["code_revision"],
+                     cost_model=trial["validation_protocol"]["cost_model"], max_drawdown_pct=-2.1, baseline_max_drawdown_pct=-2,
+                     execution_at="2026-01-01T09:30:00+08:00",
                      input_receipt_id="fixture", execution_fact_ids=["fixture"],
                      input_observed_at="2025-12-31T15:00:00+08:00", decision_at="2026-01-01T09:00:00+08:00")]
     result = loop.consume_holdout("b", trial["trial_id"], evaluator=evaluator)

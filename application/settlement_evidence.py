@@ -43,21 +43,29 @@ class SettlementEvidence:
             "arms": {"hold": deepcopy(initial), "incumbent": deepcopy(initial), "proposed": deepcopy(initial)},
             "policies": {"incumbent": old_policy, "proposed": new_policy}, "status": "registered"})
 
-    def recover(self, portfolios, *, through_day):
+    def recover(self, portfolios, *, through_day, cohorts=None):
         """Original facts only. Never fetch today's quote to fill a missed date."""
         import json
         conn = self.repo.store.connect()
         try:
             cur = conn.cursor()
             cur.execute("SELECT payload FROM research_model_targets WHERE state='pending'")
-            dates = sorted({str(json.loads(r[0]).get("earliest_execution_at") or "")[:10] for r in cur.fetchall()})
+            dates = {str(json.loads(r[0]).get("earliest_execution_at") or "")[:10] for r in cur.fetchall()}
+            cohort_symbols = set()
+            if cohorts is not None:
+                cur.execute("SELECT symbol,payload FROM research_model_orders WHERE state='pending'")
+                for symbol, payload in cur.fetchall():
+                    dates.add(str(json.loads(payload).get("earliest_execution_at") or "")[:10])
+                    cohort_symbols.add(symbol)
         finally:
             conn.close()
         result = {}
-        for day in [d for d in dates if d and d < through_day][:10]:
-            symbols = portfolios.symbols()
+        for day in sorted(d for d in dates if d and d < through_day)[:10]:
+            symbols = sorted(set(portfolios.symbols()) | cohort_symbols)
             self.request(symbols, day)
             facts = self.facts(symbols, day)
             if facts:
                 result[day] = portfolios.advance(facts, now=day + "T16:30:00+08:00")
+                if cohorts is not None:
+                    result[day]["cohorts_settled"] = cohorts.settle_models(facts, now=day + "T16:30:00+08:00")
         return result

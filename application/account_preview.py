@@ -42,6 +42,7 @@ def preview_account(*, owner_id, available_cash=None, allow_add=False):
             rules = equity_rules(symbol)
             quotes[symbol] = {"price": row.get("price"), "observed_at": timestamp.isoformat(),
                               "execution_rules": asdict(rules) if rules else None,
+                              "suspended": bool(row.get("suspended")) or row.get("volume") == 0,
                               "liquidity_budget": max(0, float(row.get("amount_wan") or 0) * 100),
                               "sell_blocked": bool(row.get("limit_down") and row.get("price", 0) <= row["limit_down"]),
                               "buy_blocked": bool(row.get("limit_up") and row.get("price", 0) >= row["limit_up"])}
@@ -58,7 +59,14 @@ def preview_account(*, owner_id, available_cash=None, allow_add=False):
                              owner_id=owner_id)
     plan["cash_basis"] = "user_confirmed" if available_cash is not None else "unknown"
     from analysis.portfolio_scenarios import risk_snapshot, stress, explain_actual_formal
-    priced = [h for h in holdings if quotes.get(h["symbol"], {}).get("price")]
+    def usable_price(holding):
+        quote = quotes.get(holding["symbol"], {})
+        try:
+            age = (now - datetime.fromisoformat(quote["observed_at"])).total_seconds()
+            return 0 <= age <= 120 and float(quote["price"]) > 0
+        except (KeyError, ValueError, TypeError):
+            return False
+    priced = [h for h in holdings if usable_price(h)]
     snapshot = risk_snapshot(priced, {s: q["price"] for s, q in quotes.items() if q.get("price")}, cash=available_cash)
     snapshot["missing_prices"] = [h["symbol"] for h in holdings if h not in priced]
     snapshot["status"] = "partial" if snapshot["missing_prices"] else "complete"
@@ -79,11 +87,12 @@ def account_books(days=30):
     summary = {}
     if rows:
         latest = rows[-1]
-        pnls = [money(r["total_daily_pnl"]) for r in rows]
+        period = rows[-days:]
+        pnls = [money(r["total_daily_pnl"]) for r in period]
         month = latest["snap_date"][:7]
         summary = {"latest": {k: latest[k] for k in ("snap_date", "total_daily_pnl", "total_daily_pct", "total_mv")},
                    "mtd_pnl": float(sum((money(r["total_daily_pnl"]) for r in rows if r["snap_date"].startswith(month)), money(0))),
-                   "period_pnl": float(sum(pnls, money(0))), "period_days": len(rows),
+                   "period_pnl": float(sum(pnls, money(0))), "period_days": len(period),
                    "win_rate": round(sum(p > 0 for p in pnls) / len(pnls) * 100, 1),
                    "best_day": float(max(pnls)), "worst_day": float(min(pnls))}
     return {"schema_version": "account-books-v1", "scope": "securities_only",

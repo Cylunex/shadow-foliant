@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import math
 import hashlib
 import json
 from datetime import datetime
@@ -28,7 +29,8 @@ def _number(value: Any) -> Optional[float]:
         return None
     text = str(value).replace(',', '').replace('¥', '').replace('￥', '').replace('元', '').strip()
     try:
-        return float(text)
+        value = float(text)
+        return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 

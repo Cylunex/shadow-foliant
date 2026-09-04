@@ -49,10 +49,17 @@ export default {
         <div class="list-title">{{r.name}} · {{r.symbol}}</div><div v-for="q in r.questions" :key="q" class="list-meta">{{q}}</div>
       </div></article>
       <p v-for="e in s.data?.research_cases?.attention_top5||[]" :key="e.object_id">{{e.review==='urgent'?'⚠️ 优先复核':'待核实'}} {{e.symbol}} · {{e.title||e.event_id}}</p>
+      <p v-for="r in s.data?.research_cases?.investigations||[]" :key="r.object_id">{{r.symbol}} · {{status(r.status)}}：{{r.summary}} <small>{{(r.missing||[]).join('、')}}</small></p>
       <p v-if="!s.data?.research_cases?.cases?.length">等待下一次正式选股生成档案。</p>
     </details>
     <details style="margin-top:16px"><summary>人工确认研究论点（私人）</summary>
       <button class="ghost" @click="loadPrivate">读取已有草稿与论点</button>
+      <p v-for="t in s.privateCases?.theses||[]" :key="t.object_id">{{t.object_id}} 已锁定 v{{t.revision}}：{{t.text}} · {{t.validity.use}} · 下次复查 {{t.next_check}}</p>
+      <label style="display:block">复核记录 <input v-model="s.reviewNote" maxlength="1000" placeholder="记录核查结论；不等于解除风险"></label>
+      <p v-for="e in s.privateCases?.attention_top5||[]" :key="e.object_id">{{e.symbol}} · {{e.title||e.event_id}}
+        <button v-if="!e.object_id.startsWith('due:')" class="ghost" @click="acknowledge(e)">确认已复核此事件</button></p>
+      <p v-if="s.privateCases?.calibration?.total">概率判断：已裁决 {{s.privateCases.calibration.settled}} / {{s.privateCases.calibration.total}}，Brier {{s.privateCases.calibration.brier??'尚无结果'}}</p>
+      <p v-for="p in s.privateCases?.predictions||[]" :key="p.object_id">{{p.symbol}} · 截至 {{p.target_date}} · 概率 {{percent(p.probability*100)}} · {{status(p.status)}} · Brier {{p.brier??'等待结果凭证'}}</p>
       <button v-for="d in s.privateCases?.drafts||[]" :key="d.object_id" class="ghost" @click="s.draft=d;s.thesisSymbol=d.object_id;s.thesisText=d.text">{{d.object_id}} 草稿 v{{d.revision}}</button>
       <label style="display:block;margin:10px 0">股票代码 <input v-model="s.thesisSymbol" maxlength="6" placeholder="六位代码"></label>
       <label style="display:block;margin:10px 0">论点草稿 <textarea v-model="s.thesisText" rows="5" style="display:block;width:100%;box-sizing:border-box;margin-top:6px" maxlength="8000" placeholder="未附证据的草稿会保留未核实标记"></textarea></label>
@@ -62,6 +69,10 @@ export default {
     </details>
     <details style="margin-top:16px"><summary>现金 / 费用 / 权益记录导入（可选）</summary>
       <p>先预览再确认，不替代成交导入。每条需要 external_id、date、kind、amount。金额为人民币；未提供不猜余额。</p>
+      <button class="ghost" @click="loadFacts">读取 Agent 待确认预览与已入账记录</button>
+      <button v-for="p in s.accountState?.pending_previews||[]" :key="p.object_id" class="ghost" @click="selectFacts(p)">查看预览 {{p.object_id.slice(0,8)}} · {{p.rows.length}} 条</button>
+      <p v-if="s.accountState">已保存 {{s.accountState.facts.length}} 条账户事实；不自动认定流水完整。</p>
+      <details v-if="s.accountState?.facts?.length"><summary>最近确认的账户事实</summary><p v-for="f in s.accountState.facts.slice(0,20)" :key="f.object_id">{{f.date}} · {{f.kind}} · {{f.amount}} {{f.currency}} · {{f.external_id}}</p></details>
       <textarea v-model="s.accountRows" rows="5" style="width:100%;box-sizing:border-box" aria-label="账户事实 JSON" placeholder='[{"external_id":"cash-1","date":"2026-09-04","kind":"cash_balance","amount":"5000"}]'></textarea>
       <button class="ghost" @click="previewFacts">预览记录</button><button class="ghost" @click="confirmFacts" :disabled="!s.accountPreview">确认导入当前预览</button>
       <p>{{s.accountMessage}}</p>
@@ -83,8 +94,8 @@ export default {
     </details>
   </section>`,
   setup() {
-    const s=reactive({data:null,error:'',loading:false,previous:null,cash:'',allowAdd:false,previewing:false,plan:null,thesisSymbol:'',thesisText:'',draft:null,thesisMessage:'',privateCases:null,accountRows:'[]',accountPreview:null,accountMessage:''})
-    const status=v=>({pending:'等待执行数据',filled:'模拟成交',partially_filled:'部分成交',unfilled:'未成交',expired:'已过期',registered:'已登记',evaluated:'已评估',failed:'失败留档',duplicate:'重复实验',budget_exhausted:'预算耗尽',retired:'已退役',applied:'已安排生效',no_change:'保持不变',rejected:'已拒绝',rolled_back:'已回滚'}[v]||v)
+    const s=reactive({data:null,error:'',loading:false,previous:null,cash:'',allowAdd:false,previewing:false,plan:null,thesisSymbol:'',thesisText:'',draft:null,thesisMessage:'',privateCases:null,reviewNote:'',accountState:null,accountRows:'[]',accountPreview:null,accountMessage:''})
+    const status=v=>({pending:'等待结果数据',draft:'调查草稿，尚未核实',interrupted:'调查中断，待人工复核',requires_evidence:'证据不足',settled:'已裁决',void:'已作废',filled:'模拟成交',partially_filled:'部分成交',unfilled:'未成交',expired:'已过期',registered:'已登记',evaluated:'已评估',failed:'失败留档',duplicate:'重复实验',budget_exhausted:'预算耗尽',retired:'已退役',applied:'已安排生效',no_change:'保持不变',rejected:'已拒绝',rolled_back:'已回滚'}[v]||v)
     const baseline=v=>({fusion:'融合 TOP15',top5:'最终 TOP5',pit_only:'纯 PIT',without_satellite:'去本地五策略',without_timing:'去技术基因组',low_turnover:'低换手'}[v]||v)
     const bookName=v=>({signal:'信号价格后验',model:'模拟成交账本',account:'真实账户收益'}[v]||v)
     const hypothesis=v=>({earnings_quality:'盈利质量',capital_persistence:'资金持续性',trend_exhaustion:'趋势衰竭'}[v]||v)
@@ -93,12 +104,15 @@ export default {
     async function load(){s.loading=true;s.error='';try{s.previous=s.data?.capsule?.capsule_id;s.data=await api('/api/research/decision-loop')}catch(e){s.error='闭环数据暂不可用：'+e}finally{s.loading=false}}
     async function preview(){s.previewing=true;s.error='';try{const q=new URLSearchParams({allow_add:String(s.allowAdd)});if(s.cash!=='')q.set('available_cash',s.cash);s.plan=await api('/api/portfolio/action-plan?'+q)}catch(e){s.error='账户预览不可用：'+e}finally{s.previewing=false}}
     onMounted(load)
-    async function saveThesis(){try{s.draft=await api('/api/research/thesis/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:s.thesisSymbol,text:s.thesisText,claims:[],expected_revision:s.draft?.object_id===s.thesisSymbol?s.draft.revision:0})});s.thesisMessage='草稿已保存，尚未锁定'}catch(e){s.thesisMessage=String(e)}}
+    async function saveThesis(){try{const existing=s.draft?.object_id===s.thesisSymbol?s.draft:s.privateCases?.drafts?.find(d=>d.object_id===s.thesisSymbol);s.draft=await api('/api/research/thesis/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:s.thesisSymbol,text:s.thesisText,claims:existing?.claims||[],expected_revision:existing?.revision||0})});s.thesisMessage='草稿已保存，原引用已保留，尚未锁定'}catch(e){s.thesisMessage=String(e)}}
     async function lockThesis(){if(!s.draft)return;if(s.thesisText!==s.draft.text||s.thesisSymbol!==s.draft.object_id){s.thesisMessage='内容已变更，请先保存新草稿';return}try{await api('/api/research/thesis/lock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:s.draft.object_id,draft_revision:s.draft.revision,confirm:true})});s.thesisMessage='已锁定；证据不足仍会标为未核实'}catch(e){s.thesisMessage=String(e)}}
     async function loadPrivate(){try{s.privateCases=await api('/api/research/cases')}catch(e){s.thesisMessage=String(e)}}
     const post=(url,value)=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)})
+    async function acknowledge(event){try{await post('/api/research/cases/acknowledge',{event_id:event.object_id,note:s.reviewNote,confirm:true});s.thesisMessage='已记为人工复核，不代表风险解除';await loadPrivate()}catch(e){s.thesisMessage=String(e)}}
+    async function loadFacts(){try{s.accountState=await api('/api/portfolio/account-facts')}catch(e){s.accountMessage=String(e)}}
+    function selectFacts(preview){s.accountRows=JSON.stringify(preview.rows,null,2);s.accountPreview={...preview,input:s.accountRows};s.accountMessage='请核对以下 '+preview.rows.length+' 条记录后确认'}
     async function previewFacts(){try{s.accountPreview=await post('/api/portfolio/account-facts/preview',{rows:JSON.parse(s.accountRows)});s.accountMessage='预览 '+s.accountPreview.rows.length+' 条，尚未入账';s.accountPreview.input=s.accountRows}catch(e){s.accountMessage=String(e)}}
     async function confirmFacts(){if(!s.accountPreview)return;if(s.accountPreview.input!==s.accountRows){s.accountMessage='输入已变化，请重新预览';return}try{const r=await post('/api/portfolio/account-facts/confirm',{preview_id:s.accountPreview.object_id,confirm:true});s.accountMessage='已确认 '+r.count+' 条；未据此推算完整账户收益';s.accountPreview=null}catch(e){s.accountMessage=String(e)}}
-    return {s,status,baseline,bookName,hypothesis,percent,action,load,preview,cls,fmt,saveThesis,lockThesis,loadPrivate,previewFacts,confirmFacts}
+    return {s,status,baseline,bookName,hypothesis,percent,action,load,preview,cls,fmt,saveThesis,lockThesis,loadPrivate,previewFacts,confirmFacts,acknowledge,loadFacts,selectFacts}
   }
 }

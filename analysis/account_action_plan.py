@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from application.results import payload_hash
-from analysis.decision_evaluation import ExecutionRules, execution_cost, money
+from analysis.decision_evaluation import ExecutionRules, execution_cost, money, unit_price
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
         quote = quotes.get(symbol) or {}
         try:
             age = (clock - datetime.fromisoformat(quote["observed_at"])).total_seconds()
-            price = money(quote["price"])
+            price = unit_price(quote["price"])
             if not 0 <= age <= limits.quote_ttl_seconds or price <= 0:
                 return None
             return price

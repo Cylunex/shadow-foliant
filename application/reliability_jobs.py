@@ -17,6 +17,8 @@ def refresh_corporate_evidence(store, symbols, *, day, now):
         start = (datetime.fromisoformat(row["day"]) - timedelta(days=30)).date().isoformat()
         try:
             evidence = fetch_dividends(symbol, start=start, end=row["day"], observed_at=now)
+            if evidence.get("status") not in {"SUCCESS", "EMPTY"}:
+                raise ValueError("corporate_provider_unavailable")
             repo.once("corporate_coverage", f"{row['day']}:{symbol}", evidence)
             for event in evidence.get("events", []):
                 from application.research_cases import ResearchCases

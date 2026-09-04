@@ -1,5 +1,18 @@
 """Research/public-private separation for decision loop views."""
-from fastapi import Body, Query, Request
+from fastapi import Body, Query, Request, HTTPException
+from functools import wraps
+
+
+def browser_errors(fn):
+    @wraps(fn)
+    def checked(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            code = str(exc).strip("'") if isinstance(exc, ValueError) else "invalid_request_fields"
+            conflict = any(word in code for word in ("stale", "conflict", "revision"))
+            raise HTTPException(status_code=409 if conflict else 422, detail=code) from exc
+    return checked
 
 
 def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok):
@@ -22,6 +35,7 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
         return browser_ok(ResearchCases(ResearchStore()).view(owner="portfolio-primary"))
 
     @app.post("/api/research/thesis/draft")
+    @browser_errors
     def browser_thesis_draft(payload: dict = Body(...)):
         from application.research_cases import ResearchCases
         from data.research_store import ResearchStore
@@ -29,6 +43,7 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
             text=payload["text"], claims=payload.get("claims", []), expected_revision=payload.get("expected_revision", 0)))
 
     @app.post("/api/research/thesis/lock")
+    @browser_errors
     def browser_thesis_lock(payload: dict = Body(...)):
         from application.research_cases import ResearchCases
         from data.research_store import ResearchStore
@@ -36,6 +51,22 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
             raise ValueError("explicit_thesis_confirmation_required")
         return browser_ok(ResearchCases(ResearchStore()).lock(payload["symbol"], owner="portfolio-primary",
             draft_revision=payload["draft_revision"], human_confirmed=True))
+
+    @app.post("/api/research/cases/acknowledge")
+    @browser_errors
+    def browser_case_acknowledge(payload: dict = Body(...)):
+        from application.research_cases import ResearchCases
+        from data.research_store import ResearchStore
+        if payload.get("confirm") is not True:
+            raise ValueError("explicit_review_confirmation_required")
+        return browser_ok(ResearchCases(ResearchStore(ensure_schema=False)).acknowledge(
+            payload["event_id"], owner="portfolio-primary", note=payload["note"], human_confirmed=True))
+
+    @app.get("/api/portfolio/account-facts")
+    def browser_account_facts():
+        from application.account_reconciliation import AccountReconciliation
+        from data.research_store import ResearchStore
+        return browser_ok(AccountReconciliation(ResearchStore(ensure_schema=False)).view(owner="portfolio-primary"))
 
     @app.get("/api/machine/v1/agent/research/cases", operation_id="get_agent_research_cases")
     def agent_cases():
@@ -48,6 +79,7 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
             return agent_error(exc)
 
     @app.post("/api/portfolio/account-facts/preview")
+    @browser_errors
     def browser_account_facts_preview(payload: dict = Body(...)):
         from application.account_reconciliation import AccountReconciliation
         from data.research_store import ResearchStore
@@ -56,6 +88,7 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
             watermark=portfolio_db.action_preview_context()["watermark"]))
 
     @app.post("/api/portfolio/account-facts/confirm")
+    @browser_errors
     def browser_account_facts_confirm(payload: dict = Body(...)):
         from application.account_reconciliation import AccountReconciliation
         from data.research_store import ResearchStore

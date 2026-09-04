@@ -1,7 +1,7 @@
 """Pure cash/security/NAV ledger with explicit corporate-action completeness."""
 from copy import deepcopy
 from decimal import Decimal
-from analysis.decision_evaluation import money, price_metrics
+from analysis.decision_evaluation import money, price_metrics, unit_price
 from application.results import payload_hash
 
 
@@ -93,15 +93,25 @@ def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False)
     value = deepcopy(ledger)
     if value["marks"] and trade_date <= value["marks"][-1]["trade_date"]:
         raise ValueError("model_mark_must_advance")
+    # An unknown action can change share/cash balances permanently. Selling the
+    # security or receiving today's complete quote cannot repair that history.
+    if "unverified_action_dates" not in value:
+        value["unverified_action_dates"] = [m["trade_date"] for m in value["marks"]
+                                            if m.get("corporate_actions_complete") is False]
+    if not corporate_actions_complete:
+        value.setdefault("unverified_action_dates", []).append(trade_date)
+    corporate_actions_complete = corporate_actions_complete and not value.get("unverified_action_dates")
     market_value = Decimal(0)
     missing = []
     for symbol, position in value["positions"].items():
         if not position["quantity"]:
             continue
-        if symbol not in prices or money(prices[symbol]) <= 0:
+        try:
+            price = unit_price(prices[symbol])
+        except (KeyError, ValueError, ArithmeticError):
             missing.append(symbol)
             continue
-        market_value += money(prices[symbol]) * position["quantity"]
+        market_value += money(price * position["quantity"])
     receivables = sum((money(r["amount"]) for r in value.get("receivables", {}).values()
                        if r["state"] == "receivable"), Decimal(0))
     nav = money(value["cash"]) + market_value + receivables if not missing else None

@@ -176,6 +176,10 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
     evidence["strategies"] = list(evidence.get("strategies") or []) + executable["strategies"]
     evidence["executable_evidence"] = executable
     evidence["evidence_snapshot_id"] = payload_hash(evidence)
+    from application.strategy_health import record_policy_arms
+    def record_fallback_study():
+        return record_policy_arms(store, current=current, current_hash=current_hash, evidence=evidence,
+            llm_proposal={"base_policy_hash": current_hash, "evidence_snapshot_id": evidence["evidence_snapshot_id"], "changes": []})
     if not call_llm:
         return {"status": "evidence_only", "policy_hash": current_hash,
                 "policy": current, "evidence": evidence}
@@ -208,13 +212,16 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
         from application.research_budget import committee_call
         call_result = committee_call(store, prompt=prompt, system=system, call=get_router().call)
         if call_result["status"] != "complete":
+            record_fallback_study()
             return {**call_result, "evidence": evidence}
         text, provider = call_result["text"], call_result["provider"]
     except Exception as exc:
+        record_fallback_study()
         return {"status": "llm_unavailable", "error": type(exc).__name__,
                 "evidence": evidence}
     proposal = _extract_json(text)
     if proposal is None:
+        record_fallback_study()
         return {"status": "invalid_llm_json", "provider": provider,
                 "evidence_snapshot_id": evidence["evidence_snapshot_id"]}
     proposal.setdefault("proposal_id", hashlib.sha256(
@@ -234,7 +241,6 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
     finally:
         conn.close()
     proposal["effective_from"] = f"{effective_day}T09:00:00+08:00" if effective_day else None
-    from application.strategy_health import record_policy_arms
     record_policy_arms(store, current=current, current_hash=current_hash, evidence=evidence, llm_proposal=proposal)
     if not proposal.get("changes"):
         store.save_strategy_policy_proposal(

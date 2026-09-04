@@ -97,6 +97,14 @@ def test_native_migration_cas_model_ledger_and_holdout():
         trial = service.register_trial(hypothesis_id="trend_exhaustion", ast={"op": "field", "name": "close"},
                                        dataset_id="fixture", data_class="exploratory", code_revision="fixture")
         assert not service.finish_trial(trial["trial_id"])["evidence"]["promotion_ready"]
+        conn = store.connect()
+        conn.execute("INSERT INTO research_holdout_batches VALUES ('interrupted','2026-01-01','2026-02-01','evaluating',?,NULL)",
+                     (trial["trial_id"],))
+        conn.commit()
+        conn.close()
+        audited = service.void_holdout("interrupted", trial["trial_id"], reason="fixture worker interrupted")
+        assert not audited["promotion_ready"]
+        assert service.void_holdout("interrupted", trial["trial_id"], reason="idempotent") == audited
         start = (now + timedelta(days=30)).date().isoformat()
         end = (now + timedelta(days=60)).date().isoformat()
         batch = service.seal_holdout(start_date=start, end_date=end)

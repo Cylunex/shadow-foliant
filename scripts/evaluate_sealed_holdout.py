@@ -18,15 +18,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", required=True)
     parser.add_argument("--trial", required=True)
-    parser.add_argument("--facts", required=True)
-    parser.add_argument("--sha256", required=True)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--facts")
+    parser.add_argument("--sha256")
+    parser.add_argument("--image")
+    parser.add_argument("--void-reason", help="Audit and retire an interrupted batch without rerunning or reopening it")
     parser.add_argument("--confirm-consume", action="store_true")
     args = parser.parse_args()
     if not args.confirm_consume:
         parser.error("--confirm-consume is required; reservation is irreversible")
-    result = DecisionLoopService().consume_holdout(args.batch, args.trial,
-        evaluator=isolated_holdout_evaluator(args.facts, image=args.image, expected_digest=args.sha256))
+    if args.void_reason:
+        result = DecisionLoopService().void_holdout(args.batch, args.trial, reason=args.void_reason)
+    else:
+        if not all((args.facts, args.sha256, args.image)):
+            parser.error("evaluation requires --facts, --sha256 and --image")
+        result = DecisionLoopService().consume_holdout(args.batch, args.trial,
+            evaluator=isolated_holdout_evaluator(args.facts, image=args.image, expected_digest=args.sha256))
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 
 

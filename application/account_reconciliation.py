@@ -37,11 +37,13 @@ class AccountReconciliation:
     def confirm(self, preview_id, *, owner, watermark):
         with self.repo.transaction() as cur:
             preview = self.repo.read(cur, "account_preview", preview_id, owner)
-            if not preview or preview["watermark"] != watermark:
+            if not preview:
                 raise ValueError("account_preview_stale_or_missing")
             result = self.repo.read(cur, "account_confirmation", preview_id, owner)
             if result:
                 return result
+            if preview["watermark"] != watermark:
+                raise ValueError("account_preview_stale_or_missing")
             head = self.repo.read(cur, "account_watermark", "primary", owner)
             if (head or {}).get("revision", 0) != preview["account_revision"]:
                 raise ValueError("account_watermark_conflict")
@@ -54,6 +56,15 @@ class AccountReconciliation:
             result = {"status": "confirmed", "count": len(preview["rows"]), "watermark": payload_hash(preview)}
             self.repo.append(cur, "account_watermark", "primary", owner, {"watermark": result["watermark"]}, head)
             return self.repo.append(cur, "account_confirmation", preview_id, owner, result)
+
+    def view(self, *, owner):
+        confirmations = self.repo.list("account_confirmation", owner=owner, limit=2000)
+        confirmed = {r["object_id"] for r in confirmations}
+        return {"facts": self.repo.list("account_fact", owner=owner, limit=2000),
+                "pending_previews": [p for p in self.repo.list("account_preview", owner=owner)
+                                     if p["object_id"] not in confirmed],
+                "confirmations": confirmations, "scope": "confirmed_inputs_only",
+                "completeness_inferred": False}
 
     def reconcile(self, *, owner, opening, closing, securities_pnl, start, end):
         rows = [r for r in self.repo.list("account_fact", owner=owner, limit=2000) if start < r["date"] <= end]

@@ -292,7 +292,7 @@ class LLMRouter:
         # 只剩 1 个 provider 时, 降级日志改口径(没下家可降, 别误导)
         single = len(chain) == 1
 
-        if call_type in {'case_review', 'research_process_eval'}:
+        if call_type in {'case_review', 'research_process_eval', 'strategy_policy_committee'}:
             # These workflows reserve actual call budgets, not unlimited logical
             # retries. The next scheduled review may retry after provider recovery.
             chain = chain[:1]

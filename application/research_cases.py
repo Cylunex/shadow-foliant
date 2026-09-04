@@ -8,7 +8,7 @@ from decimal import Decimal
 import math
 import re
 from application.results import payload_hash
-from data.reliability_store import ReliabilityStore, utcnow
+from data.reliability_store import ReliabilityStore, utcnow, canonical_time
 
 QUESTIONS = {
     "主力资金": "资金净流入是否持续，是否只是单日异动？",
@@ -23,7 +23,7 @@ QUESTIONS = {
 
 def validity(claims, *, now):
     coverage = sum(c.get("state") == "supported" for c in claims) / len(claims) if claims else 0
-    stale = any(c.get("expires_at", "") <= now for c in claims)
+    stale = any(not c.get("expires_at") or canonical_time(c["expires_at"]) <= canonical_time(now) for c in claims)
     contradicted = any(c.get("state") == "contradicted" for c in claims)
     return {"coverage": coverage, "freshness": "stale" if stale or not claims else "current",
             "conclusion": "contradicted" if contradicted else "supported" if coverage == 1 else "unverified",
@@ -33,14 +33,14 @@ def validity(claims, *, now):
 def compile_claim(text, passages, *, calculation=None, expires_at):
     if not isinstance(text, str) or not text.strip() or len(text) > 4000 or not 1 <= len(passages) <= 12:
         raise ValueError("claim_requires_bounded_evidence")
-    datetime.fromisoformat(expires_at)
+    expires_at = canonical_time(expires_at)
     for p in passages:
         if not all(p.get(k) for k in ("source_id", "quote", "published_at", "first_seen_at", "locator")):
             raise ValueError("passage_provenance_required")
         if len(p["quote"]) > 4000:
             raise ValueError("passage_too_large")
         for key in ("published_at", "first_seen_at"):
-            datetime.fromisoformat(p[key])
+            canonical_time(p[key])
     result = None
     if calculation:
         operands = calculation.get("operands", [])
@@ -59,7 +59,7 @@ def compile_claim(text, passages, *, calculation=None, expires_at):
             if not all(definition):
                 raise ValueError("calculation_semantics_required")
             semantics.add(definition)
-            if not re.search(r"(?<![\d.])" + re.escape(token) + r"(?![\d.])", passages[index]["quote"]):
+            if not re.search(r"(?<![\d.+−-])" + re.escape(token) + r"(?![\d.])", passages[index]["quote"]):
                 raise ValueError("operand_not_in_passage")
             number = Decimal(token)
             if not number.is_finite():
@@ -102,11 +102,13 @@ class ResearchCases:
             runs = list((old or {}).get("run_ids", []))
             if capsule["run_id"] in runs:
                 results.append(old)
-                continue
-            value = {**(old or {}), "symbol": symbol, "name": row.get("name", symbol), "questions": questions,
-                     "run_ids": (runs + [capsule["run_id"]])[-100:], "capsule_id": capsule["capsule_id"],
-                     "updated_at": utcnow(), "status": "open", "formal_rank_unchanged": True}
-            results.append(self.repo.put("case", symbol, value, expected_revision=(old or {}).get("revision", 0)))
+            else:
+                value = {**(old or {}), "symbol": symbol, "name": row.get("name", symbol), "questions": questions,
+                         "run_ids": (runs + [capsule["run_id"]])[-100:], "capsule_id": capsule["capsule_id"],
+                         "updated_at": utcnow(), "status": "open", "formal_rank_unchanged": True}
+                results.append(self.repo.put("case", symbol, value, expected_revision=(old or {}).get("revision", 0)))
+            # Always heal the event/queue if a previous process stopped after
+            # saving the Case but before enqueueing its review.
             if symbol in {r["symbol"] for r in capsule["opportunity_set"]["top5"]}:
                 self.event(symbol, {"event_id": "nomination:" + capsule["capsule_id"] + ":" + symbol,
                     "source_id": capsule.get("manifest_id") or capsule["capsule_id"], "published_at": capsule["published_at"],
@@ -116,7 +118,8 @@ class ResearchCases:
     def draft(self, symbol, *, owner, text, claims, expected_revision=0):
         if not re.fullmatch(r"\d{6}", symbol) or not text or len(text) > 8000 or len(claims) > 20:
             raise ValueError("invalid_thesis")
-        compiled = [compile_claim(**c) for c in claims]
+        fields = {"text", "passages", "calculation", "expires_at"}
+        compiled = [compile_claim(**{k: v for k, v in c.items() if k in fields}) for c in claims]
         return self.repo.put("thesis_draft", symbol, {"text": text, "claims": compiled,
             "status": "draft", "created_at": utcnow()}, owner=owner, expected_revision=expected_revision)
 
@@ -130,10 +133,12 @@ class ResearchCases:
             if not draft or draft["revision"] != draft_revision:
                 raise ValueError("stale_thesis_draft")
             old = self.repo.read(cur, "thesis_lock", symbol, owner)
+            if old and old.get("draft_revision") == draft_revision:
+                return old
             return self.repo.append(cur, "thesis_lock", symbol, owner,
                 {"draft_revision": draft_revision, "text": draft["text"], "claims": draft["claims"],
                  "locked_at": utcnow(), "status": "locked", "actor": "authenticated_human",
-                 "next_check": min((c["expires_at"] for c in draft["claims"]), default=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat())}, old)
+                 "next_check": min((canonical_time(c["expires_at"]) for c in draft["claims"]), default=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat())}, old)
 
     def event(self, symbol, event):
         if not event.get("source_id") or not event.get("published_at") or not event.get("event_id"):
@@ -147,6 +152,8 @@ class ResearchCases:
 
     def review(self, *, now=None, limit=3):
         import os
+        if type(limit) is not int or not 0 <= limit <= 3:
+            raise ValueError("invalid_review_budget")
         if os.getenv("RESEARCH_CASE_AUTO_REVIEW_ENABLED", "true").lower() != "true":
             return {"status": "disabled", "reviewed": 0, "token_calls": 0}
         now = now or utcnow()
@@ -166,11 +173,18 @@ class ResearchCases:
                 "max_cases": 3, "max_tool_calls_per_case": 12, "max_synthesis_per_case": 1}, budget)
         work = self.repo.claim("case_review", limit=admitted, now=now) if admitted else []
         model_calls = 0
+        failures = 0
         for row in work:
-            result = self.investigate(row, now=now)
-            model_calls += result.get("model_calls", 0)
-            self.repo.finish(row["work_id"])
-        return {"reviewed": len(work), "queue": self.repo.work_status("case_review"), "token_calls": model_calls}
+            try:
+                result = self.investigate(row, now=now)
+                model_calls += result.get("model_calls", 0)
+                self.repo.finish(row["work_id"], state="excluded" if result["status"] == "interrupted" else "complete")
+            except Exception as exc:
+                failures += 1
+                self.repo.once("case_review_error", f"{row['work_id']}:{row['attempt']}",
+                               {"symbol": row["symbol"], "error_category": type(exc).__name__})
+        return {"reviewed": len(work) - failures, "failed": failures,
+                "queue": self.repo.work_status("case_review"), "token_calls": model_calls}
 
     def investigate(self, work, *, now, call=None):
         """One durable reservation, three cached tools, at most one LLM synthesis.
@@ -184,6 +198,10 @@ class ResearchCases:
         with self.repo.transaction() as cur:
             existing = self.repo.read(cur, "case_investigation", identity, "research")
             if existing:
+                if existing["status"] == "reserved":
+                    return self.repo.append(cur, "case_investigation", identity, "research", {
+                        **existing, "status": "interrupted", "summary": "上次调查中断，需人工复核；未重复调用模型。",
+                        "verified_conclusion": False}, existing)
                 return existing
             reservation = self.repo.append(cur, "case_investigation", identity, "research",
                 {"status": "reserved", "symbol": work["symbol"], "created_at": now,
@@ -199,7 +217,7 @@ class ResearchCases:
             evidence["valuation"] = json.loads(row[0]) if row else None
         finally:
             conn.close()
-        result = {**reservation, "status": "requires_evidence", "tool_calls": 3, "model_calls": 0,
+        result = {**reservation, "event_id": work["event_id"], "status": "requires_evidence", "tool_calls": 3, "model_calls": 0,
                   "evidence_hash": payload_hash(evidence), "evidence": evidence,
                   "summary": "已核对档案、事件和缓存估值；原因尚未充分确认，不自动改变正式排名或论点。"}
         clock = datetime.fromisoformat(now)
@@ -228,11 +246,13 @@ class ResearchCases:
     def view(self, *, owner=None, now=None):
         now = now or utcnow()
         cases = self.repo.list("case", limit=100)
-        events = self.repo.list("case_event", limit=100)
+        acknowledgements = self.repo.list("case_acknowledgement", owner=owner) if owner else []
+        acknowledged = {r["object_id"] for r in acknowledgements}
+        events = [e for e in self.repo.list("case_event", limit=100) if e["object_id"] not in acknowledged]
         theses = self.repo.list("thesis_lock", owner=owner) if owner else []
         private_due = [{"object_id": "due:" + t["object_id"], "symbol": t["object_id"], "review": "urgent",
                        "title": "私人论点已到复查日期", "published_at": t["next_check"]}
-                      for t in theses if t.get("next_check", "9999") <= now]
+                      for t in theses if t.get("next_check") and canonical_time(t["next_check"]) <= canonical_time(now)]
         # Prefer fresh urgent evidence, at most one item per security. Private
         # expiry reminders stay private and are not buried by old nominations.
         attention = []
@@ -247,7 +267,24 @@ class ResearchCases:
                 "execution_runs": self.repo.list("case_execution", owner=owner) if owner else [],
                 "theses": [{**t, "validity": validity(t["claims"], now=now)} for t in theses],
                 "drafts": self.repo.list("thesis_draft", owner=owner) if owner else [],
+                "investigations": [{k: r[k] for k in ("object_id", "symbol", "event_id", "status", "summary", "missing", "verified_conclusion") if k in r}
+                                   for r in self.repo.list("case_investigation", limit=30)],
+                "acknowledgements": acknowledgements,
+                "predictions": self.repo.list("prediction", owner=owner) if owner else [],
+                "calibration": self.calibration(owner=owner) if owner else None,
                 "queue": self.repo.work_status("case_review"), "no_thesis_blocks_trades": False}
+
+    def acknowledge(self, event_id, *, owner, note, human_confirmed=False):
+        if not human_confirmed:
+            raise PermissionError("human_confirmation_required")
+        if not isinstance(note, str) or not note.strip() or len(note) > 1000:
+            raise ValueError("review_note_required")
+        event = self.repo.get("case_event", event_id)
+        if not event:
+            raise ValueError("case_event_missing")
+        return self.repo.once("case_acknowledgement", event_id, {"symbol": event["symbol"],
+            "note": note.strip(), "reviewed_at": utcnow(), "risk_cleared": False,
+            "meaning": "human_reviewed_not_evidence_verified"}, owner=owner)
 
     def predict(self, symbol, *, owner, probability, target_date, benchmark, evidence_id, now=None):
         now = now or utcnow()

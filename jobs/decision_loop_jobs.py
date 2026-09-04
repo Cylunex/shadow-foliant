@@ -43,12 +43,22 @@ def daily_decision_loop(store=None):
     symbols = sorted(set(symbols) | set(portfolios.symbols()))
     archive.request(symbols, day, held=portfolios.symbols())
     work = archive.repo.claim("execution", now=now.isoformat())
+    errors = []
+    # Archived historical facts close the work item without spending another
+    # provider request. A current quote is never a substitute for an older date.
+    for row in work:
+        if archive.facts([row["symbol"]], row["trade_date"]):
+            archive.repo.finish(row["work_id"])
     requested_symbols = symbols
     symbols = [r["symbol"] for r in work if r["trade_date"] == day]
     snapshot = {}
     for offset in range(0, min(160, len(symbols)), 80):
         batch = symbols[offset:offset + 80]
-        primary = quotes(batch)
+        try:
+            primary = quotes(batch)
+        except Exception as exc:
+            primary = {}
+            errors.append({"component": "tencent", "error_category": type(exc).__name__})
         snapshot.update({symbol: {**quote, "execution_provider": "tencent"} for symbol, quote in primary.items()})
         missing = [symbol for symbol in batch if symbol not in primary]
         if missing:
@@ -56,8 +66,11 @@ def daily_decision_loop(store=None):
             # with limits/volume can become execution facts below; no invented
             # 10% price limits or yesterday-close fills for incomplete fallbacks.
             from data.datahub import quotes as routed_quotes
-            for symbol, quote in routed_quotes(missing).items():
-                snapshot[symbol] = {**quote, "execution_provider": quote.get("provider") or "datahub"}
+            try:
+                for symbol, quote in routed_quotes(missing).items():
+                    snapshot[symbol] = {**quote, "execution_provider": quote.get("provider") or "datahub"}
+            except Exception as exc:
+                errors.append({"component": "routed_quotes", "error_category": type(exc).__name__})
     facts = {}
     for symbol, quote in snapshot.items():
         timestamp = closing_timestamp(quote.get("quote_time") or quote.get("observed_at"), day)
@@ -75,9 +88,13 @@ def daily_decision_loop(store=None):
         if (row["symbol"], row["trade_date"]) in facts:
             archive.repo.finish(row["work_id"])
     facts.update(archive.facts(requested_symbols, day))
-    recovered = archive.recover(portfolios, through_day=day)
+    recovered = archive.recover(portfolios, through_day=day, cohorts=service)
     from application.reliability_jobs import refresh_corporate_evidence
-    corporate = refresh_corporate_evidence(service.store, requested_symbols, day=day, now=now.isoformat())
+    try:
+        corporate = refresh_corporate_evidence(service.store, requested_symbols, day=day, now=now.isoformat())
+    except Exception as exc:
+        corporate = {"status": "failed", "error_category": type(exc).__name__}
+        errors.append({"component": "corporate_evidence", **corporate})
     for key, fact in list(facts.items()):
         coverage = archive.repo.get("corporate_coverage", f"{key[1]}:{key[0]}")
         if coverage:
@@ -87,10 +104,16 @@ def daily_decision_loop(store=None):
     settled = service.settle_models(facts, now=now.isoformat())
     model_books = portfolios.advance(facts, now=now.isoformat())
     from application.reliability_jobs import refresh_reliability
-    return {"status": "partial" if len(facts) < len(requested_symbols) else "complete", "settled": settled, "execution_fact_count": len(facts),
+    try:
+        reliability = refresh_reliability(service.store, now=now.isoformat())
+    except Exception as exc:
+        reliability = {"status": "failed", "error_category": type(exc).__name__}
+        errors.append({"component": "research_reviews", **reliability})
+    return {"status": "partial" if errors or len(facts) < len(requested_symbols) else "complete", "errors": errors,
+            "settled": settled, "execution_fact_count": len(facts),
             "execution_queue": archive.repo.work_status("execution"), "requested_count": len(requested_symbols),
             "recovered_original_sessions": recovered,
-            "reliability": refresh_reliability(service.store, now=now.isoformat()), "corporate_evidence": corporate,
+            "reliability": reliability, "corporate_evidence": corporate,
             "model_books": model_books,
             "quality_report": refresh_quality(service.store)}
 

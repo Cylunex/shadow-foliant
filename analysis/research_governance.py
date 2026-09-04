@@ -66,7 +66,7 @@ def evidence_summary(rows, *, trials_attempted=1, block_days=5):
               "conservative_lower_bound_pct": robust_lower,
               "status": "sufficient" if n >= 20 and bn >= 4 and len(versions) == 1 else "insufficient_evidence",
               "promotion_ready": n >= 20 and bn >= 4 and len(versions) == 1 and robust_lower is not None and robust_lower > 0}
-    result["evidence_snapshot_id"] = payload_hash(result)
+    result["evidence_snapshot_id"] = payload_hash({"summary": result, "dated_values": by_date})
     return result
 
 

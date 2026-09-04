@@ -1,7 +1,7 @@
 """Deterministic portfolio stress views; descriptive, never causal claims."""
 from copy import deepcopy
 from decimal import Decimal
-from analysis.decision_evaluation import money
+from analysis.decision_evaluation import money, unit_price
 
 
 SCENARIOS = {
@@ -18,7 +18,7 @@ def risk_snapshot(holdings, prices, *, cash=None):
     rows, total = [], Decimal(0)
     for row in holdings:
         symbol = str(row["symbol"])
-        value = money(prices[symbol]) * int(row["quantity"])
+        value = money(unit_price(prices[symbol]) * int(row["quantity"]))
         total += value
         rows.append({"symbol": symbol, "value": value, "industry": row.get("industry") or "unknown",
                      "themes": row.get("themes") or ["unknown"]})
@@ -27,6 +27,7 @@ def risk_snapshot(holdings, prices, *, cash=None):
     for row in rows:
         industries[row["industry"]] = industries.get(row["industry"], Decimal(0)) + row["value"]
     return {"nav": str(nav), "securities_value": str(total), "cash_known": cash is not None,
+            "denominator_scope": "full_account" if cash is not None else "securities_only",
             "position_weights": {r["symbol"]: float(r["value"] / nav) for r in rows} if nav else {},
             "industry_weights": {k: float(v / nav) for k, v in industries.items()} if nav else {},
             "largest_industry": max(industries, key=industries.get) if industries else None,
@@ -46,6 +47,7 @@ def stress(snapshot):
                 shock = shocks["largest_industry"]
             pnl += money(row["value"]) * shock
         output.append({"scenario": name, "pnl": str(money(pnl)), "return_pct": float(pnl / nav * 100),
+                       "denominator_scope": snapshot.get("denominator_scope", "unknown"),
                        "assumption": "fixed first-order price shock; no liquidity or causal inference"})
     return output
 
@@ -53,7 +55,7 @@ def stress(snapshot):
 def non_trade_band(*, price, rules, expected_edge_pct, uncertainty_pct, minimum_lots=1):
     if uncertainty_pct < 0 or expected_edge_pct < 0:
         raise ValueError("invalid_edge_or_uncertainty")
-    gross = money(price) * rules.buy_step * minimum_lots
+    gross = money(unit_price(price) * rules.buy_step * minimum_lots)
     from analysis.decision_evaluation import execution_cost
     round_trip_pct = float((execution_cost(gross, "buy", rules) + execution_cost(gross, "sell", rules)) / gross * 100)
     required = round_trip_pct + uncertainty_pct

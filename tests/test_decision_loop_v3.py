@@ -189,13 +189,16 @@ def test_trial_registry_failure_duplicate_and_holdout(store):
         service.consume_holdout("b1", trial["trial_id"], evaluator=lambda batch, trial: [])
 
 
-def test_forward_cohorts_idempotent_and_missing_data_expires(store, capsule):
+def test_forward_cohorts_idempotent_and_missing_data_remains_recoverable(store, capsule):
     service = DecisionLoopService(store)
     assert service.start_model_cohorts(capsule)["created"] > 0
     assert service.start_model_cohorts(capsule)["created"] == 0
     assert not service.settle_models({}, now="2026-09-07T18:00:00+08:00")
     counts = service.settle_models({}, now="2026-09-15T18:00:00+08:00")
-    assert counts["expired"] > 0
+    assert counts == {}
+    conn = store.connect()
+    assert conn.execute("SELECT COUNT(*) FROM research_model_orders WHERE state='pending'").fetchone()[0] > 0
+    conn.close()
 
 
 def test_policy_publication_compare_and_swap(store):

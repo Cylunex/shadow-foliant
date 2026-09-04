@@ -118,12 +118,22 @@ class DecisionLoopService:
 
     def settle_models(self, execution_facts, *, now, limit=500):
         """Consume explicit dated facts. Missing facts remain unfilled/pending, not zero returns."""
+        if not execution_facts:
+            return {}
         conn = self.store.connect()
         counts = {}
         try:
             cur = conn.cursor()
+            # Do not let an old missing-data backlog monopolize the first 500
+            # rows forever. Admit only securities/dates available in this pass.
+            symbols = sorted({key[0] for key in execution_facts})
+            days = sorted({key[1] for key in execution_facts})
+            date_predicates = " OR ".join("payload LIKE ?" for _ in days)
             cur.execute("SELECT order_id,payload FROM research_model_orders WHERE state='pending' "
-                        "ORDER BY created_at LIMIT ?", (max(1, min(2000, limit)),))
+                        f"AND symbol IN ({','.join('?' for _ in symbols)}) "
+                        f"AND ({date_predicates} OR payload LIKE ?) ORDER BY created_at LIMIT ?",
+                        (*symbols, *(f'%"earliest_execution_at":"{day}T%' for day in days),
+                         '%"earliest_execution_at":null%', max(1, min(2000, limit))))
             for order_id, raw in cur.fetchall():
                 order = _decode(raw)
                 earliest = order.get("earliest_execution_at")
@@ -137,12 +147,10 @@ class DecisionLoopService:
                 if not earliest or datetime.fromisoformat(now) < datetime.fromisoformat(earliest):
                     continue
                 fact = execution_facts.get((order["symbol"], earliest[:10]))
-                if fact is None:
-                    if datetime.fromisoformat(now) < datetime.fromisoformat(earliest) + timedelta(days=7):
-                        continue
-                    result = {"status": "expired", "reason": "execution_facts_never_arrived"}
-                elif order["recording_mode"] != "contemporaneous":
+                if order["recording_mode"] != "contemporaneous":
                     result = {"status": "unfilled", "reason": "backfilled_not_forward"}
+                elif fact is None:
+                    continue  # Missing original facts are recoverable, not an expired trading signal.
                 else:
                     from decimal import Decimal
                     try:
@@ -172,6 +180,7 @@ class DecisionLoopService:
     def register_trial(self, *, hypothesis_id, ast, dataset_id, data_class, code_revision,
                        parent_trial=None, adapter="factor_ast", now=None):
         from analysis.validation_protocol import DEFAULT_PROTOCOL
+        from dataclasses import replace
         if hypothesis_id not in HYPOTHESES or data_class not in {
             "strict_observed_pit", "reconstructed_history", "exploratory"}:
             raise ValueError("invalid_research_registration")
@@ -209,7 +218,7 @@ class DecisionLoopService:
                      "formula_hash": formula, "dataset_id": dataset_id, "data_class": data_class,
                      "code_revision": code_revision, "parent_trial": parent_trial, "adapter": adapter,
                      "baseline": hypothesis["baseline"], "metric": hypothesis["metric"],
-                     "validation_protocol": DEFAULT_PROTOCOL.__dict__,
+                     "validation_protocol": replace(DEFAULT_PROTOCOL, metric=hypothesis["metric"]).__dict__,
                      "search_counts": {"attempts": attempted + 1, "candidates": 1 if state == "registered" else 0,
                                        "metric_views": 0, "holdout_accesses": 0},
                      "state": state, "duplicate_of": duplicate[0] if duplicate else None,
@@ -238,9 +247,11 @@ class DecisionLoopService:
             cur.execute("SELECT COUNT(*) FROM research_experiments WHERE hypothesis_id=?", (trial["hypothesis_id"],))
             attempts = cur.fetchone()[0]
             attempts = max(attempts, trial.get("search_counts", {}).get("attempts", 1))
-            evidence = evidence_summary(observations or [], trials_attempted=attempts)
-            if trial["data_class"] != "strict_observed_pit":
-                evidence["promotion_ready"] = False
+            from analysis.validation_protocol import validate_trial_rows
+            checked = validate_trial_rows(observations or [], trial) if observations else []
+            evidence = evidence_summary(checked, trials_attempted=attempts)
+            evidence["development_candidate_ready"] = evidence["promotion_ready"]
+            evidence["promotion_ready"] = False  # Development is not the sealed final evaluation.
             state = "failed" if error_category else "evaluated"
             trial.update(state=state, evidence=evidence,
                          diagnostics=diagnostics or {},
@@ -296,9 +307,9 @@ class DecisionLoopService:
         finally:
             conn.close()
         try:
-            from analysis.validation_protocol import ValidationProtocol, evaluate_rows
+            from analysis.validation_protocol import ValidationProtocol, validate_trial_rows
             protocol = ValidationProtocol(**trial["validation_protocol"])
-            evaluated = evaluate_rows(evaluator(reserved, trial), protocol)
+            evaluated = validate_trial_rows(evaluator(reserved, trial), trial)
             if any(r["label_start"] < reserved["start_date"] or r["label_end"] > reserved["end_date"] for r in evaluated):
                 raise ValueError("evaluation_outside_reserved_batch")
             evidence = evidence_summary(evaluated, trials_attempted=trial["search_counts"]["attempts"],
@@ -313,8 +324,10 @@ class DecisionLoopService:
         try:
             cur = conn.cursor()
             result = {"batch_id": batch_id, "trial_id": trial_id, "evidence": evidence,
-                      "row_count": len(evaluated), "evaluated_at": now, "promotion_ready": evidence["promotion_ready"]}
-            from application.results import payload_hash
+                      "row_count": len(evaluated), "evaluated_at": now, "promotion_ready": evidence["promotion_ready"],
+                      "protocol": trial["validation_protocol"], "formula_hash": trial["formula_hash"],
+                      "dataset_id": trial["dataset_id"], "code_revision": trial["code_revision"],
+                      "evaluated_rows_hash": payload_hash(evaluated)}
             cur.execute("INSERT INTO research_artifacts "
                         "(artifact_id,subject,artifact_kind,run_id,formal,schema_version,payload_hash,payload,created_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?)", ("holdout_" + batch_id, trial_id, "holdout-evaluation", batch_id,
@@ -330,6 +343,25 @@ class DecisionLoopService:
             raise
         finally:
             conn.close()
+
+    def void_holdout(self, batch_id, trial_id, *, reason):
+        """Operator-only terminal audit; never reopen a revealed batch."""
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+            raise ValueError("holdout_void_reason_required")
+        from data.reliability_store import ReliabilityStore
+        with ReliabilityStore(self.store).transaction() as cur:
+            old = ReliabilityStore.read(cur, "holdout_void", batch_id, "research")
+            if old:
+                if old["trial_id"] != trial_id:
+                    raise ValueError("holdout_owner_mismatch")
+                return old
+            cur.execute("UPDATE research_holdout_batches SET state='retired' WHERE batch_id=? AND consumed_by=? AND state='evaluating'",
+                        (batch_id, trial_id))
+            if cur.rowcount != 1:
+                raise ValueError("holdout_not_interrupted_or_owner_mismatch")
+            return ReliabilityStore.append(cur, "holdout_void", batch_id, "research", {
+                "batch_id": batch_id, "trial_id": trial_id, "status": "void", "reason": reason.strip(),
+                "promotion_ready": False, "revealed_interval_reusable": False})
 
     def seal_holdout(self, *, start_date, end_date, now=None):
         from datetime import date

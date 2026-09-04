@@ -49,6 +49,7 @@ def model_strategy_evidence(store, policy_hash, *, horizon_days=5):
         summary.update(strategy_id=name.split(":", 1)[1], evidence_kind="executable_net",
                        evidence_policy_hash=policy_hash, rolling_folds=fold_results,
                        blocker=None if summary["promotion_ready"] else "net_evidence_or_rolling_validation_not_ready")
+        summary["evidence_snapshot_id"] = payload_hash(summary)
         results.append(summary)
     return {"strategies": results, "evidence_snapshot_id": payload_hash(results),
             "source": "forward_verified_model_accounts", "horizon_days": horizon_days}

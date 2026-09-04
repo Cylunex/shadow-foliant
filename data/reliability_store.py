@@ -117,6 +117,8 @@ class ReliabilityStore:
         # No 'running' lease: reservation consumes one attempt; after a crash the
         # existing Run can retry the same id after its bounded backoff.
         from datetime import timedelta
+        if type(limit) is not int or type(max_attempts) is not int or not 0 <= limit <= 160 or not 1 <= max_attempts <= 3:
+            raise ValueError("invalid_work_budget")
         now = canonical_time(now) if now else utcnow()
         later = (datetime.fromisoformat(now) + timedelta(minutes=15)).isoformat()
         with self.transaction() as cur:
@@ -127,7 +129,7 @@ class ReliabilityStore:
             for identity, _, _ in rows:
                 cur.execute("UPDATE research_reliability_work SET attempts=attempts+1,available_at=?,updated_at=? "
                             "WHERE work_id=?", (later, now, identity))
-            return [{"work_id": i, "attempt": a + 1, **json.loads(p)} for i, p, a in rows]
+            return [{**json.loads(p), "work_id": i, "attempt": a + 1} for i, p, a in rows]
 
     def finish(self, identity, *, state="complete"):
         if state not in {"complete", "excluded"}:

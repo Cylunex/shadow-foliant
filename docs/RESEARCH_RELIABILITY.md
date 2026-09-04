@@ -4,6 +4,8 @@
 TOP15/独立 TOP5 和问财/妙想参考隔离。没有新增下单、RAG 或强制全系统影子运行。
 盘前与盘中通知模板未改；新增页面继续红涨绿跌。
 
+后续三轮逻辑走查、恢复与人工确认闭环见 [走查记录](LOGIC_AUDIT_2026-09-04.md)。
+
 ## 1. 实际运行链
 
 | 入口 | 现在执行什么 | 明确不代表什么 |
@@ -56,6 +58,7 @@ TOP15/独立 TOP5 和问财/妙想参考隔离。没有新增下单、RAG 或强
 - 原 security-research Run 完成时，在同一事务追加 owner 隔离的 Case 执行关联；公共查询不泄露私人 Run 或研究内容。
 - 现有 `research_decision_loop()`/Web“研究决策闭环”包含 Case、问题与注意力摘要。
 - MCP `research_thesis_draft(symbol,text,claims,expected_revision)` 起草。可以没有 Claim，但会保持未核实。
+- 本机 operator 使用 `research_private_state()` 读取已有草稿版本、判断和待确认账户预览；不向公共 Agent HTTP 开放。
 - Web 私人区域读取已有草稿、保存、点击确认锁定。只有已认证管理员浏览器可锁定；机器凭据不具备该权限。
 - 草稿修改不会覆盖已锁定版本。无论点、过期论点不阻止风险退出或成交记录导入。
 
@@ -101,6 +104,7 @@ python scripts/evaluate_sealed_holdout.py --batch BATCH_ID --trial TRIAL_ID \
 
 容器无网络、无挂载、只读、低权限、资源上限；镜像必须 digest 固定。脚本需要实际可运行 Docker。
 已打开的批次故障需要审计，不用清状态重跑来掩盖额外指标查看。
+运维 CLI 的 `--void-reason` 可终止中断批次并保留审计，不重新揭示、不重新开放区间。
 
 健康状态：两次有效不良证据进入冷却；14 天冷却后需要连续三次合格证据才能恢复增风险；
 同一证据快照不重复累计。样本不足禁止增风险但保留既有 active。硬风险使用单独 risk_halted，不能被 LLM 自动解除。
