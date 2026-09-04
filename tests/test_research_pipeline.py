@@ -877,6 +877,18 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertFalse(readiness["ready"])
         self.assertTrue(readiness["data_complete"], readiness)
 
+    def test_previous_dates_formal_artifact_does_not_satisfy_todays_readiness(self):
+        selected = self._seed()
+        result = LocalStockSelector(self.store).run(selected, persist=True)
+        self.assertEqual(result['status'], 'success')
+        sync_id = self.store.start_sync('zzshare', 'daily_market', '2026-08-21')
+        self.store.finish_sync(sync_id, status='success', row_count=24, quality_status='ok')
+        with self.store.connect() as conn:
+            conn.execute("UPDATE selection_runs SET selection_date='2026-08-23'")
+        report = research_health_snapshot(store=self.store, selection_date=selected, mode='preopen')
+        self.assertTrue(report['data_complete'])
+        self.assertFalse(report['checks']['formal_selection'])
+
     def test_final_top_five_ignores_llm_and_quote_fields(self):
         formal = {
             "run_id": "run", "snapshot_id": "snapshot",

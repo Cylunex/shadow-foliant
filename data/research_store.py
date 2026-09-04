@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "12"
+SCHEMA_VERSION = "13"
 
 
 def _json(value) -> str:
@@ -352,6 +352,7 @@ class ResearchStore:
                 applied_policy_hash TEXT, created_at TEXT NOT NULL, applied_at TEXT
             )""",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
+            "CREATE INDEX IF NOT EXISTS idx_market_observation_identity ON research_market_observations(dataset_id,symbol,trade_date,adjustment)",
             "CREATE INDEX IF NOT EXISTS idx_research_fund_flow_date ON research_fund_flow_daily(trade_date,main_net_inflow)",
             "CREATE INDEX IF NOT EXISTS idx_research_calendar_evidence ON research_trade_calendar_evidence(trade_date,is_open)",
             "CREATE INDEX IF NOT EXISTS idx_research_calendar_fetch ON research_calendar_fetch_runs(provider,range_end,quality_status)",
@@ -2012,6 +2013,11 @@ class ResearchStore:
         placeholders = ",".join("?" for _ in ids)
         wanted = sorted({_symbol(v) for v in (symbols or []) if _symbol(v)})
         symbol_clause = (" AND o.symbol IN (" + ",".join("?" for _ in wanted) + ")") if wanted else ""
+        context = (manifest or {}).get("decision_context") or {}
+        cutoff = context.get("market_cutoff")
+        boundary = " AND o.adjustment='qfq'"
+        if cutoff:
+            boundary += " AND o.trade_date" + ("<=?" if context.get("market_cutoff_inclusive") else "<?")
         conn = self.connect()
         try:
             cur = conn.cursor()
@@ -2019,10 +2025,12 @@ class ResearchStore:
                 """SELECT o.symbol,o.trade_date,o.provider,b.quality_status,o.dataset_id,o.payload
                    FROM research_market_observations o JOIN research_dataset_batches b
                      ON b.dataset_id=o.dataset_id
-                   WHERE o.dataset_id IN (""" + placeholders + ")" + symbol_clause + " ORDER BY o.symbol,o.trade_date",
-                (*ids, *wanted),
+                   WHERE o.dataset_id IN (""" + placeholders + ")" + symbol_clause + boundary
+                + " ORDER BY o.symbol,o.trade_date,o.retrieved_at,o.observation_id",
+                (*ids, *wanted, *((cutoff,) if cutoff else ())),
             )
-            return self._observation_frame(cur.fetchall(), kind="market")
+            frame = self._observation_frame(cur.fetchall(), kind="market")
+            return frame if frame.empty else frame.drop_duplicates(["symbol", "trade_date"], keep="last")
         finally:
             conn.close()
 
@@ -2227,12 +2235,48 @@ class ResearchStore:
         return {
             "manifest_id": manifest_id, "run_id": manifest["run_id"],
             "replay_status": replay.get("status"),
+            "reason": (replay.get("metadata") or {}).get("reason"),
+            "frozen_market": self.manifest_market_coverage(manifest_id),
             "exact_match": replay.get("status") == "success"
             and all(item["exact_match"] for item in comparisons.values()),
             "artifacts": comparisons,
             **({"replay_class": "hindsight_correction_not_historical_pit", "formal_top15": formal15,
                 "formal_top5": formal5, "published": False} if financial_overrides else {}),
         }
+
+    def manifest_market_coverage(self, manifest_id: str) -> dict:
+        """Diagnose missing immutable history without silently reading live bars."""
+        manifest = self.load_selection_manifest(manifest_id)
+        if not manifest:
+            raise ValueError("selection manifest was not found")
+        ids = list(manifest.get("market_dataset_ids") or [])
+        counts = []
+        if ids:
+            context = manifest.get("decision_context") or {}
+            cutoff = context.get("market_cutoff")
+            boundary = ""
+            if cutoff:
+                boundary = " AND o.trade_date" + ("<=?" if context.get("market_cutoff_inclusive") else "<?")
+            conn = self.connect()
+            try:
+                cur = conn.cursor()
+                # Aggregate in PostgreSQL: diagnostics must not deserialize a
+                # second multi-million-row OHLC panel on the NAS.
+                cur.execute("SELECT o.symbol,COUNT(DISTINCT o.trade_date) "
+                            "FROM research_market_observations o JOIN research_dataset_batches b "
+                            "ON b.dataset_id=o.dataset_id WHERE o.dataset_id IN ("
+                            + ",".join("?" for _ in ids) + ") AND o.adjustment='qfq'"
+                            + boundary + " GROUP BY o.symbol", (*ids, *((cutoff,) if cutoff else ())))
+                counts = [int(row[1]) for row in cur.fetchall()]
+            finally:
+                conn.close()
+        policy = manifest.get("policy") or {}
+        minimum = max(int(policy.get("min_history_days", 70)), int(policy.get("min_listing_trading_days", 0)))
+        return {"rows": sum(counts), "symbols": len(counts),
+                "max_history_days": max(counts, default=0),
+                "required_history_days": minimum,
+                "symbols_with_required_history": sum(count >= minimum for count in counts),
+                "live_history_fallback": False}
 
     def save_selection(self, run: dict, primary: Sequence[dict], reference: Sequence[dict]) -> str:
         run_id = str(run.get("run_id") or uuid.uuid4().hex)

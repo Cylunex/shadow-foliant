@@ -22,8 +22,42 @@ import pywencai
 
 # 不能用 `with ThreadPoolExecutor()` —— __exit__ 会 shutdown(wait=True) 阻塞等
 # 卡死的孤儿线程跑完, 失去超时意义。同 api_server._DEADLINE_POOL 的处理方式。
-# max_workers=12(2026-06-24: 4→12): 死源挂满 timeout 时小池易饱和 → 排队被算成假超时。
-_POOL = _cf.ThreadPoolExecutor(max_workers=12, thread_name_prefix='pywencai-safe')
+# Single-flight admission prevents timed-out workers from accumulating or queuing.
+_POOL = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix='pywencai-safe')
+_ADMISSION = _threading.RLock()
+_inflight = None
+_rejected_until = 0.0
+_rejected_status = None
+
+
+def rejection_status():
+    """Only aggregate health facts; never expose query, Cookie or response body."""
+    with _ADMISSION:
+        remaining = max(0, int(_rejected_until - _time.monotonic() + 0.999))
+        return {'http_status': _rejected_status if remaining else None,
+                'retry_after_seconds': remaining,
+                'inflight': bool(_inflight is not None and not _inflight.done())}
+
+
+def _check_rejection():
+    state = rejection_status()
+    if state['retry_after_seconds']:
+        raise PyWencaiRequestRejected(
+            f"问财 HTTP {state['http_status']} 冷却中，{state['retry_after_seconds']}s 后重试",
+            status_code=state['http_status'], retry_after=state['retry_after_seconds'])
+
+
+def _record_rejection(response):
+    global _rejected_until, _rejected_status
+    status = response.status_code
+    seconds = {401: 3600, 403: 900, 429: 120}.get(status, 60)
+    try:
+        seconds = max(seconds, min(3600, float(response.headers.get('Retry-After', 0))))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    with _ADMISSION:
+        _rejected_until = _time.monotonic() + seconds
+        _rejected_status = status
 
 # ⚡ 全源熔断(2026-06-25):问财不走 datahub._route, 故在此自带熔断, 否则问财整体不可达时
 # 每只逐只仍吃满 timeout(collect_factors 焐热 391 只 × 30s) → kline_prefetch/factor_collection
@@ -53,6 +87,9 @@ class _HttpsRequestsProxy:
         self._state = _threading.local()
 
     def request(self, *args, **kwargs):
+        # pywencai swallows transport exceptions and retries internally. Deny
+        # those retries before spending another provider admission or HTTP call.
+        _check_rejection()
         args = list(args)
         if 'url' in kwargs:
             url = kwargs['url']
@@ -71,7 +108,8 @@ class _HttpsRequestsProxy:
             self._state.last_status = getattr(response, 'status_code', None)
             # Charge every page/retry, not only the outer logical query.
             if getattr(response, 'status_code', 200) in (401, 403, 429) or getattr(response, 'status_code', 200) >= 500:
-                raise PyWencaiRequestRejected('问财请求被限流或服务暂不可用')
+                _record_rejection(response)
+                _check_rejection()
         self._state.last_status = getattr(response, 'status_code', None)
         return response
 
@@ -84,6 +122,11 @@ class _HttpsRequestsProxy:
 
 class PyWencaiRequestRejected(RuntimeError):
     """问财明确拒绝请求（鉴权、反爬或限流），不是业务查询空结果。"""
+
+    def __init__(self, message, *, status_code=None, retry_after=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 # 不修改全局 requests，仅替换 pywencai 两个内部模块各自持有的引用。
@@ -104,15 +147,15 @@ def _invoke_pywencai(query, loop, kwargs):
         result = pywencai.get(query=query, loop=loop, **kwargs)
     except AttributeError as exc:
         status = _HTTPS_REQUESTS.last_status()
-        if status in (401, 403, 429):
+        if status in (401, 403, 429) or isinstance(status, int) and status >= 500:
             raise PyWencaiRequestRejected(
-                f'问财请求被拒绝(HTTP {status}，可能为鉴权/反爬/限流)'
+                f'问财请求被拒绝(HTTP {status}，可能为鉴权/反爬/限流)', status_code=status
             ) from exc
         raise
     status = _HTTPS_REQUESTS.last_status()
-    if result is None and status in (401, 403, 429):
+    if result is None and (status in (401, 403, 429) or isinstance(status, int) and status >= 500):
         raise PyWencaiRequestRejected(
-            f'问财请求被拒绝(HTTP {status}，可能为鉴权/反爬/限流)'
+            f'问财请求被拒绝(HTTP {status}，可能为鉴权/反爬/限流)', status_code=status
         )
     return result
 
@@ -128,7 +171,8 @@ def cookie_configured() -> bool:
 def breaker_open() -> bool:
     """问财熔断是否生效中(连续失败达阈值且仍在冷却期)。供任务超时通知"具体到问财"。"""
     import time as _t
-    return _streak_fail >= _BREAK_FAILS and (_t.time() - _last_fail) < _BREAK_COOLDOWN
+    return bool(rejection_status()['retry_after_seconds']) or (
+        _streak_fail >= _BREAK_FAILS and (_t.time() - _last_fail) < _BREAK_COOLDOWN)
 
 
 def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
@@ -147,7 +191,8 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
         TimeoutError: 超时, 或熔断冷却期内直接短路(上层按既有 except 路径降级)
         其它异常: 与原生 pywencai.get 一致, 上层按原路径处理
     """
-    global _streak_fail, _last_fail, _BREAK_LOG_LAST
+    global _streak_fail, _last_fail, _BREAK_LOG_LAST, _inflight
+    _check_rejection()
     now = _time.time()
     # 熔断:连续失败达阈值且仍在冷却期 → 不再 submit, 直接短路(避免逐只吃满 timeout)
     if _streak_fail >= _BREAK_FAILS and (now - _last_fail) < _BREAK_COOLDOWN:
@@ -168,7 +213,12 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
     # 上游默认 retry=10/sleep=0，会把一次拒绝瞬间放大成 10 次请求。
     kwargs.setdefault('retry', 2)
     kwargs.setdefault('sleep', 1)
-    fut = _POOL.submit(_invoke_pywencai, query, loop, kwargs)
+    with _ADMISSION:
+        _check_rejection()
+        if _inflight is not None and not _inflight.done():
+            raise TimeoutError('pywencai 上次请求仍未结束，短路降级')
+        fut = _POOL.submit(_invoke_pywencai, query, loop, kwargs)
+        _inflight = fut
     try:
         r = fut.result(timeout=timeout)
         _streak_fail = 0   # 连通即复位(返回空 df 也算连通, 问财只是无数据)

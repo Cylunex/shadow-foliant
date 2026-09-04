@@ -44,5 +44,7 @@ pytest
 [研究决策闭环使用说明](docs/RESEARCH_DECISION_LOOP.md)。
 0.6.0 的使用入口、迁移、回退和未完成的外部验收见
 [研究可靠性与持仓学习](docs/RESEARCH_RELIABILITY.md)。
+历史冻结、就绪检查和降级边界见
+[真实数据运行加固](docs/REAL_DATA_HARDENING.md)。
 
 > 本项目仅用于个人研究与信息管理，不构成投资建议。

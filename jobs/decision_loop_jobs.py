@@ -6,9 +6,14 @@ from zoneinfo import ZoneInfo
 
 def refresh_quality(store=None):
     """Call from synchronization jobs, never from a web health probe."""
-    from core.research_health import refresh_quality_report
+    from core.research_health import refresh_quality_report, _default_mode
     try:
         report = refresh_quality_report(store=store)
+        day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if _default_mode(day) == "postclose":
+            # Refresh both generation-keyed caches after evening ingestion;
+            # HTTP health probes still never score the full market.
+            refresh_quality_report(store=store, selection_date=day, mode="preopen")
         return {"status": report["status"], "report_id": report.get("report_id")}
     except Exception as exc:
         print(f"[quality-report] refresh failed: {type(exc).__name__}", flush=True)

@@ -331,7 +331,7 @@ class LocalStockSelector:
         reference = _normalize_reference(wencai_reference)
         generation_capabilities = (
             "security_master", "trade_calendar", "daily_market", "valuation",
-            "financial_pit", "fund_flow", "events",
+            "financial_pit", "fund_flow", "events", "market_archive",
         )
         generation_reader = getattr(self.store, "generation_vector", None)
         generation_before = (

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 from analysis.factor_ast import validate_ast
 
 
@@ -36,10 +37,28 @@ def isolated_holdout_evaluator(path, *, image, expected_digest):
     """
     from pathlib import Path
     import hashlib
-    def evaluate(batch, trial):
+    import stat
+
+    def validate_source():
         source = Path(path)
-        if source.is_symlink() or source.stat().st_mode & 0o077 or source.stat().st_size > 2_000_000:
-            raise ValueError("sealed_facts_require_private_bounded_file")
+        facts = source.lstat()
+        if not stat.S_ISREG(facts.st_mode) or facts.st_mode & 0o077 or facts.st_size > 2_000_000:
+            raise ValueError('sealed_facts_require_private_bounded_file')
+        return source
+
+    # No sealed contents are read before reservation. Verify infrastructure with
+    # public synthetic values, so missing Docker/image/worker doesn't burn a batch.
+    validate_source()
+    if not re.fullmatch(r'[a-f0-9]{64}', expected_digest or ''):
+        raise ValueError('sealed_facts_digest_required')
+    if not shutil.which('docker'):
+        raise RuntimeError('isolated_research_docker_unavailable_before_reservation')
+    probe = run_isolated({'op': 'field', 'name': 'probe'}, {'probe': [1.0]}, image=image)
+    if not isinstance(probe, dict) or probe.get('values') != [1.0]:
+        raise RuntimeError('isolated_research_preflight_failed')
+
+    def evaluate(batch, trial):
+        source = validate_source()
         raw = source.read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected_digest:
             raise ValueError("sealed_facts_digest_mismatch")

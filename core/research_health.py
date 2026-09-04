@@ -20,7 +20,10 @@ def _default_mode(selection_date: str) -> str:
     now = datetime.now(A_SHARE_TIMEZONE)
     if selection_date != now.date().isoformat():
         return "preopen"
-    return "postclose" if now.time() >= time(16, 0) else "preopen"
+    # Daily bars publish at 17:30 and adjustment factors at 18:00; the
+    # warehouse sync starts at 18:05. A 16:00 switch diagnoses expected lag
+    # as a broken morning decision snapshot.
+    return "postclose" if now.time() >= time(18, 5) else "preopen"
 
 
 def snapshot(*, store: Optional[ResearchStore] = None,
@@ -103,6 +106,7 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         manifest_id = metadata.get("manifest_id")
         selection_valid = bool(
             latest.get("status") == "success"
+            and str(latest.get("selection_date")) == selected
             and metadata.get("market_as_of") == expected and manifest_id
             and metadata.get("rule_version")
             and artifacts.get("formal_top15") and artifacts.get("formal_top5")
@@ -174,11 +178,23 @@ def snapshot(*, store: Optional[ResearchStore] = None,
 
 def data_snapshot(**kwargs) -> Dict[str, Any]:
     kwargs["require_selection"] = False
-    return cached_snapshot(**kwargs)
+    report = cached_snapshot(**kwargs)
+    now = datetime.now(A_SHARE_TIMEZONE)
+    selected = str(kwargs.get("selection_date") or now.date().isoformat())
+    if selected == now.date().isoformat() and time(16) <= now.time() < time(18, 5):
+        report["postclose_acquisition"] = {
+            "status": "pending_scheduled_sync", "ready": False,
+            "scheduled_sync_at": now.replace(hour=18, minute=5, second=0, microsecond=0).isoformat(),
+        }
+    return report
 
 
 def selection_snapshot(**kwargs) -> Dict[str, Any]:
     kwargs["require_selection"] = True
+    # The formal morning decision uses the previous trading day's inputs,
+    # even after the close. Postclose acquisition has its own data endpoint.
+    if not kwargs.get("mode"):
+        kwargs["mode"] = "preopen"
     return cached_snapshot(**kwargs)
 
 
