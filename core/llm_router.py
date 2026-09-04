@@ -248,6 +248,7 @@ class LLMRouter:
                      ⚠️ 关键:openai SDK 默认超时 ~10min, 无超时会让"挂起的 provider"阻塞调用方主路径
                      (选股 job/持仓建议/离场)。这里强制有界:超时即抛错 → 降级下一 provider。
         """
+        bounded = call_type in {'case_review', 'research_process_eval', 'strategy_policy_committee'}
         try:
             import platform_llm
             if platform_llm.configured():
@@ -255,12 +256,17 @@ class LLMRouter:
                     return platform_llm.call(
                         messages,
                         temperature=temperature,
-                        max_tokens=(max_tokens if call_type == 'strategy_policy_committee'
+                        max_tokens=(max_tokens if bounded
                                     else _platform_token_budget(max_tokens, thinking)),
                         thinking=thinking,
                         call_type=call_type,
+                        **({'single_attempt': True, 'timeout': timeout or 30} if bounded else {}),
                     )
                 except Exception as exc:
+                    if bounded:
+                        print(f'[LLM-Router] 有界研究调用失败({type(exc).__name__})，'
+                              '保留待核实状态，不重复请求其他 provider', flush=True)
+                        return '', 'none'
                     # Platform SDK is a preferred in-process route. During migration the existing
                     # provider chain remains the behavioral fallback; no prompt/response/error body
                     # is copied into this log line.
@@ -282,7 +288,7 @@ class LLMRouter:
                 timeout = float(os.getenv('LLM_TIMEOUT', '40'))
             except (TypeError, ValueError):
                 timeout = 40.0
-        if thinking:
+        if thinking and not bounded:
             timeout = max(timeout, 120.0)   # 思考模型推理更久
 
         chain = list(self.providers)
@@ -292,7 +298,7 @@ class LLMRouter:
         # 只剩 1 个 provider 时, 降级日志改口径(没下家可降, 别误导)
         single = len(chain) == 1
 
-        if call_type in {'case_review', 'research_process_eval', 'strategy_policy_committee'}:
+        if bounded:
             # These workflows reserve actual call budgets, not unlimited logical
             # retries. The next scheduled review may retry after provider recovery.
             chain = chain[:1]
@@ -302,7 +308,7 @@ class LLMRouter:
         for idx, p in enumerate(chain):
             key = os.getenv(p.api_key_env, '') or 'ollama'
             model = p.thinking_model or p.default_model if thinking else p.default_model
-            mtokens = max(max_tokens, 8000) if thinking else max_tokens
+            mtokens = max(max_tokens, 8000) if thinking and not bounded else max_tokens
             try:
                 # max_retries=0:SDK 默认重试 2 次会把超时×3 (我们自己跨 provider 降级, 不需 SDK 重试)
                 client = openai.OpenAI(api_key=key, base_url=p.base_url, timeout=timeout, max_retries=0)

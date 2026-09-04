@@ -37,6 +37,8 @@ def call(
     max_tokens: int,
     thinking: bool,
     call_type: str,
+    single_attempt: bool = False,
+    timeout: float | None = None,
 ) -> tuple[str, str]:
     if not configured():
         raise PlatformLLMUnavailable("Shadow LLM is not configured")
@@ -45,6 +47,10 @@ def call(
         "reasoning-default" if thinking else "chat-default",
     ).strip()
     client, config = _client(alias)
+    if single_attempt:
+        # Registry fallbacks and the SDK's retry policy must not multiply a
+        # workflow's durable one-call reservation. Do not mutate shared clients.
+        client = _single_attempt_client(config, timeout=timeout)
     payload = _provider_payload(
         config.api,
         messages,
@@ -52,12 +58,26 @@ def call(
         max_tokens=max_tokens,
         thinking=thinking,
     )
-    response = client.create(agent_id=_agent_id(call_type), **payload)
-    text = _extract_text(config.api, response, thinking=thinking)
-    if not text:
-        raise PlatformLLMUnavailable("Shadow LLM returned an empty response")
-    model = str(response.get("model") or config.model)
-    return text, f"shadow:{alias}:{model}"
+    try:
+        response = client.create(agent_id=_agent_id(call_type), **payload)
+        text = _extract_text(config.api, response, thinking=thinking)
+        if not text:
+            raise PlatformLLMUnavailable("Shadow LLM returned an empty response")
+        model = str(response.get("model") or config.model)
+        return text, f"shadow:{alias}:{model}"
+    finally:
+        if single_attempt:
+            client.close()
+
+
+def _single_attempt_client(config, *, timeout):
+    from dataclasses import replace
+    from shadow_sdk import JsonlUsageSink, LLMClient, NullUsageSink, RetryPolicy
+    seconds = min(config.timeout_seconds, max(1, int(timeout or 30)))
+    bounded = replace(config, timeout_seconds=seconds, fallbacks=())
+    outbox = os.getenv("SHADOW_LLM_USAGE_OUTBOX", "").strip()
+    sink = JsonlUsageSink(outbox) if outbox else NullUsageSink()
+    return LLMClient([bounded], usage_sink=sink, retry_policy=RetryPolicy(max_retries=0))
 
 
 def close_clients() -> None:
