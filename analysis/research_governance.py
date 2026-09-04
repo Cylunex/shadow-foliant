@@ -23,7 +23,7 @@ def purge_training_intervals(training, validation, *, embargo_days=5):
         for start, end in blocked)]
 
 
-def evidence_summary(rows, *, trials_attempted=1):
+def evidence_summary(rows, *, trials_attempted=1, block_days=5):
     """One mean per entry day; greedy disjoint label intervals cap independence."""
     by_date, versions = {}, set()
     for row in rows:
@@ -49,11 +49,23 @@ def evidence_summary(rows, *, trials_attempted=1):
     # causality or solves all dependence. Require 20 non-overlapping intervals.
     threshold = math.sqrt(2 * math.log(max(1, trials_attempted) / .025))
     lower = mean - threshold * math.sqrt(variance / n) if variance is not None else None
-    result = {"evidence_version": "independent-net-v1", "independent_dates": len(by_date),
+    # Dependence is conservatively summarized in contiguous date blocks. This is
+    # not a proof of independence; it prevents overlapping/adjacent entries from
+    # being advertised as independent observations.
+    blocks = [sum(independent[i:i + block_days]) / len(independent[i:i + block_days])
+              for i in range(0, len(independent), block_days)]
+    bn = len(blocks)
+    bmean = sum(blocks) / bn if bn else None
+    bvariance = sum((v - bmean) ** 2 for v in blocks) / (bn - 1) if bn > 1 else None
+    robust_lower = bmean - threshold * math.sqrt(bvariance / bn) if bvariance is not None else None
+    result = {"evidence_version": "date-block-net-v2", "entry_dates": len(by_date),
               "effective_samples": n, "strategy_versions": sorted(versions),
+              "nonoverlapping_samples": n,
+              "date_blocks": bn, "block_days": block_days, "independence_claimed": False,
               "trials_attempted": trials_attempted, "mean_net_excess_pct": mean,
-              "conservative_lower_bound_pct": lower,
-              "promotion_ready": n >= 20 and len(versions) == 1 and lower is not None and lower > 0}
+              "conservative_lower_bound_pct": robust_lower,
+              "status": "sufficient" if n >= 20 and bn >= 4 and len(versions) == 1 else "insufficient_evidence",
+              "promotion_ready": n >= 20 and bn >= 4 and len(versions) == 1 and robust_lower is not None and robust_lower > 0}
     result["evidence_snapshot_id"] = payload_hash(result)
     return result
 

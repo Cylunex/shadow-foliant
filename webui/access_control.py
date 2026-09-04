@@ -275,7 +275,13 @@ MACHINE_CAPABILITIES = {
 _audit_logger = logging.getLogger("webui.security_audit")
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/research/decision-loop")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/action-plan")
+_add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/research/cases")
+for _research_path in ("/api/research/thesis/draft", "/api/research/thesis/lock",
+                       "/api/portfolio/account-facts/preview", "/api/portfolio/account-facts/confirm"):
+    _add(ROUTE_POLICIES, Access.ADMIN, "POST", _research_path)
+del _research_path
 for _path, _scope, _capability in (
+    ("/api/machine/v1/agent/research/cases", "stock.research", "foliant.selection.read"),
     ("/api/machine/v1/agent/decision-loop", "stock.research", "foliant.selection.read"),
     ("/api/machine/v1/agent/portfolio/action-plan", "stock.portfolio.read", "foliant.portfolio.read"),
     ("/api/machine/v1/agent/portfolio/books", "stock.portfolio.read", "foliant.portfolio.read"),

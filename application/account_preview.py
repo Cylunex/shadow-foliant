@@ -57,6 +57,15 @@ def preview_account(*, owner_id, available_cash=None, allow_add=False):
                              now=now.isoformat(), cash=available_cash, allow_add=allow_add,
                              owner_id=owner_id)
     plan["cash_basis"] = "user_confirmed" if available_cash is not None else "unknown"
+    from analysis.portfolio_scenarios import risk_snapshot, stress, explain_actual_formal
+    priced = [h for h in holdings if quotes.get(h["symbol"], {}).get("price")]
+    snapshot = risk_snapshot(priced, {s: q["price"] for s, q in quotes.items() if q.get("price")}, cash=available_cash)
+    snapshot["missing_prices"] = [h["symbol"] for h in holdings if h not in priced]
+    snapshot["status"] = "partial" if snapshot["missing_prices"] else "complete"
+    plan["risk_snapshot"] = snapshot
+    plan["stress_scenarios"] = stress(snapshot) if not snapshot["missing_prices"] else []
+    plan["actual_formal_difference"] = explain_actual_formal([h["symbol"] for h in holdings],
+        [r["symbol"] for r in capsule["opportunity_set"]["top15"]])
     plan["missing_information"] = (["available_cash"] if available_cash is None else [])
     return plan
 

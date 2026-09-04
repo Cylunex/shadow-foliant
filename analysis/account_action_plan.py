@@ -155,9 +155,18 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
             if qty < rules.min_buy:
                 rejected.append({"symbol": symbol, "reason": "cash_exposure_lot_or_turnover_constraint"})
                 continue
+            from analysis.portfolio_scenarios import non_trade_band
+            if quote.get("expected_edge_pct") is not None and quote.get("uncertainty_pct") is not None:
+                band = non_trade_band(price=price, rules=rules, expected_edge_pct=quote["expected_edge_pct"],
+                                      uncertainty_pct=quote["uncertainty_pct"])
+                if band["action"] == "hold":
+                    rejected.append({"symbol": symbol, "reason": "inside_no_trade_band", "cost_comparison": band})
+                    continue
             cost = price * qty + execution_cost(price * qty, "buy", rules)
             additions.append({"symbol": symbol, "side": "buy", "quantity": qty,
-                              "estimated_cost": str(money(cost)), "reason": "正式候选通过账户约束"})
+                              "estimated_cost": str(money(cost)), "reason": "正式候选通过账户约束",
+                              "estimated_fees": str(execution_cost(price * qty, "buy", rules)),
+                              "net_edge": None, "edge_basis": "unknown_unless_separately_verified"})
             spend -= cost
             position_values[symbol] = position_values.get(symbol, 0) + price * qty
             industry_values[industry] = industry_values.get(industry, 0) + price * qty

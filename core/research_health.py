@@ -213,6 +213,12 @@ def refresh_quality_report(*, store=None, selection_date=None, mode=None):
     if after != key:
         return {"status": "stale", "ready": False, "reason": "generation_changed_during_evaluation"}
     report.update(report_id=key, identity=identity, evaluated_at=datetime.now(A_SHARE_TIMEZONE).isoformat())
+    from data.reliability_store import ReliabilityStore
+    reliability = ReliabilityStore(store)
+    report["reliability"] = {"revision_impacts": len(reliability.list("revision_impact", limit=100)),
+        "execution_queue": reliability.work_status("execution"),
+        "corporate_action_queue": reliability.work_status("corporate_actions"),
+        "source_observability": "instrumented_admission_only_not_all_http"}
     encoded = json.dumps(report, ensure_ascii=False, default=str, allow_nan=False)
     revision = payload_hash(report)
     conn = store.connect()

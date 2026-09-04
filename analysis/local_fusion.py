@@ -187,6 +187,19 @@ class LocalFusionComposer:
     def __init__(self, policy: Optional[FusionPolicy] = None):
         self.policy = policy or FusionPolicy()
 
+    def ablations(self, core_rows, local_result, genome_result, eligible):
+        """Re-run admission, constraints, refill and independent TOP5 on same inputs.
+
+        Unlike mechanical removal from final TOP15 these branches can admit a
+        replacement nominee. They are diagnostics, not promotion evidence.
+        """
+        return {name: {"method": "frozen_producer_rerun", "policy_hash": self.policy.policy_hash,
+                       "result": self.compose(core_rows, local, genome, eligible)}
+                for name, local, genome in (
+                    ("without_satellite", {**local_result, "strategies": []}, genome_result),
+                    ("without_timing", local_result, {**genome_result, "rows": []}),
+                )}
+
     def compose(self, core_rows: Sequence[dict], local_result: dict,
                 genome_result: dict, eligible: pd.DataFrame) -> dict:
         nominations = self._nominations(core_rows, local_result, genome_result)

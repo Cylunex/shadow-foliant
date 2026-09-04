@@ -617,6 +617,23 @@ class LocalStockSelector:
         fusion = LocalFusionComposer(fusion_policy).compose(
             core_candidates, local_strategy_reference, genome_result, eligible_scored
         )
+        ablations = LocalFusionComposer(fusion_policy).ablations(
+            core_candidates, local_strategy_reference, genome_result, eligible_scored)
+        from data.reliability_store import ReliabilityStore
+        policy_arm_candidates = {}
+        producer_cache = {(fusion_policy.genome_min_lane_score, fusion_policy.genome_prefilter_n,
+                           fusion_policy.genome_nomination_cap): genome_result}
+        for study in ReliabilityStore(self.store).list("policy_study", limit=1):
+            for arm, settings in study["arms"].items():
+                arm_policy = FusionPolicy(**{k: v for k, v in settings.items() if k in FusionPolicy.__dataclass_fields__})
+                producer_key = (arm_policy.genome_min_lane_score, arm_policy.genome_prefilter_n, arm_policy.genome_nomination_cap)
+                if producer_key not in producer_cache:
+                    producer_cache[producer_key] = ({"rows": [], "status": "paused"} if pit_only_mode else
+                        GenomeCandidateProducer(arm_policy).run(eligible_scored, panel, strategy_snapshot=locked_strategy_snapshot))
+                branch = LocalFusionComposer(arm_policy).compose(core_candidates, local_strategy_reference, producer_cache[producer_key], eligible_scored)
+                policy_arm_candidates["policyarm:" + study["object_id"][:16] + ":" + arm] = {
+                    "top15": branch["top15"], "study_id": study["object_id"], "policy_hash": arm_policy.policy_hash,
+                    "scope": "same_pit_and_genome_snapshot; changed_producer_parameters_recomputed"}
         candidates = fusion["top15"]
         formal_top5_candidates = fusion["top5"]
         comparison = self._comparison(candidates, reference)
@@ -770,6 +787,8 @@ class LocalStockSelector:
                 ("formal_membership_nominations", formal_memberships),
                 ("pit_only_top15", core_candidates[:self.policy.final_n]),
                 ("fusion_policy", fusion_policy.as_dict()),
+                ("lane_ablation_reruns", ablations),
+                ("policy_arm_candidates", policy_arm_candidates),
             ):
                 self.store.save_selection_artifact(run["run_id"], artifact_type, payload)
             self.store.save_selection_strategy_records(

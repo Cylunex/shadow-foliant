@@ -26,3 +26,36 @@ def run_isolated(ast, fields, *, image, timeout=20):
     if result.returncode or len(result.stdout) > 4_000_000:
         raise RuntimeError("isolated_research_worker_failed")
     return json.loads(result.stdout)
+
+
+def isolated_holdout_evaluator(path, *, image, expected_digest):
+    """Operator-only factory: file is read only AFTER atomic batch reservation.
+
+    Sealed facts live outside the training workspace; worker receives only fixed
+    rows, has no mounts/network/secrets. This cannot hide public market knowledge.
+    """
+    from pathlib import Path
+    import hashlib
+    def evaluate(batch, trial):
+        source = Path(path)
+        if source.is_symlink() or source.stat().st_mode & 0o077 or source.stat().st_size > 2_000_000:
+            raise ValueError("sealed_facts_require_private_bounded_file")
+        raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_digest:
+            raise ValueError("sealed_facts_digest_mismatch")
+        rows = json.loads(raw)
+        if not isinstance(rows, list) or len(rows) > 5000:
+            raise ValueError("invalid_sealed_rows")
+        # The isolated DSL performs the arithmetic; no candidate-generated Python.
+        fields = {k: [r[k] for r in rows] for k in ("gross_return_pct", "cost_pct", "baseline_return_pct")}
+        ast = {"op": "sub", "args": [{"op": "sub", "args": [
+            {"op": "field", "name": "gross_return_pct"}, {"op": "field", "name": "cost_pct"}]},
+            {"op": "field", "name": "baseline_return_pct"}]}
+        result = run_isolated(ast, fields, image=image)
+        if len(result["values"]) != len(rows):
+            raise ValueError("isolated_evaluation_length_mismatch")
+        for row, value in zip(rows, result["values"]):
+            if abs(value - (row["gross_return_pct"] - row["cost_pct"] - row["baseline_return_pct"])) > 1e-8:
+                raise ValueError("isolated_evaluation_number_mismatch")
+        return rows
+    return evaluate

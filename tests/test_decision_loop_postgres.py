@@ -37,8 +37,28 @@ def test_native_migration_cas_model_ledger_and_holdout():
         migration = (Path(__file__).resolve().parents[1] / "scripts/migrations/11-research-decision-loop.sql").read_text()
         conn.execute(migration)
         conn.execute(migration)  # fresh and repeat execution are both safe
+        reliability_migration = (Path(__file__).resolve().parents[1] / "scripts/migrations/12-research-reliability.sql").read_text()
+        conn.execute(reliability_migration)
+        conn.execute(reliability_migration)
         conn.commit()
         conn.close()
+        from data.reliability_store import ReliabilityStore
+        journal = ReliabilityStore(store)
+        journal.put("thesis_draft", "600001", {"text": "private"}, owner="fixture-owner")
+        assert journal.get("thesis_draft", "600001", "other") is None
+        def revise(number):
+            try:
+                journal.put("thesis_draft", "600001", {"text": str(number)}, owner="fixture-owner", expected_revision=1)
+                return "updated"
+            except ValueError:
+                return "conflict"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(revise, [1, 2])) == ["conflict", "updated"]
+        for number in range(4):
+            journal.enqueue("fixture", str(number), {"number": number})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(lambda _: journal.claim("fixture", limit=2), [1, 2]))
+        assert len({r["work_id"] for claim in claims for r in claim}) == 4
         policy = FusionPolicy().as_dict()
         store.save_selection_strategy_records("r1", [], policy=policy, policy_hash="base", selection_date="2026-09-04")
 

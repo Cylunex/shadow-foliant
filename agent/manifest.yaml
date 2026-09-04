@@ -1,6 +1,6 @@
 version: 2
 app_id: foliant
-package_version: 0.5.0
+package_version: 0.6.0
 skills:
   - id: foliant-security-research
     path: skills/foliant-security-research/SKILL.md
@@ -148,6 +148,17 @@ capabilities:
         transport: http
         contract_ref: contracts/agent.openapi.yaml
         operation_id: get_agent_decision_loop
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 131072
+        max_model_chars: 12000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
+      - name: foliant.research.cases
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_research_cases
         exposure: on-demand
         result_mode: structured
         max_result_bytes: 131072

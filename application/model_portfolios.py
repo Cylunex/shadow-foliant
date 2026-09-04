@@ -22,9 +22,25 @@ class ModelPortfolios:
         conn = self.store.connect()
         try:
             cur = conn.cursor()
+            if self.store._is_postgres:
+                cur.execute("SELECT pg_advisory_xact_lock(1936482718)")
+            else:
+                cur.execute("BEGIN IMMEDIATE")
+            cur.execute("SELECT payload FROM research_model_portfolios WHERE baseline='fusion'")
+            previous_ledger = cur.fetchone()
+            initial_state = json.loads(previous_ledger[0]) if previous_ledger else empty_ledger()
+            cur.execute("SELECT payload FROM selection_artifacts WHERE run_id=? AND artifact_type='policy_arm_candidates'",
+                        (capsule["run_id"],))
+            arm_row = cur.fetchone()
+            arm_metadata = json.loads(arm_row[0]) if arm_row else {}
             for baseline, rows in {**groups, "low_turnover": groups.get("fusion", [])}.items():
                 if not rows:
                     continue
+                if baseline.startswith("policyarm:"):
+                    cur.execute("SELECT payload FROM research_model_portfolios WHERE baseline=?", (baseline,))
+                    prior_arm = cur.fetchone()
+                    if prior_arm and len(json.loads(prior_arm[0])["marks"]) >= 120:
+                        continue
                 selected = datetime.fromisoformat(capsule["published_at"])
                 week = selected.strftime("%G-%V")
                 if baseline == "low_turnover":
@@ -33,7 +49,7 @@ class ModelPortfolios:
                     if previous and json.loads(previous[0]).get("week") == week:
                         continue
                 target = {"capsule_id": capsule["capsule_id"], "baseline": baseline, "week": week,
-                          "policy_hash": capsule.get("policy_hash"),
+                          "policy_hash": arm_metadata.get(baseline, {}).get("policy_hash", capsule.get("policy_hash")),
                           "published_at": capsule["published_at"], "recording_mode": "contemporaneous" if forward else "backfilled",
                           "recorded_at": recorded_at,
                           "earliest_execution_at": capsule["earliest_execution_at"],
@@ -43,6 +59,17 @@ class ModelPortfolios:
                             "VALUES (?,?,?,?,?,?) ON CONFLICT(target_id) DO NOTHING",
                             (identity, baseline, capsule["run_id"], "pending", json.dumps(target), recorded_at))
                 ledger = empty_ledger()
+                if baseline.startswith("policyarm:"):
+                    from copy import deepcopy
+                    ledger = deepcopy(initial_state)
+                    ledger["paired_initial_state_hash"] = payload_hash(initial_state)
+                    ledger["paired_started_at"] = recorded_at
+                    latest = ledger["marks"][-1] if ledger["marks"] else {}
+                    ledger["paired_initial_verified"] = latest.get("status") == "verified" or not ledger["positions"]
+                    if latest.get("net_asset_value"):
+                        ledger["initial_cash"] = latest["net_asset_value"]
+                    ledger["marks"] = []
+                    ledger["policy_transition"] = False
                 cur.execute("INSERT INTO research_model_portfolios (baseline,payload,updated_at) VALUES (?,?,?) "
                             "ON CONFLICT(baseline) DO NOTHING", (baseline, json.dumps(ledger), capsule["published_at"]))
             conn.commit()
@@ -52,16 +79,20 @@ class ModelPortfolios:
         finally:
             conn.close()
 
-    def symbols(self, limit=160):
+    def symbols(self, limit=None):
         conn = self.store.connect()
         try:
             cur = conn.cursor()
             cur.execute("SELECT payload FROM research_model_portfolios")
-            symbols = {s for r in cur.fetchall() for s, p in json.loads(r[0])["positions"].items() if p["quantity"]}
-            cur.execute("SELECT payload FROM research_model_targets WHERE state='pending' ORDER BY created_at DESC LIMIT 30")
+            books = [json.loads(r[0]) for r in cur.fetchall()]
+            symbols = {s for book in books if not (book.get("paired_started_at") and len(book["marks"]) >= 120)
+                       for s, p in book["positions"].items() if p["quantity"]}
+            symbols.update(r["symbol"] for book in books for r in book.get("receivables", {}).values()
+                           if r["state"] == "receivable")
+            cur.execute("SELECT payload FROM research_model_targets WHERE state='pending' ORDER BY created_at")
             for row in cur.fetchall():
                 symbols.update(json.loads(row[0])["weights"])
-            return sorted(symbols)[:limit]
+            return sorted(symbols)[:limit] if limit is not None else sorted(symbols)
         finally:
             conn.close()
 
@@ -83,12 +114,13 @@ class ModelPortfolios:
             cur.execute("SELECT baseline,payload FROM research_model_portfolios ORDER BY baseline")
             for baseline, raw in cur.fetchall():
                 ledger = json.loads(raw)
+                if baseline.startswith("policyarm:") and len(ledger["marks"]) >= 120:
+                    continue
                 if ledger["marks"] and ledger["marks"][-1]["trade_date"] >= day:
                     continue
-                for symbol, position in list(ledger["positions"].items()):
-                    if position["quantity"]:
-                        for event in facts.get((symbol, day), {}).get("corporate_actions") or []:
-                            ledger = apply_corporate_action(ledger, event)
+                unresolved = False
+                entitled = {s for s, p in ledger["positions"].items() if p["quantity"]}
+                entitled.update(r["symbol"] for r in ledger.get("receivables", {}).values() if r["state"] == "receivable")
                 cur.execute("SELECT target_id,payload FROM research_model_targets WHERE baseline=? AND state='pending' "
                             "ORDER BY created_at", (baseline,))
                 for identity, payload in cur.fetchall():
@@ -100,8 +132,13 @@ class ModelPortfolios:
                         earliest = f"{next_date}T09:30:00+08:00" if next_date else None
                     if not earliest or earliest[:10] > day:
                         continue
-                    if earliest[:10] < day or target["recording_mode"] != "contemporaneous":
-                        state, reason = "expired", "missed_session_or_backfill"
+                    if target["recording_mode"] != "contemporaneous":
+                        state, reason = "expired", "target_registered_after_execution"
+                    elif earliest[:10] < day:
+                        # A scheduler delay is not a late target. Preserve intent
+                        # until original dated facts are replayed, never use today.
+                        unresolved = True
+                        break
                     else:
                         wanted = set(target["weights"]) | {s for s, p in ledger["positions"].items() if p["quantity"]}
                         current = {symbol: facts.get((symbol, day)) for symbol in wanted}
@@ -113,7 +150,8 @@ class ModelPortfolios:
                         except (ValueError, TypeError, ArithmeticError):
                             valid = False
                         if not valid:
-                            state, reason = "unfilled", "required_execution_facts_missing"
+                            unresolved = True
+                            break
                         else:
                             for symbol, fact in current.items():
                                 for event in fact.get("corporate_actions") or []:
@@ -141,14 +179,37 @@ class ModelPortfolios:
                                     ledger = apply_fill(ledger, event_id=event_id, symbol=symbol, side=side, fill=fill)
                                     fills.append({"symbol": symbol, "side": side, **fill})
                             target["fills"] = fills
+                            from analysis.execution_scenarios import execution_scenarios
+                            target["execution_stress"] = [
+                                {"symbol": symbol, "scenarios": execution_scenarios(
+                                    {"side": "buy", "quantity": quantities.get(symbol, 0),
+                                     "published_at": target["published_at"], "earliest_execution_at": earliest},
+                                    current[symbol], ExecutionRules(**current[symbol]["execution_rules"]), cash=nav)}
+                                for symbol in sorted(target["weights"])[:15]]
+                            old_policy = ledger.get("policy_hash")
+                            if old_policy and old_policy != target.get("policy_hash") and not baseline.startswith("policyarm:"):
+                                ledger["policy_transition"] = True
+                                ledger.setdefault("policy_history", []).append({"from": old_policy,
+                                    "to": target.get("policy_hash"), "at": day})
                             ledger["policy_hash"] = target.get("policy_hash")
                             state, reason = "processed", "shared_next_open_model"
                     target.update(state=state, reason=reason)
                     cur.execute("UPDATE research_model_targets SET state=?,payload=? WHERE target_id=? AND state='pending'",
                                 (state, json.dumps(target), identity))
                 held = {s for s, p in ledger["positions"].items() if p["quantity"]}
+                if unresolved or any((s, day) not in facts for s in held):
+                    cur.execute("UPDATE research_model_portfolios SET payload=?,updated_at=? WHERE baseline=?",
+                                (json.dumps(ledger), now, baseline))
+                    output[baseline] = {"status": "waiting_data", "trade_date": day,
+                                        "reason": "original_execution_or_mark_facts_missing"}
+                    continue
+                for symbol in entitled:
+                    for event in facts.get((symbol, day), {}).get("corporate_actions") or []:
+                        ledger = apply_corporate_action(ledger, event)
                 prices = {s: facts[(s, day)]["close"] for s in held if (s, day) in facts and facts[(s, day)].get("close")}
                 complete = all(facts.get((s, day), {}).get("corporate_actions_complete") for s in held)
+                complete = complete and not ledger.get("policy_transition")
+                complete = complete and ledger.get("paired_initial_verified", True)
                 ledger = mark_ledger(ledger, trade_date=day, prices=prices, corporate_actions_complete=complete)
                 cur.execute("UPDATE research_model_portfolios SET payload=?,updated_at=? WHERE baseline=?",
                             (json.dumps(ledger), now, baseline))

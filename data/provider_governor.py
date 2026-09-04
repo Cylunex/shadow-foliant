@@ -25,6 +25,7 @@ PROVIDERS = {
     "tushare": (0, 1., 10000), "tencent": (1, .5, 10000),
     "sina": (1, 1., 5000), "cninfo": (1, 1., 3000),
     "eltdx": (1, .1, 10000), "tdx_python": (1, .1, 10000),
+    "tdx": (1, .1, 10000),  # additional shared upstream-family ceiling
     "mairui": (2, .5, 500), "moma": (2, .5, 500),
     "eastmoney": (2, 3., 3000), "ths": (2, 2., 2000),
     "pywencai": (2, 2., 500), "eastmoney_saas": (2, 3., 500),

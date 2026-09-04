@@ -45,6 +45,8 @@ class DecisionLoopService:
             conn.close()
 
     def start_model_cohorts(self, capsule):
+        from application.research_cases import ResearchCases
+        ResearchCases(self.store).seed(capsule)
         """Persist forward intent at publication; future replay cannot invent intent."""
         top15 = capsule["opportunity_set"]["top15"]
         recorded_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
@@ -65,6 +67,18 @@ class DecisionLoopService:
                         (capsule["run_id"],))
             pit = cur.fetchone()
             groups["pit_only"] = _decode(pit[0]) if pit else []
+            cur.execute("SELECT payload FROM selection_artifacts WHERE run_id=? AND artifact_type='lane_ablation_reruns'",
+                        (capsule["run_id"],))
+            reruns = cur.fetchone()
+            if reruns:
+                for name, value in _decode(reruns[0]).items():
+                    groups["rerun:" + name] = value["result"]["top15"]
+            cur.execute("SELECT payload FROM selection_artifacts WHERE run_id=? AND artifact_type='policy_arm_candidates'",
+                        (capsule["run_id"],))
+            arms = cur.fetchone()
+            if arms:
+                for name, value in _decode(arms[0]).items():
+                    groups[name] = value["top15"]
             cur.execute("SELECT strategy_id,symbol,lane_rank FROM selection_candidate_nominations "
                         "WHERE selection_run_id=? AND eligibility='eligible' ORDER BY strategy_id,lane_rank",
                         (capsule["run_id"],))
@@ -157,6 +171,7 @@ class DecisionLoopService:
 
     def register_trial(self, *, hypothesis_id, ast, dataset_id, data_class, code_revision,
                        parent_trial=None, adapter="factor_ast", now=None):
+        from analysis.validation_protocol import DEFAULT_PROTOCOL
         if hypothesis_id not in HYPOTHESES or data_class not in {
             "strict_observed_pit", "reconstructed_history", "exploratory"}:
             raise ValueError("invalid_research_registration")
@@ -165,7 +180,14 @@ class DecisionLoopService:
         if not dataset_id or not code_revision:
             raise ValueError("research_provenance_required")
         hypothesis = HYPOTHESES[hypothesis_id]
-        formula = fingerprint(ast, hypothesis["fields"])
+        try:
+            formula = fingerprint(ast, hypothesis["fields"])
+        except (ValueError, TypeError) as exc:
+            from data.reliability_store import ReliabilityStore
+            import uuid
+            ReliabilityStore(self.store).once("research_attempt", uuid.uuid4().hex,
+                {"hypothesis_id": hypothesis_id, "state": "compile_failed", "error_category": type(exc).__name__})
+            raise
         fingerprint_value = payload_hash({"formula": formula, "dataset": dataset_id, "adapter": adapter})
         now = now or datetime.now().astimezone().isoformat()
         trial_id = "trial_" + payload_hash({"fingerprint": fingerprint_value, "created_at": now})
@@ -178,6 +200,8 @@ class DecisionLoopService:
                 cur.execute("BEGIN IMMEDIATE")
             cur.execute("SELECT COUNT(*) FROM research_experiments WHERE hypothesis_id=?", (hypothesis_id,))
             attempted = cur.fetchone()[0]
+            cur.execute("SELECT payload FROM research_reliability_records WHERE kind='research_attempt' AND owner_id='research'")
+            attempted += sum(_decode(r[0]).get("hypothesis_id") == hypothesis_id for r in cur.fetchall())
             cur.execute("SELECT trial_id FROM research_experiments WHERE fingerprint=? LIMIT 1", (fingerprint_value,))
             duplicate = cur.fetchone()
             state = "duplicate" if duplicate else "budget_exhausted" if attempted >= hypothesis["trial_budget"] else "registered"
@@ -185,6 +209,9 @@ class DecisionLoopService:
                      "formula_hash": formula, "dataset_id": dataset_id, "data_class": data_class,
                      "code_revision": code_revision, "parent_trial": parent_trial, "adapter": adapter,
                      "baseline": hypothesis["baseline"], "metric": hypothesis["metric"],
+                     "validation_protocol": DEFAULT_PROTOCOL.__dict__,
+                     "search_counts": {"attempts": attempted + 1, "candidates": 1 if state == "registered" else 0,
+                                       "metric_views": 0, "holdout_accesses": 0},
                      "state": state, "duplicate_of": duplicate[0] if duplicate else None,
                      "retire_when": "budget exhausted, invalid data or non-positive independent net evidence",
                      "created_at": now}
@@ -210,6 +237,7 @@ class DecisionLoopService:
             trial = _decode(row[0])
             cur.execute("SELECT COUNT(*) FROM research_experiments WHERE hypothesis_id=?", (trial["hypothesis_id"],))
             attempts = cur.fetchone()[0]
+            attempts = max(attempts, trial.get("search_counts", {}).get("attempts", 1))
             evidence = evidence_summary(observations or [], trials_attempted=attempts)
             if trial["data_class"] != "strict_observed_pit":
                 evidence["promotion_ready"] = False
@@ -217,6 +245,7 @@ class DecisionLoopService:
             trial.update(state=state, evidence=evidence,
                          diagnostics=diagnostics or {},
                          error_category=str(error_category)[:80] if error_category else None)
+            trial.setdefault("search_counts", {})["metric_views"] = 1 if observations or diagnostics else 0
             cur.execute("UPDATE research_experiments SET state=?,payload=?,updated_at=? WHERE trial_id=? AND state='registered'",
                         (state, _encode(trial), now, trial_id))
             if not cur.rowcount:
@@ -229,26 +258,73 @@ class DecisionLoopService:
         finally:
             conn.close()
 
-    def consume_holdout(self, batch_id, trial_id, *, now=None):
-        """One atomic consumption retires the batch; no repeated 'blind' testing."""
+    def consume_holdout(self, batch_id, trial_id, *, evaluator=None, now=None):
+        """Reserve-before-view and persist actual evaluation before final retirement.
+
+        ``evaluator`` receives only batch dates plus the frozen trial definition;
+        callers cannot use this lifecycle method as a metric-free promotion stamp.
+        A crash leaves ``evaluating`` and cannot be silently retried/viewed again.
+        """
         now = now or datetime.now().astimezone().isoformat()
         conn = self.store.connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT state FROM research_experiments WHERE trial_id=?", (trial_id,))
+            cur.execute("SELECT state,payload FROM research_experiments WHERE trial_id=?", (trial_id,))
             row = cur.fetchone()
             if not row or row[0] != "evaluated":
                 raise ValueError("holdout_requires_evaluated_trial")
-            cur.execute("SELECT end_date FROM research_holdout_batches WHERE batch_id=?", (batch_id,))
+            trial = _decode(row[1])
+            cur.execute("SELECT start_date,end_date FROM research_holdout_batches WHERE batch_id=?", (batch_id,))
             batch = cur.fetchone()
-            if not batch or str(batch[0]) >= now[:10]:
+            if not batch or str(batch[1]) >= now[:10]:
                 raise ValueError("holdout_not_matured")
-            cur.execute("UPDATE research_holdout_batches SET state='retired',consumed_by=?,consumed_at=? "
+            if evaluator is None:
+                raise ValueError("holdout_evaluator_required")
+            cur.execute("UPDATE research_holdout_batches SET state='evaluating',consumed_by=?,consumed_at=? "
                         "WHERE batch_id=? AND state='sealed'", (trial_id, now, batch_id))
             if cur.rowcount != 1:
                 raise ValueError("holdout_already_consumed_or_missing")
+            trial.setdefault("search_counts", {})["holdout_accesses"] = trial.get("search_counts", {}).get("holdout_accesses", 0) + 1
+            cur.execute("UPDATE research_experiments SET payload=?,updated_at=? WHERE trial_id=?",
+                        (_encode(trial), now, trial_id))
             conn.commit()
-            return {"batch_id": batch_id, "state": "retired", "consumed_by": trial_id}
+            reserved = {"batch_id": batch_id, "state": "evaluating", "consumed_by": trial_id,
+                        "start_date": str(batch[0]), "end_date": str(batch[1])}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        try:
+            from analysis.validation_protocol import ValidationProtocol, evaluate_rows
+            protocol = ValidationProtocol(**trial["validation_protocol"])
+            evaluated = evaluate_rows(evaluator(reserved, trial), protocol)
+            if any(r["label_start"] < reserved["start_date"] or r["label_end"] > reserved["end_date"] for r in evaluated):
+                raise ValueError("evaluation_outside_reserved_batch")
+            evidence = evidence_summary(evaluated, trials_attempted=trial["search_counts"]["attempts"],
+                                        block_days=protocol.block_days)
+            if trial["data_class"] != "strict_observed_pit":
+                evidence["promotion_ready"] = False
+        except Exception:
+            # Keep reservation and crash evidence. Operator review can void it;
+            # automatic replay would leak another view of the sealed batch.
+            raise
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            result = {"batch_id": batch_id, "trial_id": trial_id, "evidence": evidence,
+                      "row_count": len(evaluated), "evaluated_at": now, "promotion_ready": evidence["promotion_ready"]}
+            from application.results import payload_hash
+            cur.execute("INSERT INTO research_artifacts "
+                        "(artifact_id,subject,artifact_kind,run_id,formal,schema_version,payload_hash,payload,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)", ("holdout_" + batch_id, trial_id, "holdout-evaluation", batch_id,
+                        0, "holdout-evaluation-v2", payload_hash(result), _encode(result), now))
+            cur.execute("UPDATE research_holdout_batches SET state='retired' WHERE batch_id=? AND state='evaluating' AND consumed_by=?",
+                        (batch_id, trial_id))
+            if cur.rowcount != 1:
+                raise ValueError("holdout_finalization_conflict")
+            conn.commit()
+            return {**reserved, "state": "retired", "evaluation": result}
         except Exception:
             conn.rollback()
             raise
@@ -269,11 +345,10 @@ class DecisionLoopService:
                 cur.execute("SELECT pg_advisory_xact_lock(1936482716)")
             else:
                 cur.execute("BEGIN IMMEDIATE")
-            cur.execute("SELECT batch_id FROM research_holdout_batches WHERE state='sealed' "
-                        "AND start_date<=? AND end_date>=?", (end_date, start_date))
+            cur.execute("SELECT batch_id,state FROM research_holdout_batches WHERE start_date<=? AND end_date>=?", (end_date, start_date))
             existing = cur.fetchone()
             if existing:
-                if existing[0] == identity:
+                if existing[0] == identity and existing[1] == "sealed":
                     conn.rollback()
                     return {"batch_id": identity, "state": "sealed", "idempotent": True}
                 raise ValueError("overlapping_sealed_holdout")
@@ -317,6 +392,7 @@ class DecisionLoopService:
         return {"status": "rolled_back", "proposal_id": proposal["proposal_id"], "target": target_hash}
 
     def dashboard(self):
+        from application.research_cases import ResearchCases
         conn = self.store.connect()
         try:
             cur = conn.cursor()
@@ -350,6 +426,7 @@ class DecisionLoopService:
                                     "latest": ledger["marks"][-1] if ledger["marks"] else None,
                                     "fees_paid": ledger["fees"], "mark_count": len(ledger["marks"])})
             return {"schema_version": "decision-loop-dashboard-v1", "scope": "research",
+                    "research_cases": ResearchCases(self.store).view(),
                     "capsule": capsules[0] if capsules else None, "context_diff": diff,
                     "policy_timeline": policies, "research_budget": _decode(reservation[0]) if reservation else None,
                     "model_orders": models, "experiments": experiments,

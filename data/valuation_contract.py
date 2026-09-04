@@ -76,6 +76,12 @@ def merge_snapshot(current, incoming, *, day, provider):
                                        "market_cap_unit": "CNY_100M"})
         sources = row.setdefault("field_sources", {})
         for field in FIELDS:
+            # Adapters normally normalize these definitions. Explicit mismatches
+            # fail closed instead of being overwritten by a stable-provider rank.
+            if field in {"market_cap", "circulating_market_cap"} and raw.get("market_cap_unit", "CNY_100M") != "CNY_100M":
+                continue
+            if field == "pe_ttm" and raw.get("pe_basis", "TTM") != "TTM":
+                continue
             value = number(raw.get(field, raw.get(ALIASES.get(field))))
             if value is None or (field in {"market_cap", "circulating_market_cap"} and value <= 0):
                 continue
@@ -85,7 +91,9 @@ def merge_snapshot(current, incoming, *, day, provider):
             if number(row.get(field)) is not None and PRIORITY.get(old_source, 99) < PRIORITY[provider]:
                 continue
             row[field] = value
-            sources[field] = {"provider": provider, "as_of": day,
+            from data.acquisition_evidence import source_family
+            sources[field] = {"provider": provider, "source_family": source_family(provider), "as_of": day,
+                              "semantic": field, "unit": "CNY_100M" if "market_cap" in field else "ratio",
                               "observed_at": raw.get("observed_at") or datetime.now(TZ).isoformat()}
         # Ratios with unverified/other definitions are evidence, never PE-TTM inputs.
         evidence = row.setdefault("supplemental", {})

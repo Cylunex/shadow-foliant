@@ -89,6 +89,7 @@ def validate_proposal(proposal: dict, current: dict, evidence: dict,
         for item in evidence.get("strategies") or []
         if item.get("evidence_kind") == "executable_net"
         and item.get("evidence_policy_hash") == current_hash and item.get("promotion_ready") is True
+        and item.get("health_allows_increase", True)
     }
     for change in changes:
         if not isinstance(change, dict):
@@ -163,9 +164,13 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
     from application.results import payload_hash
     content_hash = payload_hash(current)
     executable = model_strategy_evidence(store, content_hash)
+    from application.strategy_health import refresh_health
+    health = refresh_health(store, executable)
+    health_by_id = {r["object_id"]: r for r in health}
     # Old registry rows may predate canonical hashing. Retain their identity for
     # CAS, but bind model evidence to exactly the same normalized policy content.
     for item in executable["strategies"]:
+        item["health_allows_increase"] = health_by_id.get(str(item["strategy_id"]), {}).get("allow_risk_increase", False)
         item["evidence_content_hash"] = content_hash
         item["evidence_policy_hash"] = current_hash
     evidence["strategies"] = list(evidence.get("strategies") or []) + executable["strategies"]
@@ -229,6 +234,8 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
     finally:
         conn.close()
     proposal["effective_from"] = f"{effective_day}T09:00:00+08:00" if effective_day else None
+    from application.strategy_health import record_policy_arms
+    record_policy_arms(store, current=current, current_hash=current_hash, evidence=evidence, llm_proposal=proposal)
     if not proposal.get("changes"):
         store.save_strategy_policy_proposal(
             proposal, validation_status="no_change", validation_reason="LLM建议维持现状"

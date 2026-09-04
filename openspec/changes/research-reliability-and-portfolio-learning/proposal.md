@@ -1,6 +1,7 @@
 # Proposal: 研究可靠性、持仓复查与策略学习
 
-状态：Proposed；不代表获得实施或部署授权。
+状态：Implemented / external acceptance pending。用户已授权实现；未授权本轮推送或部署。
+实际交付边界和环境验收缺口见 [0.6.0 说明](../../../docs/RESEARCH_RELIABILITY.md)。
 
 ## 动机
 

@@ -1,12 +1,24 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.5.0
+  version: 0.6.0
 servers:
   - url: https://stock.example.com
 security:
   - agentBearer: []
 paths:
+  /api/machine/v1/agent/research/cases:
+    get:
+      operationId: get_agent_research_cases
+      summary: Read candidate research questions and public event reviews, without private theses
+      responses:
+        "200":
+          description: Bounded research case list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/machine/v1/agent/decision-loop:
     get:
       operationId: get_agent_decision_loop

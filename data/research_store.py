@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "11"
+SCHEMA_VERSION = "12"
 
 
 def _json(value) -> str:
@@ -382,6 +382,8 @@ class ResearchStore:
                 batch_id TEXT PRIMARY KEY,start_date TEXT NOT NULL,end_date TEXT NOT NULL,
                 state TEXT NOT NULL,consumed_by TEXT,consumed_at TEXT)""",
         ]
+        from data.reliability_store import SCHEMA as reliability_schema
+        statements.extend(reliability_schema)
         try:
             for sql in statements:
                 cur.execute(sql)
@@ -392,6 +394,8 @@ class ResearchStore:
 
     def _apply_schema_migrations(self, cur) -> None:
         """Run ordered, idempotent compatibility migrations."""
+        cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) ON CONFLICT(version) DO NOTHING",
+                    ("12-research-reliability", datetime.now().astimezone().isoformat()))
         version = "11-research-decision-loop"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
@@ -1062,6 +1066,36 @@ class ResearchStore:
         conn = self.connect()
         try:
             cur = conn.cursor()
+            # Revisions are append-only impacts, not historical payload rewrites.
+            # Dataset-level dependencies are explicit until finer lineage exists.
+            for fact in rows:
+                from data.acquisition_evidence import fact_observation
+                payload_record = json.loads(fact[-1])
+                for field in ("net_profit", "netProfit", "np_parent_company_owners", "operating_cash_flow", "roe", "ROE", "epsTTM"):
+                    if field not in payload_record or payload_record[field] is None:
+                        continue
+                    observation = fact_observation(symbol=fact[1], field=field, value=payload_record[field], period=fact[2],
+                        published_at=fact[3], first_seen_at=fact[7], provider=fact[5], revision=fact[4],
+                        unit=provenance.get("unit", "unknown"), currency=provenance.get("currency", "unknown"),
+                        basis=provenance.get("basis", "unknown"))
+                    cur.execute("INSERT INTO research_reliability_records VALUES (?,?,?,?,?,?) "
+                                "ON CONFLICT(kind,object_id,owner_id,revision) DO NOTHING",
+                                ("fact_observation", observation["object_id"], "research", 1, _json(observation), now))
+                cur.execute("SELECT payload FROM research_financial_facts WHERE table_name=? AND symbol=? "
+                            "AND stat_date=? AND provider=? ORDER BY retrieved_at DESC LIMIT 1",
+                            (fact[0], fact[1], fact[2], fact[5]))
+                old = cur.fetchone()
+                if old and str(old[0]) != fact[-1]:
+                    from data.acquisition_evidence import revision_impact
+                    impact = revision_impact(json.loads(old[0]), json.loads(fact[-1]),
+                        [{"kind": "financial_dataset", "symbol": fact[1], "granularity": "dataset"}])
+                    impact.update(symbol=fact[1], table=table, stat_date=fact[2], new_dataset_id=dataset_id,
+                                  new_values=json.loads(fact[-1]),
+                                  old_hash=hashlib.sha256(str(old[0]).encode()).hexdigest())
+                    identity = hashlib.sha256(_json(impact).encode()).hexdigest()
+                    cur.execute("INSERT INTO research_reliability_records VALUES (?,?,?,?,?,?) "
+                                "ON CONFLICT(kind,object_id,owner_id,revision) DO NOTHING",
+                                ("revision_impact", identity, "research", 1, _json(impact), now))
             cur.executemany(
                 """INSERT INTO research_financial_facts
                (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
@@ -2064,7 +2098,7 @@ class ResearchStore:
         finally:
             conn.close()
 
-    def replay_selection(self, manifest_id: str) -> dict:
+    def replay_selection(self, manifest_id: str, *, financial_overrides=None) -> dict:
         """Recompute a formal selection from immutable manifest inputs and compare artifacts."""
         manifest = self.load_selection_manifest(manifest_id)
         if not manifest:
@@ -2077,6 +2111,23 @@ class ResearchStore:
 
             def connect(self):
                 return base.connect()
+
+            def load_financial_history(self, table, as_of, *, cutoff_at=None):
+                frame = base.load_financial_history(table, as_of, cutoff_at=cutoff_at)
+                override = (financial_overrides or {}).get(table)
+                if override and not frame.empty:
+                    frame = frame.copy()
+                    selected = frame["symbol"].astype(str).eq(override["symbol"])
+                    stat = "stat_date" if "stat_date" in frame else "statDate"
+                    selected &= frame[stat].astype(str).eq(override["stat_date"])
+                    # Explicit hindsight counterfactual; preserve identity/timing
+                    # columns of the original input, never publish this as PIT.
+                    protected = {"symbol", "code", "ts_code", "stat_date", "statDate", "pub_date", "pubDate",
+                                 "first_seen_at", "retrieved_at", "as_of", "revision_no", "provider"}
+                    for key, value in override["values"].items():
+                        if key not in protected and key in frame:
+                            frame.loc[selected, key] = value
+                return frame
 
             def load_universe(self, _as_of, *, cutoff_at=None):
                 return base.load_universe_from_manifest(manifest_id)
@@ -2179,6 +2230,8 @@ class ResearchStore:
             "exact_match": replay.get("status") == "success"
             and all(item["exact_match"] for item in comparisons.values()),
             "artifacts": comparisons,
+            **({"replay_class": "hindsight_correction_not_historical_pit", "formal_top15": formal15,
+                "formal_top5": formal5, "published": False} if financial_overrides else {}),
         }
 
     def save_selection(self, run: dict, primary: Sequence[dict], reference: Sequence[dict]) -> str:

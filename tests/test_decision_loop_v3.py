@@ -182,9 +182,11 @@ def test_trial_registry_failure_duplicate_and_holdout(store):
     conn.execute("INSERT INTO research_holdout_batches VALUES ('b1','2026-01-01','2026-03-01','sealed',NULL,NULL)")
     conn.commit()
     conn.close()
-    assert service.consume_holdout("b1", trial["trial_id"])["state"] == "retired"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="evaluator_required"):
         service.consume_holdout("b1", trial["trial_id"])
+    assert service.consume_holdout("b1", trial["trial_id"], evaluator=lambda batch, trial: [])["state"] == "retired"
+    with pytest.raises(ValueError):
+        service.consume_holdout("b1", trial["trial_id"], evaluator=lambda batch, trial: [])
 
 
 def test_forward_cohorts_idempotent_and_missing_data_expires(store, capsule):

@@ -1118,5 +1118,53 @@ def portfolio_action_plan(available_cash: Optional[float] = None,
     return preview_account(owner_id="local-mcp-operator", available_cash=available_cash, allow_add=allow_add)
 
 
+@mcp.tool()
+def research_cases() -> Dict[str, Any]:
+    """读取候选个股档案、核查问题和事件，不读取私人持仓或论点。"""
+    from application.research_cases import ResearchCases
+    from data.research_store import ResearchStore
+    return ResearchCases(ResearchStore()).view()
+
+
+@mcp.tool()
+def research_thesis_draft(symbol: str, text: str, claims: list, expected_revision: int = 0) -> Dict[str, Any]:
+    """保存私人研究草稿，不锁定论点、不改变选股和仓位。symbol 为六位代码。
+    claims 可为空（会标未核实）；每项必须有 text/passages/expires_at。
+    passages 每段需 source_id/quote/published_at/first_seen_at/locator。
+    数字计算的片段另需 unit/currency/basis/period_kind，不同口径不能混算。
+    计算可用 calculation={operation:sum|difference|ratio|growth_pct,
+    operands:[{value:数字字符串,passage_index:0}]}，数字必须在对应片段出现。
+    更新已有草稿需传读取到的 expected_revision；锁定只能由用户在 Web 确认。
+    """
+    from application.research_cases import ResearchCases
+    from data.research_store import ResearchStore
+    return ResearchCases(ResearchStore()).draft(symbol, owner="portfolio-primary", text=text,
+        claims=claims, expected_revision=expected_revision)
+
+
+@mcp.tool()
+def research_forecast(symbol: str, probability: float, target_date: str, evidence_id: str) -> Dict[str, Any]:
+    """登记未来净超额收益为正的概率（0~1），target_date=YYYY-MM-DD。
+    固定 Brier 评分；不允许历史预测补填，缺失结算证据保持未裁决，不算错也不算对。
+    """
+    from application.research_cases import ResearchCases
+    from data.research_store import ResearchStore
+    return ResearchCases(ResearchStore()).predict(symbol, owner="portfolio-primary", probability=probability,
+        target_date=target_date, benchmark="positive_net_excess", evidence_id=evidence_id)
+
+
+@mcp.tool()
+def account_facts_preview(rows: list) -> Dict[str, Any]:
+    """预览可选现金/费用/权益补充记录，不提交不猜现金。rows 每项需要 external_id、date、
+    kind（cash_balance/deposit/withdrawal/fee/dividend/equity_balance）、amount（非负人民币金额）。
+    只保存预览，用户在 Web 确认；不会修改原成交导入接口。
+    """
+    from application.account_reconciliation import AccountReconciliation
+    from data.research_store import ResearchStore
+    from portfolio_db import portfolio_db
+    return AccountReconciliation(ResearchStore()).preview(rows, owner="portfolio-primary",
+        watermark=portfolio_db.action_preview_context()["watermark"])
+
+
 if __name__ == '__main__':
     mcp.run()

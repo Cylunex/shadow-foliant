@@ -188,6 +188,18 @@ class ValuationSynchronizer:
                                  'requested': sum(v for k, v in counts.items() if k != 'time_budget')})
                 checkpoint()
         result = self._summary(rows, wanted, attempts)
+        from data.reliability_store import ReliabilityStore
+        evidence = ReliabilityStore(self.store)
+        current = {r['symbol']: r for r in rows}
+        for field in ('pe_ttm', 'pb', 'market_cap'):
+            gaps = [s for s in wanted if number(current.get(s, {}).get(field)) in (None, 0)]
+            identity = f'{day}:{field}'
+            old = evidence.get('valuation_gap', identity)
+            value = {'day': day, 'field': field, 'missing_symbols': gaps, 'priority': 0,
+                     'consumer': 'formal_selection', 'status': 'partial' if gaps else 'complete',
+                     'retry_owner': 'existing_valuation_sync', 'additional_requests': 0}
+            evidence.put('valuation_gap', identity, value, expected_revision=(old or {}).get('revision', 0))
+        result['gap_tracking'] = 'persisted; existing bounded sync owns retries'
         result['valuation_elapsed_seconds'] = round(time.monotonic() - started, 2)
         log.info('valuation snapshot %s: usable=%s coverage=%.1f%% fields=%s attempts=%s',
                  day, result['valuation_rows'], result['valuation_coverage'] * 100,

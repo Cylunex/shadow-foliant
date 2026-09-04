@@ -93,6 +93,9 @@ def contracts() -> Dict[str, Dict[str, dict]]:
 
 
 _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
+    ("tushare", "dividend"): EndpointContract(
+        "tushare", "dividend", "corporate_actions", "token_and_permission", None, None,
+        1.0, 1, 15.0, 0, notes="Dividends only; no all-action completeness or holder-specific net tax guarantee"),
     ("tushare", "valuation"): EndpointContract(
         "tushare", "valuation", "valuation_snapshot", "token", 6000, 6000,
         1.0, 1, 15.0, 0, supports_pit=True, quota_basis="published",
@@ -280,6 +283,7 @@ class SourceCooldownActive(RuntimeError):
 def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
     """Apply the endpoint's concurrency and minimum-interval boundary."""
     contract = get_contract(provider, endpoint)
+    started = time.monotonic()
     key = (provider.lower(), endpoint.lower(), contract)
     try:
         from data.runtime_capabilities import active_cooldown_until
@@ -308,7 +312,11 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
         shared = (nullcontext() if provider in {"baostock", "mairui", "moma"}
                   else provider_slot(provider, wait_seconds=contract.timeout_seconds,
                                      interval=contract.min_interval_seconds))
-        with gate.enter(), shared:
+        from data.acquisition_evidence import source_family
+        family = source_family(provider)
+        family_slot = (provider_slot(family, wait_seconds=contract.timeout_seconds)
+                       if family not in {provider, "unknown"} else nullcontext())
+        with gate.enter(), family_slot, shared:
             if rate_slot is None:
                 yield contract
             else:
@@ -319,6 +327,8 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
                 ):
                     yield contract
     except Exception as exc:
+        from data.acquisition_evidence import receipt
+        receipt(provider, endpoint, started, error=exc)
         try:
             from data.runtime_capabilities import record_failure
 
@@ -327,6 +337,8 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
             pass
         raise
     else:
+        from data.acquisition_evidence import receipt
+        receipt(provider, endpoint, started)
         try:
             from data.runtime_capabilities import record_success
 

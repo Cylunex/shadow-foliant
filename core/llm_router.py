@@ -292,7 +292,13 @@ class LLMRouter:
         # 只剩 1 个 provider 时, 降级日志改口径(没下家可降, 别误导)
         single = len(chain) == 1
 
+        if call_type in {'case_review', 'research_process_eval'}:
+            # These workflows reserve actual call budgets, not unlimited logical
+            # retries. The next scheduled review may retry after provider recovery.
+            chain = chain[:1]
         errors = []
+        from application.model_invocations import begin, record as record_invocation
+        invocation_id, invocation_started = begin()
         for idx, p in enumerate(chain):
             key = os.getenv(p.api_key_env, '') or 'ollama'
             model = p.thinking_model or p.default_model if thinking else p.default_model
@@ -312,6 +318,10 @@ class LLMRouter:
                 if msg.content:
                     result += msg.content
                 if result:
+                    usage = getattr(resp, 'usage', None)
+                    record_invocation(invocation_id, invocation_started, provider=p.name, model=getattr(resp, 'model', None) or model,
+                        fallback_index=idx, status='success', call_type=call_type,
+                        usage={k: getattr(usage, k, None) for k in ('prompt_tokens', 'completion_tokens', 'total_tokens')})
                     # 旁路用量遥测(失败绝不影响返回)
                     try:
                         import llm_usage
@@ -330,6 +340,8 @@ class LLMRouter:
                 err_detail = str(e)[:120]
 
             # 失败也进入旁路遥测。只记录 provider/model 与失败次数，不落提示词和异常正文。
+            record_invocation(invocation_id, invocation_started, provider=p.name, model=model,
+                fallback_index=idx, status='failed', call_type=call_type)
             try:
                 import llm_usage
                 llm_usage.record(call_type, f'{p.name}:{model}', thinking=thinking, ok=False)

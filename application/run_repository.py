@@ -154,6 +154,8 @@ class RunRepository:
             "CREATE INDEX IF NOT EXISTS idx_foliant_run_progress_run ON foliant_run_progress(run_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_foliant_outbox_pending ON foliant_domain_outbox(published_at, created_at)",
         ]
+        from data.reliability_store import SCHEMA as reliability_schema
+        statements.extend(reliability_schema)
         conn = self.connect()
         try:
             cur = conn.cursor()
@@ -494,6 +496,13 @@ class RunRepository:
             changed = cur.rowcount == 1
             run = self._select(cur, "run_id=?", (run_id,))
             if changed and run:
+                if run.get("run_kind") == "security-research":
+                    from data.reliability_store import ReliabilityStore
+                    symbol = str((run.get("request_payload") or {}).get("symbol", ""))
+                    # Same commit as Run completion; never copy private report
+                    # contents or actor IDs into the public Case namespace.
+                    ReliabilityStore.append(cur, "case_execution", run_id, run["actor_id"], {
+                        "symbol": symbol, "run_id": run_id, "status": "complete", "completed_at": now})
                 data = result.get("data") if isinstance(result, dict) else None
                 artifact = data.get("research_artifact") if isinstance(data, dict) else None
                 if isinstance(artifact, dict) and artifact.get("artifact_id"):

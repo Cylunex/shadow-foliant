@@ -23,6 +23,8 @@ def daily_decision_loop(store=None):
     service = DecisionLoopService(store)
     from application.model_portfolios import ModelPortfolios
     portfolios = ModelPortfolios(service.store)
+    from application.settlement_evidence import SettlementEvidence
+    archive = SettlementEvidence(service.store)
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     day = now.date().isoformat()
     if now.hour < 16:
@@ -34,11 +36,15 @@ def daily_decision_loop(store=None):
     try:
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT symbol FROM research_model_orders WHERE state='pending' "
-                    "ORDER BY symbol LIMIT 80")
+                    "ORDER BY symbol")
         symbols = [str(r[0]) for r in cur.fetchall()]
     finally:
         conn.close()
     symbols = sorted(set(symbols) | set(portfolios.symbols()))
+    archive.request(symbols, day, held=portfolios.symbols())
+    work = archive.repo.claim("execution", now=now.isoformat())
+    requested_symbols = symbols
+    symbols = [r["symbol"] for r in work if r["trade_date"] == day]
     snapshot = {}
     for offset in range(0, min(160, len(symbols)), 80):
         batch = symbols[offset:offset + 80]
@@ -64,9 +70,27 @@ def daily_decision_loop(store=None):
             "limit_up": quote.get("limit_up"), "limit_down": quote.get("limit_down"),
             "suspended": not bool(quote.get("volume")), "provider": quote["execution_provider"],
             "observed_at": timestamp, "execution_rules": asdict(rules)}
+        archive.record(symbol, day, facts[(symbol, day)])
+    for row in work:
+        if (row["symbol"], row["trade_date"]) in facts:
+            archive.repo.finish(row["work_id"])
+    facts.update(archive.facts(requested_symbols, day))
+    recovered = archive.recover(portfolios, through_day=day)
+    from application.reliability_jobs import refresh_corporate_evidence
+    corporate = refresh_corporate_evidence(service.store, requested_symbols, day=day, now=now.isoformat())
+    for key, fact in list(facts.items()):
+        coverage = archive.repo.get("corporate_coverage", f"{key[1]}:{key[0]}")
+        if coverage:
+            fact = {**fact, "corporate_coverage": coverage,
+                    "corporate_action_unresolved": bool(coverage.get("gaps"))}
+            facts[key] = archive.record(key[0], key[1], fact)
     settled = service.settle_models(facts, now=now.isoformat())
     model_books = portfolios.advance(facts, now=now.isoformat())
-    return {"status": "degraded" if symbols and not facts else "complete", "settled": settled, "execution_fact_count": len(facts),
+    from application.reliability_jobs import refresh_reliability
+    return {"status": "partial" if len(facts) < len(requested_symbols) else "complete", "settled": settled, "execution_fact_count": len(facts),
+            "execution_queue": archive.repo.work_status("execution"), "requested_count": len(requested_symbols),
+            "recovered_original_sessions": recovered,
+            "reliability": refresh_reliability(service.store, now=now.isoformat()), "corporate_evidence": corporate,
             "model_books": model_books,
             "quality_report": refresh_quality(service.store)}
 
@@ -92,7 +116,7 @@ def weekly_research_cycle(store=None):
     conn = service.store.connect()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT start_date,end_date FROM research_holdout_batches WHERE state='sealed'")
+        cur.execute("SELECT start_date,end_date FROM research_holdout_batches WHERE state IN ('sealed','evaluating')")
         sealed = list(cur.fetchall())
     finally:
         conn.close()

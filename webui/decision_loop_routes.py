@@ -1,5 +1,5 @@
 """Research/public-private separation for decision loop views."""
-from fastapi import Query, Request
+from fastapi import Body, Query, Request
 
 
 def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok):
@@ -14,6 +14,56 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
     def browser_loop():
         from application.decision_loop import DecisionLoopService
         return browser_ok(DecisionLoopService().dashboard())
+
+    @app.get("/api/research/cases")
+    def browser_cases():
+        from application.research_cases import ResearchCases
+        from data.research_store import ResearchStore
+        return browser_ok(ResearchCases(ResearchStore()).view(owner="portfolio-primary"))
+
+    @app.post("/api/research/thesis/draft")
+    def browser_thesis_draft(payload: dict = Body(...)):
+        from application.research_cases import ResearchCases
+        from data.research_store import ResearchStore
+        return browser_ok(ResearchCases(ResearchStore()).draft(payload["symbol"], owner="portfolio-primary",
+            text=payload["text"], claims=payload.get("claims", []), expected_revision=payload.get("expected_revision", 0)))
+
+    @app.post("/api/research/thesis/lock")
+    def browser_thesis_lock(payload: dict = Body(...)):
+        from application.research_cases import ResearchCases
+        from data.research_store import ResearchStore
+        if payload.get("confirm") is not True:
+            raise ValueError("explicit_thesis_confirmation_required")
+        return browser_ok(ResearchCases(ResearchStore()).lock(payload["symbol"], owner="portfolio-primary",
+            draft_revision=payload["draft_revision"], human_confirmed=True))
+
+    @app.get("/api/machine/v1/agent/research/cases", operation_id="get_agent_research_cases")
+    def agent_cases():
+        try:
+            from application.research_cases import ResearchCases
+            from data.research_store import ResearchStore
+            return result(ResearchCases(ResearchStore()).view(), "个股长期研究与待复核问题；不含私人论点",
+                          "shadow://foliant/research/cases")
+        except Exception as exc:
+            return agent_error(exc)
+
+    @app.post("/api/portfolio/account-facts/preview")
+    def browser_account_facts_preview(payload: dict = Body(...)):
+        from application.account_reconciliation import AccountReconciliation
+        from data.research_store import ResearchStore
+        from portfolio_db import portfolio_db
+        return browser_ok(AccountReconciliation(ResearchStore()).preview(payload["rows"], owner="portfolio-primary",
+            watermark=portfolio_db.action_preview_context()["watermark"]))
+
+    @app.post("/api/portfolio/account-facts/confirm")
+    def browser_account_facts_confirm(payload: dict = Body(...)):
+        from application.account_reconciliation import AccountReconciliation
+        from data.research_store import ResearchStore
+        from portfolio_db import portfolio_db
+        if payload.get("confirm") is not True:
+            raise ValueError("explicit_account_confirmation_required")
+        return browser_ok(AccountReconciliation(ResearchStore()).confirm(payload["preview_id"], owner="portfolio-primary",
+            watermark=portfolio_db.action_preview_context()["watermark"]))
 
     @app.get("/api/machine/v1/agent/decision-loop", operation_id="get_agent_decision_loop")
     def agent_loop():

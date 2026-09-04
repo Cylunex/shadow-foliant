@@ -110,6 +110,22 @@ def test_same_idempotency_key_with_different_payload_conflicts(repository) -> No
         )
 
 
+def test_security_run_case_link_is_atomic_private_and_idempotent(repository):
+    from data.reliability_store import ReliabilityStore
+    created = repository.create_or_get(
+        actor_id="private-owner", capability="foliant.research.preview", run_kind="security-research",
+        idempotency_key="private-case", request_payload={"symbol": "600001"},
+        resource_uri_factory=lambda identity: f"shadow://foliant/runs/{identity}").run
+    identity = created["run_id"]
+    assert repository.mark_running(identity)
+    assert repository.complete(identity, _result(identity), event_type="foliant.research-report.ready")
+    assert not repository.complete(identity, _result(identity), event_type="foliant.research-report.ready")
+    repo = ReliabilityStore(repository)
+    assert repo.get("case_execution", identity) is None
+    assert repo.get("case_execution", identity, "another-owner") is None
+    assert repo.get("case_execution", identity, "private-owner")["symbol"] == "600001"
+
+
 def test_run_query_is_creator_scoped_and_large_list_is_paginated(repository) -> None:
     created = repository.create_or_get(
         actor_id="agent-owner",

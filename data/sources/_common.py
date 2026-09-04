@@ -155,10 +155,15 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None,
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
+    import time
+    started = time.monotonic()
     from data.provider_governor import provider_slot, host_provider
     with provider_slot(host_provider(url)):
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read().decode(encoding, 'replace')
+            body = response.read()
+            raw = body.decode(encoding, 'replace')
+    from data.acquisition_evidence import observed_http_body
+    observed_http_body(host_provider(url), body, started=started)
     return _json.loads(raw)
 
 
@@ -170,10 +175,15 @@ def http_get_text(url: str, headers: Optional[Dict[str, str]] = None,
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
+    import time
+    started = time.monotonic()
     from data.provider_governor import provider_slot, host_provider
     with provider_slot(host_provider(url)):
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.read().decode(encoding, 'replace')
+            body = response.read()
+    from data.acquisition_evidence import observed_http_body
+    observed_http_body(host_provider(url), body, started=started)
+    return body.decode(encoding, 'replace')
 
 
 def throttle(source: str = 'default') -> float:

@@ -7,7 +7,7 @@ from application.results import payload_hash
 
 def empty_ledger(initial_cash="100000.00"):
     return {"schema_version": "model-ledger-v1", "initial_cash": str(money(initial_cash)),
-            "cash": str(money(initial_cash)), "positions": {}, "events": [], "marks": [],
+            "cash": str(money(initial_cash)), "receivables": {}, "positions": {}, "events": [], "marks": [],
             "fees": "0.00", "scope": "full_account", "revision": 0}
 
 
@@ -49,7 +49,24 @@ def apply_corporate_action(ledger, event):
         return value
     if event.get("price_basis") != "raw" or not event.get("confirmed"):
         raise ValueError("unverified_corporate_action")
-    if event["kind"] == "cash_dividend":
+    if event["kind"] == "dividend_accrual":
+        entitlement = event.get("entitled_quantity")
+        if type(entitlement) is not int or entitlement < 0 or not event.get("entitlement_evidence"):
+            raise ValueError("record_date_entitlement_required")
+        amount = money(Decimal(str(event["net_cash_per_share"])) * entitlement)
+        if amount < 0 or not event.get("payment_date"):
+            raise ValueError("verified_payment_terms_required")
+        value.setdefault("receivables", {})[identity] = {"amount": str(amount), "symbol": event["symbol"],
+            "payment_date": event["payment_date"], "state": "receivable"}
+    elif event["kind"] == "dividend_payment":
+        item = value.setdefault("receivables", {}).get(event.get("accrual_id"))
+        if not item or item["state"] != "receivable" or event.get("effective_date", "") < item["payment_date"]:
+            raise ValueError("dividend_payment_not_due_or_not_accrued")
+        if money(event["amount"]) != money(item["amount"]):
+            raise ValueError("dividend_payment_reconciliation_required")
+        value["cash"] = str(money(value["cash"]) + money(item["amount"]))
+        item["state"] = "paid"
+    elif event["kind"] == "cash_dividend":
         entitlement = event["entitled_quantity"]
         if type(entitlement) is not int or entitlement < 0:
             raise ValueError("invalid_dividend_entitlement")
@@ -85,10 +102,14 @@ def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False)
             missing.append(symbol)
             continue
         market_value += money(prices[symbol]) * position["quantity"]
-    nav = money(value["cash"]) + market_value if not missing else None
+    receivables = sum((money(r["amount"]) for r in value.get("receivables", {}).values()
+                       if r["state"] == "receivable"), Decimal(0))
+    nav = money(value["cash"]) + market_value + receivables if not missing else None
     mark = {"trade_date": trade_date, "net_asset_value": str(money(nav)) if nav is not None else None,
             "policy_hash": value.get("policy_hash"),
             "cash": value["cash"], "fees_paid": value["fees"], "missing_prices": missing,
+            "receivables": str(receivables), "positions": deepcopy(value["positions"]),
+            "policy_transition": bool(value.get("policy_transition")),
             "corporate_actions_complete": bool(corporate_actions_complete),
             "status": "verified" if not missing and corporate_actions_complete else "indicative"}
     mark["net_return_pct"] = float((nav / money(value["initial_cash"]) - 1) * 100) if nav is not None else None
