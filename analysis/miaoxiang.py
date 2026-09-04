@@ -79,22 +79,17 @@ def query(skill: str, text: str, timeout: int = TIMEOUT) -> dict:
     if not text:
         return {'error': 'text 为空', 'skill': skill}
     path, field = SKILLS[skill]
-    try:  # 与 screen() 同源限流(1s 最小间隔):防 mx_selection_review(10:30 盘中)逐只
-        from rate_limiter import throttle as _throttle   # 诊断 top10 背靠背连打东财妙想 SaaS 触发封禁
-        _throttle('eastmoney_saas')
-    except Exception:
-        pass
     body = json.dumps({field: text}, ensure_ascii=False).encode('utf-8')
     req = _req.Request(BASE + path, data=body, method='POST',
                        headers={'Content-Type': 'application/json', 'em_api_key': _api_key()})
     try:
-        with _req.urlopen(req, timeout=timeout) as resp:
+        from data.provider_governor import provider_slot
+        with provider_slot('eastmoney_saas'), _req.urlopen(req, timeout=min(90, max(1, timeout))) as resp:
             raw = json.loads(resp.read().decode('utf-8', 'replace'))
     except _err.HTTPError as e:
-        msg = (e.read().decode('utf-8', 'replace')[:200] if e.fp else '') or f'HTTP {e.code}'
-        return {'error': f'妙想API失败: {msg}', 'skill': skill}
+        return {'error': f'妙想API失败: HTTP {e.code}', 'skill': skill}
     except Exception as e:
-        return {'error': f'妙想API失败: {e}', 'skill': skill}
+        return {'error': f'妙想API失败: {type(e).__name__}', 'skill': skill}
     content = _extract(raw if isinstance(raw, dict) else {'data': raw})
     out = {'skill': skill, 'content': content or '(无内容返回)'}
     if not content:
@@ -122,11 +117,6 @@ def screen(query_text: str, select_type: str = 'A股', timeout: int = 40):
     text = (query_text or '').strip()
     if not text or not available():   # 无 EM_API_KEY → 妙想不可用,优雅返空(可选源)
         return _pd.DataFrame()
-    try:  # 与其他妙想调用同源限流(1s 最小间隔)
-        from rate_limiter import throttle as _throttle
-        _throttle('eastmoney_saas')
-    except Exception:
-        pass
     meta = {'query': text, 'selectType': select_type or 'A股',
             'toolContext': {'callId': f'call_{_uuid.uuid4().hex[:8]}',
                             'userInfo': {'userId': f'user_{_uuid.uuid4().hex[:8]}'}}}
@@ -134,7 +124,8 @@ def screen(query_text: str, select_type: str = 'A股', timeout: int = 40):
     req = _req.Request(BASE + _SCREENER_PATH, data=body, method='POST',
                        headers={'Content-Type': 'application/json', 'em_api_key': _api_key()})
     try:
-        with _req.urlopen(req, timeout=timeout) as resp:
+        from data.provider_governor import provider_slot
+        with provider_slot('eastmoney_saas'), _req.urlopen(req, timeout=min(90, max(1, timeout))) as resp:
             raw = json.loads(resp.read().decode('utf-8', 'replace'))
     except Exception:
         return _pd.DataFrame()

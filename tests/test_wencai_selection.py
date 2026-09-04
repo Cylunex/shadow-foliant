@@ -281,6 +281,7 @@ class WencaiHttpsCompatibilityTests(unittest.TestCase):
         from data.sources import pywencai as source
 
         with patch.object(source._HTTPS_REQUESTS._requests, "request") as request:
+            request.return_value.status_code = 200
             source._HTTPS_REQUESTS.request("GET", "http://example.com/data")
 
         self.assertEqual(request.call_args.args[1], "http://example.com/data")

@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "9"
+SCHEMA_VERSION = "11"
 
 
 def _json(value) -> str:
@@ -366,6 +366,21 @@ class ResearchStore:
             "CREATE INDEX IF NOT EXISTS idx_selection_nominations_symbol ON selection_candidate_nominations(symbol,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_selection_strategy_runs ON selection_strategy_runs(strategy_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_research_publication_history ON research_dataset_publication_history(capability,generation)",
+            """CREATE TABLE IF NOT EXISTS research_model_orders (
+                order_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,baseline TEXT NOT NULL,
+                symbol TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS research_model_portfolios (
+                baseline TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS research_model_targets (
+                target_id TEXT PRIMARY KEY,baseline TEXT NOT NULL,run_id TEXT NOT NULL,
+                state TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS research_experiments (
+                trial_id TEXT PRIMARY KEY,hypothesis_id TEXT NOT NULL,fingerprint TEXT NOT NULL,
+                state TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS research_holdout_batches (
+                batch_id TEXT PRIMARY KEY,start_date TEXT NOT NULL,end_date TEXT NOT NULL,
+                state TEXT NOT NULL,consumed_by TEXT,consumed_at TEXT)""",
         ]
         try:
             for sql in statements:
@@ -377,6 +392,13 @@ class ResearchStore:
 
     def _apply_schema_migrations(self, cur) -> None:
         """Run ordered, idempotent compatibility migrations."""
+        version = "11-research-decision-loop"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "selection_candidate_outcomes", "mae_pct", "REAL")
+            self._add_column(cur, "selection_candidate_outcomes", "metric_version", "TEXT NOT NULL DEFAULT 'legacy-price-v1'")
+            cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                        (version, datetime.now().astimezone().isoformat()))
         version = "2-copy-legacy-pit"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():
@@ -1948,12 +1970,14 @@ class ResearchStore:
                 })
         return pd.DataFrame(values)
 
-    def load_daily_panel_from_manifest(self, manifest_id: str) -> pd.DataFrame:
+    def load_daily_panel_from_manifest(self, manifest_id: str, *, symbols=None) -> pd.DataFrame:
         manifest = self.load_selection_manifest(manifest_id)
         ids = list((manifest or {}).get("market_dataset_ids") or [])
         if not ids:
             return pd.DataFrame()
         placeholders = ",".join("?" for _ in ids)
+        wanted = sorted({_symbol(v) for v in (symbols or []) if _symbol(v)})
+        symbol_clause = (" AND o.symbol IN (" + ",".join("?" for _ in wanted) + ")") if wanted else ""
         conn = self.connect()
         try:
             cur = conn.cursor()
@@ -1961,8 +1985,8 @@ class ResearchStore:
                 """SELECT o.symbol,o.trade_date,o.provider,b.quality_status,o.dataset_id,o.payload
                    FROM research_market_observations o JOIN research_dataset_batches b
                      ON b.dataset_id=o.dataset_id
-                   WHERE o.dataset_id IN (""" + placeholders + ") ORDER BY o.symbol,o.trade_date",
-                tuple(ids),
+                   WHERE o.dataset_id IN (""" + placeholders + ")" + symbol_clause + " ORDER BY o.symbol,o.trade_date",
+                (*ids, *wanted),
             )
             return self._observation_frame(cur.fetchall(), kind="market")
         finally:
@@ -2193,6 +2217,10 @@ class ResearchStore:
         try:
             created_at = datetime.now().astimezone().isoformat()
             cur = conn.cursor()
+            metadata = {**metadata, "published_at": created_at if formal_top15 else None,
+                        "selection_date": run["selection_date"],
+                        "decision_at": created_at,
+                        "data_cutoff_at": (metadata.get("decision_context") or {}).get("decision_at")}
             cur.execute(
                 """SELECT run_id FROM selection_runs WHERE publication_status='published'
                    ORDER BY published_at DESC,created_at DESC LIMIT 1"""
@@ -2265,6 +2293,16 @@ class ResearchStore:
                 )
                 self._insert_selection_artifact(conn, run_id, "formal_top15", formal_top15, metadata)
                 self._insert_selection_artifact(conn, run_id, "formal_top5", formal_top5, metadata)
+                from application.decision_capsule import build_capsule
+                from analysis.account_action_plan import model_portfolio
+                cur.execute("SELECT MIN(trade_date) FROM research_trade_calendar WHERE trade_date>?",
+                            (created_at[:10],))
+                next_day = cur.fetchone()
+                capsule = build_capsule(
+                    run_id=run_id, metadata=metadata, top15=formal_top15, top5=formal_top5,
+                    published_at=created_at, next_open_date=str(next_day[0]) if next_day and next_day[0] else None)
+                self._insert_selection_artifact(conn, run_id, "decision_capsule", capsule, metadata)
+                self._insert_selection_artifact(conn, run_id, "model_portfolio", model_portfolio(capsule), metadata)
                 from application.research_artifacts import build_selection_research_artifact
 
                 research_artifact = build_selection_research_artifact(
@@ -2353,20 +2391,25 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             if persist_policy:
+                if self._is_postgres:
+                    cur.execute("SELECT pg_advisory_xact_lock(1936482715)")
+                else:
+                    cur.execute("BEGIN IMMEDIATE")
                 cur.execute(
                     "SELECT 1 FROM strategy_policy_versions WHERE policy_version=? AND policy_hash=?",
                     (str(policy.get("version") or "local-fusion-v2"), str(policy_hash)),
                 )
                 if not cur.fetchone():
-                    cur.execute(
-                        "UPDATE strategy_policy_versions SET state='superseded' WHERE state='active'"
-                    )
+                    # Recording a selection is not authority to activate a policy.
+                    # Only bootstrap an empty registry; later activation uses CAS.
+                    cur.execute("SELECT 1 FROM strategy_policy_versions WHERE state IN ('active','scheduled') LIMIT 1")
+                    policy_state = "observed" if cur.fetchone() else "active"
                     cur.execute(
                         """INSERT INTO strategy_policy_versions
                            (policy_version,policy_hash,state,effective_from,payload,created_at)
                            VALUES (?,?,?,?,?,?)""",
                         (str(policy.get("version") or "local-fusion-v2"), str(policy_hash),
-                         "active", str(selection_date), _json(policy), now),
+                         policy_state, str(selection_date), _json(policy), now),
                     )
             for (strategy_id, strategy_version, lane), rows in grouped.items():
                 strategy_run_id = hashlib.sha256(
@@ -2457,14 +2500,20 @@ class ResearchStore:
                         pending += 1
                         continue
                     window = bars[:horizon]
-                    entry = _plain(window[0][1]) or _plain(window[0][2])
+                    entry = _plain(window[0][1])
                     exit_price = _plain(window[-1][2])
                     if not entry or not exit_price or float(entry) <= 0:
                         pending += 1
                         continue
                     ret = (float(exit_price) / float(entry) - 1.0) * 100.0
                     lows = [float(row[3]) for row in window if row[3] is not None]
-                    max_dd = min((value / float(entry) - 1.0) * 100.0 for value in lows) if lows else None
+                    from analysis.decision_evaluation import price_metrics
+                    try:
+                        metrics = price_metrics(entry, [row[2] for row in window], lows)
+                    except (ValueError, TypeError):
+                        pending += 1
+                        continue
+                    max_dd = metrics["close_max_drawdown_pct"]
                     values = (
                         str(window[0][0]), float(entry), str(window[-1][0]), float(exit_price),
                         round(ret, 6), None, round(max_dd, 6) if max_dd is not None else None,
@@ -2490,6 +2539,10 @@ class ResearchStore:
                             values,
                         )
                     updated += 1
+                    cur.execute(
+                        "UPDATE selection_candidate_outcomes SET mae_pct=?,metric_version=? "
+                        "WHERE nomination_id=? AND horizon_days=?",
+                        (metrics["mae_pct"], metrics["metric_version"], str(nomination_id), horizon))
             conn.commit()
             return {"updated": updated, "pending": pending, "horizons": wanted,
                     "nomination_count": len(nominations)}
@@ -2568,23 +2621,30 @@ class ResearchStore:
             cur = conn.cursor()
             cur.execute(
                 """SELECT n.strategy_id,n.lane,o.return_pct,o.max_drawdown_pct,
-                          n.created_at,n.symbol
+                          n.created_at,n.symbol,n.strategy_version,o.metric_version,o.mae_pct,
+                          o.entry_date,o.exit_date
                    FROM selection_candidate_nominations n
                    JOIN selection_candidate_outcomes o ON o.nomination_id=n.nomination_id
                    WHERE o.horizon_days=? AND o.outcome_status='matured' AND n.created_at>=?""",
                 (max(1, int(horizon_days)), since),
             )
             buckets: Dict[str, dict] = {}
-            for strategy_id, lane, ret, drawdown, created_at, symbol in cur.fetchall():
-                bucket = buckets.setdefault(str(strategy_id), {
+            for strategy_id, lane, ret, drawdown, created_at, symbol, strategy_version, metric_version, mae, entry_date, exit_date in cur.fetchall():
+                bucket = buckets.setdefault((str(strategy_id), str(strategy_version), str(metric_version)), {
                     "strategy_id": str(strategy_id), "lane": str(lane), "returns": [],
-                    "drawdowns": [], "dates": set(), "symbols": set(),
+                    "strategy_version": str(strategy_version), "metric_version": str(metric_version),
+                    "drawdowns": [], "maes": [], "dates": set(), "symbols": set(), "intervals": set(),
                 })
                 if ret is not None:
                     bucket["returns"].append(float(ret))
-                if drawdown is not None:
+                if drawdown is not None and metric_version == "signal-price-v2":
                     bucket["drawdowns"].append(float(drawdown))
-                bucket["dates"].add(str(created_at)[:10])
+                elif drawdown is not None:
+                    bucket["maes"].append(min(0., float(drawdown)))
+                if mae is not None:
+                    bucket["maes"].append(float(mae))
+                bucket["dates"].add(str(entry_date))
+                bucket["intervals"].add((str(entry_date), str(exit_date)))
                 bucket["symbols"].add(str(symbol))
             strategies = []
             for bucket in buckets.values():
@@ -2592,13 +2652,23 @@ class ResearchStore:
                 drawdowns = bucket.pop("drawdowns")
                 dates = bucket.pop("dates")
                 symbols = bucket.pop("symbols")
+                maes = bucket.pop("maes")
+                intervals = sorted(bucket.pop("intervals"))
+                disjoint, last_end = 0, ""
+                for start, end in intervals:
+                    if start > last_end:
+                        disjoint, last_end = disjoint + 1, end
                 strategies.append({
                     **bucket, "sample_size": len(returns), "independent_dates": len(dates),
+                    "nonoverlapping_price_intervals": disjoint,
+                    "effective_samples": 0,
+                    "promotion_blocker": "price_labels_are_not_independent_executable_net_evidence",
                     "symbol_count": len(symbols),
                     "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 2)
                     if returns else None,
                     "avg_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
                     "worst_drawdown_pct": round(min(drawdowns), 4) if drawdowns else None,
+                    "worst_mae_pct": round(min(maes), 4) if maes else None,
                 })
             strategies.sort(key=lambda item: (item["lane"], item["strategy_id"]))
             cur.execute(
@@ -2667,8 +2737,10 @@ class ResearchStore:
             cur = conn.cursor()
             cur.execute(
                 """SELECT policy_version,policy_hash,payload,effective_from,created_at
-                   FROM strategy_policy_versions WHERE state='active'
-                   ORDER BY created_at DESC LIMIT 1"""
+                   FROM strategy_policy_versions WHERE state IN ('active','scheduled')
+                     AND effective_from<=?
+                   ORDER BY effective_from DESC,created_at DESC LIMIT 1""",
+                (datetime.now().astimezone().isoformat(),),
             )
             row = cur.fetchone()
             if not row:
@@ -2691,19 +2763,36 @@ class ResearchStore:
         conn = self.connect()
         try:
             cur = conn.cursor()
+            # One transaction owns comparison, proposal idempotency and publication.
+            if self._is_postgres:
+                cur.execute("SELECT pg_advisory_xact_lock(1936482715)")
+            else:
+                cur.execute("BEGIN IMMEDIATE")
+            cur.execute("SELECT proposal FROM strategy_adjustment_proposals WHERE proposal_id=?", (proposal_id,))
+            existing = cur.fetchone()
+            if existing:
+                if (existing[0] if isinstance(existing[0], dict) else json.loads(existing[0])) != proposal:
+                    raise ValueError("proposal_id_reused_with_different_payload")
+                conn.rollback()
+                return proposal_id
             if applied_policy:
+                cur.execute("SELECT policy_hash FROM strategy_policy_versions "
+                            "WHERE state IN ('active','scheduled') ORDER BY created_at DESC LIMIT 1")
+                active_row = cur.fetchone()
+                if not active_row or str(active_row[0]) != str(proposal.get("base_policy_hash")):
+                    raise ValueError("policy_compare_and_swap_conflict")
                 payload = dict(applied_policy)
                 encoded = _json(payload)
-                applied_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                # Same canonical contract as FusionPolicy.policy_hash. Unsorted
+                # storage JSON must not create a second identity for one policy.
+                from application.results import payload_hash
+                applied_hash = payload_hash(payload)
                 version = str(payload.get("version") or f"local-fusion-{now[:10]}")
-                cur.execute(
-                    "UPDATE strategy_policy_versions SET state='superseded' WHERE state='active'"
-                )
                 cur.execute(
                     """INSERT INTO strategy_policy_versions
                        (policy_version,policy_hash,state,effective_from,payload,created_at)
                        VALUES (?,?,?,?,?,?)""",
-                    (version, applied_hash, "active", str(proposal.get("effective_from") or now[:10]),
+                    (version, applied_hash, "scheduled", str(proposal.get("effective_from") or now),
                      encoded, now),
                 )
             cur.execute(

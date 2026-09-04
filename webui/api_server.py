@@ -338,7 +338,7 @@ def readyz():
 @app.get("/research-readyz")
 def research_readyz():
     """Protected aggregate readiness for research data and selection outputs."""
-    from core.research_health import snapshot
+    from core.research_health import cached_snapshot as snapshot
 
     try:
         payload = snapshot()
@@ -1862,8 +1862,8 @@ def portfolio_daily_pnl(days: int = 30):
     """合并日收益(股票+基金):汇总(今日/本月/区间累计/胜率/最佳最差) + 近N日序列。
     数据=daily_pnl_snapshots(每日22:30收盘口径)。盘中实时今日盈亏见持仓页前端汇总。"""
     try:
-        from portfolio.daily_pnl import get_summary, get_recent
-        return _ok({"summary": get_summary(max(days, 60)), "series": get_recent(days)})
+        from application.account_preview import account_books
+        return _ok(account_books(days))
     except Exception as e:
         return _err(e)
 
@@ -3339,6 +3339,10 @@ def health():
 from webui.runtime_integrity_routes import register_runtime_integrity_routes
 
 register_runtime_integrity_routes(
+    app, agent_result=_agent_result, agent_error=_agent_error, browser_ok=_ok
+)
+from webui.decision_loop_routes import register_decision_loop_routes
+register_decision_loop_routes(
     app, agent_result=_agent_result, agent_error=_agent_error, browser_ok=_ok
 )
 

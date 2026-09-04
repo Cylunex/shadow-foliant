@@ -1,12 +1,60 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.4.0
+  version: 0.5.0
 servers:
   - url: https://stock.example.com
 security:
   - agentBearer: []
 paths:
+  /api/machine/v1/agent/decision-loop:
+    get:
+      operationId: get_agent_decision_loop
+      summary: Read immutable selection context, experimental evidence and model ledger, without private holdings
+      responses:
+        "200":
+          description: Research decision loop
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/portfolio/action-plan:
+    get:
+      operationId: get_agent_account_action_plan
+      summary: Preview account actions from server-loaded holdings and formal candidates; never places orders
+      description: Requires delegated primary-portfolio access. Cash must be user-confirmed; omit unknown cash. Stale quotes and missing sellability fail closed.
+      parameters:
+        - name: available_cash
+          in: query
+          schema: { type: number, minimum: 0, maximum: 10000000000 }
+        - name: allow_add
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Private preview with expiration, blockers and holdings watermark
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/portfolio/books:
+    get:
+      operationId: get_agent_account_books
+      summary: Read actual securities-subaccount returns, distinct from signal and model returns
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Private account book with explicit accounting scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/machine/v1/agent/market/overview:
     get:
       operationId: get_agent_market_overview

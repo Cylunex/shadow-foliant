@@ -19,6 +19,36 @@ from typing import Dict, List, Optional, Tuple
 import _bootstrap  # noqa: F401
 
 import numpy as np
+import pandas as pd
+
+
+def aligned_returns(frames: dict, minimum_days: int = 20) -> Tuple[np.ndarray, List[str]]:
+    """Pure calculation: join identical return intervals, never align by row count.
+
+    Both start and end trading dates must match. A suspended security's multi-day
+    return must not be paired with another security's one-day return.
+    """
+    series = {}
+    for code, frame in frames.items():
+        if frame is None or frame.empty:
+            continue
+        col = next((c for c in ("close", "Close", "收盘") if c in frame), None)
+        if col is None or not isinstance(frame.index, pd.DatetimeIndex):
+            continue
+        prices = pd.to_numeric(frame[col], errors="coerce").sort_index()
+        prices = prices[~prices.index.duplicated(keep="last")]
+        prices = prices.where(prices > 0)
+        returns = prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+        returns.index = pd.MultiIndex.from_arrays(
+            [prices.index.to_series().shift().values, prices.index], names=["start", "end"])
+        if returns.notna().sum() >= minimum_days:
+            series[code] = returns
+    if len(series) < 2:
+        return np.empty((0, 0)), list(series)
+    aligned = pd.concat(series, axis=1, join="inner").dropna()
+    if len(aligned) < minimum_days:
+        return np.empty((0, 0)), list(series)
+    return aligned.to_numpy(dtype=float), list(aligned.columns)
 
 
 def _returns_matrix(codes: List[str], period: str = "6mo") -> Tuple[np.ndarray, List[str]]:
@@ -34,19 +64,10 @@ def _returns_matrix(codes: List[str], period: str = "6mo") -> Tuple[np.ndarray, 
             col = next((k for k in ("close", "Close", "收盘") if k in df.columns), None)
             if col is None:
                 continue
-            closes = df[col].astype(float).values
-            rets = np.diff(closes) / closes[:-1]
-            if len(rets) >= 20:
-                series[c] = rets
+            series[c] = df
         except Exception:
             continue
-    if len(series) < 2:
-        return np.empty((0, 0)), list(series)
-    # 对齐到最短长度(尾部对齐,用最近 N 日)
-    n = min(len(v) for v in series.values())
-    used = list(series)
-    R = np.column_stack([series[c][-n:] for c in used])
-    return R, used
+    return aligned_returns(series)
 
 
 def _normalize(w: np.ndarray) -> np.ndarray:

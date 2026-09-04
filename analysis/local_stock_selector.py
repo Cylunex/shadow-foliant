@@ -779,6 +779,21 @@ class LocalStockSelector:
                 input_snapshot_id=eligible_payload["snapshot_id"],
                 persist_policy=not pit_only_mode,
             )
+            from application.decision_loop import DecisionLoopService
+            loop = DecisionLoopService(self.store)
+            capsule = loop.capsule(run["run_id"])
+            if capsule:
+                run["metadata"] = {**run.get("metadata", {}),
+                                   "published_at": capsule["published_at"],
+                                   "decision_at": capsule["decision_at"],
+                                   "data_cutoff_at": capsule.get("data_cutoff_at")}
+                try:
+                    loop.start_model_cohorts(capsule)
+                except Exception as exc:
+                    # Publication already committed. Auxiliary model bookkeeping
+                    # must not turn a valid TOP15 into a reported selection error.
+                    # The existing EOD job retries idempotently before next open.
+                    print(f"[model-ledger] publication intent pending: {type(exc).__name__}", flush=True)
         return {
             **run, "candidates": candidates, "wencai_reference": reference,
             "formal_top5": formal_top5_candidates,

@@ -47,6 +47,7 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
             "quote_time": vals[30],
             "last_close": float(vals[4]) if vals[4] else 0,
             "open": float(vals[5]) if vals[5] else 0,
+            "volume": float(vals[6]) * 100 if vals[6] else 0,
             "change_amt": float(vals[31]) if vals[31] else 0,
             "change_pct": float(vals[32]) if vals[32] else 0,
             "high": float(vals[33]) if vals[33] else 0,

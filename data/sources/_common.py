@@ -155,7 +155,10 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None,
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
-    raw = urllib.request.urlopen(req, timeout=timeout).read().decode(encoding, 'replace')
+    from data.provider_governor import provider_slot, host_provider
+    with provider_slot(host_provider(url)):
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode(encoding, 'replace')
     return _json.loads(raw)
 
 
@@ -167,16 +170,16 @@ def http_get_text(url: str, headers: Optional[Dict[str, str]] = None,
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
-    return urllib.request.urlopen(req, timeout=timeout).read().decode(encoding, 'replace')
+    from data.provider_governor import provider_slot, host_provider
+    with provider_slot(host_provider(url)):
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read().decode(encoding, 'replace')
 
 
 def throttle(source: str = 'default') -> float:
     """按源最小间隔限流(复用 data/rate_limiter)。返回实际 sleep 秒。"""
-    try:
-        from rate_limiter import throttle as _t
-        return _t(source)
-    except Exception:
-        return 0.0
+    from data.rate_limiter import throttle as _t
+    return _t(source)
 
 
 def ak_safe(fn: Callable[..., Any], *args, timeout: int = 30, **kwargs) -> Any:
@@ -202,11 +205,8 @@ def requests_session():
         import requests
         s = requests.Session()
         s.trust_env = False
-        try:
-            from rate_limiter import throttled_session
-            throttled_session(s)
-        except Exception:
-            pass
+        from data.rate_limiter import throttled_session
+        throttled_session(s)
         _REQ_SESSION = s
     return _REQ_SESSION
 

@@ -30,6 +30,26 @@ def get_conn():
 class PortfolioDBPG:
     """持仓股票数据库管理类 — PostgreSQL 版"""
 
+    def action_preview_context(self) -> Dict:
+        """One read-only snapshot for holdings and the import watermark.
+
+        MAX(id)/COUNT cover late historical imports too, unlike a recent-trades
+        page ordered by execution time. No locks are retained during quote I/O.
+        """
+        from application.results import clean_json, payload_hash
+        conn = get_conn()
+        try:
+            conn.set_session(isolation_level='REPEATABLE READ', readonly=True)
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT * FROM portfolio_stocks WHERE quantity>0 ORDER BY code")
+            holdings = clean_json([dict(r) for r in cur.fetchall()])
+            cur.execute("SELECT COUNT(*) AS count, MAX(id) AS latest_id FROM trade_records")
+            trades = clean_json(dict(cur.fetchone()))
+            return {"holdings": holdings, "watermark": payload_hash({"holdings": holdings, "trades": trades})}
+        finally:
+            conn.rollback()
+            conn.close()
+
     # ==================== 持仓股票 CRUD ====================
 
     # ============================================================

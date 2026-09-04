@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import os
+import math
 import threading
 import time
 from typing import Dict, Iterator, Optional, Tuple
@@ -43,7 +44,8 @@ class EndpointContract:
 
 def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
     try:
-        return max(float(os.getenv(name, str(default))), minimum)
+        value = float(os.getenv(name, str(default)))
+        return max(value, minimum) if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
@@ -220,6 +222,26 @@ for _provider in ("mairui", "moma"):
     _register_mairui_compatible(_provider)
 del _provider
 
+# Existing atomic adapters remain usable in their actual domains, including
+# unstable discovery/news sources. This does not promote them into PIT inputs.
+_LEGACY_CAPABILITIES = {
+    "tencent": "quotes_raw_and_qfq_bars", "sina": "quotes_bars_financial_reference",
+    "eastmoney": "quotes_bars_order_flow_reference", "ths": "sector_hot_forecast_reference",
+    "akshare": "last_resort_market_reference", "baidu": "news_reference",
+    "cls": "news_reference", "jsl": "convertible_bond_reference",
+    "eastmoney_saas": "external_reference_only", "easy_tdx": "legacy_raw_protocol",
+    "mootdx": "legacy_raw_protocol", "tickflow": "optional_market_reference",
+}
+from data.provider_governor import PROVIDERS as _PROVIDER_POLICIES
+for _provider, _capability in _LEGACY_CAPABILITIES.items():
+    _tier, _interval, _ceiling = _PROVIDER_POLICIES[_provider]
+    _endpoint = "discovery" if _provider == "eastmoney_saas" else "adapter"
+    _BASE_CONTRACTS[(_provider, _endpoint)] = EndpointContract(
+        _provider, _endpoint, _capability, "token" if _provider == "eastmoney_saas" else "none", None, None,
+        _interval, 1, 15., 0, daily_request_limit=_ceiling,
+        notes="Existing adapter; operational safety ceiling, not a vendor quota guarantee. Never infers PIT from live data.")
+del _provider, _capability, _tier, _interval, _ceiling, _endpoint
+
 
 class _Gate:
     def __init__(self, contract: EndpointContract):
@@ -279,7 +301,14 @@ def source_call(provider: str, endpoint: str) -> Iterator[EndpointContract]:
         except Exception:
             rate_slot = None
     try:
-        with gate.enter():
+        from contextlib import nullcontext
+        from data.provider_governor import provider_slot
+        # SDK calls which bypass the shared HTTP session still receive a host-wide
+        # guard. Baostock and path-token APIs already own stricter native budgets.
+        shared = (nullcontext() if provider in {"baostock", "mairui", "moma"}
+                  else provider_slot(provider, wait_seconds=contract.timeout_seconds,
+                                     interval=contract.min_interval_seconds))
+        with gate.enter(), shared:
             if rate_slot is None:
                 yield contract
             else:

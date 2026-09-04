@@ -2,7 +2,7 @@ apiVersion: shadow.cylunex/v1alpha1
 kind: ShadowDomainPlugin
 metadata:
   id: shadow-foliant
-  version: 0.4.0
+  version: 0.5.0
   display_name: Shadow Foliant
   description: 提供有来源边界的 A 股研究、个人持仓读取和 Nexus 成交导入能力
 spec:

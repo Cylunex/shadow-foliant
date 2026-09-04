@@ -273,6 +273,17 @@ MACHINE_CAPABILITIES = {
 }
 
 _audit_logger = logging.getLogger("webui.security_audit")
+_add(ROUTE_POLICIES, Access.USER, "GET", "/api/research/decision-loop")
+_add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/action-plan")
+for _path, _scope, _capability in (
+    ("/api/machine/v1/agent/decision-loop", "stock.research", "foliant.selection.read"),
+    ("/api/machine/v1/agent/portfolio/action-plan", "stock.portfolio.read", "foliant.portfolio.read"),
+    ("/api/machine/v1/agent/portfolio/books", "stock.portfolio.read", "foliant.portfolio.read"),
+):
+    _add(ROUTE_POLICIES, Access.MACHINE, "GET", _path)
+    MACHINE_SCOPES[("GET", _path)] = _scope
+    MACHINE_CAPABILITIES[("GET", _path)] = _capability
+del _path, _scope, _capability
 _agent_authenticator: Any = None
 _agent_auth_lock = threading.Lock()
 

@@ -722,8 +722,8 @@ def dual_horizon_reco(codes: List[str]) -> Dict[str, Any]:
 def daily_pnl(days: int = 30) -> Dict[str, Any]:
     """组合每日收益(股票+基金合并):最新一日盈亏 + 本月累计 + 近N日区间累计/胜率/最佳最差日 + 序列。
     数据来自盘后 daily_pnl_snapshot(收盘口径)。回答"今天/本月赚了多少"用这个。"""
-    from portfolio.daily_pnl import get_summary, get_recent
-    return {"summary": get_summary(max(days, 60)), "series": get_recent(days)}
+    from application.account_preview import account_books
+    return account_books(days)
 
 
 @mcp.tool()
@@ -1097,6 +1097,25 @@ def industry_reports(industry_code: str = '*', pages: int = 5, begin: str = '202
     import datahub
     rows = datahub.industry_reports(industry_code=industry_code, max_pages=pages, begin=begin)
     return {'industry_code': industry_code, 'count': len(rows or []), 'reports': rows or []}
+
+
+@mcp.tool()
+def research_decision_loop() -> Dict[str, Any]:
+    """查看选股冻结上下文、模型账本、实验与证据成熟度。无需先查代码。
+    不含私人持仓；价格后验不是净交易收益，pending/未成交不记成零收益。"""
+    from application.decision_loop import DecisionLoopService
+    return DecisionLoopService().dashboard()
+
+
+@mcp.tool()
+def portfolio_action_plan(available_cash: Optional[float] = None,
+                          allow_add: bool = False) -> Dict[str, Any]:
+    """私人主组合行动预览，不下单、不写成交、不改变 TOP15/TOP5。
+    自动读取最新正式选股、持仓与行情。例：用户确认可用现金 5000 元且允许加仓时，
+    传 available_cash=5000, allow_add=True。现金未知不要猜；返回 missing_information。
+    无合格股票时明确暂不操作。行情/持仓变化后旧预览失效，须重新调用。"""
+    from application.account_preview import preview_account
+    return preview_account(owner_id="local-mcp-operator", available_cash=available_cash, allow_add=allow_add)
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 import hashlib
 import json
+import math
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -37,8 +38,16 @@ def _extract_json(text: str) -> Optional[dict]:
     match = re.search(r"\{.*\}", cleaned, flags=re.S)
     if not match:
         return None
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate_json_key")
+            value[key] = item
+        return value
     try:
-        value = json.loads(match.group(0))
+        value = json.loads(match.group(0), object_pairs_hook=unique_object,
+                           parse_constant=lambda value: (_ for _ in ()).throw(ValueError("non_finite_json")))
         return value if isinstance(value, dict) else None
     except Exception:
         return None
@@ -73,9 +82,13 @@ def validate_proposal(proposal: dict, current: dict, evidence: dict,
     if not isinstance(changes, list) or not changes:
         return False, "没有可执行的changes", None
     updated = deepcopy(current)
+    seen = set()
+    total_steps = 0.
     samples = {
-        item.get("strategy_id"): int(item.get("sample_size") or 0)
+        item.get("strategy_id"): int(item.get("effective_samples") or 0)
         for item in evidence.get("strategies") or []
+        if item.get("evidence_kind") == "executable_net"
+        and item.get("evidence_policy_hash") == current_hash and item.get("promotion_ready") is True
     }
     for change in changes:
         if not isinstance(change, dict):
@@ -83,26 +96,45 @@ def validate_proposal(proposal: dict, current: dict, evidence: dict,
         path = str(change.get("path") or "")
         if path not in _BOUNDS:
             return False, f"路径不在白名单:{path}", None
-        old = _get_path(updated, path)
-        if old is None or change.get("from") != old:
+        if path in seen:
+            return False, f"重复路径:{path}", None
+        seen.add(path)
+        old = _get_path(current, path)
+        previous = change.get("from")
+        if (old is None or isinstance(previous, bool)
+                or not isinstance(previous, (int, float)) or previous != old):
             return False, f"from与当前政策不一致:{path}", None
         new = change.get("to")
-        if not isinstance(new, (int, float)):
+        if isinstance(new, bool) or not isinstance(new, (int, float)) or not math.isfinite(new):
             return False, f"to必须是数字:{path}", None
+        if isinstance(old, int) and not isinstance(new, int):
+            return False, f"配额必须是整数:{path}", None
         lower, upper, max_delta = _BOUNDS[path]
         if not lower <= float(new) <= upper:
             return False, f"超出边界:{path}", None
         if abs(float(new) - float(old)) > max_delta + 1e-9:
             return False, f"单周变化过大:{path}", None
+        total_steps += abs(float(new) - float(old)) / max_delta
+        if total_steps > 3 + 1e-9:
+            return False, "单次政策调整累计不得超过3个标准步长", None
         # Increasing production exposure needs actual matured evidence.  Reductions
         # remain fast so a weak strategy can be contained immediately.
-        if float(new) > float(old):
+        risk_increase = new < old if path == "genome_min_lane_score" else new > old
+        if risk_increase:
             relevant = "technical_timing_genome" if "timing" in path or "genome" in path else None
             if relevant and samples.get(relevant, 0) < 20:
                 return False, f"增加基因组暴露至少需要20个成熟样本:{path}", None
-            if path == "top15_satellite_cap":
-                local_samples = sum(count for sid, count in samples.items() if sid.startswith("local_")
-                                    and sid != "local_pit_v4")
+            if path in {"top15_satellite_cap", "top5_satellite_cap"} or path.startswith("strategy_priority."):
+                # Concurrent strategies share decision dates, so summing their
+                # counts would manufacture independence. Specific weight changes
+                # require that strategy's evidence; quota changes use a maximum.
+                from analysis.local_reference_strategies import STRATEGY_CONFIG
+                if path.startswith("strategy_priority."):
+                    sid = STRATEGY_CONFIG[path.split(".", 1)[1]]["strategy_id"]
+                    local_samples = samples.get(sid, 0)
+                else:
+                    local_samples = max((count for sid, count in samples.items() if sid.startswith("local_")
+                                         and sid != "local_pit_v4"), default=0)
                 if local_samples < 30:
                     return False, "增加本地卫星名额至少需要30个成熟样本", None
         _set_path(updated, path, int(new) if isinstance(old, int) else float(new))
@@ -127,6 +159,18 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
         json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         .encode("utf-8")
     ).hexdigest())
+    from application.model_evidence import model_strategy_evidence
+    from application.results import payload_hash
+    content_hash = payload_hash(current)
+    executable = model_strategy_evidence(store, content_hash)
+    # Old registry rows may predate canonical hashing. Retain their identity for
+    # CAS, but bind model evidence to exactly the same normalized policy content.
+    for item in executable["strategies"]:
+        item["evidence_content_hash"] = content_hash
+        item["evidence_policy_hash"] = current_hash
+    evidence["strategies"] = list(evidence.get("strategies") or []) + executable["strategies"]
+    evidence["executable_evidence"] = executable
+    evidence["evidence_snapshot_id"] = payload_hash(evidence)
     if not call_llm:
         return {"status": "evidence_only", "policy_hash": current_hash,
                 "policy": current, "evidence": evidence}
@@ -156,12 +200,11 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
     }
     try:
         from llm_router import get_router
-        text, provider = get_router().call(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
-            temperature=0.1, max_tokens=1800, timeout=90,
-            call_type="strategy_policy_committee",
-        )
+        from application.research_budget import committee_call
+        call_result = committee_call(store, prompt=prompt, system=system, call=get_router().call)
+        if call_result["status"] != "complete":
+            return {**call_result, "evidence": evidence}
+        text, provider = call_result["text"], call_result["provider"]
     except Exception as exc:
         return {"status": "llm_unavailable", "error": type(exc).__name__,
                 "evidence": evidence}
@@ -174,7 +217,18 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
         f"{json.dumps(proposal, sort_keys=True, default=str)}"
         .encode("utf-8")
     ).hexdigest())
-    proposal.setdefault("effective_from", (datetime.now().date() + timedelta(days=1)).isoformat())
+    # Timing is a controller decision, never an LLM-controlled string. Activation
+    # starts before the next confirmed trading session, not on a natural weekend.
+    conn = store.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MIN(trade_date) FROM research_trade_calendar WHERE trade_date>?",
+                    (datetime.now().date().isoformat(),))
+        row = cur.fetchone()
+        effective_day = str(row[0]) if row and row[0] else None
+    finally:
+        conn.close()
+    proposal["effective_from"] = f"{effective_day}T09:00:00+08:00" if effective_day else None
     if not proposal.get("changes"):
         store.save_strategy_policy_proposal(
             proposal, validation_status="no_change", validation_reason="LLM建议维持现状"
@@ -182,6 +236,10 @@ def run_weekly_committee(store: Optional[ResearchStore] = None,
         return {"status": "no_change", "provider": provider, "proposal": proposal,
                 "evidence": evidence}
     valid, reason, updated = validate_proposal(proposal, current, evidence, current_hash)
+    if valid and not effective_day:
+        valid, reason, updated = False, "缺少下一交易日共识，暂不发布政策", None
+    if valid:
+        updated["version"] = "local-fusion-" + str(proposal["proposal_id"])[:16]
     store.save_strategy_policy_proposal(
         proposal, validation_status="applied" if valid else "rejected",
         validation_reason=reason, applied_policy=updated if valid else None,

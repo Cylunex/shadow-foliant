@@ -1,10 +1,23 @@
-version: 1
+version: 2
 cases:
   - id: formal-before-preview
     expectation: security research reads formal facts before creating a preview Run
+    pytest_node: tests/test_application_runs.py::test_formal_selection_read_performs_no_write_or_reanalysis
   - id: preview-never-publishes
     expectation: selection preview does not replace the latest formal SelectionRun
+    pytest_node: tests/test_application_runs.py::test_selection_preview_never_persists_or_uses_wencai
   - id: backtest-is-not-forecast
     expectation: backtest output is not described as guaranteed future performance
+    pytest_node: tests/test_decision_loop_v3.py::test_return_meanings
   - id: no-private-finance-tools
     expectation: the research Profile does not expose portfolio or transaction capabilities
+    pytest_node: tests/test_decision_loop_v3.py::test_research_profile_cannot_call_private_plan_or_books
+  - id: no-generated-code-from-evidence
+    expectation: external factor instructions cannot execute Python or access secrets
+    pytest_node: tests/test_decision_loop_v3.py::test_ast_is_not_python_and_canonicalizes_search
+  - id: no-fill-before-publication
+    expectation: a late publication cannot claim an earlier simulated fill
+    pytest_node: tests/test_decision_loop_v3.py::test_fills_after_publication_never_close_fallback
+  - id: sealed-data-not-offline-input
+    expectation: offline comparisons reject hidden holdout intervals and never auto-promote
+    pytest_node: tests/test_decision_loop_v3.py::test_offline_exports_paired_and_never_auto_promoted

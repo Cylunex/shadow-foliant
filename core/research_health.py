@@ -94,7 +94,7 @@ def snapshot(*, store: Optional[ResearchStore] = None,
     except Exception:
         financial_coverage = 0.0
 
-    latest = store.latest_selection()
+    latest = store.latest_formal_selection()
     last_selection = None
     selection_valid = False
     if latest:
@@ -132,9 +132,9 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         "last_sync": bool(
             last_sync and last_sync["as_of"] == expected
             and last_sync["status"] == "success"
-            and (last_sync["quality_status"] == "ok"
-                 or (last_sync["quality_status"] == "incomplete"
-                     and valuation_state["status"] == "lagged"))
+            # Required data are checked individually above. Optional ingestion
+            # gaps must not veto an otherwise usable formal decision snapshot.
+            and last_sync["quality_status"] in {"ok", "incomplete"}
         ),
         "pit_boundary": bool(
             pit.get("historical_pit_available") and pit.get("market_history_ready")
@@ -174,9 +174,88 @@ def snapshot(*, store: Optional[ResearchStore] = None,
 
 def data_snapshot(**kwargs) -> Dict[str, Any]:
     kwargs["require_selection"] = False
-    return snapshot(**kwargs)
+    return cached_snapshot(**kwargs)
 
 
 def selection_snapshot(**kwargs) -> Dict[str, Any]:
     kwargs["require_selection"] = True
-    return snapshot(**kwargs)
+    return cached_snapshot(**kwargs)
+
+
+def _report_key(store, selected, mode):
+    from application.results import payload_hash
+    from analysis.local_stock_selector import SelectionPolicy
+    conn = store.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT run_id FROM selection_runs WHERE publication_status='published' "
+                    "ORDER BY published_at DESC LIMIT 1")
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    vector = store.generation_vector()
+    identity = {"selection_date": selected, "mode": mode, "generations": vector,
+                "formal_run": str(row[0]) if row else None,
+                "policy_hash": SelectionPolicy.from_env().policy_hash}
+    return payload_hash(identity), identity
+
+
+def refresh_quality_report(*, store=None, selection_date=None, mode=None):
+    """Job-side computation only. HTTP readers never trigger full-market scoring."""
+    import json
+    from application.results import payload_hash
+    store = store or ResearchStore(ensure_schema=False)
+    selected = str(selection_date or date.today().isoformat())
+    mode = mode or _default_mode(selected)
+    key, identity = _report_key(store, selected, mode)
+    report = snapshot(store=store, selection_date=selected, mode=mode, require_selection=True)
+    after, _ = _report_key(store, selected, mode)
+    if after != key:
+        return {"status": "stale", "ready": False, "reason": "generation_changed_during_evaluation"}
+    report.update(report_id=key, identity=identity, evaluated_at=datetime.now(A_SHARE_TIMEZONE).isoformat())
+    encoded = json.dumps(report, ensure_ascii=False, default=str, allow_nan=False)
+    revision = payload_hash(report)
+    conn = store.connect()
+    try:
+        conn.execute("INSERT INTO research_artifacts "
+                     "(artifact_id,subject,artifact_kind,run_id,formal,schema_version,payload_hash,payload,created_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,artifact_kind) DO NOTHING",
+                     ("qr_" + revision, f"quality:{key}", "quality-report", revision, 0,
+                      "quality-report-v1", payload_hash(report), encoded, report["evaluated_at"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return report
+
+
+def cached_snapshot(*, store=None, selection_date=None, mode=None, require_selection=True):
+    import json
+    store = store or ResearchStore(ensure_schema=False)
+    selected = str(selection_date or date.today().isoformat())
+    mode = mode or _default_mode(selected)
+    key, identity = _report_key(store, selected, mode)
+    conn = store.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT payload FROM research_artifacts WHERE subject=? AND artifact_kind='quality-report' "
+                    "ORDER BY created_at DESC LIMIT 1", (f"quality:{key}",))
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"service": "shadow-foliant-research", "status": "stale", "ready": False,
+                "kind": "selection" if require_selection else "data", "identity": identity,
+                "checks": {"quality_report_current": False},
+                "reason": "quality_report_missing_or_generation_changed"}
+    report = dict(row[0]) if isinstance(row[0], dict) else json.loads(row[0])
+    age = (datetime.now(A_SHARE_TIMEZONE) - datetime.fromisoformat(report["evaluated_at"])).total_seconds()
+    if not 0 <= age <= 86400:
+        return {"service": "shadow-foliant-research", "status": "stale", "ready": False,
+                "checks": {"quality_report_current": False}, "reason": "quality_report_expired"}
+    report["checks"] = dict(report["checks"])
+    if not require_selection:
+        report["checks"].pop("formal_selection", None)
+    report["kind"] = "selection" if require_selection else "data"
+    report["ready"] = all(report["checks"].values())
+    report["status"] = "ready" if report["ready"] else "degraded"
+    return report

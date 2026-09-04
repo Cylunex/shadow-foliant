@@ -401,7 +401,7 @@ class WebAuthTests(unittest.TestCase):
             "runtime_health.snapshot",
             return_value={"ready": True, "status": "ready", "revision": "example"},
         ), patch(
-            "core.research_health.snapshot",
+            "core.research_health.cached_snapshot",
             return_value={
                 "ready": True, "status": "ready",
                 "usable_qfq_coverage": 0.99,

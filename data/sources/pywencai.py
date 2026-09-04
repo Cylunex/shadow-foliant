@@ -63,7 +63,15 @@ class _HttpsRequestsProxy:
             url = args[1]
             if isinstance(url, str) and url.startswith(self._HTTP_PREFIX):
                 args[1] = self._HTTPS_PREFIX + url[len(self._HTTP_PREFIX):]
-        response = self._requests.request(*args, **kwargs)
+        from data.provider_governor import provider_slot
+        if kwargs.get('timeout') is None:
+            kwargs['timeout'] = (5, 15)
+        with provider_slot('pywencai'):
+            response = self._requests.request(*args, **kwargs)
+            self._state.last_status = getattr(response, 'status_code', None)
+            # Charge every page/retry, not only the outer logical query.
+            if getattr(response, 'status_code', 200) in (401, 403, 429) or getattr(response, 'status_code', 200) >= 500:
+                raise PyWencaiRequestRejected('问财请求被限流或服务暂不可用')
         self._state.last_status = getattr(response, 'status_code', None)
         return response
 

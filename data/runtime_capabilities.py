@@ -42,7 +42,10 @@ DATASET_ROUTES: dict[str, dict[str, Any]] = {
         "primary": "zzshare.realtime",
         "fallback": ["eltdx.quotes", "tdx_python.quotes", "mairui.realtime", "moma.realtime"],
     },
-    "valuation": {"primary": "zzshare.valuation", "fallback": []},
+    "valuation": {"primary": "zzshare.valuation", "fallback": [
+        "tushare.valuation", "baostock.daily", "tencent.valuation",
+        "mairui.realtime", "moma.realtime", "eastmoney.valuation"],
+        "policy": "dated_field_composition_before_freeze; live_sources_same_day_close_only"},
     "financial_pit": {"primary": "zzshare.finance_pit", "fallback": []},
     "official_disclosure": {
         "primary": "cninfo.announcements",
@@ -64,7 +67,7 @@ DATASET_ROUTES: dict[str, dict[str, Any]] = {
         "policy": "reference_only",
     },
     "external_reference": {
-        "primary": "pywencai.discovery", "fallback": [], "policy": "reference_only",
+        "primary": "pywencai.discovery", "fallback": ["eastmoney_saas.discovery"], "policy": "reference_only",
     },
 }
 
@@ -85,6 +88,8 @@ def _configured(provider: str, auth: str) -> bool:
         "pywencai": ("PYWENCAI_COOKIE", "WENCAI_COOKIE"),
         "mairui": ("MAIRUI_LICENCE",),
         "moma": ("MOMA_TOKEN",),
+        "tushare": ("TUSHARE_TOKEN",),
+        "eastmoney_saas": ("EM_API_KEY",),
     }.get(provider, ())
     return any(str(os.getenv(name) or "").strip() for name in names)
 
@@ -94,13 +99,16 @@ def _enabled(provider: str) -> bool:
         "zzshare": "ZZSHARE_ENABLED",
         "eltdx": "TDX_USE_ELTDX",
         "tdx_python": "TDX_USE_TDX_PYTHON",
+        "easy_tdx": "TDX_USE_EASY_TDX",
+        "mootdx": "TDX_USE_MOOTDX",
         "mairui": "MAIRUI_ENABLED",
         "moma": "MOMA_ENABLED",
     }
     name = flags.get(provider)
     if not name:
         return True
-    return str(os.getenv(name, "true")).lower() not in {"0", "false", "no", "off"}
+    default = "false" if provider in {"easy_tdx", "mootdx"} else "true"
+    return str(os.getenv(name, default)).lower() not in {"0", "false", "no", "off"}
 
 
 def _connect():
@@ -276,8 +284,10 @@ def _stored_states() -> dict[tuple[str, str], dict[str, Any]]:
 
 def capability_snapshot() -> dict[str, Any]:
     from data.source_contracts import contracts
+    from data.provider_governor import budget_snapshot
 
     runtime = _stored_states()
+    governor = budget_snapshot()
     providers: dict[str, dict[str, Any]] = {}
     for provider, endpoints in contracts().items():
         provider_out: dict[str, Any] = {}
@@ -311,7 +321,11 @@ def capability_snapshot() -> dict[str, Any]:
                     "retries": contract.get("retries"),
                     "daily_request_limit": contract.get("daily_request_limit"),
                 },
+                "shared_governor": governor.get(provider),
+                "verification": "observed" if state.get("last_success_at") else "not_yet_observed",
             }
+            if (governor.get(provider) or {}).get("status") in {"cooling", "state_unreadable", "budget_exhausted"}:
+                item["available"] = False
             provider_out[endpoint] = item
         providers[provider] = provider_out
     try:

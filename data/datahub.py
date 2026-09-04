@@ -117,9 +117,8 @@ def _record(key: str, ok: bool, latency: float):
 import os as _os_route
 import concurrent.futures as _cf
 
-# ⭐ 每个数据源的硬超时(秒, 2026-06-23): 这是全项目外部数据的总闸门。
-# 任何源(腾讯/东财/新浪/akshare/...)的单次取数超过这个时间, 一律当失败切断 → 试下一个源,
-# 都没有就返回 empty。彻底根治"外部接口卡死拖垮整个任务"(quotes/kline/资金流 等无差别覆盖)。
+# 每个源的调用方等待上限。线程超时不是网络请求被取消；运行中的请求仍持有
+# provider 锁和 inflight 标记，直到真实退出，禁止重试叠加同源孤儿请求。
 # 可用 env DATAHUB_SOURCE_TIMEOUT 调整。
 _SOURCE_TIMEOUT = int(_os_route.getenv("DATAHUB_SOURCE_TIMEOUT", "20"))
 # 独立线程池跑源调用; 不用 with(__exit__ 会 wait 卡死的孤儿线程)。
@@ -132,28 +131,66 @@ _TO_LOG_LAST: Dict[str, float] = {}
 _TO_LOG_GAP = 60.0
 
 
+import threading as _route_threading
+_ROUTE_INFLIGHT = set()
+_ROUTE_INFLIGHT_LOCK = _route_threading.Lock()
+
+
 def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
            timeout: int = None):
-    """按健康度动态排序源链,依次试,返回第一个"非空"结果并记录统计(供自动升降级)。
+    """稳定等级优先，同等级按健康度排序，返回第一个非空结果。
     sources: [(源名, 无参thunk), ...]。DataFrame 用 not empty 判空,其余用 truthy。
-    ⭐ 每源套硬超时(默认 _SOURCE_TIMEOUT): 源卡死 timeout 秒后强制当失败 → 试下一个源,
-       不会无限等(根治 datahub.quotes 等卡死拖垮 jobs)。单源异常/超时被吞续试下一个。"""
+    有限等待和整条路由预算；底层超时线程不能强制取消，保留 inflight 防重入。"""
     to = timeout or _SOURCE_TIMEOUT
+    deadline = _time.monotonic() + min(90., max(float(to), float(to) * 2))
     now = _time.time()
     # ⚡ 全源熔断(2026-06-25):该域所有源都在活跃冷却期(连续失败沉底,score<-0.5)→ 外网/该域整体
     # 不可达,直接返回 empty,不再逐源吃满超时。外网全挂时让 监控/选股/快照 等批量任务秒级降级而非
     # 每只吃 quotes60s+kline135s 拖到任务超时(1813s 加仓审核即此)。冷却 120s 后自动放行重试 → 自愈。
     if sources and all(_health(f"{capability}:{n}", now) < -0.5 for n, _ in sources):
         return empty
-    ordered = sorted(sources, key=lambda ns: -_health(f"{capability}:{ns[0]}", now))
+    from data.provider_governor import PROVIDERS
+    aliases = {"east": "eastmoney", "em": "eastmoney", "em_datacenter": "eastmoney", "bkzj": "eastmoney",
+               "east_qfq": "eastmoney", "bs": "baostock", "baostock_qfq": "baostock", "baostock_idx": "baostock",
+               "sina_qfq": "sina", "sina_raw": "sina", "tickflow_qfq": "tickflow", "akshare_idx": "akshare",
+               "a_stock": "default", "fetcher": "default", "dsm": "default"}
+    ordered = sorted(sources, key=lambda ns: (
+        PROVIDERS.get(aliases.get(ns[0], ns[0]), (2,))[0],
+        -_health(f"{capability}:{ns[0]}", now)))
     for name, fn in ordered:
         key = f"{capability}:{name}"
+        if _health(key, now) < -0.5:
+            continue
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            break
+        with _ROUTE_INFLIGHT_LOCK:
+            if key in _ROUTE_INFLIGHT:
+                continue
+            _ROUTE_INFLIGHT.add(key)
+
+        def invoke(call=fn, call_key=key, provider=aliases.get(name, name)):
+            try:
+                # Legacy adapters also receive process-wide admission. Native
+                # quota-owning clients keep their stricter per-request guard.
+                if provider in PROVIDERS and provider not in {"baostock", "zzshare", "tushare", "mairui", "moma", "eltdx", "tdx_python"}:
+                    from data.provider_governor import provider_slot
+                    with provider_slot(provider, wait_seconds=to):
+                        return call()
+                return call()
+            finally:
+                with _ROUTE_INFLIGHT_LOCK:
+                    _ROUTE_INFLIGHT.discard(call_key)
+
         t0 = _time.time()
+        fut = None
         try:
-            fut = _ROUTE_POOL.submit(fn)
-            v = fut.result(timeout=to)
+            fut = _ROUTE_POOL.submit(invoke)
+            v = fut.result(timeout=min(to, remaining))
         except _cf.TimeoutError:
-            fut.cancel()  # 孤儿线程留底层自然结束, 不阻塞
+            if fut.cancel():
+                with _ROUTE_INFLIGHT_LOCK:
+                    _ROUTE_INFLIGHT.discard(key)
             _record(key, False, _time.time() - t0)
             _t = _time.time()
             if _t - _TO_LOG_LAST.get(key, 0) >= _TO_LOG_GAP:
@@ -161,6 +198,9 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
                 print(f"[datahub] ⏱️ {key} 源超时 {to}s, 切下一个源(60s 内同源仅提示一次)", flush=True)
             continue
         except Exception:
+            if fut is None or fut.done():
+                with _ROUTE_INFLIGHT_LOCK:
+                    _ROUTE_INFLIGHT.discard(key)
             _record(key, False, _time.time() - t0)
             continue
         good = (not v.empty) if isinstance(v, pd.DataFrame) else bool(v)

@@ -1,6 +1,6 @@
 version: 2
 app_id: foliant
-package_version: 0.4.0
+package_version: 0.5.0
 skills:
   - id: foliant-security-research
     path: skills/foliant-security-research/SKILL.md
@@ -144,6 +144,17 @@ capabilities:
     audience: foliant
     scopes: [stock.research]
     tools:
+      - name: foliant.selection.decision-loop
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_decision_loop
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 131072
+        max_model_chars: 12000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
       - name: foliant.selection.latest
         transport: http
         contract_ref: contracts/agent.openapi.yaml
@@ -247,6 +258,28 @@ capabilities:
     audience: foliant
     scopes: [stock.portfolio.read]
     tools:
+      - name: foliant.portfolio.action-plan
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_account_action_plan
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 131072
+        max_model_chars: 10000
+        timeout_ms: 30000
+        concurrency_safe: true
+        retry_policy: idempotent
+      - name: foliant.portfolio.books
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_account_books
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 131072
+        max_model_chars: 10000
+        timeout_ms: 12000
+        concurrency_safe: true
+        retry_policy: idempotent
       - name: foliant.portfolio.summary
         transport: http
         contract_ref: contracts/agent.openapi.yaml

@@ -255,7 +255,8 @@ class LLMRouter:
                     return platform_llm.call(
                         messages,
                         temperature=temperature,
-                        max_tokens=_platform_token_budget(max_tokens, thinking),
+                        max_tokens=(max_tokens if call_type == 'strategy_policy_committee'
+                                    else _platform_token_budget(max_tokens, thinking)),
                         thinking=thinking,
                         call_type=call_type,
                     )

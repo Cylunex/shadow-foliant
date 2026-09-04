@@ -1176,6 +1176,8 @@ def task_strategy_policy_weekly():
         pass
     try:
         from strategy_policy_controller import run_weekly_committee
+        from jobs.decision_loop_jobs import weekly_research_cycle
+        weekly_research_cycle()
         result = run_weekly_committee()
         status = str(result.get('status') or 'unknown')
         reason = str(result.get('reason') or '')
@@ -1233,10 +1235,17 @@ def task_eod_outcomes():
     except Exception as e:
         fails += 1
         parts.append(f"signal_err={type(e).__name__}:{str(e)[:50]}")
+    try:
+        from jobs.decision_loop_jobs import daily_decision_loop
+        loop_result = daily_decision_loop()
+        parts.append(f"decision_loop={loop_result.get('status')}")
+    except Exception as e:
+        fails += 1
+        parts.append(f"decision_loop_err={type(e).__name__}")
     # 两段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
     # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
     # 单段失败仍记 success(两段隔离是有意设计,另一段照常工作)。
-    _log_run(job, 'error' if fails >= 2 else 'success', error=' | '.join(parts),
+    _log_run(job, 'error' if fails >= 3 else 'success', error=' | '.join(parts),
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 
@@ -3764,6 +3773,8 @@ def task_research_data_sync():
         master = syncer.sync_master()
         stage = 'daily_market'
         result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
+        from jobs.decision_loop_jobs import refresh_quality
+        refresh_quality(syncer.store)
         stage = 'quality_gate'
         detail = _research_sync_detail(result, master)
         if result.get('quality_status') == 'ok':
@@ -3802,6 +3813,8 @@ def task_research_data_sync_retry():
     syncer = ResearchSynchronizer()
     today = datetime.now().strftime('%Y-%m-%d')
     if syncer.store.completed_sync('daily_market', today):
+        from jobs.decision_loop_jobs import refresh_quality
+        refresh_quality(syncer.store)
         _log_run(job, 'skipped', error='daily_market already complete',
                  started_at=started, finished_at=datetime.now().isoformat())
         return
@@ -3827,6 +3840,8 @@ def task_research_data_sync_retry():
         error=_research_repair_detail(today, result),
         started_at=started, finished_at=datetime.now().isoformat(),
     )
+    from jobs.decision_loop_jobs import refresh_quality
+    refresh_quality(syncer.store)
 
 
 def task_research_data_sync_premarket_retry():
@@ -3842,6 +3857,8 @@ def task_research_data_sync_premarket_retry():
     try:
         _, _, trade_date = _preopen_research_context(syncer)
         if syncer.store.completed_sync('daily_market', trade_date):
+            from jobs.decision_loop_jobs import refresh_quality
+            refresh_quality(syncer.store)
             _log_run(
                 job, 'skipped', error=f'daily_market {trade_date} already complete',
                 started_at=started, finished_at=datetime.now().isoformat(),
@@ -3870,6 +3887,8 @@ def task_research_data_sync_premarket_retry():
         error=_research_repair_detail(trade_date, result),
         started_at=started, finished_at=datetime.now().isoformat(),
     )
+    from jobs.decision_loop_jobs import refresh_quality
+    refresh_quality(syncer.store)
 
 
 def task_weekly_backtest():
@@ -4551,6 +4570,8 @@ def task_unified_selection():
             print('[unified_selection] 🧰 ' + _research_repair_detail(effective_market_date, repair),
                   flush=True)
         local_result = selector.run(selection_date, persist=True)
+        from jobs.decision_loop_jobs import refresh_quality
+        refresh_quality(syncer.store)
         local_candidates = local_result.get('candidates', [])
         if not local_candidates:
             reason = local_result.get('metadata', {}).get('reason', 'local selector returned no candidates')

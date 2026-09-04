@@ -1,5 +1,6 @@
 import { reactive, computed, onMounted, onUnmounted } from 'vue'
 import { api, cls, fmt } from '../lib.js'
+import DecisionLoop from './decision-loop.js'
 
 const STATUS_CN = {
   success:'正常', ready:'就绪', degraded:'降级', partial:'部分成功', stale:'已过期',
@@ -9,6 +10,7 @@ const STATUS_CN = {
 const FINAL_BAD = new Set(['error','failed','timeout','interrupted'])
 
 export default {
+  components: {DecisionLoop},
   template: `
   <div>
     <section class="command-hero">
@@ -63,6 +65,7 @@ export default {
       <div v-else class="empty-state"><div><b>暂无最终优选</b><br>下一次综合选股完成后自动生成。</div></div>
     </section>
 
+    <DecisionLoop />
     <div class="dashboard-grid">
       <section class="card">
         <div class="section-head">

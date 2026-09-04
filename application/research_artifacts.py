@@ -113,7 +113,10 @@ def build_selection_research_artifact(*, run_id: str, selection_date: str,
     context = dict(metadata.get("decision_context") or {})
     provenance = {
         "run_id": run_id,
-        "decision_at": context.get("decision_at"),
+        "decision_at": metadata.get("decision_at") or context.get("decision_at"),
+        "data_cutoff_at": context.get("decision_at"),
+        "selection_date": selection_date,
+        "published_at": metadata.get("published_at"),
         "market_as_of": metadata.get("market_as_of"),
         "financial_cutoff_at": context.get("financial_cutoff_at"),
         "universe_snapshot_id": metadata.get("universe_snapshot_id"),
@@ -158,7 +161,7 @@ def build_selection_research_artifact(*, run_id: str, selection_date: str,
         formal=True,
         artifact_kind="selection-research",
         evidence=evidence,
-        created_at=str(provenance.get("decision_at") or now_iso()),
+        created_at=str(provenance.get("published_at") or provenance.get("decision_at") or now_iso()),
     )
 
 
