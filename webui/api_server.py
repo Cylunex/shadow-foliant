@@ -566,7 +566,7 @@ class AgentBacktestPreviewReq(StrictAgentRequest):
 
 
 class AgentNexusTradeReviewReq(StrictAgentRequest):
-    intent: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    intent: Literal["foliant.trade.import"]
     summary: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     fields: dict[str, Any]
     source_text: Annotated[str, StringConstraints(max_length=12000)] = ""
