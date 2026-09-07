@@ -579,6 +579,19 @@ class AgentNexusReviewDecisionReq(StrictAgentRequest):
     revision: int | None = Field(default=None, ge=1)
 
 
+class AgentNexusTradeCommandReq(StrictAgentRequest):
+    protocol: Literal["shadow.command.v1"]
+    command_id: Annotated[str, StringConstraints(pattern=r"^cmd_[A-Za-z0-9_-]{8,128}$")]
+    capability_ref: Annotated[
+        str, StringConstraints(pattern=r"^shadow://capabilities/.+/foliant\.trades\.write$")
+    ]
+    operation_id: Literal["execute_nexus_foliant_command"]
+    schema_version: Literal[1]
+    arguments: AgentNexusTradeReviewReq
+    target_refs: list[str] = Field(default_factory=list, max_length=50)
+    source_refs: list[str] = Field(default_factory=list, max_length=50)
+
+
 def _agent_actor(request: Request) -> str:
     return str(getattr(request.state.agent_identity, "agent_id", ""))
 
@@ -814,6 +827,55 @@ def create_nexus_foliant_review(
             trace_id=getattr(request.state, "request_id", ""),
         )
         return _agent_result(value, max_bytes=131072, status_code=201)
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.post(
+    "/api/machine/v1/agent/nexus/commands",
+    operation_id="execute_nexus_foliant_command",
+)
+def execute_nexus_foliant_command(
+    command: AgentNexusTradeCommandReq,
+    request: Request,
+):
+    from application.runtime import get_application_services
+
+    try:
+        actor_id = _nexus_actor(request)
+        service = get_application_services().trade_entry
+        created = service.create_review(
+            actor_id=actor_id,
+            fields=command.arguments.fields,
+            idempotency_key=command.command_id,
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        committed = service.commit_review(
+            str(created["review_id"]),
+            actor_id=actor_id,
+            idempotency_key=f"{command.command_id}:commit",
+            trace_id=getattr(request.state, "request_id", ""),
+        )
+        resource_ref = committed.get("receipt") or committed.get("reference")
+        if not isinstance(resource_ref, str) or not resource_ref.startswith("shadow://"):
+            from application.services import ApplicationError
+            raise ApplicationError(
+                "invalid_execution_receipt", "trade receipt is invalid", status_code=502
+            )
+        return _agent_result({
+            "protocol": "shadow.execution-result.v1",
+            "command_id": command.command_id,
+            "capability_ref": command.capability_ref,
+            "operation_id": command.operation_id,
+            "status": "committed",
+            "result_kind": "record",
+            "resource_ref": resource_ref,
+            "receipt_ref": f"shadow://foliant/operations/{command.command_id}",
+            "completed_at": committed["created_at"],
+            "replayed": bool(committed.get("replayed")),
+            "summary": committed["summary"],
+            "fields": committed["fields"],
+        }, max_bytes=131072)
     except Exception as exc:
         return _agent_error(exc)
 

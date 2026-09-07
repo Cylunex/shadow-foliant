@@ -356,10 +356,21 @@ capabilities:
     resource_grant_required: true
     idempotency_required: true
   - id: foliant.trades.write
-    summary: 由 Nexus 隐藏 Host 将已校验成交 Review 幂等写入主组合并更新持仓
+    summary: 按用户当前意图直接保存已校验成交并更新私有持仓
     audience: foliant
     scopes: [stock.portfolio.write]
     tools:
+      - name: foliant.trades.execute
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: execute_nexus_foliant_command
+        exposure: hidden
+        result_mode: reference
+        max_result_bytes: 131072
+        max_model_chars: 1000
+        timeout_ms: 10000
+        concurrency_safe: false
+        retry_policy: idempotent
       - name: foliant.nexus.review.list
         transport: http
         contract_ref: contracts/agent.openapi.yaml
@@ -400,3 +411,10 @@ capabilities:
     reversible: true
     resource_grant_required: true
     idempotency_required: true
+    execution:
+      interaction: direct
+      effect_scope: private
+      reversibility: correctable
+      result_kind: record
+      authorization_mode: current_intent
+      idempotency_window_seconds: 86400

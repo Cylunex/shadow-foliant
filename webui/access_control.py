@@ -218,6 +218,7 @@ _add(
     "/api/machine/v1/agent/selection-runs",
     "/api/machine/v1/agent/backtest-runs",
     "/api/machine/v1/agent/nexus/reviews",
+    "/api/machine/v1/agent/nexus/commands",
     "/api/machine/v1/agent/nexus/reviews/{review_id}/commit",
     "/api/machine/v1/agent/nexus/reviews/{review_id}/reject",
 )
@@ -241,6 +242,7 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
+    ("POST", "/api/machine/v1/agent/nexus/commands"): "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/commit"):
         "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/reject"):
@@ -266,6 +268,7 @@ MACHINE_CAPABILITIES = {
     ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "foliant.trades.read",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.draft",
+    ("POST", "/api/machine/v1/agent/nexus/commands"): "foliant.trades.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/commit"):
         "foliant.trades.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews/{review_id}/reject"):

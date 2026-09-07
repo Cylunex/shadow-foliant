@@ -7,6 +7,16 @@ servers:
 security:
   - agentBearer: []
 paths:
+  /api/machine/v1/agent/nexus/commands:
+    post:
+      operationId: execute_nexus_foliant_command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: Strict execution receipt for the committed private trades}
   /api/machine/v1/agent/research/cases:
     get:
       operationId: get_agent_research_cases

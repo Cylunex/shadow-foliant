@@ -36,8 +36,8 @@ surfaces:
           tone: neutral
   - id: capture
     type: capture
-    capability: foliant.trades.draft
-    operation_id: create_nexus_foliant_review
+    capability: foliant.trades.write
+    operation_id: execute_nexus_foliant_command
     risk_level: L2
     intent_prefixes: [foliant.trade.import]
   - id: review
