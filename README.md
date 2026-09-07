@@ -48,3 +48,5 @@ pytest
 [真实数据运行加固](docs/REAL_DATA_HARDENING.md)。
 
 > 本项目仅用于个人研究与信息管理，不构成投资建议。
+
+- [统一鉴权、Agent 与 Nexus 接入设计（目标方案，尚未实现）](docs/nexus-integration-design.md)

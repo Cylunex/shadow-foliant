@@ -1,5 +1,7 @@
 # Shadow Foliant 插件接入
 
+> 2026-09-07 设计衔接：统一鉴权、Agent 与 Nexus 目标规范以 [本项目接入设计](nexus-integration-design.md) 为准。不再新增领域自管 OIDC/Session、Agent registry/Grant/审批中心或模型/工具通用循环；普通明确写入采用中央 current_intent。以下相关条目仅描述旧实现/历史阶段，不能作为新增实现继续复制；未迁移接口仍保留当前安全限制。
+
 Foliant 是独立部署的股票、基金、选股、研究、回测和组合分析领域服务。Stock Web/PWA
 仍是用户入口；Shadow Plugin 只描述 Runtime 如何用 Foliant 专属 Bearer 直接访问一组
 窄化远程能力。Platform 不代理行情、Prompt、持仓或研究正文，Foliant 也不依赖 DSH、
