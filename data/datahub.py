@@ -594,29 +594,63 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
       - tdx-python:Python 3.12+ 环境的增强 TDX 兜底
       - easy-tdx:仅在显式启用时加入旧协议兼容链
     _route 按健康度排序:某源连续卡死会降级,其余自动上位,不再让单点拖垮取数。"""
-    codes = [str(c) for c in (codes or []) if c]
+    codes = list(dict.fromkeys(_norm_code(c) for c in (codes or []) if _norm_code(c)))
     if not codes:
         return {}
-    sources = [("a_stock", lambda: _adapter().get_quotes(codes)),
-               ("eastmoney", lambda: _adapter().get_quotes_eastmoney(codes)),
-               ("sina", lambda: _adapter().get_quotes_sina(codes))]
+    sources = [("a_stock", lambda wanted: _adapter().get_quotes(wanted)),
+               ("sina", lambda wanted: _adapter().get_quotes_sina(wanted))]
     if _zzshare_available():
-        sources.append(("zzshare", lambda: _quotes_zzshare(codes)))
+        sources.append(("zzshare", _quotes_zzshare))
     if _eltdx_available():
-        sources.append(("eltdx", lambda: _quotes_eltdx(codes)))
+        sources.append(("eltdx", _quotes_eltdx))
     if _tdx_python_available():
-        sources.append(("tdx_python", lambda: _quotes_tdx_python(codes)))
+        sources.append(("tdx_python", _quotes_tdx_python))
     if _easy_tdx_available():
-        sources.append(("easy_tdx", lambda: _quotes_easy_tdx(codes)))
+        sources.append(("easy_tdx", _quotes_easy_tdx))
     # 两个额度独立但接口/上游高度相似，只作为既有独立行情链的末位补洞源。
     if _mairui_available():
-        sources.append(("mairui", lambda: _quotes_mairui(codes)))
+        sources.append(("mairui", _quotes_mairui))
     if _moma_available():
-        sources.append(("moma", lambda: _quotes_moma(codes)))
-    raw = _route("quotes", sources, empty={}) or {}
-    norm = {_norm_code(k): v for k, v in raw.items()}
-    _name_remember(norm)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)
-    return norm
+        sources.append(("moma", _quotes_moma))
+
+    # A non-empty partial batch is not a successful full-pool quote.  The old
+    # generic router stopped at the first such response, so a stock-only source
+    # could strand every ETF/fund in a mixed portfolio.  Keep one public batch
+    # call while asking later providers only for the remaining symbols.
+    try:
+        budget = min(60.0, max(5.0, float(
+            _os.environ.get("DATAHUB_QUOTES_BUDGET_SECONDS", "24")
+        )))
+    except (TypeError, ValueError):
+        budget = 24.0
+    deadline = _time.monotonic() + budget
+    merged: Dict[str, dict] = {}
+    for name, fetch in sources:
+        missing = [code for code in codes if code not in merged]
+        remaining = deadline - _time.monotonic()
+        if not missing or remaining <= 0:
+            break
+        raw = _route(
+            "quotes", [(name, lambda wanted=missing, call=fetch: call(wanted))],
+            empty={}, timeout=max(1, min(_SOURCE_TIMEOUT, int(remaining))),
+        ) or {}
+        retrieved_at = pd.Timestamp.now(tz="Asia/Shanghai").isoformat()
+        for raw_code, raw_quote in raw.items():
+            code = _norm_code(raw_code)
+            if code not in missing or not isinstance(raw_quote, dict):
+                continue
+            quote_row = dict(raw_quote)
+            quote_row.setdefault("source", name)
+            # Provider timestamps win. For live endpoints without a row time,
+            # retain the bounded batch receipt time instead of dropping as-of.
+            if not str(quote_row.get("quote_time") or "").strip():
+                quote_row["retrieved_at"] = retrieved_at
+                quote_row["quote_time_source"] = "batch_retrieved_at"
+            else:
+                quote_row["quote_time_source"] = "provider"
+            merged[code] = quote_row
+    _name_remember(merged)   # 顺带把中文名焐进持久缓存(见下:行情源挂了也能出名)
+    return merged
 
 
 def quote(code: str) -> dict:

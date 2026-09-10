@@ -55,7 +55,7 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
         now = datetime.fromisoformat(now)
     quotes = {}
     for symbol, row in (raw_quotes or {}).items():
-        stamp = row.get("quote_time") or row.get("observed_at")
+        stamp = row.get("quote_time") or row.get("observed_at") or row.get("retrieved_at")
         try:
             timestamp = _quote_timestamp(stamp)
             rules = equity_rules(symbol)

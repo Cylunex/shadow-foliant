@@ -43,8 +43,9 @@ def _candidate(row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     allowed = (
-        "symbol", "code", "name", "rank", "score", "final_score", "assigned_lane",
-        "source_labels", "technical_state", "trade_plan",
+        "symbol", "code", "name", "rank", "score", "total_score", "final_score",
+        "assigned_lane", "source_labels", "technical_state", "trade_plan",
+        "score_components", "tradeability", "data_quality",
     )
     value = {key: row.get(key) for key in allowed if key in row}
     symbol = str(value.get("symbol") or value.get("code") or "")
@@ -68,11 +69,13 @@ def _quote(symbol: str, row: Any) -> dict[str, Any]:
         row = {}
     allowed = (
         "name", "price", "change_pct", "open", "high", "low", "volume", "amount_wan",
-        "quote_time", "observed_at", "source", "suspended", "limit_up", "limit_down",
+        "quote_time", "observed_at", "retrieved_at", "quote_time_source", "source",
+        "suspended", "limit_up", "limit_down",
     )
     value = {key: row.get(key) for key in allowed if key in row}
     value["symbol"] = symbol
-    value["as_of"] = row.get("quote_time") or row.get("observed_at")
+    value["as_of"] = (row.get("quote_time") or row.get("observed_at")
+                      or row.get("retrieved_at"))
     return clean_json(value)
 
 
@@ -98,6 +101,7 @@ class ScheduledSnapshotService:
         cockpit_reader: Callable[..., dict[str, Any]] | None = None,
         context_reader: Callable[[], dict[str, Any]] | None = None,
         capsule_reader: Callable[[], dict[str, Any] | None] | None = None,
+        intraday_reader: Callable[[], dict[str, Any]] | None = None,
         quote_loader: Callable[[list[str]], dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -106,6 +110,7 @@ class ScheduledSnapshotService:
         self.cockpit_reader = cockpit_reader
         self.context_reader = context_reader
         self.capsule_reader = capsule_reader
+        self.intraday_reader = intraday_reader
         self.quote_loader = quote_loader
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
 
@@ -130,6 +135,10 @@ class ScheduledSnapshotService:
             from application.decision_loop import DecisionLoopService
 
             self.capsule_reader = DecisionLoopService(self.store).capsule
+        if self.intraday_reader is None:
+            from jobs.intraday_decision_monitor import latest_snapshot
+
+            self.intraday_reader = latest_snapshot
         if self.quote_loader is None:
             import datahub
 
@@ -243,6 +252,7 @@ class ScheduledSnapshotService:
                 "strategy_id": raw.get("strategy_id"),
                 "strategy_version": raw.get("strategy_version"),
                 "status": str(raw.get("status") or "missing"),
+                "failure_code": raw.get("failure_code"),
                 "picks": picks[:15],
             })
         present = sum(1 for row in rows if row["status"] != "missing")
@@ -256,6 +266,28 @@ class ScheduledSnapshotService:
             "ready_groups": ready,
             "strategies": rows,
             "as_of": payload.get("executed_at"),
+        }
+
+    @staticmethod
+    def _independent(selection_value: dict[str, Any]) -> dict[str, Any]:
+        data = selection_value.get("data") or {}
+        payload = ((data.get("references") or {}).get("independent") or {})
+        ready = payload.get("status") == "ready"
+        return {
+            "status": "complete" if ready else "missing",
+            "availability": payload.get("status") or "unavailable",
+            "reason": payload.get("reason"),
+            "strategy_id": payload.get("strategy_id"),
+            "strategy_version": payload.get("strategy_version"),
+            "strategy_hash": payload.get("strategy_hash"),
+            "manifest_id": payload.get("manifest_id"),
+            "input_snapshot_id": payload.get("input_snapshot_id"),
+            "market_as_of": payload.get("market_as_of"),
+            "weights": clean_json(payload.get("weights") or {}),
+            "top15": [_candidate(row) for row in (payload.get("top15") or [])][:15],
+            "top5": [_candidate(row) for row in (payload.get("top5") or [])][:5],
+            "independence_boundary": payload.get("independence_boundary"),
+            "comparison": clean_json(data.get("selection_comparison") or {}),
         }
 
     def read(self, *, owner_id: str) -> dict[str, Any]:
@@ -273,6 +305,7 @@ class ScheduledSnapshotService:
                 ),
                 "cockpit": {"status": "missing"},
                 "formal_selection": {"status": "missing", "formal_top15": [], "formal_top5": []},
+                "independent_selection": {"status": "missing", "top15": [], "top5": []},
                 "wencai_reference": {"status": "missing", "reference_only": True, "strategies": []},
                 "holdings": {"status": "missing", "rows": []},
                 "trade_plans": {"status": "missing", "formal": [], "portfolio_risk": {}},
@@ -299,6 +332,7 @@ class ScheduledSnapshotService:
             selection_value = {"status": "missing", "data": None, "warnings": []}
         formal = self._formal(selection_value, trading_day)
         wencai = self._wencai(selection_value)
+        independent = self._independent(selection_value)
 
         try:
             context = self.context_reader() or {"holdings": [], "watermark": ""}
@@ -333,6 +367,22 @@ class ScheduledSnapshotService:
             except Exception:
                 quote_state = "missing"
         quote_rows = [_quote(symbol, raw_quotes.get(symbol)) for symbol in symbols]
+        try:
+            from jobs.intraday_decision_monitor import assess_quotes
+
+            quote_quality = assess_quotes(
+                [{"symbol": symbol} for symbol in symbols], raw_quotes, now
+            )
+            by_symbol = quote_quality.get("items") or {}
+            for row in quote_rows:
+                assessed = by_symbol.get(row["symbol"]) or {}
+                row["as_of"] = assessed.get("quote_as_of") or row.get("as_of")
+                row["freshness"] = (
+                    "actionable" if assessed.get("price_actionable") else "stale_or_missing"
+                )
+            quote_state = quote_quality.get("status") or quote_state
+        except Exception:
+            quote_quality = {}
         quotes = {
             "status": quote_state,
             "requested_count": len(symbols),
@@ -340,6 +390,8 @@ class ScheduledSnapshotService:
             "batch_count": 1 if symbols else 0,
             "rows": quote_rows[:115],
             "as_of": max((str(row.get("as_of") or "") for row in quote_rows), default="") or None,
+            "missing_by_asset_type": quote_quality.get("missing_by_asset_type") or {},
+            "unsupported_asset_symbols": quote_quality.get("unsupported_asset_symbols") or [],
         }
 
         if context is None:
@@ -364,9 +416,17 @@ class ScheduledSnapshotService:
                 account_plan = {"status": "degraded", "preview_only": True,
                                 "error_code": "portfolio_risk_unavailable"}
 
+        try:
+            intraday_value = self.intraday_reader() or {}
+            intraday = intraday_value.get("data") or {}
+        except Exception:
+            intraday = {}
+        persisted_plans = intraday.get("plans") or {}
         formal_plans = [
-            {"symbol": row.get("symbol"), "trade_plan": row.get("trade_plan")}
-            for row in formal.get("formal_top15") or [] if row.get("trade_plan")
+            {"symbol": row.get("symbol"),
+             "trade_plan": row.get("trade_plan") or persisted_plans.get(row.get("symbol"))}
+            for row in formal.get("formal_top15") or []
+            if row.get("trade_plan") or persisted_plans.get(row.get("symbol"))
         ]
         plan_projection = _action_plan(account_plan)
         plan_state = str(plan_projection.get("status") or "complete")
@@ -376,6 +436,8 @@ class ScheduledSnapshotService:
             "status": plan_state,
             "formal": formal_plans[:15],
             "portfolio_risk": plan_projection,
+            "holding_actions": clean_json(intraday.get("holdings") or [])[:100],
+            "intraday_as_of": intraday.get("generated_at"),
             "preview_only": True,
             "auto_execution": False,
         }
@@ -384,6 +446,7 @@ class ScheduledSnapshotService:
             "trading_day": trading_day.get("status"),
             "cockpit": cockpit.get("status"),
             "formal_selection": formal.get("status"),
+            "independent_selection": independent.get("status"),
             "wencai_reference": wencai.get("status"),
             "holdings": holdings.get("status"),
             "trade_plans": trade_plans.get("status"),
@@ -397,6 +460,7 @@ class ScheduledSnapshotService:
             "trading_day": trading_day,
             "cockpit": cockpit,
             "formal_selection": formal,
+            "independent_selection": independent,
             "wencai_reference": wencai,
             "holdings": holdings,
             "trade_plans": trade_plans,
@@ -405,6 +469,7 @@ class ScheduledSnapshotService:
                 "captured_at": captured_at,
                 "calendar": trading_day.get("as_of"),
                 "formal_selection": formal.get("selection_date"),
+                "independent_selection": independent.get("market_as_of"),
                 "wencai": wencai.get("as_of"),
                 "holdings": holdings.get("as_of"),
                 "quotes": quotes.get("as_of"),

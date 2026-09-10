@@ -39,6 +39,11 @@ def _formal(day="2026-09-10"):
                     {"symbol": "999999", "name": "外部独有"},
                 ]}},
             }},
+            "independent_selection": {"payload": {
+                "status": "ready", "strategy_version": "codex-independent-v1",
+                "top15": [{"symbol": "600002"}, {"symbol": "600004"}],
+                "top5": [{"symbol": "600002"}],
+            }},
         },
     }
 
@@ -140,6 +145,8 @@ def test_cycle_uses_one_batch_quote_and_statefully_rearms_after_exit_and_cooldow
     assert len(quote_calls) == 1
     assert set(quote_calls[0]) == {"000001", "600001", "600002", "600003"}
     assert sum("进入买入区" in title for title, _ in alerts) == 3
+    assert first["independent_selection"]["status"] == "ready"
+    assert first["selection_comparison"]["availability"]["wencai"] is False
 
     quote_now[0] = now + timedelta(minutes=20)
     monitor.run_cycle(now=quote_now[0], **kwargs)
@@ -236,6 +243,19 @@ def test_stale_quotes_fail_closed_and_report_quality():
     assert "as-of" in text
     assert "暂不给价" in text
     assert "失败关闭" in text
+
+
+def test_batch_retrieved_at_keeps_existing_price_fresh_when_provider_omits_row_time():
+    now = datetime(2026, 9, 10, 11, 20, tzinfo=TZ)
+    quality = monitor.assess_quotes(
+        [{"symbol": "510300"}],
+        {"510300": {"price": 4.25, "retrieved_at": now.isoformat(),
+                    "quote_time_source": "batch_retrieved_at", "source": "sina"}},
+        now,
+    )
+    assert quality["status"] == "success"
+    assert quality["items"]["510300"]["price_actionable"] is True
+    assert quality["items"]["510300"]["quote_time_source"] == "batch_retrieved_at"
 
 
 def test_missing_plan_fails_closed_for_holding_action_and_prices():

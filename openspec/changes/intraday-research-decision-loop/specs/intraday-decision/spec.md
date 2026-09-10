@@ -50,3 +50,21 @@ as-of。TOP5 MUST 为高优先级，TOP15 其余 MUST 为观察级。
 
 系统 MUST 保存区分 `holdings`、`formal_top5`、`formal_top15_watch` 和 `wencai_reference` 的完整当日快照，
 并 MUST 提供 Agent 只读查询。即时通知 SHOULD 只发送有界摘要。
+
+## Requirement: 可复现的独立选股对照
+
+系统 MUST 从正式 run 锁定的同一 PIT manifest 构建 `codex-independent-v1`，且 MUST NOT 读取正式或问财
+成员、排名和分数。权重 MUST 固定为 30/25/20/15/10；任一必要维度缺失的标的 MUST 排除，
+不得重配权重。产物 MUST 保存 TOP15/TOP5、分项分、策略版本/哈希、manifest/snapshot/as-of，并进入
+1/3/5/10/20 交易日结果跟踪。
+
+### Scenario: 问财全部失败
+
+- **WHEN** 正式与独立产物有效，但任一必要问财组不可用
+- **THEN** 系统只输出正式/独立两方交集及各自独有项
+- **AND** 三方比较 MUST 为不可用，不得将问财缺失当作空集
+
+## Requirement: 现金未知时的风险边界
+
+未知可用现金 MUST 阻止加仓和替换预览，但 MUST NOT 阻止以证券市值为保守分母的持仓风险评估，
+也 MUST NOT 阻止对已知可卖数量生成减仓/卖出研究预览。

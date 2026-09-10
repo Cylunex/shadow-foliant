@@ -88,15 +88,20 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
     alternatives = [{"kind": "hold", "actions": [], "feasible": True,
                      "reason": "不动也是有效选择"}]
     reductions = []
-    if nav and nav > 0:
-        turnover_budget = nav * Decimal(str(limits.max_turnover))
-        industry_over = {key: max(Decimal(0), value - nav * Decimal(str(limits.max_industry))) for key, value in industry_values.items()}
-        theme_over = {key: max(Decimal(0), value - nav * Decimal(str(limits.max_theme))) for key, value in theme_values.items()}
+    # Unknown cash blocks additions, but it must not erase observable holdings risk
+    # or prevent a conservative reduction preview.  Securities MV is a lower-bound
+    # NAV denominator until a user-confirmed cash balance is supplied.
+    risk_nav = nav if nav is not None else mv
+    reduction_blockers = [item for item in failures if item != "cash_unknown"]
+    if risk_nav and risk_nav > 0:
+        turnover_budget = risk_nav * Decimal(str(limits.max_turnover))
+        industry_over = {key: max(Decimal(0), value - risk_nav * Decimal(str(limits.max_industry))) for key, value in industry_values.items()}
+        theme_over = {key: max(Decimal(0), value - risk_nav * Decimal(str(limits.max_theme))) for key, value in theme_values.items()}
         for symbol, value in sorted(position_values.items(), key=lambda item: -item[1]):
             holding = held[symbol]
             industry = holding.get("industry") or "unknown"
             themes = holding.get("themes") or ["unknown"]
-            over = max(value - nav * Decimal(str(limits.max_position)),
+            over = max(value - risk_nav * Decimal(str(limits.max_position)),
                        industry_over.get(industry, 0), *(theme_over.get(theme, 0) for theme in themes))
             if over <= 0 or holding.get("sellable") is None:
                 continue
@@ -120,7 +125,7 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
                 for theme in themes:
                     theme_over[theme] = max(Decimal(0), theme_over.get(theme, 0) - price * qty)
     alternatives.append({"kind": "reduce", "actions": reductions,
-                         "feasible": bool(reductions) and not failures,
+                         "feasible": bool(reductions) and not reduction_blockers,
                          "reason": "按已知可卖数量减少超限持仓；未核实可卖的持仓不生成卖单"})
     additions, rejected = [], []
     if allow_add and not failures:

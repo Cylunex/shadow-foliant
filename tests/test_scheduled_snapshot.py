@@ -53,8 +53,25 @@ def selection(*, day="2026-09-10", with_wencai=True):
             "selection_date": day,
             "formal_top15": top15,
             "formal_top5": top15[:5],
-            "references": {"wencai": {"executed_at": NOW.isoformat(),
-                                        "strategies": strategies}},
+            "references": {
+                "wencai": {"executed_at": NOW.isoformat(), "strategies": strategies},
+                "independent": {
+                    "status": "ready", "strategy_id": "codex-independent",
+                    "strategy_version": "codex-independent-v1", "strategy_hash": "fixed",
+                    "manifest_id": "manifest", "input_snapshot_id": "independent-snapshot",
+                    "market_as_of": "2026-09-09",
+                    "weights": {"fundamental_quality": 30, "medium_trend": 25,
+                                "valuation": 20, "flow_liquidity": 15,
+                                "risk_discount": 10},
+                    "top15": top15, "top5": top15[:5],
+                    "independence_boundary": "immutable_manifest_inputs_only",
+                },
+            },
+            "selection_comparison": {
+                "availability": {"formal": True, "independent": True,
+                                 "wencai": bool(with_wencai)},
+                "pairwise": {}, "triple": None,
+            },
         },
     }
 
@@ -118,6 +135,9 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert snapshot["trade_plans"]["auto_execution"] is False
     assert len(snapshot["trade_plans"]["formal"]) == 15
     assert "note" not in snapshot["holdings"]["rows"][1]
+    assert snapshot["independent_selection"]["status"] == "complete"
+    assert len(snapshot["independent_selection"]["top5"]) == 5
+    assert snapshot["quality"]["sections"]["independent_selection"] == "complete"
 
 
 def test_unknown_calendar_never_uses_weekday_fallback():

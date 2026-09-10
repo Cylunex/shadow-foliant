@@ -3,7 +3,7 @@
 ## Requirement: 受保护的有界计划快照
 
 Foliant MUST 通过独立 Agent capability 提供一次性只读快照；快照 MUST 包含交易日依据、
-cockpit、正式 TOP15/TOP5、五组问财参考、真实持仓、正式交易计划、组合风控行动预览、批量行情
+cockpit、正式 TOP15/TOP5、`codex-independent-v1` TOP15/TOP5、五组问财参考、真实持仓、正式交易计划、组合风控行动预览、批量行情
 及各分区 as-of/quality。该能力 MUST 要求个人主组合 resource grant，MUST NOT 下单或修改数据。
 
 ### Scenario: 研究 Agent 请求私人快照
@@ -22,6 +22,17 @@ Then 返回 403，且不返回持仓数量、成本或证券明细。
 Given 正式 TOP15/TOP5 完整且问财 artifact 缺失
 When 生成计划快照
 Then 正式候选保持完整，问财状态为 missing，整体质量为 degraded。
+
+## Requirement: 独立选股与有效性感知对照
+
+快照 MUST 投影独立选股的版本/哈希、manifest/snapshot/as-of、固定权重和 TOP15/TOP5。
+两两或三方比较 MUST 只在参与方各自有效时输出；问财任一必要组失败时，三方结果 MUST 为不可用。
+
+### Scenario: 只有正式与独立有效
+
+Given 正式与独立 TOP15 有效，问财存在失败组
+When 生成计划快照
+Then 快照返回正式/独立交集和各自独有项，三方结果为不可用。
 
 ## Requirement: 权威交易日与陈旧度
 

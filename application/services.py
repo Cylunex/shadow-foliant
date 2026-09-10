@@ -514,6 +514,10 @@ class SelectionRunService:
         final_candidates = decorate(top5)
         references = {
             "wencai": (artifacts.get("wencai_strategy_runs") or {}).get("payload") or {},
+            "independent": (artifacts.get("independent_selection") or {}).get("payload") or {
+                "status": "unavailable", "reason": "artifact_missing",
+                "top15": [], "top5": [],
+            },
             "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},
             "miaoxiang_review": (artifacts.get("miaoxiang_review") or {}).get("payload") or {},
         }
@@ -526,6 +530,7 @@ class SelectionRunService:
             ),
             "fusion_policy": (artifacts.get("fusion_policy") or {}).get("payload") or {},
         }
+        from analysis.independent_selector import comparison as compare_selection_lanes
         payload = {
             "selection_date": latest.get("selection_date"),
             "candidates": candidates,
@@ -535,6 +540,9 @@ class SelectionRunService:
             "lane_counts": metadata.get("lane_counts") or {},
             "strategy_inputs": strategy_inputs,
             "references": references,
+            "selection_comparison": compare_selection_lanes(
+                top15, references["independent"], references["wencai"]
+            ),
             "comparison": latest.get("comparison") or {},
             "formal": True,
         }

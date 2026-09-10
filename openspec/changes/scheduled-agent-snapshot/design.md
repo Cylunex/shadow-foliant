@@ -7,7 +7,7 @@ Codex heartbeat / cron CLI
   -- HTTPS + Agent Bearer --> Foliant Agent HTTP
   -- exact capability ----> ScheduledSnapshotService
                               |-- authoritative calendar consensus
-                              |-- existing cockpit / formal SelectionRun
+                              |-- existing cockpit / formal + independent SelectionRun artifacts
                               |-- delegated portfolio snapshot + action-plan rules
                               `-- one batched quote request
   -- explicit --send-qq --> existing notification_router --> QQ webhook
@@ -23,6 +23,8 @@ Codex heartbeat / cron CLI
 中映射为稳定错误码与修复提示，不回显异常、URL、Token 或响应正文。正式 TOP15/TOP5 只来自
 已发布且 Manifest 完整的 SelectionRun；五组问财保持独立 reference 分区，缺失不会改变正式
 候选。行情一次按“TOP15 ∪ 持仓”批量读取，并为每只证券保留 observation time。
+行时间缺失但批次接收时间可信时，快照保留该 as-of 及来源，不把所有已存价格误标为陈旧。
+独立产物只是同一 PIT manifest 的可复现对照；对照计算保留输入有效性，不把缺失源当作空候选集。
 
 `trading_day.confirmed=true` 只在仓库内双源日历共识覆盖目标自然日时成立。在线日历失败后的
 weekday fallback 不进入这个合同。正式产物日期相对最近确认开市日落后时标记 stale。

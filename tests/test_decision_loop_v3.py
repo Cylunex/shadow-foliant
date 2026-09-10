@@ -449,3 +449,27 @@ def test_industry_reduction_and_stale_preview_are_explicit(capsule):
     plan = build_action_plan(capsule, holdings, quotes, holdings_version="v1", owner_id="owner", now=now,
                              cash=10000, limits=AccountLimits(max_position=.5, max_turnover=.3))
     assert next(a for a in plan["alternatives"] if a["kind"] == "reduce")["actions"]
+
+
+def test_unknown_cash_blocks_add_but_not_conservative_reduction(capsule):
+    from dataclasses import asdict
+    from analysis.account_action_plan import AccountLimits
+
+    now = "2026-09-04T10:00:00+08:00"
+    holdings = [{
+        "symbol": symbol, "quantity": 1000, "sellable": 1000, "industry": "bank",
+        "execution_rules": asdict(ExecutionRules()),
+    } for symbol in ("600001", "600002")]
+    quotes = {
+        row["symbol"]: {"price": 10, "observed_at": now, "liquidity_budget": 10000}
+        for row in holdings
+    }
+    plan = build_action_plan(
+        capsule, holdings, quotes, holdings_version="v1", owner_id="owner", now=now,
+        cash=None, allow_add=True, limits=AccountLimits(max_position=.5, max_turnover=.3),
+    )
+    reduction = next(item for item in plan["alternatives"] if item["kind"] == "reduce")
+    addition = next(item for item in plan["alternatives"] if item["kind"] == "add")
+    assert "cash_unknown" in plan["blockers"]
+    assert reduction["actions"] and reduction["feasible"] is True
+    assert addition["actions"] == [] and addition["feasible"] is False

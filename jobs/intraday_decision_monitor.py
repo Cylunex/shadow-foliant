@@ -154,11 +154,13 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         symbol = item["symbol"]
         quote = quotes.get(symbol) or quotes.get(str(symbol).zfill(6)) or {}
         price = _finite(quote.get("price")) if isinstance(quote, dict) else None
-        stamp, stamp_source = _parse_quote_time(
-            quote.get("quote_time") if isinstance(quote, dict) else None, now
-        )
+        raw_stamp = (quote.get("quote_time") or quote.get("as_of")
+                     or quote.get("retrieved_at")) if isinstance(quote, dict) else None
+        stamp, parsed_source = _parse_quote_time(raw_stamp, now)
+        declared_source = str(quote.get("quote_time_source") or "").strip()
+        stamp_source = declared_source or parsed_source
         age_minutes = max(0.0, (now - stamp).total_seconds() / 60.0)
-        is_stale = stamp_source == "provider" and age_minutes > stale_minutes
+        is_stale = bool(raw_stamp) and age_minutes > stale_minutes
         actionable = bool(price and price > 0 and not is_stale)
         if not price or price <= 0:
             missing.append(symbol)
@@ -172,6 +174,7 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
             "change_pct": _finite(quote.get("change_pct")) if isinstance(quote, dict) else None,
             "quote_as_of": stamp.isoformat(timespec="seconds"),
             "quote_time_source": stamp_source,
+            "quote_provider": quote.get("source") if isinstance(quote, dict) else None,
             "quote_age_minutes": round(age_minutes, 2),
             "price_actionable": actionable,
         }
@@ -185,12 +188,22 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         status = "degraded"
     else:
         status = "success"
+    missing_asset_types: dict[str, list[str]] = {}
+    for symbol in missing:
+        asset_type = (
+            "fund_or_etf" if symbol.startswith(("15", "16", "18", "50", "51", "52", "56", "58"))
+            else "a_share" if symbol[:1] in {"0", "2", "3", "4", "6", "8", "9"}
+            else "unsupported_or_unknown"
+        )
+        missing_asset_types.setdefault(asset_type, []).append(symbol)
     return {
         "status": status,
         "requested": requested,
         "valid": len(valid),
         "coverage": round(coverage, 4),
         "missing_symbols": missing,
+        "missing_by_asset_type": missing_asset_types,
+        "unsupported_asset_symbols": missing_asset_types.get("unsupported_or_unknown", []),
         "stale_symbols": stale,
         "quote_as_of": min(as_of_values).isoformat(timespec="seconds") if as_of_values else None,
         "items": rows,
@@ -229,6 +242,23 @@ def _build_missing_plans(formal: dict[str, Any], pool: list[dict[str, Any]],
             continue
         try:
             frame = panel[panel["symbol"].astype(str).str[-6:] == symbol].copy()
+            basis = "formal_manifest_qfq"
+            if frame.empty and "holding" in (item.get("sources") or []):
+                # Funds/ETFs and holdings outside the A-share selection universe
+                # are absent from the formal manifest. Fixed nodes may reuse the
+                # warmed qfq cache; the 20-minute loop never enters this branch.
+                import datahub
+
+                frame = datahub.kline(symbol, "1y", "1d", use_cache=True, adjust="qfq")
+                quality = datahub.kline_quality(frame)
+                if not quality.get("actionable"):
+                    plans[symbol] = {
+                        "available": False, "action": "hold", "action_cn": "不动",
+                        "blockers": [f"持仓 qfq 日 K 不可用：{quality.get('reason') or 'unknown'}"],
+                        "price_basis": "fixed_node_warmed_qfq_cache",
+                    }
+                    continue
+                basis = f"fixed_node_warmed_qfq_cache:{quality.get('source') or 'unknown'}"
             if not frame.empty and "trade_date" in frame.columns:
                 frame = frame.sort_values("trade_date")
                 frame.index = pd.to_datetime(frame["trade_date"], errors="coerce")
@@ -246,7 +276,7 @@ def _build_missing_plans(formal: dict[str, Any], pool: list[dict[str, Any]],
                 "blockers": [f"本地交易计划生成失败：{type(exc).__name__}"],
             }
         plan["price_basis"] = (
-            f"trade_plan；正式 manifest {manifest_id[:12]}；"
+            f"trade_plan；{basis}；manifest {manifest_id[:12]}；"
             f"qfq 日线截至 {(formal.get('metadata') or {}).get('market_as_of') or '未知'}"
         )
         plan["plan_as_of"] = (formal.get("metadata") or {}).get("market_as_of")
@@ -388,7 +418,13 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
             f"{row.get('action_cn')}｜卖出/止损{_row_price(row, 'stop_loss')}｜"
             f"止盈{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
         )
-    lines.append(f"正式候选 TOP5 {len(snapshot.get('formal_top5') or [])} / 观察 {len(snapshot.get('formal_top15_watch') or [])}")
+    independent = snapshot.get("independent_selection") or {}
+    independent_label = (str(len(independent.get("top5") or []))
+                         if independent.get("status") == "ready" else "不可用")
+    lines.append(
+        f"正式候选 TOP5 {len(snapshot.get('formal_top5') or [])} / "
+        f"观察 {len(snapshot.get('formal_top15_watch') or [])}｜独立TOP5 {independent_label}"
+    )
     shown_c = (snapshot.get("formal_top5") or [])[:2]
     if not shown_c:
         shown_c = candidates[:2]
@@ -531,7 +567,18 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     degraded = quality["status"] in {"degraded", "error"}
     _transition(events, states, "__pool__:quote_degraded", degraded, current,
                 {"trigger_type": "quote_degraded", "symbol": "__pool__"}, cooldown)
-    _, _, _, wencai = _formal_parts(formal)
+    formal_top15, _, _, wencai = _formal_parts(formal)
+    artifacts = formal.get("artifacts") or {}
+    independent_selection = (
+        (artifacts.get("independent_selection") or {}).get("payload") or {
+            "status": "unavailable", "reason": "artifact_missing",
+            "top15": [], "top5": [],
+        }
+    )
+    from analysis.independent_selector import comparison as compare_selection_lanes
+    selection_comparison = compare_selection_lanes(
+        formal_top15, independent_selection, wencai
+    )
     snapshot = {
         "version": VERSION,
         "trade_date": current.date().isoformat(),
@@ -544,6 +591,8 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         "formal_top5": [decisions[row["symbol"]] for row in pool if "formal_top5" in row.get("sources", [])],
         "formal_top15_watch": [decisions[row["symbol"]] for row in pool if "formal_top15_watch" in row.get("sources", [])],
         "wencai_reference": wencai,
+        "independent_selection": independent_selection,
+        "selection_comparison": selection_comparison,
         "monitor_pool": pool,
         "plans": plans,
         "trigger_state": states,

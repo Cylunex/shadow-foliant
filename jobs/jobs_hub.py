@@ -2332,6 +2332,10 @@ def _run_strategy_scans() -> dict:
                 days_ago=5, use_cache=True, cache_only=True)
             if r_ok and r_df is not None and len(r_df) > 0:
                 r_df = mf.get_top_stocks(r_df, top_n=5)
+            elif _sc.load_failure('主力资金'):
+                failure = _sc.load_failure('主力资金') or {}
+                r_msg = (f"{r_msg};last_failure={failure.get('failure_code')}:"
+                         f"{failure.get('detail')}")
             return r_ok, r_df, r_msg
         ok, df, msg = _call_with_hard_timeout('主力资金', _do_main_force, timeout=120)
         results['主力资金'] = (ok, df, msg)
@@ -2464,7 +2468,9 @@ def _format_wencai_overlap_notification(comparison: dict, names: dict = None) ->
 
 def _format_selection_reference_summary(final_rows: list, top15_rows: list,
                                         results: dict, comparison: dict,
-                                        names: dict = None, data_note: str = '') -> str:
+                                        names: dict = None, data_note: str = '',
+                                        independent: dict = None,
+                                        three_way: dict = None) -> str:
     """09:45 QQ 的固定八行摘要，保证五组状态不会被路由截断。"""
     def _label(row):
         code = str(row.get('code') or row.get('symbol') or '')
@@ -2473,6 +2479,17 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
         return f'{code} {name}'.strip() + (f' ¥{price:.2f}' if price else '')
 
     lines = ['正式TOP5：' + ('、'.join(_label(row) for row in (final_rows or [])[:5]) or '未产出')]
+    independent = independent or {}
+    if independent.get('status') == 'ready':
+        independent_rows = independent.get('top5') or []
+        formal_codes = {str(row.get('code') or row.get('symbol') or '') for row in top15_rows or []}
+        independent_codes = {str(row.get('symbol') or row.get('code') or '')
+                             for row in independent.get('top15') or []}
+        overlap_count = len(formal_codes & independent_codes)
+        lines.append('独立TOP5：' + ('、'.join(_label(row) for row in independent_rows[:5]) or '未产出')
+                     + f'｜与正式TOP15重合{overlap_count}只')
+    else:
+        lines.append('独立TOP5：⚠️不可用（' + str(independent.get('reason') or '必要输入不完整')[:35] + '）')
     overlap = _format_wencai_overlap_notification(comparison, names)
     note = re.sub(r'\s+', ' ', str(data_note or '')).strip()
     lines.append(f'正式TOP15：{len(top15_rows or [])}只｜{overlap}' + (f'｜{note[:70]}' if note else ''))
@@ -4429,6 +4446,7 @@ def _prefetch_main_force(*, use_cache: bool, log_job: str) -> int:
 
     09:15 最先请求；09:30 命中缓存时零请求，缺失时才补一次。
     """
+    import strategy_cache as _sc
     try:
         from main_force_selector import MainForceStockSelector
         ok, df, msg = _call_with_hard_timeout(
@@ -4442,8 +4460,13 @@ def _prefetch_main_force(*, use_cache: bool, log_job: str) -> int:
         ) else 0
         print(f'[{log_job}] {"✅" if n else "⚠️"} 主力资金 {n} 只 '
               f'({str(msg)[:70]})', flush=True)
+        if n:
+            _sc.clear_failure('主力资金')
+        else:
+            _sc.record_failure('主力资金', msg or 'empty_result')
         return 1 if n else 0
     except Exception as e:
+        _sc.record_failure('主力资金', e)
         print(f'[{log_job}] ⚠️ 主力资金异常/超时: '
               f'{type(e).__name__}: {str(e)[:80]}', flush=True)
         return 0
@@ -4473,9 +4496,12 @@ def _prefetch_wencai_strategies(*, use_cache: bool, log_job: str) -> int:
             ) else 0
             if n:
                 done += 1
+            else:
+                _sc.record_failure(name, msg or 'empty_result')
             print(f'[{log_job}] {"✅" if n else "⚠️"} {name} {n} 只 '
                   f'({str(msg)[:70]})', flush=True)
         except Exception as e:
+            _sc.record_failure(name, e)
             print(f'[{log_job}] ⚠️ {name} 异常/超时: '
                   f'{type(e).__name__}: {str(e)[:80]}', flush=True)
     return done
@@ -4576,11 +4602,13 @@ def task_unified_selection():
 
         # 2. 问财继续保留一段时间，仅作外部发现/对照。独立短截止时间结束后，
         #    参考结果附着到已存在的本地 run，不重新计算正式分数。
+        wencai_scan_error = ''
         try:
             strategy_scan = _call_with_hard_timeout(
                 '问财参考', _run_strategy_scans, timeout=45
             )
         except Exception as _wre:
+            wencai_scan_error = f'{type(_wre).__name__}:{str(_wre)[:240]}'
             print(f'[unified_selection] 问财参考放弃(不影响本地主链): '
                   f'{type(_wre).__name__}')
             strategy_scan = {'results': {}}
@@ -4591,8 +4619,12 @@ def task_unified_selection():
             'strategies': {},
             'reference_affects_membership': False,
         }
+        import strategy_cache as _strategy_cache
         wencai_nominations = []
-        for sname, (ok, df, msg) in strategy_scan.get('results', {}).items():
+        for sname in ('主力资金', '低价擒牛', '小市值', '净利增长', '低估值'):
+            ok, df, msg = strategy_scan.get('results', {}).get(
+                sname, (False, None, wencai_scan_error or 'strategy_result_missing')
+            )
             strategy_picks = []
             strategy_id = _WENCAI_STRATEGY_IDS.get(
                 sname, 'wencai_' + str(sname).strip().lower().replace(' ', '_')
@@ -4624,6 +4656,7 @@ def task_unified_selection():
                 'strategy_version': strategy_version,
                 'definition_hash': definition_hash,
                 'status': 'ready' if ok else 'failed',
+                'failure_code': (None if ok else _strategy_cache.classify_failure(msg)),
                 'message': str(msg or '')[:300],
                 'picks': _normalize_reference(strategy_picks),
             }
@@ -4651,6 +4684,22 @@ def task_unified_selection():
         except Exception as _are:
             print(f'[unified_selection] 问财参考保存失败(不影响本地主链): '
                   f'{type(_are).__name__}')
+
+        # 3. 独立通道只读上述正式 run 锁定的不可变 PIT manifest。
+        #    它不接收正式/问财成员、排名或分数，失败也不回填候选。
+        try:
+            from analysis.independent_selector import build_and_persist
+            independent_selection = build_and_persist(
+                str(local_result.get('run_id') or ''), store=selector.store
+            )
+        except Exception as _independent_error:
+            independent_selection = {
+                'status': 'unavailable',
+                'reason': f'build_error:{type(_independent_error).__name__}',
+                'top15': [], 'top5': [],
+            }
+            print('[unified_selection] 独立选股通道不可用(不影响正式产物): '
+                  f'{type(_independent_error).__name__}: {str(_independent_error)[:100]}')
         candidates = {}
         top_list = []
         for item in local_candidates:
@@ -4783,6 +4832,17 @@ def task_unified_selection():
         if local_lines:
             body += '\n\n🧭 本地策略提名（参与正式候选，受赛道配额约束）\n' + '\n'.join(local_lines)
 
+        if independent_selection.get('status') == 'ready':
+            independent_labels = '、'.join(
+                f"{row.get('symbol')} {row.get('name') or ''}".strip()
+                for row in (independent_selection.get('top5') or [])
+            )
+            body += ('\n\n🧪 Codex 独立TOP5（同一 PIT manifest，'
+                     '不读正式/问财成员与排名）\n' + independent_labels)
+        else:
+            body += ('\n\n⚠️ Codex 独立选股不可用：'
+                     + str(independent_selection.get('reason') or '必要输入不完整')[:100])
+
         body += '\n\n' + _format_wencai_reference_notification(
             strategy_scan.get('results', {})
         )
@@ -4805,6 +4865,12 @@ def task_unified_selection():
         local_formal_rows = []
         deterministic_rows = []
         final_rows = []
+        selection_comparison = {
+            'availability': {'formal': False,
+                             'independent': independent_selection.get('status') == 'ready',
+                             'wencai': False},
+            'pairwise': {}, 'triple': None,
+        }
         try:
             local_by_code = {
                 str(item.get('symbol') or ''): item for item in local_candidates
@@ -4875,6 +4941,10 @@ def task_unified_selection():
                 {**overlay_by_code.get(row['code'], {}), **row}
                 for row in deterministic_rows
             ]
+            from analysis.independent_selector import comparison as compare_selection_lanes
+            selection_comparison = compare_selection_lanes(
+                local_formal_rows, independent_selection, wencai_strategy_runs
+            )
             save_indicator_snapshot('_last_selection', {
                 'picks': top_list,
                 'rows': artifact_rows,
@@ -4887,6 +4957,8 @@ def task_unified_selection():
                 'ai_review': list(debate_map.values()),
                 'external_reference': local_result.get('comparison', {}),
                 'local_strategy_reference': local_strategy_reference,
+                'independent_selection': independent_selection,
+                'selection_comparison': selection_comparison,
                 'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                 'vetoed': _vetoed,
                 'source_breakdown': source_count,
@@ -4990,13 +5062,18 @@ def task_unified_selection():
                 _final_body = _format_selection_reference_summary(
                     final_rows, local_formal_rows, strategy_scan.get('results', {}),
                     comparison, name_map, data_note,
+                    independent=independent_selection,
+                    three_way=selection_comparison,
                 )
                 _push_daily('今日候选：加、减还是不动', _final_body)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
                       f'{type(_fpe).__name__}: {str(_fpe)[:80]}')
         _rf = globals().pop('_UNIFIED_REC_FAIL', 0)
-        _note = f'picks={len(top_list)} final={len(final_rows)}' + (f' rec_fail={_rf}' if _rf else '')
+        _independent_count = len(independent_selection.get('top15') or [])
+        _note = (f'picks={len(top_list)} final={len(final_rows)} '
+                 f'independent={independent_selection.get("status")}/{_independent_count}'
+                 + (f' rec_fail={_rf}' if _rf else ''))
         _log_run(job, 'success', error=_note,
                  started_at=started, finished_at=datetime.now().isoformat())
 

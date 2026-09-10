@@ -795,6 +795,16 @@ def latest_selection_artifact() -> Dict[str, Any]:
     wencai_strategy_runs = (
         (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
     )
+    independent_selection = (
+        (artifacts.get('independent_selection') or {}).get('payload') or {
+            'status': 'unavailable', 'reason': 'artifact_missing',
+            'top15': [], 'top5': [],
+        }
+    )
+    from analysis.independent_selector import comparison as compare_selection_lanes
+    selection_comparison = compare_selection_lanes(
+        top15, independent_selection, wencai_strategy_runs
+    )
     miaoxiang_review = (
         (artifacts.get('miaoxiang_review') or {}).get('payload') or {}
     )
@@ -849,6 +859,8 @@ def latest_selection_artifact() -> Dict[str, Any]:
         'fusion_policy': fusion_policy,
         'lane_counts': metadata.get('lane_counts') or {},
         'wencai_strategy_runs': wencai_strategy_runs,
+        'independent_selection': independent_selection,
+        'selection_comparison': selection_comparison,
         'miaoxiang_strategy_runs': miaoxiang_strategy_runs,
         'miaoxiang_review': miaoxiang_review,
         'ai_review': ai_review,

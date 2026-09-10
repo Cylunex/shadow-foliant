@@ -9,9 +9,10 @@
   - 09:45 选股:cached(name, fetch_fn, use_cache=True)  命中当日缓存即返回,不在高峰现调问财
   fetch_fn() 须返回 (ok: bool, df: DataFrame|None, msg: str),与各选股器 get_*_stocks 同形。
 """
+import json
 import os
 import pickle
-from datetime import date
+from datetime import date, datetime
 
 try:
     import _bootstrap  # noqa: F401  路径引导(项目根)
@@ -54,9 +55,81 @@ def save(name: str, df) -> bool:
             return False
         with open(os.path.join(_cache_dir(), _key(name) + '.pkl'), 'wb') as f:
             pickle.dump(df, f)
+        failure_path = os.path.join(_cache_dir(), _key(name) + '.failure.json')
+        if os.path.isfile(failure_path):
+            os.unlink(failure_path)
         return True
     except Exception:
         return False
+
+
+def classify_failure(value) -> str:
+    """将外部问财异常压缩成稳定失败码，不存储请求参数或凭据。"""
+    text = f"{type(value).__name__}:{value}".lower()
+    if "缓存缺失" in text or "cache" in text and "miss" in text:
+        return "cache_missing"
+    if "403" in text or "forbidden" in text:
+        return "http_403"
+    if "429" in text or "too many" in text or "rate limit" in text:
+        return "http_429"
+    if "401" in text or "unauthorized" in text:
+        return "http_401"
+    if "熔断" in text or "circuit" in text:
+        return "circuit_open"
+    if "上次请求仍未结束" in text or "inflight" in text:
+        return "inflight_busy"
+    if "超时" in text or "timeout" in text:
+        return "timeout"
+    if "未安装" in text or "modulenotfound" in text or "importerror" in text:
+        return "dependency_missing"
+    if "无数据" in text or "empty" in text:
+        return "empty_result"
+    return "provider_error"
+
+
+def record_failure(name: str, value, *, code: str = "") -> dict:
+    """持久化当日最后一次失败，供 09:45 缓存只读阶段还原真实原因。"""
+    payload = {
+        "strategy": str(name),
+        "trade_date": date.today().isoformat(),
+        "failure_code": code or classify_failure(value),
+        "detail": str(value or "")[:300],
+        "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    path = os.path.join(_cache_dir(), _key(name) + ".failure.json")
+    temporary = path + f".{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        except Exception:
+            pass
+    return payload
+
+
+def load_failure(name: str):
+    try:
+        path = os.path.join(_cache_dir(), _key(name) + ".failure.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        if value.get("trade_date") == date.today().isoformat():
+            return value
+    except Exception:
+        pass
+    return None
+
+
+def clear_failure(name: str) -> None:
+    try:
+        path = os.path.join(_cache_dir(), _key(name) + ".failure.json")
+        if os.path.isfile(path):
+            os.unlink(path)
+    except Exception:
+        pass
 
 
 def cached(name: str, fetch_fn, use_cache: bool = True, cache_only: bool = False):
@@ -69,8 +142,17 @@ def cached(name: str, fetch_fn, use_cache: bool = True, cache_only: bool = False
         if df is not None and hasattr(df, 'empty') and not df.empty:
             return True, df, f'{name} 当日缓存命中({len(df)}只)'
     if cache_only:
-        return False, None, f'{name} 当日缓存缺失(09:45不重复请求外部源)'
-    ok, df, msg = fetch_fn()
+        failure = load_failure(name) or {}
+        suffix = (f";last_failure={failure.get('failure_code')}:{failure.get('detail')}"
+                  if failure else "")
+        return False, None, f'{name} 当日缓存缺失(09:45不重复请求外部源){suffix}'
+    try:
+        ok, df, msg = fetch_fn()
+    except Exception as exc:
+        record_failure(name, exc)
+        raise
     if ok:
         save(name, df)
+    else:
+        record_failure(name, msg or "empty_result")
     return ok, df, msg

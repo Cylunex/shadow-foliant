@@ -137,6 +137,7 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     """Render only whitelisted business fields; never interpolate errors or config."""
     day = snapshot.get("trading_day") or {}
     formal = snapshot.get("formal_selection") or {}
+    independent = snapshot.get("independent_selection") or {}
     reference = snapshot.get("wencai_reference") or {}
     holdings = snapshot.get("holdings") or {}
     plans = snapshot.get("trade_plans") or {}
@@ -151,6 +152,15 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     if top5:
         labels = [f"{row.get('name') or row.get('symbol')}({row.get('symbol')})" for row in top5]
         lines.append("TOP5：" + "、".join(labels))
+    independent_top5 = independent.get("top5") or []
+    if independent.get("status") == "complete":
+        labels = [
+            f"{row.get('name') or row.get('symbol')}({row.get('symbol')})"
+            for row in independent_top5
+        ]
+        lines.append("独立TOP5：" + ("、".join(labels) or "无候选"))
+    else:
+        lines.append("独立TOP5：不可用（必要输入不完整）")
     lines.extend([
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
