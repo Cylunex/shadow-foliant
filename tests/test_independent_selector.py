@@ -7,6 +7,7 @@ import pandas as pd
 from analysis.independent_selector import (
     IndependentPolicy,
     _score,
+    artifact_payload,
     build,
     comparison,
 )
@@ -89,3 +90,15 @@ def test_comparison_omits_wencai_pairs_and_triple_until_every_reference_is_ready
     assert result["triple"] is None
     assert "formal_wencai" not in result["pairwise"]
 
+
+def test_ready_append_only_repair_wins_over_preserved_failed_attempt():
+    artifacts = {
+        "independent_selection": {"payload": {
+            "status": "unavailable", "reason": "manifest_history_incomplete",
+        }},
+        "independent_selection_repair": {"payload": {
+            "status": "ready", "top15": [{"symbol": "600001"}],
+            "top5": [{"symbol": "600001"}],
+        }},
+    }
+    assert artifact_payload(artifacts)["status"] == "ready"

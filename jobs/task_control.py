@@ -795,13 +795,10 @@ def latest_selection_artifact() -> Dict[str, Any]:
     wencai_strategy_runs = (
         (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
     )
-    independent_selection = (
-        (artifacts.get('independent_selection') or {}).get('payload') or {
-            'status': 'unavailable', 'reason': 'artifact_missing',
-            'top15': [], 'top5': [],
-        }
+    from analysis.independent_selector import (
+        artifact_payload, comparison as compare_selection_lanes,
     )
-    from analysis.independent_selector import comparison as compare_selection_lanes
+    independent_selection = artifact_payload(artifacts)
     selection_comparison = compare_selection_lanes(
         top15, independent_selection, wencai_strategy_runs
     )

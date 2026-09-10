@@ -512,12 +512,10 @@ class SelectionRunService:
 
         candidates = decorate(top15)
         final_candidates = decorate(top5)
+        from analysis.independent_selector import artifact_payload
         references = {
             "wencai": (artifacts.get("wencai_strategy_runs") or {}).get("payload") or {},
-            "independent": (artifacts.get("independent_selection") or {}).get("payload") or {
-                "status": "unavailable", "reason": "artifact_missing",
-                "top15": [], "top5": [],
-            },
+            "independent": artifact_payload(artifacts),
             "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},
             "miaoxiang_review": (artifacts.get("miaoxiang_review") or {}).get("payload") or {},
         }

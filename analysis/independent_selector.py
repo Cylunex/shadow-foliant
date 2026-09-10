@@ -23,6 +23,7 @@ from data.research_store import ResearchStore
 STRATEGY_ID = "codex-independent"
 STRATEGY_VERSION = "codex-independent-v1"
 ARTIFACT_TYPE = "independent_selection"
+REPAIR_ARTIFACT_TYPE = "independent_selection_repair"
 EXPECTED_WENCAI_STRATEGIES = {
     "主力资金", "低价擒牛", "小市值", "净利增长", "低估值",
 }
@@ -75,6 +76,27 @@ def _hash(value: object) -> str:
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
+
+
+def _frame_hash(frame: pd.DataFrame, columns: Iterable[str]) -> str:
+    selected = [column for column in columns if column in frame.columns]
+    if not selected:
+        return hashlib.sha256(b"").hexdigest()
+    normalized = frame[selected].copy().sort_values(selected[:2]).reset_index(drop=True)
+    return hashlib.sha256(
+        pd.util.hash_pandas_object(normalized, index=False).values.tobytes()
+    ).hexdigest()
+
+
+def artifact_payload(artifacts: dict[str, Any]) -> dict[str, Any]:
+    """Prefer an append-only ready repair while retaining the failed first attempt."""
+    base = ((artifacts.get(ARTIFACT_TYPE) or {}).get("payload") or {})
+    repair = ((artifacts.get(REPAIR_ARTIFACT_TYPE) or {}).get("payload") or {})
+    if repair.get("status") == "ready":
+        return repair
+    return base or repair or {
+        "status": "unavailable", "reason": "artifact_missing", "top15": [], "top5": [],
+    }
 
 
 def _symbol(value: Any) -> str:
@@ -136,6 +158,28 @@ def _prepare_frame(store: ResearchStore, manifest_id: str,
         return pd.DataFrame(), {"reason": "manifest_market_rows_unusable"}
     market_as_of = panel["trade_date"].max()
     history = panel.groupby("symbol")["trade_date"].nunique()
+    market_input_mode = "manifest_dataset_ids"
+    # Early materialized histories predate the append-only observation table, so
+    # some otherwise valid manifests name only the recent slice.  Repair that
+    # known manifest gap with the local warehouse locked to the manifest's market
+    # as-of, then hash the exact consumed rows.  No post-cutoff market date enters.
+    if int(history.max() or 0) < policy.minimum_history_days:
+        repaired = store.load_daily_panel(
+            market_as_of.date().isoformat(),
+            trading_days=max(420, policy.minimum_history_days + 20), adjustment="qfq",
+        )
+        if repaired is None or repaired.empty:
+            return pd.DataFrame(), {"reason": "manifest_history_incomplete"}
+        repaired = repaired.copy()
+        repaired["trade_date"] = pd.to_datetime(repaired["trade_date"], errors="coerce")
+        repaired = repaired[
+            repaired["trade_date"].notna()
+            & (repaired["trade_date"] <= market_as_of)
+            & ~repaired["quality_status"].isin({"unknown_unit", "failed"})
+        ]
+        panel = repaired
+        history = panel.groupby("symbol")["trade_date"].nunique()
+        market_input_mode = "manifest_as_of_warehouse_history_repair"
     current = set(panel.loc[panel["trade_date"] == market_as_of, "symbol"].astype(str))
     universe = universe.drop_duplicates("symbol").copy()
     universe["symbol"] = universe["symbol"].astype(str).map(_symbol)
@@ -183,6 +227,15 @@ def _prepare_frame(store: ResearchStore, manifest_id: str,
         "universe_count": int(len(universe)),
         "hard_gate_count": int(len(eligible)),
         "feature_count": int(len(features)),
+        "market_input_mode": market_input_mode,
+        "market_input_hash": _frame_hash(panel, (
+            "symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
+            "turnover_rate", "is_paused", "is_st", "provider", "quality_status", "dataset_id",
+        )),
+        "market_dataset_ids": sorted({
+            str(value) for value in panel.get("dataset_id", pd.Series(dtype=str)).dropna()
+            if str(value).strip()
+        }),
     }
 
 
@@ -281,12 +334,25 @@ def build(manifest_id: str, *, store: ResearchStore | None = None,
     rows = [_row(row, rank) for rank, (_, row) in enumerate(scored.head(15).iterrows(), 1)]
     snapshot_seed = {
         "strategy_version": policy.version, "strategy_hash": policy.policy_hash,
-        "manifest_id": manifest_id, "market_as_of": evidence["market_as_of"], "rows": rows,
+        "manifest_id": manifest_id, "market_as_of": evidence["market_as_of"],
+        "market_input_hash": evidence["market_input_hash"],
+        "market_dataset_ids": evidence["market_dataset_ids"],
+        "financial_revision_set_id": manifest.get("financial_revision_set_id"),
+        "event_dataset_id": manifest.get("event_dataset_id"),
+        "valuation_dataset_ids": manifest.get("valuation_dataset_ids") or [],
     }
     return {
         "status": "ready", "strategy_id": STRATEGY_ID,
         "strategy_version": policy.version, "strategy_hash": policy.policy_hash,
         "manifest_id": manifest_id, "input_snapshot_id": _hash(snapshot_seed),
+        "input_provenance": {
+            "market_input_mode": evidence["market_input_mode"],
+            "market_input_hash": evidence["market_input_hash"],
+            "market_dataset_ids": evidence["market_dataset_ids"],
+            "financial_revision_set_id": manifest.get("financial_revision_set_id"),
+            "event_dataset_id": manifest.get("event_dataset_id"),
+            "valuation_dataset_ids": manifest.get("valuation_dataset_ids") or [],
+        },
         "selection_date": manifest["decision_context"]["selection_date"],
         "decision_at": manifest["decision_context"]["decision_at"],
         "market_as_of": evidence["market_as_of"],
@@ -310,12 +376,18 @@ def build_and_persist(run_id: str, *, store: ResearchStore | None = None) -> dic
     if str(formal.get("run_id") or "") != str(run_id or ""):
         return {"status": "unavailable", "reason": "formal_run_not_current",
                 "top15": [], "top5": []}
-    existing = ((formal.get("artifacts") or {}).get(ARTIFACT_TYPE) or {}).get("payload")
-    if isinstance(existing, dict):
+    artifacts = formal.get("artifacts") or {}
+    existing = artifact_payload(artifacts)
+    if existing.get("status") == "ready":
         return existing
     manifest_id = str((formal.get("metadata") or {}).get("manifest_id") or "")
     result = build(manifest_id, store=store)
-    store.save_selection_artifact(str(run_id), ARTIFACT_TYPE, result)
+    artifact_type = REPAIR_ARTIFACT_TYPE if ARTIFACT_TYPE in artifacts else ARTIFACT_TYPE
+    if artifact_type in artifacts:
+        return existing
+    if artifact_type == REPAIR_ARTIFACT_TYPE and result.get("status") != "ready":
+        return result
+    store.save_selection_artifact(str(run_id), artifact_type, result)
     if result.get("status") == "ready":
         nominations = [{
             "symbol": row["symbol"], "lane": "independent",

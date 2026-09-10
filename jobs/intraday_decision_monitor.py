@@ -569,13 +569,10 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
                 {"trigger_type": "quote_degraded", "symbol": "__pool__"}, cooldown)
     formal_top15, _, _, wencai = _formal_parts(formal)
     artifacts = formal.get("artifacts") or {}
-    independent_selection = (
-        (artifacts.get("independent_selection") or {}).get("payload") or {
-            "status": "unavailable", "reason": "artifact_missing",
-            "top15": [], "top5": [],
-        }
+    from analysis.independent_selector import (
+        artifact_payload, comparison as compare_selection_lanes,
     )
-    from analysis.independent_selector import comparison as compare_selection_lanes
+    independent_selection = artifact_payload(artifacts)
     selection_comparison = compare_selection_lanes(
         formal_top15, independent_selection, wencai
     )

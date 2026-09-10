@@ -282,6 +282,7 @@ class ScheduledSnapshotService:
             "strategy_hash": payload.get("strategy_hash"),
             "manifest_id": payload.get("manifest_id"),
             "input_snapshot_id": payload.get("input_snapshot_id"),
+            "input_provenance": clean_json(payload.get("input_provenance") or {}),
             "market_as_of": payload.get("market_as_of"),
             "weights": clean_json(payload.get("weights") or {}),
             "top15": [_candidate(row) for row in (payload.get("top15") or [])][:15],
