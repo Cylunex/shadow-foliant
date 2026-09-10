@@ -32,6 +32,10 @@ permissions:
     audience: foliant
     scopes: [stock.portfolio.read]
     resource_grant: portfolio-primary
+  - capability: foliant.scheduled-report.read
+    audience: foliant
+    scopes: [stock.portfolio.read]
+    resource_grant: portfolio-primary
   - capability: foliant.trades.read
     audience: foliant
     scopes: [stock.portfolio.read]

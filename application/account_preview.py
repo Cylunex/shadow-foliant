@@ -2,7 +2,6 @@
 from dataclasses import asdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import pandas as pd
 
 from analysis.account_action_plan import build_action_plan
 from analysis.decision_evaluation import equity_rules
@@ -10,35 +9,55 @@ from application.decision_loop import DecisionLoopService
 from application.results import clean_json, payload_hash
 
 
-def preview_account(*, owner_id, available_cash=None, allow_add=False):
-    """Load facts server-side; cash override is explicit user-confirmed cash only."""
+def _quote_timestamp(value):
+    text = str(value or "").strip()
+    if len(text) == 14 and text.isdigit():
+        timestamp = datetime.strptime(text, "%Y%m%d%H%M%S")
+    else:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return timestamp
+
+
+def account_quote_symbols(capsule, holdings, *, extra_symbols=()):
+    """Return the deduplicated quote universe for one account snapshot."""
+    return sorted({
+        str(symbol)
+        for symbol in (
+            [row.get("symbol") or row.get("code") for row in holdings]
+            + [row.get("symbol") or row.get("code")
+               for row in (capsule.get("opportunity_set") or {}).get("top5", [])]
+            + list(extra_symbols or ())
+        )
+        if str(symbol or "").isdigit() and len(str(symbol)) == 6
+    })
+
+
+def build_account_preview(*, owner_id, capsule, context, raw_quotes,
+                          available_cash=None, allow_add=False, now=None):
+    """Build the existing authoritative account plan from already loaded facts.
+
+    This seam lets aggregate readers share exactly one batched quote request while
+    preserving the same holdings/action-plan implementation used by Web and Agent HTTP.
+    """
     if not owner_id:
         raise PermissionError("portfolio_scope_required")
-    from portfolio_db import portfolio_db
-    import datahub
-    service = DecisionLoopService()
-    capsule = service.capsule()
     if not capsule:
         return {"status": "missing", "error_code": "formal_capsule_missing", "preview_only": True}
-    context = portfolio_db.action_preview_context()
     holdings = context["holdings"]
     holdings = [{**r, "symbol": str(r.get("code") or "")} for r in holdings if float(r.get("quantity") or 0) > 0]
     if len(holdings) > 100:
         raise ValueError("portfolio_preview_size_limit")
     watermark = context["watermark"]
-    symbols = sorted({r["symbol"] for r in holdings} | {r["symbol"] for r in capsule["opportunity_set"]["top5"]})
-    raw = datahub.quotes(symbols)
-    if portfolio_db.action_preview_context()["watermark"] != watermark:
-        return {"status": "stale", "error_code": "holdings_changed_during_preview",
-                "preview_only": True, "summary": "持仓在取行情期间变化，请重新计算", "alternatives": []}
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+    if isinstance(now, str):
+        now = datetime.fromisoformat(now)
     quotes = {}
-    for symbol, row in raw.items():
+    for symbol, row in (raw_quotes or {}).items():
         stamp = row.get("quote_time") or row.get("observed_at")
         try:
-            timestamp = pd.to_datetime(str(stamp))
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.tz_localize("Asia/Shanghai")
+            timestamp = _quote_timestamp(stamp)
             rules = equity_rules(symbol)
             quotes[symbol] = {"price": row.get("price"), "observed_at": timestamp.isoformat(),
                               "execution_rules": asdict(rules) if rules else None,
@@ -76,6 +95,32 @@ def preview_account(*, owner_id, available_cash=None, allow_add=False):
         [r["symbol"] for r in capsule["opportunity_set"]["top15"]])
     plan["missing_information"] = (["available_cash"] if available_cash is None else [])
     return plan
+
+
+def preview_account(*, owner_id, available_cash=None, allow_add=False):
+    """Load facts server-side; cash override is explicit user-confirmed cash only."""
+    if not owner_id:
+        raise PermissionError("portfolio_scope_required")
+    from portfolio_db import portfolio_db
+    import datahub
+    service = DecisionLoopService()
+    capsule = service.capsule()
+    if not capsule:
+        return {"status": "missing", "error_code": "formal_capsule_missing", "preview_only": True}
+    context = portfolio_db.action_preview_context()
+    symbols = account_quote_symbols(capsule, context.get("holdings") or [])
+    raw = datahub.quotes(symbols)
+    if portfolio_db.action_preview_context()["watermark"] != context["watermark"]:
+        return {"status": "stale", "error_code": "holdings_changed_during_preview",
+                "preview_only": True, "summary": "持仓在取行情期间变化，请重新计算", "alternatives": []}
+    return build_account_preview(
+        owner_id=owner_id,
+        capsule=capsule,
+        context=context,
+        raw_quotes=raw,
+        available_cash=available_cash,
+        allow_add=allow_add,
+    )
 
 
 def account_books(days=30):

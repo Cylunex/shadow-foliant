@@ -39,6 +39,19 @@ Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 c
 该研究 Profile 不含持仓、成交、监控、环境配置、任务控制、正式发布、MiniQMT 或券商执行。
 生产 `shadow-nexus` Profile 可另外选择个人组合只读能力；写能力只供 Nexus 隐藏 Host 使用。
 
+## 计划任务快照
+
+`foliant.scheduled-report.read` 是面向仓库外 Codex heartbeat/NAS 报告的独立 L0 只读能力，
+但因为结果包含真实持仓，它仍属于 sensitive，要求 `stock.portfolio.read` 和精确的
+`portfolio-primary` grant。研究 Profile 不包含该能力；示例 Profile 位于
+`agent/profiles/shadow-finance-scheduled-report.yaml`，实例绑定和真实授权仍由仓库外 registry
+提供。
+
+工具 `foliant.scheduled-report.snapshot` 一次返回双源交易日依据、cockpit、正式 TOP15/TOP5、
+五组问财参考、真实持仓、正式 `trade_plan`、组合风控行动预览和批量行情。正式候选与问财
+reference 不混算，行情对 TOP15 与持仓并集只调用一次批量入口。该工具不发送通知、不触发任务、
+不交易；仓库外 CLI 的 `--send-qq` 才会显式调用既有 `notification_router`。
+
 ## 成交录入
 
 股票成交录入是 Stock Web 的 `stock-admins` 能力：

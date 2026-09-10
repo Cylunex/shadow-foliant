@@ -27,11 +27,16 @@ Stock Web 使用中央 SDK Session，保持 `stock-users`/管理员等应用角�
 | `research/selection/backtest.preview` | 受控 specification、budget、as_of、scope | accepted run_ref；不发布策略或触发实盘 |
 | `run.status/result/cancel` | exact run_ref | 当前授权的自身 Run；取消和旧 lease 失效 |
 | `portfolio.read` | 明确组合引用、as_of/口径 | 私人只读，不因市场读取权限开放 |
+| `scheduled-report.read` | 主组合 grant、正式选股与批量行情 | 私人只读聚合；供 heartbeat/NAS，不发送通知或下单 |
 | `trade_fact.import` | 冻结规范行、preview hash、组合水位、日期/费用 | current_intent direct；只记录已发生交易 |
 | `research_note.save/update` | 研究引用、内容、revision | 私人草稿；模型观点与用户认可区分 |
 | `monitor.configure` | 范围、周期、预算、通知目标 | 配置 standing policy；外部通知/权限范围变化内联确认 |
 
 新能力名为设计示意，现有 `foliant.trade.import` 和短 scope 不仅为命名统一就破坏性重命名。Schema/operation 映射可提供兼容别名，但同一命令只走一条执行路径。
+
+计划任务聚合通过 Foliant Agent HTTP 运行，调用端不直连 PostgreSQL、不导入 MCP。交易日字段只
+接受生产库双源日历共识；在线日历不可达后的 weekday fallback 必须显示 unknown。通知是调用端
+显式动作，使用仓库外 `QQ_WEBHOOK_URL` 和领域既有 Router，读取接口本身保持无副作用。
 
 ## 4. 研究任务与模型运行
 

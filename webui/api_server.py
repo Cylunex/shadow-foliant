@@ -3422,6 +3422,10 @@ from webui.decision_loop_routes import register_decision_loop_routes
 register_decision_loop_routes(
     app, agent_result=_agent_result, agent_error=_agent_error, browser_ok=_ok
 )
+from webui.scheduled_snapshot_routes import register_scheduled_snapshot_routes
+register_scheduled_snapshot_routes(
+    app, agent_result=_agent_result, agent_error=_agent_error
+)
 
 if os.path.isdir(_STATIC):
     app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")

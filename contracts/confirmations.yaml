@@ -24,6 +24,9 @@ confirmations:
   - capability: foliant.portfolio.read
     mode: none
     receipt_required: false
+  - capability: foliant.scheduled-report.read
+    mode: none
+    receipt_required: false
   - capability: foliant.trades.read
     mode: none
     receipt_required: false

@@ -279,6 +279,19 @@ paths:
               schema: { $ref: "#/components/schemas/ToolResult" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/scheduled-snapshot:
+    get:
+      operationId: get_agent_scheduled_snapshot
+      summary: Read one bounded formal-selection and delegated-portfolio snapshot for scheduled reports
+      description: Requires portfolio-primary access; uses one batched quote read and never places orders or sends notifications.
+      responses:
+        "200":
+          description: Bounded scheduled snapshot with per-section as-of and quality
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/machine/v1/agent/portfolio/trade-records:
     get:
       operationId: list_agent_trade_records

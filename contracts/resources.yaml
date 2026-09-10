@@ -20,6 +20,10 @@ resources:
     uri_template: shadow://foliant/reports/{report_id}
     owner: foliant
     resource_grant_required: false
+  - type: foliant-scheduled-report
+    uri_template: shadow://foliant/reports/scheduled-{report_id}
+    owner: foliant
+    resource_grant_required: true
   - type: foliant-primary-portfolio
     uri_template: shadow://foliant/portfolios/primary
     owner: foliant

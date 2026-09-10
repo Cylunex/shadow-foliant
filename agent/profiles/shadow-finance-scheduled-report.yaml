@@ -1,0 +1,18 @@
+version: 1
+id: shadow-finance-scheduled-report
+runtime:
+  kind: dsh
+  distribution_version: 0.1.1-rc.2
+  tools_api_version: 0.1.1-rc.2
+plugins:
+  - plugin_id: shadow-foliant
+    instance_id: foliant-example
+    capabilities:
+      - foliant.scheduled-report.read
+policy:
+  preauthorized_capabilities:
+    - foliant.scheduled-report.read
+  allow_elevated: false
+budgets:
+  max_tool_catalog_chars: 8000
+  max_skill_catalog_chars: 2000

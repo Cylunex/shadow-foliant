@@ -1,6 +1,6 @@
 version: 2
 app_id: foliant
-package_version: 0.6.0
+package_version: 0.7.0
 skills:
   - id: foliant-security-research
     path: skills/foliant-security-research/SKILL.md
@@ -311,6 +311,29 @@ capabilities:
         max_result_bytes: 262144
         max_model_chars: 16000
         timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
+    effect: read
+    data_classification: sensitive
+    risk_level: L0
+    confirmation: none
+    reversible: true
+    resource_grant_required: true
+    idempotency_required: false
+  - id: foliant.scheduled-report.read
+    summary: 为计划任务读取正式选股、五组参考、主组合风控和批量行情的一次性快照
+    audience: foliant
+    scopes: [stock.portfolio.read]
+    tools:
+      - name: foliant.scheduled-report.snapshot
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_scheduled_snapshot
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 262144
+        max_model_chars: 16000
+        timeout_ms: 60000
         concurrency_safe: true
         retry_policy: idempotent
     effect: read
