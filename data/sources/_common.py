@@ -40,7 +40,10 @@ def sina_code(code: str) -> str:
     c = norm_code(code)
     if c[:3] in ('920',) or c[0] in ('4', '8'):
         return 'bj' + c
-    if c[0] in ('0', '2', '3'):
+    # Shenzhen listed funds/LOFs use 15xxxx/16xxxx.  Treating 16xxxx as
+    # Shanghai can silently return an unrelated exchange bond with the same
+    # numeric code, which is worse than a missing quote.
+    if c[0] in ('0', '1', '2', '3'):
         return 'sz' + c
     return 'sh' + c   # 6/9/5 开头(沪)及兜底
 

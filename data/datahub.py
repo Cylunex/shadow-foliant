@@ -527,6 +527,22 @@ def _quotes_zzshare(codes: List[str]) -> Dict[str, dict]:
         return {}
 
 
+def _quotes_tencent(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import tencent as _source
+        return _source.quotes(codes)
+    except Exception:
+        return {}
+
+
+def _quotes_eastmoney(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import eastmoney as _source
+        return _source.ulist_quote(codes)
+    except Exception:
+        return {}
+
+
 def _quotes_easy_tdx(codes: List[str]) -> Dict[str, dict]:
     try:
         from data.sources import easy_tdx as _tdx
@@ -597,8 +613,15 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
     codes = list(dict.fromkeys(_norm_code(c) for c in (codes or []) if _norm_code(c)))
     if not codes:
         return {}
-    sources = [("a_stock", lambda wanted: _adapter().get_quotes(wanted)),
-               ("sina", lambda wanted: _adapter().get_quotes_sina(wanted))]
+    sources = [
+        ("a_stock", lambda wanted: _adapter().get_quotes(wanted)),
+        # a_stock is a composite Tencent/Eastmoney adapter with one shared
+        # health bucket.  Keep both atomic sources independently routable so a
+        # previous stock-only/timeout result cannot strand ETFs and LOFs.
+        ("tencent", _quotes_tencent),
+        ("eastmoney", _quotes_eastmoney),
+        ("sina", lambda wanted: _adapter().get_quotes_sina(wanted)),
+    ]
     if _zzshare_available():
         sources.append(("zzshare", _quotes_zzshare))
     if _eltdx_available():

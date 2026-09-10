@@ -3019,6 +3019,26 @@ class ResearchStore:
                )"""
         )
 
+    def formal_selection(self, run_id: str) -> Optional[dict]:
+        """Return one exact published formal run, even if a newer run exists."""
+
+        return self._latest_selection_where(
+            """WHERE run_id=? AND status='success' AND publication_status='published'
+               AND EXISTS (
+                   SELECT 1 FROM selection_input_manifests m
+                   WHERE m.run_id=selection_runs.run_id
+               )
+               AND EXISTS (
+                   SELECT 1 FROM selection_artifacts a
+                   WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top15'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM selection_artifacts a
+                   WHERE a.run_id=selection_runs.run_id AND a.artifact_type='formal_top5'
+               )""",
+            (str(run_id),),
+        )
+
     def latest_selection(self) -> Optional[dict]:
         """Backward-compatible diagnostic alias; formal readers must call the explicit method."""
 

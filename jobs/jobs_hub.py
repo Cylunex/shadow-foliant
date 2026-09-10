@@ -4668,8 +4668,8 @@ def task_unified_selection():
             selector.store.attach_selection_reference(
                 local_result.get('run_id'), wencai_reference, comparison
             )
-            selector.store.save_selection_artifact(
-                local_result.get('run_id'), 'wencai_strategy_runs', wencai_strategy_runs
+            _strategy_cache.save_artifact(
+                selector.store, local_result.get('run_id'), wencai_strategy_runs
             )
             if wencai_nominations:
                 fusion_policy = local_result.get('metadata', {}).get('fusion_policy') or {}
@@ -4928,9 +4928,11 @@ def task_unified_selection():
                     'local_state': cinfo.get('state'),
                     'data_coverage': cinfo.get('data_coverage'),
                 })
-            persisted = selector.store.latest_formal_selection() or {}
+            persisted = selector.store.formal_selection(
+                str(local_result.get('run_id') or '')
+            ) or {}
             if str(persisted.get('run_id') or '') != str(local_result.get('run_id') or ''):
-                raise RuntimeError('formal selection artifact does not match local run')
+                raise RuntimeError('formal selection artifact for local run is unavailable')
             artifacts = persisted.get('artifacts') or {}
             local_formal_rows = (artifacts.get('formal_top15') or {}).get('payload') or []
             deterministic_rows = (artifacts.get('formal_top5') or {}).get('payload') or []
@@ -4945,24 +4947,29 @@ def task_unified_selection():
             selection_comparison = compare_selection_lanes(
                 local_formal_rows, independent_selection, wencai_strategy_runs
             )
-            save_indicator_snapshot('_last_selection', {
-                'picks': top_list,
-                'rows': artifact_rows,
-                'final_picks': [row['code'] for row in deterministic_rows],
-                'final_rows': final_rows,
-                'formal_run_id': local_result.get('run_id'),
-                'formal_top15_artifact_id': (artifacts.get('formal_top15') or {}).get('artifact_id'),
-                'formal_top5_artifact_id': (artifacts.get('formal_top5') or {}).get('artifact_id'),
-                'display_overlay': artifact_rows,
-                'ai_review': list(debate_map.values()),
-                'external_reference': local_result.get('comparison', {}),
-                'local_strategy_reference': local_strategy_reference,
-                'independent_selection': independent_selection,
-                'selection_comparison': selection_comparison,
-                'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
-                'vetoed': _vetoed,
-                'source_breakdown': source_count,
-            })
+            latest = selector.store.latest_formal_selection() or {}
+            if str(latest.get('run_id') or '') == str(local_result.get('run_id') or ''):
+                save_indicator_snapshot('_last_selection', {
+                    'picks': top_list,
+                    'rows': artifact_rows,
+                    'final_picks': [row['code'] for row in deterministic_rows],
+                    'final_rows': final_rows,
+                    'formal_run_id': local_result.get('run_id'),
+                    'formal_top15_artifact_id': (artifacts.get('formal_top15') or {}).get('artifact_id'),
+                    'formal_top5_artifact_id': (artifacts.get('formal_top5') or {}).get('artifact_id'),
+                    'display_overlay': artifact_rows,
+                    'ai_review': list(debate_map.values()),
+                    'external_reference': local_result.get('comparison', {}),
+                    'local_strategy_reference': local_strategy_reference,
+                    'independent_selection': independent_selection,
+                    'selection_comparison': selection_comparison,
+                    'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                    'vetoed': _vetoed,
+                    'source_breakdown': source_count,
+                })
+            else:
+                print('[unified_selection] 本 run 已被更新的正式 run 取代；'
+                      '仅保存本 run 追加式附件，不覆盖最新展示快照', flush=True)
             for artifact_type, payload in (
                 ('display_overlay', artifact_rows),
                 ('ai_review', list(debate_map.values())),

@@ -66,8 +66,19 @@ def save(name: str, df) -> bool:
 def classify_failure(value) -> str:
     """将外部问财异常压缩成稳定失败码，不存储请求参数或凭据。"""
     text = f"{type(value).__name__}:{value}".lower()
-    if "缓存缺失" in text or "cache" in text and "miss" in text:
-        return "cache_missing"
+    # cache-only messages intentionally begin with “缓存缺失” but append the
+    # persisted upstream reason.  Preserve that reason instead of masking a
+    # real circuit/provider failure as a plain cache miss.
+    stable_codes = {
+        "cache_missing", "http_403", "http_429", "http_401", "circuit_open",
+        "inflight_busy", "timeout", "dependency_missing", "empty_result",
+        "source_unavailable", "provider_error",
+    }
+    marker = "last_failure="
+    if marker in text:
+        persisted = text.split(marker, 1)[1].split(":", 1)[0].strip()
+        if persisted in stable_codes:
+            return persisted
     if "403" in text or "forbidden" in text:
         return "http_403"
     if "429" in text or "too many" in text or "rate limit" in text:
@@ -82,9 +93,42 @@ def classify_failure(value) -> str:
         return "timeout"
     if "未安装" in text or "modulenotfound" in text or "importerror" in text:
         return "dependency_missing"
+    if any(marker in text for marker in (
+        "remotedisconnected", "remote end closed", "connection refused",
+        "connection reset", "connection aborted", "source_unavailable",
+    )):
+        return "source_unavailable"
     if "无数据" in text or "empty" in text:
         return "empty_result"
+    if "缓存缺失" in text or "cache" in text and "miss" in text:
+        return "cache_missing"
     return "provider_error"
+
+
+def artifact_payload(artifacts: dict) -> dict:
+    """Return the newest append-only Wencai diagnostic for a formal run."""
+    artifacts = artifacts or {}
+    for artifact_type in ("wencai_strategy_runs_repair", "wencai_strategy_runs"):
+        payload = (artifacts.get(artifact_type) or {}).get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def save_artifact(store, run_id: str, payload: dict):
+    """Append a repair without overwriting the original auditable attempt."""
+    loader = getattr(store, "formal_selection", None)
+    formal = loader(str(run_id)) if callable(loader) else None
+    if not formal:
+        return None
+    artifacts = formal.get("artifacts") or {}
+    artifact_type = (
+        "wencai_strategy_runs_repair"
+        if "wencai_strategy_runs" in artifacts else "wencai_strategy_runs"
+    )
+    if artifact_type in artifacts:
+        return str((artifacts.get(artifact_type) or {}).get("artifact_id") or "") or None
+    return store.save_selection_artifact(str(run_id), artifact_type, payload)
 
 
 def record_failure(name: str, value, *, code: str = "") -> dict:

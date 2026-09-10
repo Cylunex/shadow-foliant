@@ -372,9 +372,11 @@ def build(manifest_id: str, *, store: ResearchStore | None = None,
 
 def build_and_persist(run_id: str, *, store: ResearchStore | None = None) -> dict[str, Any]:
     store = store or ResearchStore(ensure_schema=False)
-    formal = store.latest_formal_selection() or {}
+    loader = getattr(store, "formal_selection", None)
+    formal = loader(str(run_id or "")) if callable(loader) else None
+    formal = formal or {}
     if str(formal.get("run_id") or "") != str(run_id or ""):
-        return {"status": "unavailable", "reason": "formal_run_not_current",
+        return {"status": "unavailable", "reason": "formal_run_not_published",
                 "top15": [], "top5": []}
     artifacts = formal.get("artifacts") or {}
     existing = artifact_payload(artifacts)

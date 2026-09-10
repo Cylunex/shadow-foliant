@@ -55,7 +55,8 @@ def _formal_parts(formal: dict[str, Any]) -> tuple[list, list, dict, dict]:
         _code(row.get("code") or row.get("symbol")): row
         for row in overlay if isinstance(row, dict) and _code(row.get("code") or row.get("symbol"))
     }
-    wencai = (artifacts.get("wencai_strategy_runs") or {}).get("payload") or {}
+    from selection.strategy_cache import artifact_payload as wencai_artifact_payload
+    wencai = wencai_artifact_payload(artifacts)
     return list(top15), list(top5), overlays, wencai
 
 
