@@ -95,7 +95,7 @@ def classify_failure(value) -> str:
         return "dependency_missing"
     if any(marker in text for marker in (
         "remotedisconnected", "remote end closed", "connection refused",
-        "connection reset", "connection aborted", "source_unavailable",
+        "connection reset", "connection aborted", "source_unavailable", "源不可用",
     )):
         return "source_unavailable"
     if "无数据" in text or "empty" in text:

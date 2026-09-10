@@ -15,6 +15,9 @@ def test_failure_codes_are_stable_and_cache_only_replays_persisted_reason(monkey
     assert strategy_cache.classify_failure(
         "RemoteDisconnected: Remote end closed connection without response"
     ) == "source_unavailable"
+    assert strategy_cache.classify_failure(
+        "主力资金源不可用（通用候选缺少主力资金字段，已拒绝冒充）"
+    ) == "source_unavailable"
     strategy_cache.record_failure("低估值", "HTTP 429 rate limit")
 
     ok, frame, message = strategy_cache.cached(
