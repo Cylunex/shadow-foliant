@@ -108,10 +108,20 @@ def classify_failure(value) -> str:
 def artifact_payload(artifacts: dict) -> dict:
     """Return the newest append-only Wencai diagnostic for a formal run."""
     artifacts = artifacts or {}
-    for artifact_type in ("wencai_strategy_runs_repair", "wencai_strategy_runs"):
-        payload = (artifacts.get(artifact_type) or {}).get("payload")
+    candidates = []
+    for artifact_type, artifact in artifacts.items():
+        if (artifact_type != "wencai_strategy_runs"
+                and not str(artifact_type).startswith("wencai_strategy_runs_repair")):
+            continue
+        artifact = artifact or {}
+        payload = artifact.get("payload")
         if isinstance(payload, dict):
-            return payload
+            candidates.append((
+                0 if artifact_type == "wencai_strategy_runs" else 1,
+                str(artifact.get("created_at") or ""), str(artifact_type), payload,
+            ))
+    if candidates:
+        return max(candidates, key=lambda item: item[:3])[3]
     return {}
 
 
@@ -122,12 +132,13 @@ def save_artifact(store, run_id: str, payload: dict):
     if not formal:
         return None
     artifacts = formal.get("artifacts") or {}
-    artifact_type = (
-        "wencai_strategy_runs_repair"
-        if "wencai_strategy_runs" in artifacts else "wencai_strategy_runs"
-    )
-    if artifact_type in artifacts:
-        return str((artifacts.get(artifact_type) or {}).get("artifact_id") or "") or None
+    if "wencai_strategy_runs" not in artifacts:
+        artifact_type = "wencai_strategy_runs"
+    elif "wencai_strategy_runs_repair" not in artifacts:
+        artifact_type = "wencai_strategy_runs_repair"
+    else:
+        stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f")
+        artifact_type = f"wencai_strategy_runs_repair_{stamp}"
     return store.save_selection_artifact(str(run_id), artifact_type, payload)
 
 

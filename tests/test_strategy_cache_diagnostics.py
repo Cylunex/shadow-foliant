@@ -55,3 +55,9 @@ def test_append_only_wencai_repair_wins_without_overwriting_original():
     formal = store.formal_selection("run-1")
     assert strategy_cache.artifact_payload(formal["artifacts"]) == repair
     assert store.saved == [("wencai_strategy_runs_repair", repair)]
+
+    recovered = {"strategies": {"低估值": {"status": "ready", "picks": []}}}
+    assert strategy_cache.save_artifact(store, "run-1", recovered) == "repair-id"
+    formal = store.formal_selection("run-1")
+    assert strategy_cache.artifact_payload(formal["artifacts"]) == recovered
+    assert store.saved[1][0].startswith("wencai_strategy_runs_repair_")
