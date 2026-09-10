@@ -580,14 +580,20 @@ def run_outcomes(days: int = 60, force: bool = False, limit: int = 500) -> Dict[
     return stat
 
 
-def outcome_stats(dimension: str = 'action', days: int = 180) -> Dict[str, Any]:
-    """已评信号按维度分桶胜率(只算方向性 buy/add/sell/reduce)。dimension∈action/source_type/horizon。"""
+def outcome_stats(dimension: str = 'action', days: int = 180, *,
+                  ensure_tables: bool = True) -> Dict[str, Any]:
+    """已评信号按维度分桶胜率。
+
+    ``ensure_tables=False`` 供严格只读投影使用；目标表缺失时直接返回降级结果，
+    不在读请求中执行建表或迁移。
+    """
     dim_col = {'action': 's.action', 'source_type': 's.source_type',
                'horizon': 's.horizon'}.get(dimension, 's.action')
     out = {'dimension': dimension, 'days': days, 'buckets': []}
     try:
-        _ensure_tables()
-        if not _tables_ready:
+        if ensure_tables:
+            _ensure_tables()
+        if ensure_tables and not _tables_ready:
             return out
         conn = _connect(_DB_PATH)
         cur = conn.cursor()

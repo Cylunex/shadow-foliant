@@ -56,11 +56,37 @@ Then `trading_day.confirmed=false` 且 `is_trading_day=null`。
 When 生成快照
 Then 行情适配器只收到一次去重后的证券列表，不发生逐只行情调用。
 
+## Requirement: 盘后闭环与保守调整建议
+
+20:45 后的快照 MUST 投影当日 `eod_outcomes`、`daily_backtest` 运行状态、决策信号后验和
+正式选股策略证据。策略调整建议 MUST 至少满足 30 个方向样本与后验偏离门槛，单次乘数变化
+MUST 限制在 5% 以内，且 MUST 标记人工审核、MUST NOT 自动写回策略。
+
+### Scenario: 盘后任务缺失或后验样本不足
+
+Given 当日任一盘后任务没有成功，或策略只有相关价格标签而没有独立可执行净证据
+When 20:45 后生成计划快照
+Then 盘后闭环标记 degraded，相关策略保持 blocked，且 `auto_apply=false`。
+
+## Requirement: 候选跟踪与次日盘前复核
+
+快照 MUST 为正式 TOP15 投影行情新鲜度、交易计划可用性及显式 blocker，并 MUST 提供基于下一次
+双源确认开市日的盘前检查清单。现金未知时 MUST 禁止新开或加仓，但 MUST 保留保守减仓预览能力。
+`portfolio_snapshot`、`position_guardian` 与 `exit_advisor` 的权威职责边界 MUST 明示；只读快照
+MUST NOT 为补齐这些结果而触发它们的写入、逐股行情或 LLM 流程。
+
+### Scenario: 现金未知且持仓需要收缩
+
+Given Agent 快照不能证明可用现金，但账户行动预览包含减仓替代项
+When 生成候选跟踪与组合计划
+Then 新开和加仓保持禁用，减仓替代项仍可见，且所有结果仍为 preview-only。
+
 ## Requirement: 安全 CLI 与显式通知
 
 CLI MUST 从仓库外环境或凭据文件取得 Agent 地址与 Bearer，默认不得发送通知。缺少配置、鉴权
 失败和服务失败 MUST 输出结构化状态与修复提示，不输出堆栈、真实主机、Token 或响应正文。
-显式 QQ 发送 MUST 复用 `notification_router`，通知正文 MUST 由字段白名单生成。
+显式 QQ 发送 MUST 复用 `notification_router`，通知正文 MUST 由字段白名单生成；当盘后闭环已到期时，
+正文 MUST 附加盘后结论和“建议不自动应用”的提示。
 
 ### Scenario: Bearer 缺失
 

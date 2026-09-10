@@ -141,6 +141,8 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     reference = snapshot.get("wencai_reference") or {}
     holdings = snapshot.get("holdings") or {}
     plans = snapshot.get("trade_plans") or {}
+    post_close = snapshot.get("post_close_review") or {}
+    proposals = snapshot.get("strategy_adjustment_proposals") or {}
     top5 = formal.get("formal_top5") or []
     risk = plans.get("portfolio_risk") or {}
     lines = [
@@ -169,6 +171,12 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         f"状态 {plans.get('status') or 'missing'}",
         f"快照质量：{snapshot.get('status') or 'degraded'}；仅供研究，不自动下单。",
     ])
+    if post_close.get("due"):
+        lines.append(f"盘后结论：{post_close.get('conclusion') or '盘后闭环结果不可用。'}")
+        lines.append(
+            f"策略调整：{proposals.get('proposal_count') or 0} 项待复核；"
+            "仅生成建议，不自动应用。"
+        )
     return "ShadowFoliant 计划报告", "\n".join(lines)
 
 
