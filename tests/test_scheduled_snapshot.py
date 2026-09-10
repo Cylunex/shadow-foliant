@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -11,6 +16,7 @@ from application.scheduled_snapshot import ScheduledSnapshotService
 
 
 NOW = datetime(2026, 9, 10, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class CalendarStore:
@@ -235,3 +241,68 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
     assert "private.example.invalid" not in body
     assert "should-not-appear" not in body
     assert "super-secret-bearer" not in body
+
+
+def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):
+    hook_dir = tmp_path / "hooks"
+    hook_dir.mkdir()
+    marker = tmp_path / "qq-post.json"
+    (hook_dir / "sitecustomize.py").write_text(
+        """
+import json
+import os
+import requests
+
+class Response:
+    status_code = 200
+    def __init__(self, payload):
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+def fake_get(*_args, **_kwargs):
+    return Response({"data": {
+        "schema_version": "scheduled-agent-snapshot-v1",
+        "status": "degraded",
+        "trading_day": {"date": "2026-09-10", "confirmed": False},
+        "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
+        "wencai_reference": {"ready_groups": 0},
+        "holdings": {"status": "complete", "count": 2},
+        "trade_plans": {"status": "degraded", "portfolio_risk": {}},
+    }})
+
+def fake_post(_url, *, json=None, **_kwargs):
+    with open(os.environ["FOLIANT_TEST_POST_MARKER"], "w", encoding="utf-8") as handle:
+        handle.write(__import__("json").dumps(json, ensure_ascii=False))
+    return Response({"ok": True})
+
+requests.get = fake_get
+requests.post = fake_post
+""",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update({
+        "PYTHONPATH": str(hook_dir),
+        "FOLIANT_TEST_POST_MARKER": str(marker),
+        "FOLIANT_AGENT_BASE_URL": "https://agent.example.invalid",
+        "FOLIANT_AGENT_TOKEN": "external-cwd-test-token-that-is-long-enough",
+        "QQ_WEBHOOK_URL": "https://qq.example.invalid/private-hook",
+        "SHADOW_LOG_TIMESTAMPS": "false",
+    })
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "foliant_scheduled_snapshot.py"),
+         "--send-qq"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["notification"] == {"requested": True, "sent": True, "channel": "qq"}
+    assert json.loads(marker.read_text("utf-8"))["msgtype"] == "markdown"
+    assert "external-cwd-test-token" not in completed.stdout

@@ -20,6 +20,12 @@ from urllib.parse import urlsplit
 import requests
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    # Keep the machine-readable CLI independent from cwd without loading .env or
+    # enabling the application's timestamped stdout wrapper.
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 ENDPOINT = "/api/machine/v1/agent/scheduled-snapshot"
 SECRET_PATTERN = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|(?:token|secret|password|cookie)\s*[:=]\s*\S+)"
@@ -163,14 +169,25 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
     title, content = render_qq_report(snapshot)
     try:
         from notify import notification_router
-
+    except (ImportError, ModuleNotFoundError):
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_router_unavailable"}
+    try:
         with contextlib.redirect_stdout(io.StringIO()):
             result = notification_router.send(
                 "report", title, content, only_channels=["qq"], fallback=None,
             )
-        sent = bool((result.get("qq") or (False, ""))[0])
     except Exception:
-        sent = False
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_router_error"}
+    if not isinstance(result, dict) or not isinstance(result.get("qq"), tuple):
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_router_result_invalid"}
+    try:
+        sent = bool(result["qq"][0])
+    except Exception:
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_router_result_invalid"}
     return ({"requested": True, "sent": True, "channel": "qq"} if sent else
             {"requested": True, "sent": False, "channel": "qq",
              "error_code": "qq_delivery_failed"})
