@@ -134,7 +134,7 @@ def test_agent_http_layer_never_imports_mcp_server_and_manifest_has_bounded_tool
     tools = [tool for capability in manifest["capabilities"] for tool in capability["tools"]]
     # Keep the catalog bounded while allowing the personal-portfolio read and
     # hidden review operations that are unavailable to the research-only profile.
-    assert 8 <= len(tools) <= 22  # includes the bounded direct Nexus trade command
+    assert 8 <= len(tools) <= 23  # includes intraday portfolio read and direct Nexus command
     for tool in tools:
         assert 256 <= tool["max_result_bytes"] <= 1048576
         assert 128 <= tool["max_model_chars"] <= 100000

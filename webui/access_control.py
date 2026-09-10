@@ -206,6 +206,7 @@ _add(
     "/api/machine/v1/agent/runs/{run_id}",
     "/api/machine/v1/agent/runs/{run_id}/result",
     "/api/machine/v1/agent/portfolio/summary",
+    "/api/machine/v1/agent/portfolio/intraday-decision",
     "/api/machine/v1/agent/portfolio/trade-records",
     "/api/machine/v1/agent/nexus/reviews",
 )
@@ -239,6 +240,7 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/v1/agent/runs/{run_id}"): "stock.research",
     ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "stock.research",
     ("GET", "/api/machine/v1/agent/portfolio/summary"): "stock.portfolio.read",
+    ("GET", "/api/machine/v1/agent/portfolio/intraday-decision"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
@@ -265,6 +267,8 @@ MACHINE_CAPABILITIES = {
     ("GET", "/api/machine/v1/agent/runs/{run_id}"): "foliant.run.read",
     ("GET", "/api/machine/v1/agent/runs/{run_id}/result"): "foliant.run.read",
     ("GET", "/api/machine/v1/agent/portfolio/summary"): "foliant.portfolio.read",
+    ("GET", "/api/machine/v1/agent/portfolio/intraday-decision"):
+        "foliant.portfolio.read",
     ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "foliant.trades.read",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.draft",

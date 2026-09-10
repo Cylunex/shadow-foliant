@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Shadow Foliant Agent API
-  version: 0.6.0
+  version: 0.7.0
 servers:
   - url: https://stock.example.com
 security:
@@ -261,6 +261,19 @@ paths:
       responses:
         "200":
           description: Bounded personal portfolio summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/machine/v1/agent/portfolio/intraday-decision:
+    get:
+      operationId: get_agent_portfolio_intraday_decision
+      summary: Read the complete persisted intraday decisions for holdings and formal candidates
+      description: Requires delegated primary-portfolio access. This read never refreshes quotes, calls an LLM, or places an order.
+      responses:
+        "200":
+          description: Full private intraday snapshot with provenance, prices, quality and trigger state
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ToolResult" }

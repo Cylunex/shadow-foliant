@@ -781,6 +781,21 @@ def agent_portfolio_summary():
 
 
 @app.get(
+    "/api/machine/v1/agent/portfolio/intraday-decision",
+    operation_id="get_agent_portfolio_intraday_decision",
+)
+def agent_portfolio_intraday_decision():
+    from application.runtime import get_application_services
+
+    try:
+        return _agent_result(
+            get_application_services().portfolio.intraday_decision(), max_bytes=262144
+        )
+    except Exception as exc:
+        return _agent_error(exc)
+
+
+@app.get(
     "/api/machine/v1/agent/portfolio/trade-records",
     operation_id="list_agent_trade_records",
 )

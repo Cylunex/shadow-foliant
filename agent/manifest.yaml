@@ -302,6 +302,17 @@ capabilities:
         timeout_ms: 10000
         concurrency_safe: true
         retry_policy: idempotent
+      - name: foliant.portfolio.intraday-decision
+        transport: http
+        contract_ref: contracts/agent.openapi.yaml
+        operation_id: get_agent_portfolio_intraday_decision
+        exposure: on-demand
+        result_mode: structured
+        max_result_bytes: 262144
+        max_model_chars: 16000
+        timeout_ms: 10000
+        concurrency_safe: true
+        retry_policy: idempotent
     effect: read
     data_classification: sensitive
     risk_level: L0

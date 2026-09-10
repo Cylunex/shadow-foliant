@@ -1171,8 +1171,10 @@ class TradeEntryService:
 class PortfolioAccessService:
     """Bounded, read-only personal portfolio and trade projections for Nexus."""
 
-    def __init__(self, *, portfolio_db: Any = None) -> None:
+    def __init__(self, *, portfolio_db: Any = None,
+                 intraday_snapshot_loader: Callable[[], dict[str, Any]] | None = None) -> None:
         self._portfolio_db = portfolio_db
+        self._intraday_snapshot_loader = intraday_snapshot_loader
 
     def _db(self):
         if self._portfolio_db is not None:
@@ -1214,6 +1216,54 @@ class PortfolioAccessService:
             provenance_value=provenance(run_id="portfolio-primary"),
             data=data,
             model_payload=data,
+        )
+
+    def intraday_decision(self) -> dict[str, Any]:
+        """Read the latest persisted intraday decision artifact without fetching new data."""
+        if self._intraday_snapshot_loader is None:
+            from jobs.intraday_decision_monitor import latest_snapshot
+
+            loaded = latest_snapshot()
+        else:
+            loaded = self._intraday_snapshot_loader()
+        loaded_result = loaded if isinstance(loaded, Mapping) else {}
+        snapshot = loaded_result.get("data")
+        snapshot_status = str(loaded_result.get("status") or "missing")
+        status = {
+            "success": "complete",
+            "degraded": "degraded",
+            "missing": "missing",
+            "skipped": "missing",
+            "error": "failed",
+        }.get(snapshot_status, "failed")
+        trade_date = str((snapshot or {}).get("trade_date") or "latest")
+        quality = (snapshot or {}).get("data_quality") or {}
+        holdings = (snapshot or {}).get("holdings") or []
+        top5 = (snapshot or {}).get("formal_top5") or []
+        watch = (snapshot or {}).get("formal_top15_watch") or []
+        if snapshot:
+            summary = (
+                f"{trade_date} 盘中决策快照：持仓 {len(holdings)} 只，"
+                f"正式 TOP5 {len(top5)} 只，TOP15 观察 {len(watch)} 只；"
+                f"数据状态 {snapshot_status}"
+            )
+        else:
+            summary = "当日盘中决策快照尚不可用"
+        warnings = []
+        if status in {"degraded", "failed"}:
+            warnings.append("部分行情陈旧、缺失或价格计划不足；相关动作已失败关闭")
+        return tool_result(
+            summary=summary,
+            resource_uri=f"shadow://foliant/portfolios/primary/intraday-decisions/{trade_date}",
+            status=status,
+            provenance_value=provenance(
+                run_id=str((snapshot or {}).get("selection_run_id") or "intraday-decision-latest"),
+                decision_at=(snapshot or {}).get("generated_at"),
+                market_as_of=quality.get("quote_as_of"),
+            ),
+            warnings=warnings,
+            data=snapshot,
+            model_payload=snapshot,
         )
 
     def trades(self, *, code: str = "", import_date: str = "", trade_date: str = "",

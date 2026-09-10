@@ -524,56 +524,6 @@ def task_portfolio_indicator_snapshot():
                  finished_at=datetime.now().isoformat())
 
 
-def _intraday_plunge_check(drop_pct: float = -5.0):
-    """持仓盘中急跌监控(挂在 stock_monitor_check 每30分钟):
-    批量行情扫持仓,跌幅 ≤ drop_pct 即推告警;用快照表做"每股每日只报一次"去重。
-    零K线接口,只一组批量行情。"""
-    holdings = _holdings_codes()
-    if not holdings:
-        return
-    codes = [c for c, _ in holdings]
-    quotes = {}
-    try:
-        for i in range(0, len(codes), 20):
-            quotes.update(datahub.quotes(codes[i:i + 20]) or {})
-    except Exception:
-        return
-
-    today = datetime.now().strftime('%Y-%m-%d')
-    alerted = set()
-    try:
-        snap = get_indicator_snapshot('_plunge_alerted') or {}
-        if snap.get('date') == today:
-            alerted = set(snap.get('codes') or [])
-    except Exception:
-        pass
-
-    hits = []
-    for code, name in holdings:
-        q = quotes.get(code) or {}
-        try:
-            chg = float(q.get('change_pct') or 0)
-        except (TypeError, ValueError):
-            continue
-        if chg <= drop_pct and code not in alerted:
-            hits.append((code, q.get('name') or name, chg, q.get('price')))
-            alerted.add(code)
-
-    if not hits:
-        return
-    hits.sort(key=lambda x: x[2])
-    lines = [f'🚨 持仓盘中急跌 — {datetime.now().strftime("%H:%M")}', '']
-    for code, name, chg, price in hits:
-        lines.append(f'  • {name} {code}  {chg:+.1f}%' + (f'  ¥{price}' if price else ''))
-    lines.append('')
-    lines.append('(每股每日仅提醒一次;详情看尾盘持仓分析)')
-    _push_error('🚨 持仓急跌提醒', '\n'.join(lines))
-    try:
-        save_indicator_snapshot('_plunge_alerted', {'date': today, 'codes': sorted(alerted)})
-    except Exception:
-        pass
-
-
 def _latest_job_run_today(job_name: str, success_only: bool = False) -> Optional[Dict]:
     """读取任务今天最近一次运行；依赖调度与任务内 barrier 共用同一判定口径。"""
     conn = None
@@ -1761,6 +1711,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'strategy_prefetch_retry':    360,    # 09:30 只补 4 条问财缓存缺口；4×75s 外层上限，09:45 前必收尾
     'unified_selection':         1800,   # 本地多赛道选股 + 正式TOP5红蓝参考
     'morning_portfolio':         900,
+    'intraday_decision_monitor': 180,
     'afternoon_portfolio':       900,
     'portfolio_indicator_snapshot': 1200,
     'selection_debate':          900,
@@ -2469,8 +2420,8 @@ def _format_strategy_results(results: dict) -> str:
     return '\n'.join(lines)
 
 
-def _format_wencai_reference_notification(results: dict) -> str:
-    """通知中完整展示五组问财参考；不可用也必须显式可见。"""
+def _format_wencai_reference_notification(results: dict, *, max_per_strategy: int = 3) -> str:
+    """通知中有界展示五组问财参考；不可用也必须显式可见。"""
     lines = ['🌐 问财选股参考（仅供对照，不参与正式排名）']
     order = ('主力资金', '低价擒牛', '低估值', '小市值', '净利增长')
     for strategy in order:
@@ -2480,7 +2431,7 @@ def _format_wencai_reference_notification(results: dict) -> str:
             lines.append(f'{strategy}: ⚠️ 暂不可用（{detail}）')
             continue
         picks = []
-        for _, row in frame.head(5).iterrows():
+        for _, row in frame.head(max(0, int(max_per_strategy))).iterrows():
             raw_code = next(
                 (row[key] for key in ('股票代码', 'code', 'symbol') if key in row.index), ''
             )
@@ -2498,6 +2449,51 @@ def _format_wencai_reference_notification(results: dict) -> str:
             picks.append(f'{code} {name}'.strip())
         lines.append(f'{strategy}: ' + ('、'.join(picks) if picks else '（无命中）'))
     return '\n'.join(lines)
+
+
+def _format_wencai_overlap_notification(comparison: dict, names: dict = None) -> str:
+    """只翻译既有 comparison，不据问财结果调整任何正式字段。"""
+    overlap = [str(code) for code in ((comparison or {}).get('overlap') or [])]
+    name_map = names or {}
+    if not overlap:
+        return '与正式TOP15重合：无（仅供参考）'
+    shown = [f'{code} {name_map.get(code, "")}'.strip() for code in overlap[:5]]
+    suffix = f' 等{len(overlap)}只' if len(overlap) > 5 else ''
+    return '与正式TOP15重合：' + '、'.join(shown) + suffix + '（仅供参考）'
+
+
+def _format_selection_reference_summary(final_rows: list, top15_rows: list,
+                                        results: dict, comparison: dict,
+                                        names: dict = None, data_note: str = '') -> str:
+    """09:45 QQ 的固定八行摘要，保证五组状态不会被路由截断。"""
+    def _label(row):
+        code = str(row.get('code') or row.get('symbol') or '')
+        name = str(row.get('name') or (names or {}).get(code) or '')
+        price = _safe_float(row.get('price'))
+        return f'{code} {name}'.strip() + (f' ¥{price:.2f}' if price else '')
+
+    lines = ['正式TOP5：' + ('、'.join(_label(row) for row in (final_rows or [])[:5]) or '未产出')]
+    overlap = _format_wencai_overlap_notification(comparison, names)
+    note = re.sub(r'\s+', ' ', str(data_note or '')).strip()
+    lines.append(f'正式TOP15：{len(top15_rows or [])}只｜{overlap}' + (f'｜{note[:70]}' if note else ''))
+    order = ('主力资金', '低价擒牛', '低估值', '小市值', '净利增长')
+    for strategy in order:
+        ok, frame, message = (results or {}).get(strategy, (False, None, '未执行'))
+        if not ok or frame is None or len(frame) == 0:
+            state = '缓存缺失' if '缓存' in str(message or '') else '外部源失败'
+            lines.append(f'问财参考·{strategy}：⚠️{state}（仅供参考）')
+            continue
+        picks = []
+        for _, row in frame.head(3).iterrows():
+            code = ''.join(ch for ch in str(next((row[k] for k in ('股票代码', 'code', 'symbol')
+                                                  if k in row.index), '')) if ch.isdigit())[-6:]
+            name = next((str(row[k]).strip() for k in ('股票简称', 'name', '名称')
+                         if k in row.index and str(row[k]).strip().lower() not in ('', 'nan', 'none', '<na>')), '')
+            if len(code) == 6:
+                picks.append(f'{code} {name}'.strip())
+        lines.append(f'问财参考·{strategy}：✅可用·' +
+                     ('、'.join(picks) if picks else '无命中') + '（仅供参考）')
+    return '\n'.join(lines[:8])
 
 
 def _run_daily_signal_scan(mode: str, job_name: str):
@@ -4991,8 +4987,10 @@ def task_unified_selection():
 
         if final_rows:
             try:
-                from analysis.selection_finalizer import format_final_selection
-                _final_body = data_note + format_final_selection(final_rows)
+                _final_body = _format_selection_reference_summary(
+                    final_rows, local_formal_rows, strategy_scan.get('results', {}),
+                    comparison, name_map, data_note,
+                )
                 _push_daily('今日候选：加、减还是不动', _final_body)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
@@ -5050,6 +5048,49 @@ def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '', 
         return ''
 
 
+def _run_fixed_intraday(label: str, *, holding_overrides: dict = None) -> dict:
+    """固定节点复用同一个盘中快照；价位只从本地正式 manifest 构建。"""
+    from jobs.intraday_decision_monitor import run_cycle
+    return run_cycle(
+        allow_plan_build=True,
+        notify_changes=True,
+        holding_overrides=holding_overrides or {},
+    )
+
+
+def _intraday_job_log_status(result: dict) -> str:
+    """job_runs 的历史枚举不含 degraded；完整质量状态保留在快照和日志详情。"""
+    status = str((result or {}).get('status') or 'error')
+    return status if status in {'success', 'error', 'skipped'} else 'success'
+
+
+def task_intraday_decision_monitor():
+    """交易时段每20分钟只做一次全池批量报价和状态变化判断。"""
+    job = 'intraday_decision_monitor'
+    from jobs.intraday_decision_monitor import trading_session
+    if not trading_session():
+        return
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from jobs.intraday_decision_monitor import run_cycle
+        result = run_cycle(allow_plan_build=False, notify_changes=True)
+        status = str(result.get('status') or 'error')
+        _log_run(
+            job, _intraday_job_log_status(result),
+            error=(f'decision_status={status}; ' + (str(result.get('reason') or '') or
+                   f"coverage={(result.get('data_quality') or {}).get('coverage', 0):.1%} "
+                   f"events={len(result.get('events') or [])}")),
+            started_at=started, finished_at=datetime.now().isoformat(),
+        )
+        return result
+    except Exception as exc:
+        _log_run(job, 'error', error=str(exc), started_at=started,
+                 finished_at=datetime.now().isoformat())
+        raise
+
+
 def task_morning_portfolio():
     """🆕 早盘持仓分析（接住原晨报"持仓买卖提示":多因子风险分+浮盈,10:05 开盘后实时价比 9:00 盘前快照更准）
     2026-06-27:加早盘 AI 研判(一次 LLM,只喂风险/买点/异动子集,控 token、不逐只;开关 morning_portfolio_ai)。
@@ -5063,7 +5104,13 @@ def task_morning_portfolio():
     try:
         scans = _scan_holdings_with_snapshot()
         if not scans:
-            _log_run(job, 'success', error='no holdings', started_at=started,
+            intraday = _run_fixed_intraday('10:05')
+            if intraday.get('data_quality'):
+                from jobs.intraday_decision_monitor import format_fixed_summary
+                _push_daily('☀️ 早盘持仓与候选计划', format_fixed_summary(intraday, '10:05'))
+            _log_run(job, _intraday_job_log_status(intraday),
+                     error=(f"decision_status={intraday.get('status')}; "
+                            'no holdings; formal candidates covered'), started_at=started,
                      finished_at=datetime.now().isoformat())
             return
 
@@ -5193,40 +5240,15 @@ def task_morning_portfolio():
             market=mkt_line,
             as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
         )
+        intraday = _run_fixed_intraday('10:05')
+        if intraday.get('data_quality'):
+            from jobs.intraday_decision_monitor import format_fixed_summary
+            _body = format_fixed_summary(intraday, '10:05')
         _push_daily(_title, _body)
 
-        # 🎯 挑「今日重点盯盘候选」(持仓多→聚焦):风险分>0 / 有买点 / 盘中异动±3%。
-        # 存快照供 11:20 午间盯盘只看这批(不再全持仓逐只),与"持仓瘦身"理念一致。
-        try:
-            cands = []
-            for s in scans:
-                hot = (s['sell_score'] > 0 or s['buy_signal']
-                       or int(s.get('rollover_level') or 0) > 0
-                       or abs(s.get('change') or 0) >= 3)
-                if not hot:
-                    continue
-                if s['sell_score'] > 0:
-                    tag = '⚠️ ' + '、'.join(s['sell_reasons'][:2])
-                elif int(s.get('rollover_level') or 0) > 0:
-                    tag = '⚪ ' + (s.get('rollover_reason') or '连涨后首次转弱')
-                elif s['buy_signal']:
-                    tag = '🔴 ' + (s.get('buy_reason') or '买点')
-                else:
-                    tag = f"⚡ 异动{s.get('change'):+.1f}%"
-                pri = (s['sell_score'] * 2 + int(s.get('rollover_level') or 0)
-                       + (1 if s['buy_signal'] else 0)
-                       + (1 if abs(s.get('change') or 0) >= 3 else 0))
-                cands.append({'code': s['code'], 'name': s['name'], 'pri': pri, 'tag': tag,
-                              'sell_score': s['sell_score'], 'buy_signal': bool(s['buy_signal']),
-                              'mprice': s.get('price') or 0})
-            cands.sort(key=lambda x: x['pri'], reverse=True)
-            save_indicator_snapshot('focus_candidates',
-                                    {'date': datetime.now().strftime('%Y-%m-%d'), 'picks': cands[:15]})
-        except Exception as _e:
-            print(f'[morning_portfolio] 候选挑选失败: {_e}', flush=True)
-
-        _log_run(job, 'success',
-                 error=(f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} '
+        _log_run(job, _intraday_job_log_status(intraday),
+                 error=(f'decision_status={intraday.get("status")}; '
+                        f'scanned={len(scans)} sell={len(sell_list)} buy={len(buy_list)} '
                         f'movers={len(movers)} rollover_watch={len(rollover_watch)} '
                         f'add={_add_signal.get("level")}'),
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -5250,91 +5272,50 @@ def task_afternoon_portfolio():
         target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
         from eod_review import run_eod_review
         res = run_eod_review(target_positions=target, record_signals=True)
-        if res.get('ok') and res.get('text'):
+        _action_cn = {'add': '加仓', 'hold': '不动', 'reduce': '减仓', 'sell': '卖出'}
+        overrides = {
+            str(item.get('code')): {
+                'action': item.get('action') or 'hold',
+                'action_cn': _action_cn.get(item.get('action'), '不动'),
+                'reason': item.get('reason') or item.get('rule_reason') or '尾盘统一风控结论',
+                'holding_pnl_pct': item.get('pnl'),
+            }
+            for item in (res.get('items') or []) if item.get('code')
+        }
+        intraday = _run_fixed_intraday('14:30', holding_overrides=overrides)
+        if intraday.get('data_quality'):
+            from jobs.intraday_decision_monitor import format_fixed_summary
+            _push_daily('🧹 尾盘持仓与候选动作', format_fixed_summary(intraday, '14:30'))
+        elif res.get('ok') and res.get('text'):
             _push_daily('🧹 尾盘持仓总结', res['text'])
-        _log_run(job, 'success', error=res.get('summary'),
+        _log_run(job, _intraday_job_log_status(intraday), error=(
+            f"decision_status={intraday.get('status')}; {res.get('summary')}; intraday="
+            f"{(intraday.get('data_quality') or {}).get('coverage', 0):.1%}"
+        ),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
 
-    # ── E: 盘中急跌兜底(14:30 尾盘段,每股每日去重)。覆盖点 10:30/11:20/14:30 三次,不重复告警 ──
-    try:
-        _intraday_plunge_check()
-    except Exception as e:
-        print(f'[afternoon_portfolio] 急跌监控子任务失败: {e}')
-
-
 def task_noon_portfolio():
-    """🕦 午间持仓盯盘(11:20)—— 只看早盘(10:05)挑出的「今日重点候选」, 不再全持仓逐只。
-
-    持仓多(80只)全程逐只盯既费算力又抓不住重点 → 早盘 morning_portfolio 按 风险分/买点/异动
-    挑出 top15 存 focus_candidates 快照, 午间只跟这批。一组批量行情(零逐只K线)看候选当前价/异动,
-    推简报; 尾接持仓急跌兜底(原挂 stock_monitor_check 每30分, 该任务退役后移到此单点)。"""
+    """🕦 午间复核：复用持仓 + 正式TOP5/TOP15 的统一盘中决策快照。"""
     job = 'noon_portfolio'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
-        snap = get_indicator_snapshot('focus_candidates') or {}
-        picks = (snap.get('picks') or []) if snap.get('date') == today else []
-        if not picks:
-            # 无候选:不在此单独 _log_run(否则和末尾那条重复,同一次运行写两行 job_runs;
-            # 2026-07-16 修)。也不能 return —— 后面的持仓急跌兜底仍须执行。
-            pass
-        else:
-            codes = [p['code'] for p in picks]
-            quotes = {}
-            try:
-                for i in range(0, len(codes), 20):
-                    quotes.update(datahub.quotes(codes[i:i + 20]) or {})
-            except Exception:
-                pass
-            rows_q = []
-            for p in picks:
-                q = quotes.get(p['code']) or {}
-                try:
-                    price = float(q.get('price') or 0)
-                    chg = float(q.get('change_pct') or 0)
-                except (TypeError, ValueError):
-                    price, chg = 0, 0
-                rows_q.append((p, price, chg))
-            changes = [chg for _, _, chg in rows_q]
-            avg_change = sum(changes) / len(changes) if changes else 0.0
-            reduce_rows = [(p, chg) for p, _, chg in rows_q if p.get('sell_score')]
-            add_rows = [(p, chg) for p, _, chg in rows_q
-                        if p.get('buy_signal') and not p.get('sell_score')]
-            action = '减仓' if reduce_rows else ('加仓' if add_rows else '不动')
-            direction = '看涨' if avg_change >= 0.5 else ('看跌' if avg_change <= -0.5 else '震荡')
-            from notify.plain_language import build_market_message
-            title, body = build_market_message(
-                label='午间重点', direction=direction, action=action,
-                market=f'重点持仓平均{avg_change:+.1f}%',
-                holdings=(f'需减仓{len(reduce_rows)}只、可加仓{len(add_rows)}只'
-                          if reduce_rows or add_rows else '没有必须处理的，先不动'),
-                reason='只列早盘发现的重点持仓，其余不动',
-                as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
-            )
-            detail = []
-            for row_action, group in (('减仓', reduce_rows), ('加仓', add_rows)):
-                for p, chg in group:
-                    move = f'涨{chg:.1f}%' if chg > 0 else f'跌{abs(chg):.1f}%'
-                    detail.append(f"{row_action}：{p['name']}｜{move}")
-            _push_daily(title, body + ('\n' + '\n'.join(detail[:4]) if detail else ''))
-        _log_run(job, 'success',
-                 error=f'candidates={len(picks)}' + ('' if picks else ' (早盘未挑/无持仓)'),
+        intraday = _run_fixed_intraday('11:20')
+        if intraday.get('data_quality'):
+            from jobs.intraday_decision_monitor import format_fixed_summary
+            _push_daily('🕦 午间持仓与候选复核', format_fixed_summary(intraday, '11:20'))
+        _log_run(job, _intraday_job_log_status(intraday),
+                 error=(f"decision_status={intraday.get('status')}; " + (intraday.get('reason') or
+                        f"pool={len(intraday.get('monitor_pool') or [])} "
+                        f"coverage={(intraday.get('data_quality') or {}).get('coverage', 0):.1%}")),
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
                  started_at=started, finished_at=datetime.now().isoformat())
-
-    # ── 持仓急跌兜底(原挂 stock_monitor_check 每30分, 退役后移到此单点)──
-    try:
-        _intraday_plunge_check()
-    except Exception as e:
-        print(f'[noon_portfolio] 急跌监控子任务失败: {e}', flush=True)
-
 
 def task_portfolio_health_ai():
     """🧠 持仓 AI 体检官(14:35 尾盘):融合每只持仓的多维规则信号 → 单股 持有/减仓/清仓 动作 + 理由。
@@ -5710,13 +5691,6 @@ def task_mx_selection_review():
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now().isoformat())
 
-    # ── E: 盘中急跌兜底(10:30 段,每股每日去重)。覆盖点 10:30/11:20/14:30 三次,不重复告警 ──
-    try:
-        _intraday_plunge_check()
-    except Exception as e:
-        print(f'[mx_selection_review] 急跌监控子任务失败: {e}')
-
-
 def task_mx_daily_analysis():
     """收盘后妙想复盘: run_daily_wrap 一站式完成(收集数据→调妙想→格式化)→推送"""
     job = 'mx_daily_analysis'
@@ -6082,12 +6056,12 @@ def register_default_jobs():
       09:00 morning_strategy            — 📊 晨间市场报告(AI研判/新闻/数据快照,零逐只接口)
       09:15/09:30 strategy_prefetch     — 问财外部参考首取 / 仅补缓存缺口
       09:45 unified_selection           — 本地多赛道正式选股；问财只对照，红蓝只复核TOP5
-      10:05 morning_portfolio           — ☀️ 早盘持仓分析 + 挑今日 top15 重点候选(存 focus_candidates)
-      10:30 mx_selection_review         — 妙想五组参考 + 正式TOP5诊断(D:分歧才推) + 急跌兜底
-      11:20 noon_portfolio              — 🕦 午间盯盘(只看早盘候选) + 持仓急跌兜底
+      10:05 morning_portfolio           — ☀️ 持仓 + 正式TOP5/TOP15 早盘价格计划
+      每20分钟 intraday_decision_monitor— ⏱️ 仅批量报价，阈值穿越/动作升级才提醒
+      10:30 mx_selection_review         — 妙想五组参考 + 正式TOP5诊断(D:分歧才推)
+      11:20 noon_portfolio              — 🕦 持仓 + 正式TOP5/TOP15 午间复核
       12:00 noon_report                 — 📊 午盘简报(大盘)
-      14:30 afternoon_portfolio         — 🧹 尾盘持仓总结(eod_review 四合一:三合一 + 止盈阶梯减仓并入一条;尾接急跌兜底)
-      —— E:盘中急跌兜底覆盖 10:30/11:20/14:30 三点(_intraday_plunge_check,每股每日去重)——
+      14:30 afternoon_portfolio         — 🧹 尾盘持仓统一动作 + 正式候选价格计划
       —— 盘后(日线17:30、复权因子18:00就绪;读暖缓存任务仍显式等依赖)——
       16:48 daily_market_snapshot       — 📷 龙虎榜市场快照
       18:05/20:05 research_data_sync    — 🗄️ 全市场复权日线/估值/PIT 首轮与轻量条件补跑
@@ -6104,7 +6078,7 @@ def register_default_jobs():
       周日 23:15 weekly_db_cleanup      — 清理过期业务记录
       周日 08:00/12:05 mx_weekend_outlook / weekend_portfolio（高 token LLM，避开 09–12、14–18）
       周日 20:00/20:30 wf_weekly_backtest / ai_eval_weekly（无 LLM，保留原时间）
-      ⚠️ 退役(不再注册):stock_monitor_check(进场区间盯盘,价值低→急跌并入 noon_portfolio);
+      ⚠️ 退役(不再注册):stock_monitor_check / 旧三点急跌推送（由统一状态机替代）；
          selection_debate/lockup_radar/research_digest(已并入 unified_selection / announcement_scan)。
 
     2026-06-12 整合说明:
@@ -6134,16 +6108,15 @@ def register_default_jobs():
     hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 条问财外部参考
     hub.register('strategy_prefetch_retry',     '09:30', task_strategy_prefetch_retry)  # 只补09:15缺口；不阻断本地主链
     hub.register('unified_selection',           '09:45', task_unified_selection)
-    # ---- 持仓分析三点(2026-06-25):早盘挑候选 → 午间只看候选 → 尾盘全局总结。持仓多(80只)
-    #      不再全程逐只盯,聚焦早盘挑的 top15。红蓝对抗已并入 unified_selection(原 selection_debate@10:00 删)。
-    hub.register('morning_portfolio',           '10:05', task_morning_portfolio)   # 早盘:全持仓 + 挑 top15 候选(2026-06-27:09:50→10:05,开盘半小时后价更稳)
+    # ---- 持仓+正式候选三点与20分钟轻轮询；红蓝对抗已并入 unified_selection。----
+    hub.register('morning_portfolio',           '10:05', task_morning_portfolio)
+    hub.register('intraday_decision_monitor',   'every:20:minutes', task_intraday_decision_monitor)
     hub.register('mx_selection_review',         '10:30', task_mx_selection_review)
-    hub.register('noon_portfolio',              '11:20', task_noon_portfolio)      # 午间:只盯早盘候选 + 急跌兜底
+    hub.register('noon_portfolio',              '11:20', task_noon_portfolio)
 
     # ---- 🟡 盘中 ----
     hub.register('noon_report',                 '12:00', task_noon_report)
-    # ⚠️ 2026-06-25 监控重构:stock_monitor_check(进场区间盯盘,价值低)已退役、不再注册;
-    #    其急跌兜底并入 11:20 noon_portfolio;ai_rec_check(推荐池胜率回填,非盯盘)由 every:30 → 盘后 16:35 收盘后验。
+    # stock_monitor_check 与三点急跌推送已退役；盘中只由统一状态机提醒。
     # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 

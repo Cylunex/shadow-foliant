@@ -74,7 +74,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🕦 午间重点盯盘',
         'schedule': '11:20 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '只看早盘挑出的 top15 重点候选(批量行情,零逐只K线)+ 持仓急跌兜底(原 stock_monitor 的急跌移此)',
+        'description': '复用当日盘中决策快照，同时复核全部真实持仓、正式TOP5与TOP15观察池；只做批量行情',
+    },
+    'intraday_decision_monitor': {
+        'cn': '⏱️ 持仓与正式候选盘中阈值监控',
+        'schedule': 'A股交易时段每20分钟（午休/非交易日跳过）',
+        'category': '核心', 'default': True, 'core': True,
+        'description': '只批量刷新持仓+正式TOP15报价；买入区/止损/止盈/动作升级或行情整体降级时提醒，不调用LLM/问财/F10/慢K线',
     },
     'mx_selection_review': {
         'cn': '🔍 选股过妙想第二意见',
@@ -94,7 +100,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🧹 尾盘持仓总结',
         'schedule': '14:30 每日',
         'category': '核心', 'default': True, 'core': True,
-        'description': '持仓分析+AI体检+清仓助手合并计算；推送只保留一句总览和最重要的5个动作，完整明细供Agent查询',
+        'description': '持仓统一动作与正式候选尾盘计划合并；通知发有界摘要，完整盘中决策快照供Agent查询',
     },
     'kline_prefetch': {
         'cn': '📥 K线缓存预热',

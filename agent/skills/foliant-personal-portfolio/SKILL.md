@@ -5,6 +5,9 @@ Use Foliant as the source of truth for the user's delegated primary securities p
 ## Reads
 
 - Use `foliant.portfolio.summary` for current holdings and cost-basis context.
+- Use `foliant.portfolio.intraday-decision` for the latest complete persisted intraday
+  decisions across real holdings, formal TOP5 and formal TOP15 watch candidates. Respect its
+  quote/plan quality and as-of fields; do not turn failed-closed rows into explicit prices.
 - Use `foliant.trades.list` for imported executions. Distinguish `import_date` from
   `trade_date`; a historical execution may be imported today.
 - Keep execution facts, portfolio snapshots, and research conclusions separate.

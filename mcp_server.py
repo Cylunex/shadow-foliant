@@ -799,6 +799,7 @@ _TASKS = {
     'fund_valuation_signal':    ('📈 基金估值信号', '09:05'),
     'unified_selection':        ('🎯 综合选股 TOP15 + 最终TOP5', '09:45'),
     'morning_portfolio':        ('☀️ 早盘持仓分析(买卖提示+浮盈+异动)', '10:05'),
+    'intraday_decision_monitor': ('⏱️ 持仓+正式候选阈值监控', '交易时段每20分钟'),
     'mx_selection_review':      ('🔍 妙想第二意见', '10:30'),
     'noon_report':              ('☀️ 午间报告', '12:00'),
     'afternoon_portfolio':      ('📊 尾盘持仓分析', '14:30'),
@@ -884,6 +885,13 @@ def latest_selection() -> Dict[str, Any]:
     """读取权威本地融合 TOP15/TOP5、三条本地赛道与外部参考；不现算、不拉源。"""
     from application.runtime import get_application_services
     return get_application_services().selection.latest_formal()
+
+
+@mcp.tool()
+def intraday_decision_snapshot() -> Dict[str, Any]:
+    """读取今日持仓+正式TOP5/TOP15盘中决策、明确价位、行情质量和问财参考分区；不现算、不拉源。"""
+    from jobs.intraday_decision_monitor import latest_snapshot
+    return latest_snapshot()
 
 
 @mcp.tool()
