@@ -316,6 +316,24 @@ def test_revision_replay_ignores_period_not_in_original_input():
     assert result["reason"] == "period_not_consumed"
 
 
+def test_revision_replay_zero_budget_leaves_queue_unclaimed(monkeypatch):
+    import application.revision_replay as replay
+
+    class Repo:
+        def __init__(self, store):
+            pass
+        def list(self, kind, limit=100):
+            return []
+        def claim(self, *args, **kwargs):
+            raise AssertionError("zero replay budget must not claim work")
+        def work_status(self, kind):
+            return {"pending": 4}
+
+    monkeypatch.setattr(replay, "ReliabilityStore", Repo)
+    result = replay.process_revision_impacts(object(), now="2026-09-11T22:00:00+08:00", limit=0)
+    assert result == {"completed": 0, "queue": {"pending": 4}, "deferred": True}
+
+
 def test_missing_older_target_prevents_newer_fills(store):
     from application.model_portfolios import ModelPortfolios
     from application.decision_capsule import build_capsule

@@ -31,7 +31,7 @@ def refresh_corporate_evidence(store, symbols, *, day, now):
     return {"queried": len(rows), "queue": repo.work_status("corporate_actions"), "scope": "dividend_discovery_only"}
 
 
-def refresh_reliability(store, *, now):
+def refresh_reliability(store, *, now, replay_limit=2):
     from data.acquisition_evidence import flush
     from application.model_invocations import flush as flush_models
     from application.research_cases import ResearchCases
@@ -61,6 +61,8 @@ def refresh_reliability(store, *, now):
     from application.revision_replay import process_revision_impacts
     reviews = cases.review(now=now)
     return {"acquisition": flush(store), "model_invocations": flush_models(store),
-            "revision_replays": process_revision_impacts(store, now=now),
+            "revision_replays": process_revision_impacts(
+                store, now=now, limit=replay_limit,
+            ),
             "case_reviews": reviews,
             "prediction_calibration": cases.settle_due(owner="portfolio-primary", now=now)}

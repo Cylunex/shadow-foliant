@@ -43,7 +43,9 @@ def replay_impact(store, *, impact, manifest_id):
     return ReliabilityStore(store).once("revision_replay", payload_hash({"impact": impact, "manifest": manifest_id}), result)
 
 
-def process_revision_impacts(store, *, now):
+def process_revision_impacts(store, *, now, limit=2):
+    if type(limit) is not int or not 0 <= limit <= 2:
+        raise ValueError("invalid_revision_replay_budget")
     repo = ReliabilityStore(store)
     # Discovery is database-only; queue stores all discovered manifest IDs while
     # only two expensive replays may run per invocation. No external fetches.
@@ -64,7 +66,7 @@ def process_revision_impacts(store, *, now):
             repo.enqueue("revision_replay", key + ":" + identity, {"impact": impact, "manifest_id": identity}, priority=3)
         repo.once("revision_discovery", key, {"manifest_count": len(ids), "discovered_at": now})
     completed = 0
-    for work in repo.claim("revision_replay", limit=2, now=now):
+    for work in repo.claim("revision_replay", limit=limit, now=now) if limit else []:
         try:
             value = replay_impact(store, impact=work["impact"], manifest_id=work["manifest_id"])
             if value["status"] in {"complete", "excluded"}:
@@ -72,4 +74,8 @@ def process_revision_impacts(store, *, now):
                 completed += 1
         except Exception as exc:
             repo.once("revision_replay_error", f"{work['work_id']}:{work['attempt']}", {"error_category": type(exc).__name__})
-    return {"completed": completed, "queue": repo.work_status("revision_replay")}
+    return {
+        "completed": completed,
+        "queue": repo.work_status("revision_replay"),
+        "deferred": limit == 0,
+    }

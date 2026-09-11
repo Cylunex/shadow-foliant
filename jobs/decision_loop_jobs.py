@@ -137,7 +137,13 @@ def daily_decision_loop(store=None):
     model_books = portfolios.advance(facts, now=now.isoformat())
     from application.reliability_jobs import refresh_reliability
     try:
-        reliability = refresh_reliability(service.store, now=now.isoformat())
+        # Historical revision replay can rebuild entire frozen selections and is
+        # intentionally not part of eod_outcomes' 900s settlement budget.  This
+        # run still flushes evidence, reviews cases and reports the durable replay
+        # queue for a separately budgeted reliability invocation.
+        reliability = refresh_reliability(
+            service.store, now=now.isoformat(), replay_limit=0,
+        )
     except Exception as exc:
         reliability = {"status": "failed", "error_category": type(exc).__name__}
         errors.append({"component": "research_reviews", **reliability})

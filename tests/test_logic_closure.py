@@ -267,8 +267,13 @@ def test_daily_fallback_and_optional_failure_do_not_block_settlement(store, monk
     monkeypatch.setattr(primary, "quotes", lambda batch: (_ for _ in ()).throw(TimeoutError()))
     monkeypatch.setattr(routed, "quotes", lambda batch: {"600001": dict(open=10, price=10, volume=100000, limit_up=11, limit_down=9, quote_time="2026-09-04T15:00:00+08:00")})
     monkeypatch.setattr(optional, "refresh_corporate_evidence", lambda *a, **kw: {})
-    monkeypatch.setattr(optional, "refresh_reliability", lambda *a, **kw: (_ for _ in ()).throw(ValueError()))
+    replay_limits = []
+    def failed_reliability(*args, **kwargs):
+        replay_limits.append(kwargs.get("replay_limit"))
+        raise ValueError()
+    monkeypatch.setattr(optional, "refresh_reliability", failed_reliability)
     monkeypatch.setattr(jobs, "refresh_quality", lambda *a: {})
     result = jobs.daily_decision_loop(store)
     assert calls == ["settled"] and result["status"] == "partial"
+    assert replay_limits == [0]
     assert {e["component"] for e in result["errors"]} == {"tencent", "research_reviews"}
