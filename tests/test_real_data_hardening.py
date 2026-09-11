@@ -118,6 +118,24 @@ def test_evening_refresh_warms_both_contexts():
         assert refresh.call_args.kwargs['mode'] == 'preopen'
 
 
+def test_decision_loop_quality_reader_uses_cached_artifact_only():
+    cached = {
+        'status': 'ready', 'ready': True, 'report_id': 'quality-1',
+    }
+    with patch('core.research_health.cached_snapshot', return_value=cached) as read, patch(
+            'core.research_health.refresh_quality_report',
+            side_effect=AssertionError('full-market refresh must not run in eod_outcomes')):
+        from jobs.decision_loop_jobs import cached_quality
+
+        result = cached_quality(store=object())
+
+    assert result == {
+        'status': 'ready', 'ready': True, 'report_id': 'quality-1',
+        'source': 'cached_research_sync_artifact',
+    }
+    read.assert_called_once()
+
+
 @pytest.fixture
 def wencai(monkeypatch):
     from data.sources import pywencai as source

@@ -20,6 +20,33 @@ def refresh_quality(store=None):
         return {"status": "failed", "error_category": type(exc).__name__}
 
 
+def cached_quality(store=None):
+    """Read the quality artifact produced by the research-sync jobs.
+
+    The daily decision loop is part of ``eod_outcomes`` and has a hard 900s
+    budget.  Re-scoring the full market here duplicated the earlier research
+    sync and could consume that entire budget.  Quality is optional evidence
+    for this loop, so a missing/stale artifact is reported explicitly without
+    recomputing it inline.
+    """
+    try:
+        from core.research_health import cached_snapshot
+
+        report = cached_snapshot(store=store)
+        return {
+            "status": report.get("status") or "stale",
+            "report_id": report.get("report_id"),
+            "ready": bool(report.get("ready")),
+            "source": "cached_research_sync_artifact",
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error_category": type(exc).__name__,
+            "source": "cached_research_sync_artifact",
+        }
+
+
 def daily_decision_loop(store=None):
     from application.decision_loop import DecisionLoopService
     from analysis.decision_evaluation import equity_rules
@@ -120,7 +147,7 @@ def daily_decision_loop(store=None):
             "recovered_original_sessions": recovered,
             "reliability": reliability, "corporate_evidence": corporate,
             "model_books": model_books,
-            "quality_report": refresh_quality(service.store)}
+            "quality_report": cached_quality(service.store)}
 
 
 def weekly_research_cycle(store=None):
