@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import threading
 import time
 import sqlite3
 
@@ -28,6 +29,10 @@ def _slow_task():
 
 def _failing_task():
     raise RuntimeError("stage=calendar latest confirmed open market date unavailable")
+
+
+def _completed_task_with_lingering_thread():
+    threading.Thread(target=time.sleep, args=(30,), daemon=False).start()
 
 
 def test_research_artifact_has_evidence_freshness_and_invalidation() -> None:
@@ -179,6 +184,17 @@ def test_isolated_runtime_completes_and_terminates_timeout() -> None:
     )
     assert timed_out["status"] == "timeout"
     assert timed_out["terminated"] is True
+
+
+def test_isolated_runtime_does_not_wait_for_lingering_provider_threads() -> None:
+    started = time.monotonic()
+    result = run_isolated_task(
+        "lingering-thread-example", _completed_task_with_lingering_thread,
+        (), {}, timeout_seconds=5, cancel_grace_seconds=1,
+    )
+    assert result["status"] == "complete"
+    assert result["terminated"] is True
+    assert time.monotonic() - started < 3
 
 
 def test_isolated_runtime_reports_bounded_safe_failure_reason(monkeypatch) -> None:

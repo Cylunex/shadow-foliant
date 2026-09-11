@@ -113,8 +113,32 @@ def run_isolated_task(name: str, func: Callable[..., Any], args: tuple[Any, ...]
     process.daemon = False
     started = time.monotonic()
     process.start()
-    process.join(timeout=max(0.01, float(timeout_seconds)))
-    exceeded_deadline = process.is_alive()
+    deadline = started + max(0.01, float(timeout_seconds))
+    result = None
+    # A task can finish and publish its durable result while provider libraries
+    # still own non-daemon timeout threads. Waiting for process.join() first turns
+    # that harmless cleanup tail into a false task timeout. Observe the result
+    # channel while the child is alive; _child_entry publishes only after func()
+    # has returned, so it is then safe to terminate leftover background threads.
+    while result is None and process.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = result_queue.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            continue
+
+    exceeded_deadline = result is None and process.is_alive()
+    if result is not None and process.is_alive():
+        process.join(timeout=min(1.0, max(0.01, float(cancel_grace_seconds))))
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(timeout=5)
+
     if process.is_alive():
         cancel_event.set()
         process.join(timeout=max(0.01, float(cancel_grace_seconds)))
@@ -129,7 +153,8 @@ def run_isolated_task(name: str, func: Callable[..., Any], args: tuple[Any, ...]
             return {"status": "timeout", "elapsed": time.monotonic() - started,
                     "terminated": False, "isolation": "spawn"}
     try:
-        result = result_queue.get(timeout=1)
+        if result is None:
+            result = result_queue.get(timeout=1)
     except queue.Empty:
         result = {
             "status": "error",
