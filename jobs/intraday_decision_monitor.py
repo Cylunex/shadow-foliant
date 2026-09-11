@@ -237,6 +237,20 @@ def _build_missing_plans(formal: dict[str, Any], pool: list[dict[str, Any]],
         LOGGER.exception("intraday plan source unavailable")
         return
     market_signal = snapshot_loader("_market_add_signal") or {}
+    try:
+        from portfolio_policy import is_fresh_market_add_signal
+        if not is_fresh_market_add_signal(market_signal):
+            market_signal = {
+                "action": "unknown",
+                "action_cn": "数据不足·默认持有",
+                "reason": "组合动作信号过期，尾盘不以该信号加仓。",
+            }
+    except Exception:
+        market_signal = market_signal if market_signal else {
+            "action": "unknown",
+            "action_cn": "数据不足·默认持有",
+            "reason": "市场动作信号不可用，不进行尾盘加仓。",
+        }
     for item in pool:
         symbol = item["symbol"]
         if symbol not in missing:

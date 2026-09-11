@@ -3,6 +3,7 @@ import importlib
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pandas as pd
@@ -34,6 +35,47 @@ class PortfolioPolicyTest(unittest.TestCase):
     def test_high_position_still_blocks_only_moderate_buy(self, _signal):
         guarded = portfolio_policy.guard('buy', source_type='selection')
         self.assertTrue(guarded['blocked'])
+
+    @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
+    @patch('portfolio_policy.latest_market_add_signal')
+    def test_high_position_blocks_stale_market_signal(self, get_signal):
+        now = datetime.now(portfolio_policy.SHANGHAI)
+        get_signal.return_value = {
+            'action': 'strong_buy',
+            'must_add': True,
+            'date': now.strftime('%Y-%m-%d'),
+            'updated_at': (now - timedelta(minutes=200)).isoformat(),
+        }
+        guarded = portfolio_policy.guard('add', source_type='analysis')
+        self.assertTrue(guarded['blocked'])
+        self.assertEqual(guarded['action'], 'watch')
+        self.assertIn('今日组合动作不是“强力买入”', guarded['reason'])
+
+    @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
+    @patch('portfolio_policy.latest_market_add_signal')
+    def test_high_position_status_marks_stale_signal(self, get_signal):
+        now = datetime.now(portfolio_policy.SHANGHAI)
+        get_signal.return_value = {
+            'action': 'strong_buy',
+            'must_add': True,
+            'date': now.strftime('%Y-%m-%d'),
+            'updated_at': (now - timedelta(minutes=200)).isoformat(),
+        }
+        status = portfolio_policy.status()
+        self.assertTrue(status['fail_closed'])
+        self.assertTrue(status['market_add_signal']['stale'])
+        self.assertFalse(status['market_add_signal']['fresh'])
+
+    def test_invalid_ttl_config_falls_back_to_default(self):
+        now = datetime.now(portfolio_policy.SHANGHAI)
+        with patch.dict(os.environ, {'MARKET_ADD_SIGNAL_TTL_MINUTES': 'not-an-int'}):
+            signal = {
+                'action': 'strong_buy',
+                'must_add': True,
+                'date': now.strftime('%Y-%m-%d'),
+                'updated_at': now.isoformat(),
+            }
+            self.assertTrue(portfolio_policy.is_fresh_market_add_signal(signal))
 
     @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
     def test_manual_action_is_not_rewritten(self):
