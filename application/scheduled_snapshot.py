@@ -388,14 +388,30 @@ class ScheduledSnapshotService:
         }
 
     @staticmethod
-    def _independent(selection_value: dict[str, Any]) -> dict[str, Any]:
+    def _independent(
+        selection_value: dict[str, Any],
+        expected_market_as_of: str | None = None,
+    ) -> dict[str, Any]:
         data = selection_value.get("data") or {}
         payload = ((data.get("references") or {}).get("independent") or {})
         ready = payload.get("status") == "ready"
+        expected = str(expected_market_as_of or "").strip()
+        market_as_of = str(payload.get("market_as_of") or "").strip()
+        status = "complete" if ready else "missing"
+        reason = payload.get("reason")
+        warnings: list[str] = []
+        if status == "complete" and expected:
+            if market_as_of != expected:
+                status = "stale"
+                reason = reason or "independent result date mismatch"
+                warnings.append(
+                    f"independent_selection.market_as_of({market_as_of or 'missing'}) != "
+                    f"formal_selection_date({expected})"
+                )
         return {
-            "status": "complete" if ready else "missing",
+            "status": status,
             "availability": payload.get("status") or "unavailable",
-            "reason": payload.get("reason"),
+            "reason": reason,
             "strategy_id": payload.get("strategy_id"),
             "strategy_version": payload.get("strategy_version"),
             "strategy_hash": payload.get("strategy_hash"),
@@ -403,11 +419,13 @@ class ScheduledSnapshotService:
             "input_snapshot_id": payload.get("input_snapshot_id"),
             "input_provenance": clean_json(payload.get("input_provenance") or {}),
             "market_as_of": payload.get("market_as_of"),
+            "expected_market_as_of": expected,
             "weights": clean_json(payload.get("weights") or {}),
             "top15": [_candidate(row) for row in (payload.get("top15") or [])][:15],
             "top5": [_candidate(row) for row in (payload.get("top5") or [])][:5],
             "independence_boundary": payload.get("independence_boundary"),
             "comparison": clean_json(data.get("selection_comparison") or {}),
+            "warnings": [item[:300] for item in warnings][:10],
         }
 
     @staticmethod
@@ -441,18 +459,23 @@ class ScheduledSnapshotService:
         return result[:15]
 
     @staticmethod
-    def _next_premarket_check(formal: dict[str, Any]) -> dict[str, Any]:
+    def _next_premarket_check(
+        formal: dict[str, Any], independent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        checks = [
+            "refresh_two_source_calendar_consensus",
+            "revalidate_formal_selection_freshness",
+            "refresh_batch_quotes_and_tradeability",
+            "confirm_cash_and_sellable_quantities",
+            "rebuild_preview_if_portfolio_watermark_changed",
+        ]
+        if (independent or {}).get("status") not in {"complete", "success", "missing", "not_applicable"}:
+            checks.append("revalidate_independent_selection_freshness")
         return {
             "status": "required" if formal.get("formal_top15") else "missing",
             "target_session_date": None,
             "date_basis": "next_confirmed_open_date_requires_fresh_two_source_consensus",
-            "checks": [
-                "refresh_two_source_calendar_consensus",
-                "revalidate_formal_selection_freshness",
-                "refresh_batch_quotes_and_tradeability",
-                "confirm_cash_and_sellable_quantities",
-                "rebuild_preview_if_portfolio_watermark_changed",
-            ],
+            "checks": checks[:10],
             "preview_only": True,
             "auto_execution": False,
         }
@@ -654,7 +677,9 @@ class ScheduledSnapshotService:
             selection_value = {"status": "missing", "data": None, "warnings": []}
         formal = self._formal(selection_value, trading_day)
         wencai = self._wencai(selection_value)
-        independent = self._independent(selection_value)
+        independent = self._independent(
+            selection_value, expected_market_as_of=formal.get("selection_date"),
+        )
 
         try:
             context = self.context_reader() or {"holdings": [], "watermark": ""}
@@ -760,7 +785,7 @@ class ScheduledSnapshotService:
             "status": plan_state,
             "formal": formal_plans[:15],
             "formal_candidate_follow_up": candidate_follow_up,
-            "next_premarket_check": self._next_premarket_check(formal),
+            "next_premarket_check": self._next_premarket_check(formal, independent=independent),
             "portfolio_risk": plan_projection,
             "holding_actions": clean_json(intraday.get("holdings") or [])[:100],
             "intraday_as_of": intraday.get("generated_at"),

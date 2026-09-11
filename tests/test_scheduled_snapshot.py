@@ -33,7 +33,7 @@ class CalendarStore:
         return dict(self.value)
 
 
-def selection(*, day="2026-09-10", with_wencai=True):
+def selection(*, day="2026-09-10", with_wencai=True, independent_day: str | None = None):
     top15 = [{
         "symbol": f"600{i:03d}", "name": f"候选{i}", "rank": i,
         "trade_plan": {"available": True, "action": "hold", "reason": "规则计划"},
@@ -59,7 +59,7 @@ def selection(*, day="2026-09-10", with_wencai=True):
                     "status": "ready", "strategy_id": "codex-independent",
                     "strategy_version": "codex-independent-v1", "strategy_hash": "fixed",
                     "manifest_id": "manifest", "input_snapshot_id": "independent-snapshot",
-                    "market_as_of": "2026-09-09",
+                    "market_as_of": independent_day if independent_day is not None else day,
                     "weights": {"fundamental_quality": 30, "medium_trend": 25,
                                 "valuation": 20, "flow_liquidity": 15,
                                 "risk_discount": 10},
@@ -177,6 +177,19 @@ def test_confirmed_closed_day_and_stale_formal_are_explicit():
     assert result["trading_day"]["confirmed"] is True
     assert result["trading_day"]["is_trading_day"] is False
     assert result["formal_selection"]["status"] == "stale"
+    assert result["status"] == "degraded"
+
+
+def test_independent_selection_stale_when_as_of_mismatch():
+    value = selection(day="2026-09-11", independent_day="2026-09-10")
+    result = build_service(selection_value=value).read(owner_id="scheduled-agent")["data"]
+    assert result["formal_selection"]["selection_date"] == "2026-09-11"
+    assert result["independent_selection"]["status"] == "stale"
+    assert result["independent_selection"]["expected_market_as_of"] == "2026-09-11"
+    assert result["independent_selection"]["reason"] == "independent result date mismatch"
+    assert any("independent_selection.market_as_of(2026-09-10)" in item
+               for item in result["independent_selection"]["warnings"])
+    assert result["quality"]["sections"]["independent_selection"] == "stale"
     assert result["status"] == "degraded"
 
 
