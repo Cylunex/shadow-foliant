@@ -258,6 +258,40 @@ def test_batch_retrieved_at_keeps_existing_price_fresh_when_provider_omits_row_t
     assert quality["items"]["510300"]["quote_time_source"] == "batch_retrieved_at"
 
 
+def test_post_close_accepts_same_day_close_without_marking_it_intraday_actionable():
+    now = datetime(2026, 9, 10, 20, 46, tzinfo=TZ)
+    quality = monitor.assess_quotes(
+        [{"symbol": "510300"}],
+        {"510300": {"price": 4.25, "quote_time": "20260910161500",
+                    "source": "sina"}},
+        now,
+        mode="post_close",
+    )
+    item = quality["items"]["510300"]
+    assert quality["status"] == "success"
+    assert quality["mode"] == "post_close"
+    assert item["freshness"] == "closing_current"
+    assert item["price_usable"] is True
+    assert item["price_actionable"] is False
+    assert item["price_context"] == "post_close_mark"
+
+
+def test_post_close_rejects_previous_day_or_preclose_marks():
+    now = datetime(2026, 9, 10, 20, 46, tzinfo=TZ)
+    quality = monitor.assess_quotes(
+        [{"symbol": "000001"}, {"symbol": "600001"}],
+        {
+            "000001": {"price": 10, "quote_time": "20260909161500"},
+            "600001": {"price": 10, "quote_time": "20260910145959"},
+        },
+        now,
+        mode="post_close",
+    )
+    assert quality["status"] == "error"
+    assert set(quality["stale_symbols"]) == {"000001", "600001"}
+    assert all(item["price_usable"] is False for item in quality["items"].values())
+
+
 def test_missing_plan_fails_closed_for_holding_action_and_prices():
     now = datetime(2026, 9, 10, 10, 5, tzinfo=TZ)
     plans = _plans()

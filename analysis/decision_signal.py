@@ -491,7 +491,12 @@ def _kline_after(code: str, anchor_iso: str, horizon_days: int):
     注:datahub.kline 的日期是 DataFrame 的**索引**(列只有 OHLCV),也兼容个别源把日期放列里。"""
     try:
         import datahub
-        df = datahub.kline(code, '1y')
+        # eod_outcomes is downstream of kline_prefetch. Historical outcome
+        # settlement must stay bounded and must not fan out to providers for old
+        # symbols that were not part of today's warm set.
+        df = datahub.kline(
+            code, '1y', '1d', use_cache=True, adjust='raw', cache_only=True,
+        )
         if df is None or len(df) == 0:
             return (None, None)
         ccol = next((c for c in ('close', 'Close', '收盘') if c in df.columns), None)

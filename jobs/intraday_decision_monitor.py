@@ -146,7 +146,16 @@ def _parse_quote_time(value: Any, now: datetime) -> tuple[datetime, str]:
 
 
 def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, Any]],
-                  now: datetime, stale_minutes: int = 8) -> dict[str, Any]:
+                  now: datetime, stale_minutes: int = 8,
+                  mode: str = "intraday") -> dict[str, Any]:
+    """Assess quote freshness for an explicit decision context.
+
+    Intraday decisions require a quote inside ``stale_minutes``.  A scheduled
+    post-close report may instead use a timestamped quote from the same trading
+    day at or after 15:00 as a closing mark.  Such a mark is usable for review
+    and next-session planning but is never labelled intraday-executable.
+    """
+    mode = "post_close" if mode == "post_close" else "intraday"
     pool = list(pool)
     rows: dict[str, dict[str, Any]] = {}
     stale, missing, valid = [], [], []
@@ -162,14 +171,30 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         stamp_source = declared_source or parsed_source
         age_minutes = max(0.0, (now - stamp).total_seconds() / 60.0)
         is_stale = bool(raw_stamp) and age_minutes > stale_minutes
-        actionable = bool(price and price > 0 and not is_stale)
+        intraday_actionable = bool(
+            mode == "intraday" and price and price > 0 and not is_stale
+        )
+        closing_current = bool(
+            mode == "post_close"
+            and raw_stamp
+            and price and price > 0
+            and stamp.date() == now.date()
+            and (stamp.hour, stamp.minute) >= (15, 0)
+            and (now.hour, now.minute) >= (15, 0)
+        )
+        usable = intraday_actionable or closing_current
         if not price or price <= 0:
             missing.append(symbol)
-        elif is_stale:
+        elif not usable:
             stale.append(symbol)
         else:
             valid.append(symbol)
             as_of_values.append(stamp)
+        freshness = (
+            "actionable" if intraday_actionable else
+            "closing_current" if closing_current else
+            "stale_or_missing"
+        )
         rows[symbol] = {
             "price": round(price, 3) if price and price > 0 else None,
             "change_pct": _finite(quote.get("change_pct")) if isinstance(quote, dict) else None,
@@ -177,7 +202,14 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
             "quote_time_source": stamp_source,
             "quote_provider": quote.get("source") if isinstance(quote, dict) else None,
             "quote_age_minutes": round(age_minutes, 2),
-            "price_actionable": actionable,
+            "freshness": freshness,
+            "price_actionable": intraday_actionable,
+            "price_usable": usable,
+            "price_context": (
+                "intraday_execution" if intraday_actionable else
+                "post_close_mark" if closing_current else
+                "unusable"
+            ),
         }
     requested = len(pool)
     coverage = len(valid) / requested if requested else 1.0
@@ -199,6 +231,7 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         missing_asset_types.setdefault(asset_type, []).append(symbol)
     return {
         "status": status,
+        "mode": mode,
         "requested": requested,
         "valid": len(valid),
         "coverage": round(coverage, 4),

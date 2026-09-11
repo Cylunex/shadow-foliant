@@ -106,6 +106,7 @@ def context():
 def build_service(
     *, store=None, selection_value=None, quote_spy=None, context_reader=context,
     clock=lambda: NOW, job_runs_reader=lambda **_kwargs: [],
+    quote_time=None, intraday_value=None,
     outcome_stats_reader=lambda **_kwargs: {"dimension": "source_type", "days": 180,
                                             "buckets": []},
     strategy_evidence_reader=lambda **_kwargs: {
@@ -118,7 +119,7 @@ def build_service(
         if quote_spy is not None:
             quote_spy.append(list(symbols))
         return {symbol: {"name": symbol, "price": 10, "change_pct": 1,
-                         "quote_time": NOW.isoformat(), "volume": 1000,
+                         "quote_time": (quote_time or NOW).isoformat(), "volume": 1000,
                          "amount_wan": 100, "limit_up": 11, "limit_down": 9}
                 for symbol in symbols}
 
@@ -128,7 +129,7 @@ def build_service(
         cockpit_reader=cockpit,
         context_reader=context_reader,
         capsule_reader=capsule,
-        intraday_reader=lambda: {},
+        intraday_reader=lambda: intraday_value or {},
         quote_loader=quotes,
         job_runs_reader=job_runs_reader,
         outcome_stats_reader=outcome_stats_reader,
@@ -269,6 +270,47 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
     assert proposals["proposals"][0]["proposed_multiplier"] == 0.95
     assert proposals["blocked_strategy_count"] == 1
     assert proposals["guardrails"]["auto_apply"] is False
+
+
+def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs():
+    evening = NOW.replace(hour=20, minute=46)
+    close_time = NOW.replace(hour=16, minute=15)
+    jobs = [
+        {"job_name": name, "started_at": evening.isoformat(),
+         "finished_at": evening.isoformat(), "status": "success", "error": ""}
+        for name in ("eod_outcomes", "daily_backtest")
+    ]
+    holding_plan = {
+        "available": True, "action": "hold", "action_cn": "不动",
+        "entry_low": 9.8, "entry_high": 10.1,
+        "stop_loss": 9.2, "target_price": 11.5,
+        "price_basis": "persisted-rule-plan",
+    }
+    snapshot = build_service(
+        clock=lambda: evening,
+        quote_time=close_time,
+        intraday_value={"data": {"plans": {"000001": holding_plan}}},
+        job_runs_reader=lambda **_kwargs: jobs,
+    ).read(owner_id="scheduled-agent")["data"]
+
+    assert snapshot["quotes"]["status"] == "success"
+    assert all(row["freshness"] == "closing_current"
+               for row in snapshot["quotes"]["rows"])
+    assert snapshot["trade_plans"]["pricing_status"] == "success"
+    assert snapshot["trade_plans"]["pricing_context"] == "post_close"
+    assert snapshot["holdings_review"]["status"] == "complete"
+    assert snapshot["holdings_review"]["count"] == 2
+    assert all(row["reference_close"] == 10
+               for row in snapshot["holdings_review"]["rows"])
+    assert snapshot["next_session_plan"]["status"] == "complete"
+    assert snapshot["next_session_plan"]["count"] == 16
+    assert snapshot["next_session_plan"]["auto_execution"] is False
+    assert snapshot["source_comparison"]["status"] == "complete"
+    assert snapshot["source_comparison"]["availability"] == {
+        "formal": True, "independent": True, "wencai": True,
+    }
+    assert snapshot["post_close_review"]["holdings_review_status"] == "complete"
+    assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
 
 
 def test_unknown_cash_blocks_additions_but_keeps_reduction_preview():

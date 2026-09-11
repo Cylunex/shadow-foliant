@@ -336,6 +336,13 @@ class DataHubIntradayTest(unittest.TestCase):
         quality = datahub.kline_quality(frame)
         self.assertFalse(quality['actionable'])
 
+    def test_kline_cache_only_never_enters_provider_route_when_cache_is_missing(self):
+        with patch.object(datahub._os.path, 'isfile', return_value=False), \
+                patch.object(datahub, '_route') as route:
+            out = datahub.kline('600000', '1y', '1d', cache_only=True)
+        self.assertTrue(out.empty)
+        route.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

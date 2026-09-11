@@ -91,6 +91,22 @@ class MarketBreadthTests(unittest.TestCase):
 
 
 class SignalTransitionTests(unittest.TestCase):
+    def test_outcome_settlement_reads_only_the_prefetched_raw_cache(self):
+        import datahub
+
+        frame = pd.DataFrame(
+            {"Close": [10.0, 10.5]},
+            index=pd.to_datetime(["2026-09-01", "2026-09-02"]),
+        )
+        with mock.patch.object(datahub, "kline", return_value=frame) as kline:
+            start, end = decision_signal._kline_after(
+                "600001", "2026-09-01T10:00:00+08:00", 1,
+            )
+        self.assertEqual((start, end), (10.0, 10.5))
+        kline.assert_called_once_with(
+            "600001", "1y", "1d", use_cache=True, adjust="raw", cache_only=True,
+        )
+
     def test_only_cross_risk_state_is_material(self):
         self.assertFalse(is_material_transition("hold", "watch"))
         self.assertFalse(is_material_transition("buy", "add"))

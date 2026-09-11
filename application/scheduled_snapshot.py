@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 import re
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -97,6 +98,14 @@ def _action_plan(value: Any) -> dict[str, Any]:
         "stress_scenarios", "actual_formal_difference", "alternatives", "rejected_candidates",
     )
     return clean_json({key: value.get(key) for key in allowed if key in value})
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _job_run(row: Any) -> dict[str, Any]:
@@ -442,7 +451,7 @@ class ScheduledSnapshotService:
             blockers = []
             if formal.get("status") not in {"complete", "success"}:
                 blockers.append("formal_selection_not_current")
-            if quote.get("freshness") != "actionable":
+            if quote.get("freshness") not in {"actionable", "closing_current"}:
                 blockers.append("quote_stale_or_missing")
             if not plan_available:
                 blockers.append("trade_plan_missing")
@@ -479,6 +488,207 @@ class ScheduledSnapshotService:
             "preview_only": True,
             "auto_execution": False,
         }
+
+    @staticmethod
+    def _source_comparison(
+        selection_value: dict[str, Any], formal: dict[str, Any],
+        independent: dict[str, Any], wencai: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = clean_json(
+            ((selection_value.get("data") or {}).get("selection_comparison") or {})
+        )
+        availability = {
+            "formal": formal.get("status") in {"complete", "success"}
+                      and bool(formal.get("formal_top15")),
+            "independent": independent.get("status") in {"complete", "success"},
+            "wencai": int(wencai.get("ready_groups") or 0) == len(EXPECTED_WENCAI_STRATEGIES),
+        }
+        pair_dependencies = {
+            "formal_independent": ("formal", "independent"),
+            "formal_wencai": ("formal", "wencai"),
+            "independent_wencai": ("independent", "wencai"),
+        }
+        raw_pairs = raw.get("pairwise") or {}
+        pairs = {
+            name: clean_json(raw_pairs.get(name) or {})
+            for name, required in pair_dependencies.items()
+            if all(availability[source] for source in required) and raw_pairs.get(name)
+        }
+        return clean_json({
+            "status": "complete" if availability["formal"] else "degraded",
+            "selection_date": formal.get("selection_date"),
+            "availability": availability,
+            "unavailable_sources": [name for name, ready in availability.items() if not ready],
+            "pairwise": pairs,
+            "triple": raw.get("triple") if all(availability.values()) else None,
+            "reference_only": True,
+            "formal_membership_unchanged": True,
+        })
+
+    @staticmethod
+    def _holdings_review(
+        *, due: bool, trading_day: dict[str, Any], holdings: list[dict[str, Any]],
+        quote_rows: list[dict[str, Any]], plans: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        base = {
+            "review_date": trading_day.get("date"),
+            "preview_only": True,
+            "auto_execution": False,
+        }
+        if not due:
+            return base | {"status": "pending", "rows": []}
+        if trading_day.get("confirmed") and not trading_day.get("is_trading_day"):
+            return base | {"status": "not_applicable", "rows": []}
+        quote_by_symbol = {str(row.get("symbol") or ""): row for row in quote_rows}
+        rows = []
+        for holding in holdings:
+            symbol = str(holding.get("symbol") or holding.get("code") or "")
+            quote = quote_by_symbol.get(symbol) or {}
+            freshness = str(quote.get("freshness") or "stale_or_missing")
+            close_price = (
+                _finite_number(quote.get("price"))
+                if freshness in {"actionable", "closing_current"} else None
+            )
+            cost = _finite_number(holding.get("cost_price"))
+            pnl = (
+                round((close_price - cost) / cost * 100, 2)
+                if close_price is not None and cost and cost > 0 else None
+            )
+            plan = plans.get(symbol) or {}
+            stop = _finite_number(plan.get("stop_loss"))
+            target = _finite_number(plan.get("target_price"))
+            if close_price is None:
+                action, reason, state = "data_insufficient", "当日收盘价不可用", "blocked"
+            elif stop is not None and close_price <= stop:
+                action, reason, state = "sell", "收盘价触及计划止损", "reviewed"
+            elif target is not None and close_price >= target:
+                action, reason, state = "reduce", "收盘价触及计划第一目标", "reviewed"
+            elif str(plan.get("action") or "") in {"sell", "reduce"}:
+                action = str(plan.get("action"))
+                reason = str(plan.get("reason") or "沿用规则计划的风险动作")[:300]
+                state = "reviewed"
+            else:
+                action, reason, state = "hold", "收盘未触及止损或止盈阈值", "reviewed"
+            blockers = []
+            if close_price is None:
+                blockers.append("closing_quote_unavailable")
+            if not plan or plan.get("available") is False:
+                blockers.append("trade_plan_missing")
+            rows.append(clean_json({
+                "symbol": symbol,
+                "name": holding.get("name"),
+                "quantity": holding.get("quantity"),
+                "cost_price": cost,
+                "reference_close": close_price,
+                "quote_as_of": quote.get("as_of"),
+                "quote_freshness": freshness,
+                "holding_pnl_pct": pnl,
+                "status": "degraded" if blockers else state,
+                "action": action,
+                "action_cn": {
+                    "hold": "不动", "reduce": "减仓", "sell": "卖出",
+                    "data_insufficient": "数据不足",
+                }[action],
+                "reason": reason,
+                "stop_loss": stop,
+                "target_price": target,
+                "blockers": blockers,
+            }))
+        complete = all(row.get("status") == "reviewed" for row in rows)
+        return clean_json(base | {
+            "status": "complete" if complete else "degraded",
+            "count": len(rows),
+            "rows": rows[:100],
+            "price_basis": "same_trading_day_close_snapshot",
+        })
+
+    @staticmethod
+    def _next_session_plan(
+        *, due: bool, trading_day: dict[str, Any], formal: dict[str, Any],
+        holdings: list[dict[str, Any]], quote_rows: list[dict[str, Any]],
+        plans: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        base = {
+            "based_on_session": trading_day.get("date"),
+            "target_session_date": None,
+            "target_date_basis": "next_confirmed_open_date_requires_fresh_two_source_consensus",
+            "preview_only": True,
+            "auto_execution": False,
+            "execution_preconditions": [
+                "refresh_next_session_quotes",
+                "confirm_cash_and_sellable_quantities",
+                "revalidate_portfolio_watermark",
+            ],
+        }
+        if not due:
+            return base | {"status": "pending", "rows": []}
+        if trading_day.get("confirmed") and not trading_day.get("is_trading_day"):
+            return base | {"status": "not_applicable", "rows": []}
+        quote_by_symbol = {str(row.get("symbol") or ""): row for row in quote_rows}
+        candidates = {str(row.get("symbol") or ""): row for row in formal.get("formal_top15") or []}
+        items: dict[str, dict[str, Any]] = {}
+        for holding in holdings:
+            symbol = str(holding.get("symbol") or holding.get("code") or "")
+            items[symbol] = {
+                "symbol": symbol, "name": holding.get("name"),
+                "sources": ["holding"], "formal_rank": None,
+            }
+        for symbol, candidate in candidates.items():
+            item = items.setdefault(symbol, {
+                "symbol": symbol, "name": candidate.get("name"),
+                "sources": [], "formal_rank": candidate.get("rank"),
+            })
+            item["name"] = item.get("name") or candidate.get("name")
+            item["formal_rank"] = candidate.get("rank")
+            item["sources"].append("formal_top15")
+        rows = []
+        for symbol, item in items.items():
+            candidate = candidates.get(symbol) or {}
+            plan = candidate.get("trade_plan") or plans.get(symbol) or {}
+            quote = quote_by_symbol.get(symbol) or {}
+            freshness = str(quote.get("freshness") or "stale_or_missing")
+            close_price = (
+                _finite_number(quote.get("price"))
+                if freshness in {"actionable", "closing_current"} else None
+            )
+            entry_low = _finite_number(plan.get("entry_low"))
+            entry_high = _finite_number(plan.get("entry_high"))
+            blockers = []
+            if close_price is None:
+                blockers.append("closing_quote_unavailable")
+            if not plan or plan.get("available") is False:
+                blockers.append("trade_plan_missing")
+            rows.append(clean_json(item | {
+                "status": "blocked" if blockers else "ready",
+                "reference_close": close_price,
+                "quote_as_of": quote.get("as_of"),
+                "quote_freshness": freshness,
+                "buy_zone": (
+                    {"low": entry_low, "high": entry_high}
+                    if entry_low is not None and entry_high is not None else None
+                ),
+                "sell_levels": {
+                    "stop_loss": _finite_number(plan.get("stop_loss")),
+                    "first_target": _finite_number(plan.get("target_price")),
+                    "second_target": _finite_number(plan.get("target_price_2")),
+                },
+                "planned_action": plan.get("action") or "hold",
+                "planned_action_cn": plan.get("action_cn") or "不动",
+                "plan_reason": str(plan.get("reason") or "")[:300],
+                "plan_price_basis": plan.get("price_basis"),
+                "blockers": blockers,
+            }))
+        rows.sort(key=lambda row: (
+            0 if "holding" in (row.get("sources") or []) else 1,
+            int(row.get("formal_rank") or 9999), str(row.get("symbol") or ""),
+        ))
+        complete = bool(rows) and all(row.get("status") == "ready" for row in rows)
+        return clean_json(base | {
+            "status": "complete" if complete else "degraded" if rows else "missing",
+            "count": len(rows),
+            "rows": rows[:115],
+            "price_basis": "same_trading_day_close_plus_persisted_rule_plan",
+        })
 
     @staticmethod
     def _adjustment_proposals(outcomes: dict[str, Any], strategies: dict[str, Any]) -> dict[str, Any]:
@@ -651,6 +861,9 @@ class ScheduledSnapshotService:
                 },
                 "quotes": {"status": "missing", "rows": []},
                 "post_close_review": {"status": "missing", "jobs": []},
+                "holdings_review": {"status": "missing", "rows": []},
+                "next_session_plan": {"status": "missing", "rows": []},
+                "source_comparison": {"status": "missing", "pairwise": {}},
                 "strategy_adjustment_proposals": {
                     "status": "missing", "proposal_count": 0, "proposals": [],
                     "guardrails": {"human_review_required": True, "auto_apply": False},
@@ -679,6 +892,9 @@ class ScheduledSnapshotService:
         wencai = self._wencai(selection_value)
         independent = self._independent(
             selection_value, expected_market_as_of=formal.get("selection_date"),
+        )
+        source_comparison = self._source_comparison(
+            selection_value, formal, independent, wencai,
         )
 
         try:
@@ -719,15 +935,19 @@ class ScheduledSnapshotService:
             from jobs.intraday_decision_monitor import assess_quotes
 
             quote_quality = assess_quotes(
-                [{"symbol": symbol} for symbol in symbols], raw_quotes, now
+                [{"symbol": symbol} for symbol in symbols], raw_quotes, now,
+                mode=(
+                    "post_close"
+                    if trading_day.get("confirmed") and trading_day.get("is_trading_day")
+                    and (now.hour, now.minute) >= (15, 0)
+                    else "intraday"
+                ),
             )
             by_symbol = quote_quality.get("items") or {}
             for row in quote_rows:
                 assessed = by_symbol.get(row["symbol"]) or {}
                 row["as_of"] = assessed.get("quote_as_of") or row.get("as_of")
-                row["freshness"] = (
-                    "actionable" if assessed.get("price_actionable") else "stale_or_missing"
-                )
+                row["freshness"] = assessed.get("freshness") or "stale_or_missing"
             quote_state = quote_quality.get("status") or quote_state
         except Exception:
             quote_quality = {}
@@ -770,6 +990,14 @@ class ScheduledSnapshotService:
         except Exception:
             intraday = {}
         persisted_plans = intraday.get("plans") or {}
+        review_plans = {
+            str(symbol): dict(plan) for symbol, plan in persisted_plans.items()
+            if isinstance(plan, dict)
+        }
+        for candidate in formal.get("formal_top15") or []:
+            symbol = str(candidate.get("symbol") or "")
+            if isinstance(candidate.get("trade_plan"), dict):
+                review_plans[symbol] = dict(candidate["trade_plan"])
         formal_plans = [
             {"symbol": row.get("symbol"),
              "trade_plan": row.get("trade_plan") or persisted_plans.get(row.get("symbol"))}
@@ -822,9 +1050,23 @@ class ScheduledSnapshotService:
             },
             "preview_only": True,
             "auto_execution": False,
+            "pricing_status": quote_quality.get("status") or quote_state,
+            "pricing_context": quote_quality.get("mode") or "intraday",
         }
 
         post_close_review, adjustment_proposals = self._post_close_review(now, trading_day)
+        review_due = bool(post_close_review.get("due"))
+        holdings_review = self._holdings_review(
+            due=review_due, trading_day=trading_day, holdings=holding_rows,
+            quote_rows=quote_rows, plans=review_plans,
+        )
+        next_session_plan = self._next_session_plan(
+            due=review_due, trading_day=trading_day, formal=formal,
+            holdings=holding_rows, quote_rows=quote_rows, plans=review_plans,
+        )
+        post_close_review["holdings_review_status"] = holdings_review.get("status")
+        post_close_review["next_session_plan_status"] = next_session_plan.get("status")
+        post_close_review["source_comparison_status"] = source_comparison.get("status")
 
         section_status = {
             "trading_day": trading_day.get("status"),
@@ -836,6 +1078,9 @@ class ScheduledSnapshotService:
             "trade_plans": trade_plans.get("status"),
             "quotes": quotes.get("status"),
             "post_close_review": post_close_review.get("status"),
+            "holdings_review": holdings_review.get("status"),
+            "next_session_plan": next_session_plan.get("status"),
+            "source_comparison": source_comparison.get("status"),
             "strategy_adjustment_proposals": adjustment_proposals.get("status"),
         }
         healthy_states = {"complete", "success", "pending", "not_applicable"}
@@ -853,6 +1098,9 @@ class ScheduledSnapshotService:
             "trade_plans": trade_plans,
             "quotes": quotes,
             "post_close_review": post_close_review,
+            "holdings_review": holdings_review,
+            "next_session_plan": next_session_plan,
+            "source_comparison": source_comparison,
             "strategy_adjustment_proposals": adjustment_proposals,
             "as_of": {
                 "captured_at": captured_at,

@@ -1310,7 +1310,7 @@ def kline_quality(df: pd.DataFrame, max_stale_days: float = 3.0) -> dict:
 
 
 def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool = True,
-          adjust: str = "raw") -> pd.DataFrame:
+          adjust: str = "raw", cache_only: bool = False) -> pd.DataFrame:
     """K线 DataFrame(DatetimeIndex='Date', 列 Open/Close/High/Low/Volume)。
     ⭐ 两套复权缓存(2026-06-24):
       adjust='raw'(默认):不复权,真实成交价 —— 回测/持仓盈亏/决策后验/显示真实价 用。
@@ -1319,7 +1319,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         在新浪/baostock/东财既有链中加入 zzshare qfq；全部失败才 fallback raw，且不写 qfq 缓存。
         分钟线独立使用 zzshare → eltdx → tdx-python → 显式兼容源链，不混入日线复权逻辑。
     健康度路由自动把可达源排前。磁盘缓存日线提速。失败返回空 DF。
-    use_cache=False 强制实时拉(需要今日最新 bar 时用)。"""
+    use_cache=False 强制实时拉(需要今日最新 bar 时用)。cache_only=True 只读取已有
+    磁盘缓存，绝不进入外部源；用于已明确依赖盘后预热的有界批处理。"""
     adjust = 'qfq' if str(adjust) == 'qfq' else 'raw'
     suffix = '_qfq' if adjust == 'qfq' else ''
     cache_f = _os.path.join(_KLINE_DIR, f"{_norm_code(code)}_{period}_{interval}{suffix}.pkl")
@@ -1333,6 +1334,24 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                     return _tag_kline(df, 'fresh_cache', cache_age_days=age, interval=interval)
         except Exception:
             pass
+
+    if cache_only:
+        if not use_cache:
+            return pd.DataFrame()
+        try:
+            if _os.path.isfile(cache_f):
+                cached = pd.read_pickle(cache_f)
+                if isinstance(cached, pd.DataFrame) and not cached.empty:
+                    age_seconds = _time.time() - _os.path.getmtime(cache_f)
+                    age = age_seconds / 86400
+                    stale = age_seconds >= _kline_ttl(interval)
+                    return _tag_kline(
+                        cached, 'stale_cache' if stale else 'fresh_cache',
+                        stale=stale, cache_age_days=age, interval=interval,
+                    )
+        except Exception:
+            pass
+        return pd.DataFrame()
 
     # 分钟线使用 zzshare → Python 3.10+ eltdx → Python 3.12+ tdx-python → 旧协议兼容链。
     # 分钟 bar 不在这里做前复权；公司行动因子应由更高层显式处理。

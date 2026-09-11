@@ -24,8 +24,14 @@ class PortfolioPolicyTest(unittest.TestCase):
         self.assertIn('高仓位总闸', guarded['reason'])
 
     @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
-    @patch('portfolio_policy.latest_market_add_signal', return_value={'action': 'strong_buy'})
-    def test_high_position_allows_buy_only_in_must_add_window(self, _signal):
+    @patch('portfolio_policy.latest_market_add_signal')
+    def test_high_position_allows_buy_only_in_must_add_window(self, get_signal):
+        now = datetime.now(portfolio_policy.SHANGHAI)
+        get_signal.return_value = {
+            'action': 'strong_buy',
+            'date': now.date().isoformat(),
+            'updated_at': now.isoformat(),
+        }
         guarded = portfolio_policy.guard('add', source_type='analysis')
         self.assertFalse(guarded['blocked'])
         self.assertEqual(guarded['action'], 'add')
