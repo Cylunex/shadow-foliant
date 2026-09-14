@@ -434,6 +434,8 @@ def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, A
         "action": decision.get("action"),
         "action_cn": decision.get("action_cn"),
         "reason": decision.get("reason"),
+        "decision_source": decision.get("source") or decision.get("decision_source"),
+        "action_guard": decision.get("action_guard") or {},
         "holding_pnl_pct": decision.get("holding_pnl_pct"),
         "entry_low": _finite(plan.get("entry_low")),
         "entry_high": _finite(plan.get("entry_high")),
@@ -587,10 +589,38 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         is_holding = "holding" in (item.get("sources") or [])
         override = (holding_overrides or {}).get(symbol) if is_holding else None
         row_fail_closed = fail_closed or not plan.get("available")
-        decision = (dict(override) if isinstance(override, dict) and not row_fail_closed
-                    and quote.get("price_actionable")
-                    else _holding_decision(item, quote, plan, snapshot_loader, row_fail_closed)
-                    if is_holding else _candidate_decision(quote, plan, row_fail_closed))
+        base_decision = (
+            _holding_decision(item, quote, plan, snapshot_loader, row_fail_closed)
+            if is_holding else _candidate_decision(quote, plan, row_fail_closed)
+        )
+        if (is_holding and isinstance(override, dict) and not row_fail_closed
+                and quote.get("price_actionable")):
+            from core.action_decision import resolve_action
+
+            base_action = str(base_decision.get("action") or "hold")
+            base_source = (
+                "hard_risk" if base_action == "sell" else
+                "portfolio_risk" if base_action == "reduce" else
+                "formal_signal"
+            )
+            decision = resolve_action([
+                {"source": base_source, "action": base_action,
+                 "reason": base_decision.get("reason") or ""},
+                {"source": override.get("decision_source") or "formal_signal",
+                 "action": override.get("action") or "hold",
+                 "reason": override.get("reason") or ""},
+            ])
+            decision["action_cn"] = {
+                "hold": "不动", "reduce": "减仓", "sell": "卖出", "add": "加仓",
+            }.get(decision["action"], "不动")
+            decision["holding_pnl_pct"] = (
+                override.get("holding_pnl_pct")
+                if override.get("holding_pnl_pct") is not None
+                else base_decision.get("holding_pnl_pct")
+            )
+            decision["action_guard"] = override.get("action_guard") or {}
+        else:
+            decision = base_decision
         row = _decision_row(item, quote, plan, decision)
         decisions[symbol] = row
         actionable = bool(quote.get("price_actionable")) and not fail_closed

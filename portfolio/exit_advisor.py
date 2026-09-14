@@ -5,14 +5,14 @@ import _bootstrap  # noqa: F401  路径引导
 """清仓决策助手 —— 回答"持仓太多、不知道什么时候清"。
 
 把"该不该清、先清哪只"做成**可执行的清仓优先级清单**:对每只持仓按多触发器打"清仓紧迫分",
-排序给出明确动作(清仓/减仓锁利/破位减仓/死钱调出/继续持有)+ 一句话理由;持仓过多(过度分散)
+排序给出明确动作(清仓/减仓锁利/破位减仓/长期效率观察/继续持有)+ 一句话理由;持仓过多(过度分散)
 时给"目标持仓数"建议并指出该先清掉哪几只瘦身到目标。规则层定量打分(可靠) + AI 层给整体瘦身策略。
 
 触发器(每只综合):
   ① 割肉止损:浮亏深(≤-12%)或浮亏+技术破位                → 清仓
   ② 止盈锁定:浮盈大(≥30%)但动能转弱(今日跌/破MA)        → 减仓锁利
   ③ 破位减仓:风险分高(破MA20/MA60/VaR/看跌形态)           → 减仓
-  ④ 死钱调出:持有久(≥90天)却横盘(|浮盈亏|<8%),占用机会成本 → 清仓换仓
+  ④ 效率观察:有可信建仓日且持有久(≥90天)、横盘(|浮盈亏|<8%) → 仅观察
   ⑤ 健康保留:浮盈且趋势未坏                                → 持有
 
 清仓/减仓结论写 decision_signal(source_type='exit_advice', action=sell/reduce)→ 16:10 方向后验
@@ -31,15 +31,33 @@ def _holding_days(created_at) -> Optional[int]:
     if not created_at:
         return None
     try:
-        s = str(created_at).replace('T', ' ')[:19]
-        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
-            try:
-                return max(0, (datetime.now() - datetime.strptime(s[:len(fmt) + (0 if '%H' not in fmt else 0)], fmt)).days)
-            except ValueError:
-                continue
-        return max(0, (datetime.now() - datetime.fromisoformat(s)).days)
-    except Exception:
+        if isinstance(created_at, datetime):
+            opened = created_at.date()
+        else:
+            opened = datetime.fromisoformat(
+                str(created_at).strip().replace("Z", "+00:00")
+            ).date()
+        return max(0, (datetime.now().date() - opened).days)
+    except (TypeError, ValueError):
         return None
+
+
+def _holding_age_evidence(holding: Dict[str, Any]) -> Dict[str, Any]:
+    """Use only an explicit acquisition/open date as holding-age evidence.
+
+    ``portfolio_stocks.created_at`` is often a bulk-import/tracking timestamp and
+    must never be presented as the date the investor acquired the position.
+    """
+    explicit = next((
+        holding.get(key) for key in (
+            "holding_since", "position_opened_at", "acquired_at",
+        ) if holding.get(key)
+    ), None)
+    return {
+        "holding_days": _holding_days(explicit),
+        "tracking_days": _holding_days(holding.get("created_at")),
+        "basis": "explicit_position_open_date" if explicit else "unconfirmed_tracking_date",
+    }
 
 
 def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
@@ -71,9 +89,9 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
     elif sell_score == 1:
         score += 10; reasons.append('单一风险:' + '/'.join((scan.get('sell_reasons') or [])[:2]))
 
-    # ④ 死钱调出(持有久却横盘)
+    # ④ 长期效率观察（只有明确建仓日期才能进入；本身不构成卖出依据）
     if hold_days is not None and hold_days >= 90 and -8 < pnl < 8:
-        score += 22; reasons.append(f'持有{hold_days}天横盘({pnl:+.0f}%),死钱占仓')
+        score += 22; reasons.append(f'明确持有{hold_days}天且横盘({pnl:+.0f}%),仅列入效率观察')
 
     score = min(100.0, score)
     # 归类(取最主导的触发)
@@ -81,10 +99,12 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
         cat, act = '割肉止损', 'sell'
     elif pnl >= 30 and score >= 25:
         cat, act = '止盈锁定', 'reduce'
-    elif hold_days is not None and hold_days >= 90 and -8 < pnl < 8 and score >= 20:
-        cat, act = '死钱调出', 'sell'
     elif sell_score >= 2:
         cat, act = '破位减仓', 'reduce'
+    elif hold_days is not None and hold_days >= 90 and -8 < pnl < 8 and score >= 20:
+        # Time-in-position plus flat P&L is an efficiency observation, not a
+        # liquidation fact. It may inform a later reviewed rebalance only.
+        cat, act = '长期效率观察', 'hold'
     else:
         cat, act = '健康保留', 'hold'
     if not reasons:
@@ -115,13 +135,12 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
         scans = {str(s.get('code')): s for s in (_scan_holdings_with_snapshot() or [])}
     except Exception:
         scans = {}
-    created = {str(h.get('code')): h.get('created_at') for h in holdings}
-
     items = []
     for h in holdings:
         code = str(h.get('code'))
         scan = scans.get(code) or {'code': code, 'name': h.get('name', ''), 'pnl': None, 'sell_score': 0}
-        hd = _holding_days(created.get(code))
+        age = _holding_age_evidence(h)
+        hd = age["holding_days"]
         sc, cat, act, reasons = _exit_score(scan, hd)
         decision = resolve_action([{
             'source': 'hard_risk' if act == 'sell' else (
@@ -135,7 +154,9 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
             'exit_score': round(sc, 1), 'category': cat,
             'action': decision['action'], 'action_text': decision['action_text'],
             'action_decision': decision,
-            'pnl': scan.get('pnl'), 'holding_days': hd, 'reason': '；'.join(reasons)[:80],
+            'pnl': scan.get('pnl'), 'holding_days': hd,
+            'tracking_days': age["tracking_days"], 'holding_age_basis': age["basis"],
+            'reason': '；'.join(reasons)[:80],
             'price': scan.get('price'),
         })
     items.sort(key=lambda x: -x['exit_score'])

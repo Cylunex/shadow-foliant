@@ -15,12 +15,113 @@ import _bootstrap  # noqa: F401  路径引导
 接口:run_eod_review(target_positions=20, record_signals=True) -> dict
 """
 
+import os
 import re
 from typing import Any, Dict, List, Optional
 
 _ACT_MAP = {'清仓': 'sell', '卖出': 'sell', '减仓': 'reduce', '减持': 'reduce',
             '持有': 'hold', '观望': 'watch', '加仓': 'add', '增持': 'add'}
 _ACT_ORDER = {'sell': 0, 'reduce': 1, 'add': 2, 'hold': 3, 'watch': 4}
+
+
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return min(maximum, max(minimum, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        return min(maximum, max(minimum, float(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_portfolio_action_guard(
+    items: List[Dict[str, Any]], *, max_sells: int = 3, max_actions: int = 8,
+    max_turnover_pct: float = .10, max_same_trigger: int = 3,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Bound one report's correlated liquidation and turnover suggestions."""
+    values = [float(item.get("position_value") or 0) for item in items]
+    securities_value = sum(value for value in values if value > 0)
+    turnover_budget = securities_value * max_turnover_pct
+    used_turnover = 0.0
+    action_count = sell_count = guarded_count = 0
+    trigger_counts: Dict[str, int] = {}
+    output = []
+    for raw in items:
+        item = dict(raw)
+        original = str(item.get("action") or "hold")
+        action = original
+        trigger = str(item.get("category") or "unknown")
+        guard_reasons = []
+        if action in {"sell", "reduce", "add"}:
+            if trigger_counts.get(trigger, 0) >= max_same_trigger:
+                action = "hold"
+                guard_reasons.append("same_trigger_concentration_limit")
+            if action != "hold" and action_count >= max_actions:
+                action = "hold"
+                guard_reasons.append("portfolio_action_count_limit")
+            if action == "sell" and sell_count >= max_sells:
+                action = "reduce"
+                guard_reasons.append("portfolio_sell_count_limit")
+
+            position_value = float(item.get("position_value") or 0)
+            fraction = 1.0 if action == "sell" else .25
+            proposed = position_value * fraction
+            if action != "hold" and (securities_value <= 0 or position_value <= 0):
+                action = "hold"
+                guard_reasons.append("turnover_denominator_unavailable")
+            elif action != "hold" and used_turnover + proposed > turnover_budget:
+                reduced = position_value * .25
+                if action == "sell" and used_turnover + reduced <= turnover_budget:
+                    action = "reduce"
+                    proposed = reduced
+                    fraction = .25
+                    guard_reasons.append("portfolio_turnover_sell_demoted")
+                else:
+                    action = "hold"
+                    proposed = 0.0
+                    fraction = 0.0
+                    guard_reasons.append("portfolio_turnover_limit")
+            if action != "hold":
+                action_count += 1
+                sell_count += int(action == "sell")
+                trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+                used_turnover += proposed
+                item["suggested_position_fraction"] = fraction
+        if action != original:
+            guarded_count += 1
+            item["original_action"] = original
+            item["action"] = action
+            labels = {
+                "same_trigger_concentration_limit": "同类触发过于集中",
+                "portfolio_action_count_limit": "本轮动作数已达上限",
+                "portfolio_sell_count_limit": "本轮卖出数已达上限",
+                "turnover_denominator_unavailable": "缺少可靠仓位金额",
+                "portfolio_turnover_sell_demoted": "预计换手接近上限",
+                "portfolio_turnover_limit": "预计换手已达上限",
+            }
+            detail = "、".join(labels.get(reason, reason) for reason in guard_reasons)
+            item["reason"] = f"组合级保护：{detail}，原{original}建议降为{action}"
+            item["decision_source"] = "portfolio_action_guard"
+        item["action_guard"] = {
+            "changed": action != original,
+            "reasons": guard_reasons,
+        }
+        item.pop("position_value", None)
+        output.append(item)
+    return output, {
+        "status": "applied", "max_sell_count": max_sells,
+        "max_action_count": max_actions, "max_same_trigger_count": max_same_trigger,
+        "max_turnover_pct": round(max_turnover_pct * 100, 2),
+        "estimated_turnover_pct": (
+            round(used_turnover / securities_value * 100, 2) if securities_value else None
+        ),
+        "guarded_count": guarded_count, "action_count": action_count,
+        "sell_count": sell_count,
+    }
 
 
 def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:
@@ -44,19 +145,24 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
         scans = {str(s.get('code')): s for s in (_scan_holdings_with_snapshot() or [])}
     except Exception:
         scans = {}
-    from exit_advisor import _exit_score, _holding_days
-    created = {str(h.get('code')): h.get('created_at') for h in holdings}
+    from exit_advisor import _exit_score, _holding_age_evidence
 
     # 1) 规则层:每只融合打分(割肉/止盈/破位/死钱),复用 exit_advisor
     rows = []
     for h in holdings:
         code = str(h.get('code'))
         scan = scans.get(code) or {'code': code, 'name': h.get('name', ''), 'pnl': None, 'sell_score': 0}
-        hd = _holding_days(created.get(code))
+        age = _holding_age_evidence(h)
+        hd = age["holding_days"]
+        quantity = float(h.get("quantity") or h.get("shares") or 0)
+        price = float(scan.get("price") or 0)
         sc, cat, act, reasons = _exit_score(scan, hd)
         rows.append({'code': code, 'name': scan.get('name') or h.get('name', ''),
                      'exit_score': round(sc, 1), 'category': cat, 'rule_action': act,
                      'pnl': scan.get('pnl'), 'holding_days': hd, 'price': scan.get('price'),
+                     'tracking_days': age["tracking_days"],
+                     'holding_age_basis': age["basis"],
+                     'position_value': price * quantity if price > 0 and quantity > 0 else None,
                      'rule_reason': '；'.join(reasons)[:60],
                      'sell_score': scan.get('sell_score', 0),
                      'sell_reasons': scan.get('sell_reasons') or []})
@@ -93,6 +199,13 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
             'decision_source': decision['source'],
         })
 
+    items, action_guard = _apply_portfolio_action_guard(
+        items,
+        max_sells=_bounded_int("EOD_MAX_SELL_ACTIONS", 3, 1, 10),
+        max_actions=_bounded_int("EOD_MAX_POSITION_ACTIONS", 8, 1, 20),
+        max_turnover_pct=_bounded_float("EOD_MAX_TURNOVER_PCT", .10, .01, .25),
+        max_same_trigger=_bounded_int("EOD_MAX_SAME_TRIGGER_ACTIONS", 3, 1, 10),
+    )
     n_sell = sum(1 for it in items if it['action'] == 'sell')
     n_reduce = sum(1 for it in items if it['action'] == 'reduce')
 
@@ -113,7 +226,10 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
 
     out['ok'] = True
     out['items'] = items
-    out['summary'] = f'持仓{n}只(目标{target_positions}),清仓{n_sell}/减仓{n_reduce}' + ('·过度分散' if over else '')
+    out['action_guard'] = action_guard
+    out['summary'] = (f'持仓{n}只(目标{target_positions}),清仓{n_sell}/减仓{n_reduce}'
+                      f'·保护降级{action_guard["guarded_count"]}'
+                      + ('·过度分散' if over else ''))
     out['text'] = _format(items, n, target_positions, over)
     return out
 
@@ -123,7 +239,8 @@ def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
     if not decide:
         return ('', {})
     lines = [f"{r['code']} {r['name']}|既定动作:{r['rule_action']}|紧迫{r['exit_score']}|{r['category']}|"
-             f"浮盈亏{(r['pnl'] if r['pnl'] is not None else 0):+.0f}%|持有{r.get('holding_days','?')}天|"
+             f"浮盈亏{(r['pnl'] if r['pnl'] is not None else 0):+.0f}%|"
+             f"持有{(r['holding_days'] if r.get('holding_days') is not None else '未知')}天|"
              f"风险分{r['sell_score']}({'/'.join(r['sell_reasons'][:3]) or '无'})" for r in decide]
     prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'，持仓偏多' if over else ''}。
 下面动作已经由确定性风控规则决定：

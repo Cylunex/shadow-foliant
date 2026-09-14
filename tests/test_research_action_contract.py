@@ -100,6 +100,21 @@ class ActionResolutionTests(unittest.TestCase):
         ])
         self.assertEqual(result["action"], "reduce")
 
+    def test_portfolio_guard_sits_below_hard_stop_and_above_ordinary_advice(self):
+        hard_stop = resolve_action([
+            {"source": "hard_risk", "action": "sell", "reason": "已触发止损"},
+            {"source": "portfolio_action_guard", "action": "hold", "reason": "组合保护"},
+        ])
+        self.assertEqual(hard_stop["action"], "sell")
+        self.assertEqual(hard_stop["source"], "hard_risk")
+
+        guarded = resolve_action([
+            {"source": "formal_signal", "action": "sell", "reason": "普通规则"},
+            {"source": "portfolio_action_guard", "action": "reduce", "reason": "组合保护"},
+        ])
+        self.assertEqual(guarded["action"], "reduce")
+        self.assertEqual(guarded["source"], "portfolio_action_guard")
+
     def test_lockup_llm_cannot_escalate_below_formal_threshold(self):
         result = _resolve_event_action(
             {"days": 45, "ratio": 3.5},

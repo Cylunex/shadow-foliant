@@ -17,6 +17,9 @@ _ACTION_ALIASES = {
 }
 SOURCE_PRIORITY = {
     "hard_risk": 500,
+    # Portfolio-wide turnover/concentration protection may demote ordinary
+    # position advice, but an actually triggered hard stop still wins.
+    "portfolio_action_guard": 450,
     "position_truth": 400,
     "portfolio_risk": 300,
     "formal_signal": 200,

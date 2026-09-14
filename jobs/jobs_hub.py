@@ -5366,6 +5366,8 @@ def task_afternoon_portfolio():
                 'action_cn': _action_cn.get(item.get('action'), '不动'),
                 'reason': item.get('reason') or item.get('rule_reason') or '尾盘统一风控结论',
                 'holding_pnl_pct': item.get('pnl'),
+                'decision_source': item.get('decision_source') or 'formal_signal',
+                'action_guard': item.get('action_guard') or {},
             }
             for item in (res.get('items') or []) if item.get('code')
         }

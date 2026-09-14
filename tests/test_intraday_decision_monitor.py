@@ -320,6 +320,61 @@ def test_missing_plan_fails_closed_for_holding_action_and_prices():
     assert monitor._row_price(holding, "price") == "暂不给价"
 
 
+def test_hard_stop_beats_portfolio_guard_override():
+    now = datetime(2026, 9, 10, 10, 5, tzinfo=TZ)
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [{"code": "000001", "quantity": 100, "cost_price": 10}],
+        quote_loader=lambda codes: {
+            code: {"price": 8.5 if code == "000001" else 10,
+                   "change_pct": 0, "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: {
+            "selection_run_id": "formal-run-1", "plans": _plans(),
+        },
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+        holding_overrides={"000001": {
+            "action": "hold", "reason": "组合级保护",
+            "decision_source": "portfolio_action_guard",
+            "action_guard": {"changed": True},
+        }},
+    )
+    holding = result["holdings"][0]
+    assert holding["action"] == "sell"
+    assert holding["decision_source"] == "hard_risk"
+
+
+def test_portfolio_guard_override_beats_ordinary_holding_advice():
+    now = datetime(2026, 9, 10, 10, 5, tzinfo=TZ)
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [{"code": "000001", "quantity": 100, "cost_price": 10}],
+        quote_loader=lambda codes: {
+            code: {"price": 10, "change_pct": 0,
+                   "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: {
+            "selection_run_id": "formal-run-1", "plans": _plans(),
+        },
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+        holding_overrides={"000001": {
+            "action": "reduce", "reason": "组合级保护后保留一个减仓动作",
+            "decision_source": "portfolio_action_guard",
+            "action_guard": {"changed": True},
+        }},
+    )
+    holding = result["holdings"][0]
+    assert holding["action"] == "reduce"
+    assert holding["decision_source"] == "portfolio_action_guard"
+    assert holding["action_guard"]["changed"] is True
+
+
 def test_nine_forty_five_summary_keeps_five_reference_states_and_overlap_bounded():
     results = {
         "主力资金": (True, pd.DataFrame([{"股票代码": "600001", "股票简称": "甲"}]), "ok"),
