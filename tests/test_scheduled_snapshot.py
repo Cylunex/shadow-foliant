@@ -304,6 +304,10 @@ def test_missing_wencai_does_not_change_formal_candidates():
     assert [row["symbol"] for row in result["formal_selection"]["formal_top15"]] == expected
     assert result["wencai_reference"]["status"] == "missing"
     assert result["wencai_reference"]["reference_affects_membership"] is False
+    replacement = result["wencai_reference"]["official_replacement_contract"]
+    assert replacement["provider"] == "fuyao_aicubes"
+    assert replacement["identity"] == "distinct_official_provider_not_wencai"
+    assert replacement["must_not_be_labeled_as_wencai"] is True
 
 
 def test_holdings_watermark_change_fails_risk_plan_closed():

@@ -437,6 +437,13 @@ class ScheduledSnapshotService:
             })
         present = sum(1 for row in rows if row["status"] != "missing")
         ready = sum(1 for row in rows if row["status"] == "ready")
+        try:
+            import datahub
+
+            fuyao = clean_json(datahub.fuyao_capabilities() or {})
+        except Exception:
+            fuyao = {"configured": False, "enabled": False, "capabilities": {}}
+        fuyao_configured = bool(fuyao.get("configured") and fuyao.get("enabled"))
         return {
             "status": "missing" if present == 0 else "complete" if ready == 5 else "degraded",
             "provider": "iwencai_reference_adapter",
@@ -455,14 +462,19 @@ class ScheduledSnapshotService:
                 "retry_policy": "bounded_scheduled_attempts_only",
             },
             "official_replacement_contract": {
-                "provider": "fuyao_ths_official",
-                "status": "not_connected",
+                "provider": "fuyao_aicubes",
+                "status": "configured" if fuyao_configured else "not_configured",
+                "identity": "distinct_official_provider_not_wencai",
                 "must_preserve_provider_identity": True,
                 "must_not_be_labeled_as_wencai": True,
-                "dimensions": [
-                    "capital_flow", "valuation", "financial_growth",
-                    "market_attention", "tradeability",
-                ],
+                "dimensions": {
+                    "capital_flow": (fuyao.get("capital_flow") or {}).get("status")
+                                    or "degraded",
+                    "valuation": "connected" if fuyao_configured else "not_configured",
+                    "financial_growth": "connected" if fuyao_configured else "not_configured",
+                    "market_attention": "connected" if fuyao_configured else "not_configured",
+                    "tradeability": "connected" if fuyao_configured else "not_configured",
+                },
             },
         }
 
