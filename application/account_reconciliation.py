@@ -66,6 +66,27 @@ class AccountReconciliation:
                 "confirmations": confirmations, "scope": "confirmed_inputs_only",
                 "completeness_inferred": False}
 
+    def latest_cash_balance(self, *, owner):
+        """Return one explicit confirmed cash balance, never a derived estimate."""
+        balances = [
+            row for row in self.repo.list("account_fact", owner=owner, limit=2000)
+            if row.get("kind") == "cash_balance" and row.get("date")
+        ]
+        if not balances:
+            return {"status": "missing", "amount": None, "as_of": None,
+                    "reason": "confirmed_cash_balance_missing"}
+        latest_date = max(str(row["date"]) for row in balances)
+        latest = [row for row in balances if str(row["date"]) == latest_date]
+        if len(latest) != 1:
+            return {"status": "ambiguous", "amount": None, "as_of": latest_date,
+                    "reason": "multiple_cash_balances_for_latest_date"}
+        row = latest[0]
+        return {
+            "status": "confirmed", "amount": str(money(row.get("amount"))),
+            "as_of": latest_date, "fact_id": row.get("object_id"),
+            "basis": "confirmed_account_fact",
+        }
+
     def reconcile(self, *, owner, opening, closing, securities_pnl, start, end):
         rows = [r for r in self.repo.list("account_fact", owner=owner, limit=2000) if start < r["date"] <= end]
         sums = {k: sum((money(r["amount"]) for r in rows if r["kind"] == k), Decimal(0))

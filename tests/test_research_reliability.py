@@ -176,6 +176,29 @@ def test_account_import_preview_confirm_and_conflicts(store):
     assert result["unexplained"] == "0.00" and result["twr"] is None
 
 
+def test_latest_cash_balance_requires_one_confirmed_fact_on_latest_date(store):
+    service = AccountReconciliation(store)
+    assert service.latest_cash_balance(owner="a")["status"] == "missing"
+
+    preview = service.preview([
+        dict(kind="cash_balance", external_id="cash-old", date="2026-09-01", amount="80"),
+        dict(kind="cash_balance", external_id="cash-new", date="2026-09-02", amount="120"),
+    ], owner="a", watermark="trades-v1")
+    service.confirm(preview["object_id"], owner="a", watermark="trades-v1")
+    assert service.latest_cash_balance(owner="a") == {
+        "status": "confirmed", "amount": "120.00", "as_of": "2026-09-02",
+        "fact_id": "cash-new", "basis": "confirmed_account_fact",
+    }
+
+    ambiguous = service.preview([
+        dict(kind="cash_balance", external_id="cash-new-2", date="2026-09-02", amount="20"),
+    ], owner="a", watermark="trades-v1")
+    service.confirm(ambiguous["object_id"], owner="a", watermark="trades-v1")
+    value = service.latest_cash_balance(owner="a")
+    assert value["status"] == "ambiguous"
+    assert value["amount"] is None
+
+
 def test_holdout_requires_real_evaluation_and_reserves_before_view(store):
     loop = DecisionLoopService(store)
     trial = loop.register_trial(hypothesis_id="trend_exhaustion", ast={"op": "field", "name": "close"}, dataset_id="x", data_class="strict_observed_pit", code_revision="test")

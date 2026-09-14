@@ -34,11 +34,13 @@ class CalendarStore:
 
 
 def selection(*, day="2026-09-10", market_as_of: str | None = None,
-              with_wencai=True, independent_day: str | None = None):
+              with_wencai=True, independent_day: str | None = None,
+              with_trade_plans: bool = True):
     market_as_of = market_as_of or day
     top15 = [{
         "symbol": f"600{i:03d}", "name": f"候选{i}", "rank": i,
-        "trade_plan": {"available": True, "action": "hold", "reason": "规则计划"},
+        **({"trade_plan": {"available": True, "action": "hold", "reason": "规则计划"}}
+           if with_trade_plans else {}),
     } for i in range(1, 16)]
     strategies = {
         name: {"strategy_id": f"wencai-{index}", "strategy_version": "v1",
@@ -111,6 +113,8 @@ def build_service(
     quote_time=None, intraday_value=None,
     outcome_stats_reader=lambda **_kwargs: {"dimension": "source_type", "days": 180,
                                             "buckets": []},
+    cash_reader=lambda: {"status": "missing", "amount": None,
+                         "reason": "confirmed_cash_balance_missing"},
     strategy_evidence_reader=lambda **_kwargs: {
         "horizon_days": 5, "lookback_days": 180, "strategies": [],
         "portfolio_comparison": {"matured_runs": 0, "avg_satellite_marginal_pct": None},
@@ -136,6 +140,7 @@ def build_service(
         job_runs_reader=job_runs_reader,
         outcome_stats_reader=outcome_stats_reader,
         strategy_evidence_reader=strategy_evidence_reader,
+        cash_reader=cash_reader,
         clock=clock,
     )
 
@@ -221,6 +226,65 @@ def test_risk_preview_uses_same_quote_freshness_window_and_snapshot():
     assert risk["blockers"] == ["cash_unknown"]
     assert risk["pricing_snapshot"]["snapshot_id"] == result["quotes"]["snapshot_id"]
     assert risk["pricing_snapshot"]["oldest_as_of"] == result["quotes"]["oldest_usable_as_of"]
+
+
+def test_formal_follow_up_binds_current_intraday_trade_plans():
+    plans = {
+        f"600{i:03d}": {
+            "available": True, "action": "hold", "entry_low": 9.8,
+            "entry_high": 10.0, "stop_loss": 9.2, "target_price": 11.6,
+            "plan_as_of": "2026-09-10", "price_basis": "formal_manifest_qfq",
+        }
+        for i in range(1, 16)
+    }
+    intraday = {"data": {
+        "selection_run_id": "formal-run", "generated_at": NOW.isoformat(),
+        "plans": plans,
+    }}
+    result = build_service(
+        selection_value=selection(with_trade_plans=False), intraday_value=intraday,
+    ).read(owner_id="scheduled-agent")["data"]
+    follow_up = result["trade_plans"]["formal_candidate_follow_up"]
+    assert len(result["trade_plans"]["formal"]) == 15
+    assert len(follow_up) == 15
+    assert all(row["status"] == "ready" for row in follow_up)
+    assert all(row["trade_plan_source"] == "current_intraday_snapshot" for row in follow_up)
+    assert follow_up[0]["trade_plan"] == {
+        "available": True, "action": "hold", "entry_low": 9.8,
+        "entry_high": 10.0, "stop_loss": 9.2, "target_price": 11.6,
+        "plan_as_of": "2026-09-10", "price_basis": "formal_manifest_qfq",
+    }
+    assert result["trade_plans"]["intraday_plan_binding"]["status"] == "current"
+
+
+def test_formal_follow_up_rejects_plans_from_another_selection_run():
+    intraday = {"data": {
+        "selection_run_id": "old-formal-run", "generated_at": NOW.isoformat(),
+        "plans": {"600001": {"available": True, "entry_low": 9.8}},
+    }}
+    result = build_service(
+        selection_value=selection(with_trade_plans=False), intraday_value=intraday,
+    ).read(owner_id="scheduled-agent")["data"]
+    follow_up = result["trade_plans"]["formal_candidate_follow_up"]
+    assert result["trade_plans"]["formal"] == []
+    assert all(row["status"] == "blocked" for row in follow_up)
+    assert all("trade_plan_missing" in row["blockers"] for row in follow_up)
+    assert result["trade_plans"]["intraday_plan_binding"]["status"] == "stale_or_missing"
+
+
+def test_confirmed_cash_fact_removes_cash_unknown_without_enabling_additions():
+    result = build_service(cash_reader=lambda: {
+        "status": "confirmed", "amount": "1000.00", "as_of": "2026-09-10",
+        "basis": "confirmed_account_fact",
+    }).read(owner_id="scheduled-agent")["data"]
+    risk = result["trade_plans"]["portfolio_risk"]
+    cash_policy = result["trade_plans"]["cash_policy"]
+    assert "cash_unknown" not in (risk.get("blockers") or [])
+    assert risk["risk_snapshot"]["cash_known"] is True
+    assert risk["risk_snapshot"]["denominator_scope"] == "full_account"
+    assert cash_policy["cash_basis"] == "confirmed_account_fact"
+    assert cash_policy["cash_status"] == "confirmed"
+    assert cash_policy["new_or_add_positions_allowed"] is False
 
 
 def test_missing_wencai_does_not_change_formal_candidates():
@@ -318,7 +382,9 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     snapshot = build_service(
         clock=lambda: evening,
         quote_time=close_time,
-        intraday_value={"data": {"plans": {"000001": holding_plan}}},
+            intraday_value={"data": {
+                "selection_run_id": "formal-run", "plans": {"000001": holding_plan},
+            }},
         job_runs_reader=lambda **_kwargs: jobs,
     ).read(owner_id="scheduled-agent")["data"]
 

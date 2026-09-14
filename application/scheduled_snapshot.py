@@ -64,6 +64,18 @@ def _candidate(row: Any) -> dict[str, Any]:
     return clean_json(value)
 
 
+def _trade_plan(row: Any) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    allowed = (
+        "available", "action", "action_cn", "market_action", "entry_low", "entry_high",
+        "stop_loss", "target_price", "target_price_2", "current_price", "plan_as_of",
+        "price_basis", "horizon", "horizon_cn", "risk_reward_ratio",
+        "suggested_position_pct", "blockers",
+    )
+    return clean_json({key: row.get(key) for key in allowed if key in row})
+
+
 def _holding(row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
@@ -219,6 +231,7 @@ class ScheduledSnapshotService:
         job_runs_reader: Callable[..., list[dict[str, Any]]] | None = None,
         outcome_stats_reader: Callable[..., dict[str, Any]] | None = None,
         strategy_evidence_reader: Callable[..., dict[str, Any]] | None = None,
+        cash_reader: Callable[[], dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
@@ -231,6 +244,7 @@ class ScheduledSnapshotService:
         self.job_runs_reader = job_runs_reader
         self.outcome_stats_reader = outcome_stats_reader
         self.strategy_evidence_reader = strategy_evidence_reader
+        self.cash_reader = cash_reader
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
 
     def _dependencies(self):
@@ -272,6 +286,13 @@ class ScheduledSnapshotService:
             self.outcome_stats_reader = outcome_stats
         if self.strategy_evidence_reader is None:
             self.strategy_evidence_reader = self.store.selection_strategy_evidence
+        if self.cash_reader is None:
+            from application.account_reconciliation import AccountReconciliation
+
+            reconciliation = AccountReconciliation(self.store)
+            self.cash_reader = lambda: reconciliation.latest_cash_balance(
+                owner="portfolio-primary"
+            )
 
     @staticmethod
     def _missing(code: str, hint: str) -> dict[str, Any]:
@@ -442,13 +463,22 @@ class ScheduledSnapshotService:
     @staticmethod
     def _candidate_follow_up(
         formal: dict[str, Any], quote_rows: list[dict[str, Any]],
+        trade_plans: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         quote_by_symbol = {str(row.get("symbol") or ""): row for row in quote_rows}
+        trade_plans = trade_plans or {}
         result = []
         for candidate in formal.get("formal_top15") or []:
             symbol = str(candidate.get("symbol") or "")
             quote = quote_by_symbol.get(symbol) or {}
-            trade_plan = candidate.get("trade_plan") or {}
+            embedded_plan = candidate.get("trade_plan") or {}
+            persisted_plan = trade_plans.get(symbol) or {}
+            trade_plan = embedded_plan or persisted_plan
+            plan_source = (
+                "formal_artifact" if embedded_plan else
+                "current_intraday_snapshot" if persisted_plan else
+                "missing"
+            )
             plan_available = bool(trade_plan) and trade_plan.get("available") is not False
             blockers = []
             if formal.get("status") not in {"complete", "success"}:
@@ -465,6 +495,8 @@ class ScheduledSnapshotService:
                 "quote_as_of": quote.get("as_of"),
                 "quote_freshness": quote.get("freshness") or "stale_or_missing",
                 "trade_plan_available": plan_available,
+                "trade_plan_source": plan_source,
+                "trade_plan": _trade_plan(trade_plan),
                 "blockers": blockers,
             }))
         return result[:15]
@@ -964,6 +996,14 @@ class ScheduledSnapshotService:
             "unsupported_asset_symbols": quote_quality.get("unsupported_asset_symbols") or [],
         }
 
+        try:
+            cash_fact = self.cash_reader() or {}
+        except Exception:
+            cash_fact = {"status": "missing", "reason": "cash_reader_unavailable"}
+        available_cash = (
+            cash_fact.get("amount") if cash_fact.get("status") == "confirmed" else None
+        )
+
         if context is None:
             account_plan = {"status": "missing", "preview_only": True,
                             "error_code": "portfolio_unavailable"}
@@ -980,7 +1020,8 @@ class ScheduledSnapshotService:
                 else:
                     account_plan = build_account_preview(
                         owner_id=owner_id, capsule=capsule, context=context,
-                        raw_quotes=raw_quotes, available_cash=None, allow_add=False, now=now,
+                        raw_quotes=raw_quotes, available_cash=available_cash,
+                        allow_add=False, now=now,
                         quote_ttl_seconds=int(
                             float(quote_quality.get("stale_minutes") or 8) * 60
                         ),
@@ -1002,7 +1043,11 @@ class ScheduledSnapshotService:
             intraday = intraday_value.get("data") or {}
         except Exception:
             intraday = {}
-        persisted_plans = intraday.get("plans") or {}
+        plan_run_matches = bool(
+            formal.get("run_id")
+            and str(intraday.get("selection_run_id") or "") == str(formal.get("run_id"))
+        )
+        persisted_plans = (intraday.get("plans") or {}) if plan_run_matches else {}
         review_plans = {
             str(symbol): dict(plan) for symbol, plan in persisted_plans.items()
             if isinstance(plan, dict)
@@ -1021,7 +1066,9 @@ class ScheduledSnapshotService:
         plan_state = str(plan_projection.get("status") or "complete")
         if plan_projection.get("error_code") or plan_projection.get("blockers"):
             plan_state = "degraded" if plan_state not in {"missing", "stale"} else plan_state
-        candidate_follow_up = self._candidate_follow_up(formal, quote_rows)
+        candidate_follow_up = self._candidate_follow_up(
+            formal, quote_rows, trade_plans=review_plans,
+        )
         trade_plans = {
             "status": plan_state,
             "formal": formal_plans[:15],
@@ -1030,11 +1077,22 @@ class ScheduledSnapshotService:
             "portfolio_risk": plan_projection,
             "holding_actions": clean_json(intraday.get("holdings") or [])[:100],
             "intraday_as_of": intraday.get("generated_at"),
+            "intraday_plan_binding": {
+                "status": "current" if plan_run_matches else "stale_or_missing",
+                "selection_run_id": intraday.get("selection_run_id"),
+                "expected_run_id": formal.get("run_id"),
+            },
             "cash_policy": {
-                "cash_basis": "unknown_unverified",
+                "cash_basis": cash_fact.get("basis") or "unknown_unverified",
+                "cash_status": cash_fact.get("status") or "missing",
+                "cash_as_of": cash_fact.get("as_of"),
                 "new_or_add_positions_allowed": False,
                 "conservative_reductions_allowed": True,
-                "reason": "cash_unknown_blocks_additions_but_not_risk_reduction_preview",
+                "reason": (
+                    "scheduled_preview_never_enables_additions"
+                    if available_cash is not None else
+                    "cash_unknown_blocks_additions_but_not_risk_reduction_preview"
+                ),
             },
             "source_contracts": {
                 "position_truth": {
@@ -1059,6 +1117,11 @@ class ScheduledSnapshotService:
                 "current_holding_actions": {
                     "source": "jobs.intraday_decision_monitor.latest_snapshot",
                     "authoritative_for": "persisted_intraday_decisions",
+                },
+                "cash_balance": {
+                    "source": "application.account_reconciliation.confirmed_account_fact",
+                    "authoritative_for": "latest_explicit_cash_balance_only",
+                    "status": cash_fact.get("status") or "missing",
                 },
             },
             "preview_only": True,
