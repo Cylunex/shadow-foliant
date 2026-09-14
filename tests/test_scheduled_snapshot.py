@@ -115,6 +115,12 @@ def build_service(
                                             "buckets": []},
     cash_reader=lambda: {"status": "missing", "amount": None,
                          "reason": "confirmed_cash_balance_missing"},
+    security_metadata_reader=lambda _day: {
+        "stock_symbols": {"000001", *(f"600{i:03d}" for i in range(1, 16))},
+        "fund_symbols": set(),
+        "sources": [{"source": "test_security_master"}],
+        "errors": [],
+    },
     strategy_evidence_reader=lambda **_kwargs: {
         "horizon_days": 5, "lookback_days": 180, "strategies": [],
         "portfolio_comparison": {"matured_runs": 0, "avg_satellite_marginal_pct": None},
@@ -141,6 +147,7 @@ def build_service(
         outcome_stats_reader=outcome_stats_reader,
         strategy_evidence_reader=strategy_evidence_reader,
         cash_reader=cash_reader,
+        security_metadata_reader=security_metadata_reader,
         clock=clock,
     )
 
@@ -223,7 +230,8 @@ def test_risk_preview_uses_same_quote_freshness_window_and_snapshot():
     assert result["quotes"]["quote_ttl_seconds"] == 480
     assert risk["risk_snapshot"]["status"] == "complete"
     assert risk["risk_snapshot"]["missing_prices"] == []
-    assert risk["blockers"] == ["cash_unknown"]
+    assert risk["blockers"] == []
+    assert risk["cash_basis"] == "user_declared_stock_budget"
     assert risk["pricing_snapshot"]["snapshot_id"] == result["quotes"]["snapshot_id"]
     assert risk["pricing_snapshot"]["oldest_as_of"] == result["quotes"]["oldest_usable_as_of"]
 
@@ -272,7 +280,7 @@ def test_formal_follow_up_rejects_plans_from_another_selection_run():
     assert result["trade_plans"]["intraday_plan_binding"]["status"] == "stale_or_missing"
 
 
-def test_confirmed_cash_fact_removes_cash_unknown_without_enabling_additions():
+def test_user_declared_stock_budget_supersedes_legacy_cash_fact_without_enabling_additions():
     result = build_service(cash_reader=lambda: {
         "status": "confirmed", "amount": "1000.00", "as_of": "2026-09-10",
         "basis": "confirmed_account_fact",
@@ -282,8 +290,10 @@ def test_confirmed_cash_fact_removes_cash_unknown_without_enabling_additions():
     assert "cash_unknown" not in (risk.get("blockers") or [])
     assert risk["risk_snapshot"]["cash_known"] is True
     assert risk["risk_snapshot"]["denominator_scope"] == "full_account"
-    assert cash_policy["cash_basis"] == "confirmed_account_fact"
-    assert cash_policy["cash_status"] == "confirmed"
+    assert cash_policy["cash_basis"] == "user_declared_stock_budget"
+    assert cash_policy["cash_status"] == "complete"
+    assert cash_policy["stock_budget"]["available_cash_cny"] == 297000
+    assert cash_policy["broker_cash_balance"] is False
     assert cash_policy["new_or_add_positions_allowed"] is False
 
 
@@ -315,6 +325,11 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
         {"job_name": "daily_backtest", "started_at": evening.isoformat(),
          "finished_at": evening.isoformat(), "status": "success",
          "error": "https://secret.invalid must-not-leak"},
+        {"job_name": "portfolio_indicator_snapshot", "started_at": evening.isoformat(),
+         "finished_at": evening.isoformat(), "status": "success", "error": ""},
+        {"job_name": "research_data_sync_retry", "started_at": evening.isoformat(),
+         "finished_at": evening.isoformat(), "status": "skipped",
+         "error": "daily market already complete"},
     ]
     outcomes = {
         "dimension": "source_type", "days": 180,
@@ -355,7 +370,9 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
     assert outcome_calls == [{"dimension": "source_type", "days": 180,
                               "ensure_tables": False}]
     assert snapshot["post_close_review"]["status"] == "complete"
-    assert snapshot["post_close_review"]["jobs"][0]["metrics"]["signals_evaluated"] == 40
+    outcomes_job = next(row for row in snapshot["post_close_review"]["jobs"]
+                        if row["job_name"] == "eod_outcomes")
+    assert outcomes_job["metrics"]["signals_evaluated"] == 40
     assert "secret.invalid" not in str(snapshot)
     proposals = snapshot["strategy_adjustment_proposals"]
     assert proposals["proposal_count"] == 1
@@ -371,7 +388,10 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     jobs = [
         {"job_name": name, "started_at": evening.isoformat(),
          "finished_at": evening.isoformat(), "status": "success", "error": ""}
-        for name in ("eod_outcomes", "daily_backtest")
+        for name in (
+            "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
+            "research_data_sync_retry",
+        )
     ]
     holding_plan = {
         "available": True, "action": "hold", "action_cn": "不动",
@@ -406,6 +426,60 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     }
     assert snapshot["post_close_review"]["holdings_review_status"] == "complete"
     assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
+    assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == "historical_reference"
+    assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
+
+
+def test_four_report_phases_keep_expected_authority_and_pending_semantics():
+    jobs = [
+        {"job_name": name, "started_at": "2026-09-10T20:30:00+08:00",
+         "finished_at": "2026-09-10T20:31:00+08:00", "status": "success", "error": ""}
+        for name in (
+            "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
+            "research_data_sync_retry",
+        )
+    ]
+    holding_plan = {
+        "available": True, "action": "hold", "action_cn": "不动",
+        "stop_loss": 9, "target_price": 12, "price_basis": "persisted-rule-plan",
+    }
+    intraday = {"data": {
+        "selection_run_id": "formal-run", "generated_at": "2026-09-10T14:49:00+08:00",
+        "plans": {"000001": holding_plan, "600001": holding_plan},
+    }}
+    cases = (
+        (10, 5, "intraday", "current", "intraday_rule_plan"),
+        (14, 30, "intraday", "current", "intraday_rule_plan"),
+        (18, 23, "post_close_pending", "historical_reference", "pending_post_close_review"),
+        (20, 46, "post_close_review", "historical_reference", "next_session_plan"),
+    )
+    for hour, minute, phase, binding, authority in cases:
+        current = NOW.replace(hour=hour, minute=minute)
+        snapshot = build_service(
+            clock=lambda current=current: current,
+            quote_time=current,
+            selection_value=selection(with_wencai=False),
+            intraday_value=intraday,
+            job_runs_reader=lambda **_kwargs: jobs,
+            security_metadata_reader=lambda _day: {
+                "stock_symbols": set(), "fund_symbols": set(),
+                "sources": [], "errors": ["metadata_unavailable"],
+            },
+        ).read(owner_id="scheduled-agent")["data"]
+        assert snapshot["phase"] == phase
+        assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == binding
+        assert snapshot["trade_plans"]["current_authority"] == authority
+        assert snapshot["quality"]["optional_degradations"] == ["wencai_reference"]
+        assert snapshot["trade_plans"]["cash_policy"]["buy_side"]["status"] == "blocked"
+        assert snapshot["trade_plans"]["cash_policy"]["sell_side"]["status"] == "available"
+        assert "trade_plans" not in snapshot["quality"]["blocking_sections"]
+        if phase == "post_close_pending":
+            assert snapshot["status"] == "complete"
+            assert snapshot["quality"]["pending_is_normal"] is True
+        if phase == "post_close_review":
+            assert snapshot["post_close_review"]["status"] == "complete"
+            assert snapshot["holdings_review"]["status"] == "complete"
+            assert snapshot["next_session_plan"]["status"] == "complete"
 
 
 def test_unknown_cash_blocks_additions_but_keeps_reduction_preview():
@@ -532,7 +606,15 @@ def test_cli_report_appends_due_post_close_conclusion():
         "independent_selection": {"status": "missing"},
         "wencai_reference": {"ready_groups": 5},
         "holdings": {"count": 2, "status": "complete"},
-        "trade_plans": {"status": "complete", "portfolio_risk": {"summary": "继续观察"}},
+        "trade_plans": {
+            "status": "complete", "portfolio_risk": {"summary": "继续观察"},
+            "cash_policy": {"stock_budget": {
+                "status": "complete", "total_budget_cny": 300000,
+                "stock_holding_count": 40, "stock_market_value_cny": 184388,
+                "excluded_fund_holding_count": 13, "available_cash_cny": 115612,
+                "as_of": "2026-09-14T16:15:00+08:00",
+            }},
+        },
         "post_close_review": {"due": True, "status": "complete",
                               "conclusion": "盘后闭环完成：无异常。"},
         "strategy_adjustment_proposals": {"proposal_count": 1},
@@ -540,6 +622,8 @@ def test_cli_report_appends_due_post_close_conclusion():
     _, body = cli.render_qq_report(snapshot)
     assert "盘后结论：盘后闭环完成：无异常。" in body
     assert "策略调整：1 项待复核；仅生成建议，不自动应用。" in body
+    assert "股票 40 只/市值 ¥184,388" in body
+    assert "基金排除 13 只；可用 ¥115,612" in body
 
 
 def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):

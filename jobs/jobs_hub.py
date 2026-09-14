@@ -1723,7 +1723,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'fund_evening':              1200,   # B 合并:净值入库(900) + 止盈检查,串行给足
     'weekend_portfolio':         5400,   # F 合并:压力AI(快) + 周报(run_once 深度批量,筛选后排 ETF+Top-N 个股,
                                          # 默认 Top-20,见 PORTFOLIO_DEEP_TOP_N)。5400s 给降级日(每股~300s)足量头量(2026-06-28)
-    'eod_outcomes':              900,    # 依赖等待在 worker 外；这里只计推荐池回填 + 信号后验
+    'eod_outcomes':             1800,    # 三段后验闭环；18:50 起仍须在 20:45 前完成
 }
 def _run_with_log(name, func, *a, **kw):
     """Run task in thread pool and log result (module-level, usable by _wrap)。
@@ -5368,6 +5368,7 @@ def task_afternoon_portfolio():
                 'holding_pnl_pct': item.get('pnl'),
                 'decision_source': item.get('decision_source') or 'formal_signal',
                 'action_guard': item.get('action_guard') or {},
+                'reason_version': item.get('reason_version') or 'portfolio-action-reason-v2',
             }
             for item in (res.get('items') or []) if item.get('code')
         }

@@ -13,6 +13,11 @@ from application.account_preview import (
     build_account_preview,
 )
 from application.results import clean_json, payload_hash, provenance, tool_result
+from application.stock_budget import (
+    STOCK_BUDGET_BASIS,
+    default_metadata_reader,
+    derive_stock_budget,
+)
 
 
 EXPECTED_WENCAI_STRATEGIES = (
@@ -20,7 +25,10 @@ EXPECTED_WENCAI_STRATEGIES = (
 )
 POST_CLOSE_REVIEW_HOUR = 20
 POST_CLOSE_REVIEW_MINUTE = 45
-POST_CLOSE_JOBS = ("eod_outcomes", "daily_backtest")
+POST_CLOSE_JOBS = (
+    "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
+    "research_data_sync_retry",
+)
 MIN_STRATEGY_FEEDBACK_SAMPLES = 30
 MIN_PERFORMANCE_FACTOR_DEVIATION = 0.05
 MAX_STRATEGY_MULTIPLIER_STEP = 0.05
@@ -153,6 +161,11 @@ def _job_run(row: Any) -> dict[str, Any]:
     ]
     if partial_failures and status == "success":
         status = "degraded"
+    completion_semantics = "required_success"
+    if (str(row.get("job_name") or "") == "research_data_sync_retry"
+            and raw_status == "skipped" and "already complete" in detail.lower()):
+        status = "not_applicable"
+        completion_semantics = "upstream_daily_market_already_complete"
     decision_loop = re.search(r"\bdecision_loop=([a-zA-Z0-9_-]+)", detail)
     if decision_loop:
         metrics["decision_loop_status"] = decision_loop.group(1)[:40]
@@ -163,7 +176,19 @@ def _job_run(row: Any) -> dict[str, Any]:
         "finished_at": row.get("finished_at"),
         "metrics": metrics,
         "partial_failure_codes": partial_failures,
+        "completion_semantics": completion_semantics,
     })
+
+
+def _report_phase(now: datetime, trading_day: dict[str, Any]) -> str:
+    if trading_day.get("confirmed") and not trading_day.get("is_trading_day"):
+        return "closed_day"
+    minute = now.hour * 60 + now.minute
+    if minute < 15 * 60:
+        return "intraday"
+    if minute < POST_CLOSE_REVIEW_HOUR * 60 + POST_CLOSE_REVIEW_MINUTE:
+        return "post_close_pending"
+    return "post_close_review"
 
 
 def _outcome_evidence(value: Any) -> dict[str, Any]:
@@ -232,6 +257,7 @@ class ScheduledSnapshotService:
         outcome_stats_reader: Callable[..., dict[str, Any]] | None = None,
         strategy_evidence_reader: Callable[..., dict[str, Any]] | None = None,
         cash_reader: Callable[[], dict[str, Any]] | None = None,
+        security_metadata_reader: Callable[[str], dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
@@ -245,6 +271,7 @@ class ScheduledSnapshotService:
         self.outcome_stats_reader = outcome_stats_reader
         self.strategy_evidence_reader = strategy_evidence_reader
         self.cash_reader = cash_reader
+        self.security_metadata_reader = security_metadata_reader
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
 
     def _dependencies(self):
@@ -293,6 +320,8 @@ class ScheduledSnapshotService:
             self.cash_reader = lambda: reconciliation.latest_cash_balance(
                 owner="portfolio-primary"
             )
+        if self.security_metadata_reader is None:
+            self.security_metadata_reader = default_metadata_reader(self.store)
 
     @staticmethod
     def _missing(code: str, hint: str) -> dict[str, Any]:
@@ -410,13 +439,31 @@ class ScheduledSnapshotService:
         ready = sum(1 for row in rows if row["status"] == "ready")
         return {
             "status": "missing" if present == 0 else "complete" if ready == 5 else "degraded",
+            "provider": "iwencai_reference_adapter",
+            "availability": "ready" if ready == 5 else "long_term_degraded",
             "reference_only": True,
             "reference_affects_membership": False,
+            "blocks_snapshot_quality": False,
             "expected_groups": 5,
             "present_groups": present,
             "ready_groups": ready,
             "strategies": rows,
             "as_of": payload.get("executed_at"),
+            "degradation_boundary": {
+                "formal_selection_unaffected": True,
+                "no_synthetic_results": True,
+                "retry_policy": "bounded_scheduled_attempts_only",
+            },
+            "official_replacement_contract": {
+                "provider": "fuyao_ths_official",
+                "status": "not_connected",
+                "must_preserve_provider_identity": True,
+                "must_not_be_labeled_as_wencai": True,
+                "dimensions": [
+                    "capital_flow", "valuation", "financial_growth",
+                    "market_attention", "tradeability",
+                ],
+            },
         }
 
     @staticmethod
@@ -464,9 +511,12 @@ class ScheduledSnapshotService:
     def _candidate_follow_up(
         formal: dict[str, Any], quote_rows: list[dict[str, Any]],
         trade_plans: dict[str, dict[str, Any]] | None = None,
+        stock_budget: dict[str, Any] | None = None,
+        phase: str = "intraday",
     ) -> list[dict[str, Any]]:
         quote_by_symbol = {str(row.get("symbol") or ""): row for row in quote_rows}
         trade_plans = trade_plans or {}
+        stock_budget = stock_budget or {}
         result = []
         for candidate in formal.get("formal_top15") or []:
             symbol = str(candidate.get("symbol") or "")
@@ -476,7 +526,8 @@ class ScheduledSnapshotService:
             trade_plan = embedded_plan or persisted_plan
             plan_source = (
                 "formal_artifact" if embedded_plan else
-                "current_intraday_snapshot" if persisted_plan else
+                "current_intraday_snapshot" if persisted_plan and phase == "intraday" else
+                "historical_intraday_reference" if persisted_plan else
                 "missing"
             )
             plan_available = bool(trade_plan) and trade_plan.get("available") is not False
@@ -487,6 +538,25 @@ class ScheduledSnapshotService:
                 blockers.append("quote_stale_or_missing")
             if not plan_available:
                 blockers.append("trade_plan_missing")
+            budget_blockers = list(stock_budget.get("buy_side_blockers") or [])
+            blockers.extend(item for item in budget_blockers if item not in blockers)
+            available_cash = _finite_number(stock_budget.get("available_cash_cny"))
+            total_budget = _finite_number(stock_budget.get("total_budget_cny"))
+            quote_price = _finite_number(quote.get("price"))
+            max_order_value = (
+                min(available_cash, total_budget * 0.15, total_budget * 0.10)
+                if available_cash is not None and total_budget is not None else None
+            )
+            max_quantity = None
+            if max_order_value is not None and quote_price and quote_price > 0:
+                try:
+                    from analysis.decision_evaluation import equity_rules
+
+                    rules = equity_rules(symbol)
+                    step = int(rules.buy_step) if rules else 100
+                    max_quantity = int(max_order_value / quote_price) // step * step
+                except Exception:
+                    max_quantity = None
             result.append(clean_json({
                 "symbol": symbol,
                 "name": candidate.get("name"),
@@ -497,6 +567,18 @@ class ScheduledSnapshotService:
                 "trade_plan_available": plan_available,
                 "trade_plan_source": plan_source,
                 "trade_plan": _trade_plan(trade_plan),
+                "stock_budget_constraint": {
+                    "status": "ready" if not budget_blockers else "blocked",
+                    "cash_basis": stock_budget.get("basis"),
+                    "available_cash_cny": available_cash,
+                    "max_order_value_cny": (
+                        round(max_order_value, 2) if max_order_value is not None else None
+                    ),
+                    "max_quantity_before_fees": max_quantity,
+                    "position_limit_pct": 15,
+                    "turnover_limit_pct": 10,
+                    "preview_only": True,
+                },
                 "blockers": blockers,
             }))
         return result[:15]
@@ -843,7 +925,9 @@ class ScheduledSnapshotService:
             strategies = {"status": "missing", "strategies": []}
         proposals = self._adjustment_proposals(outcomes, strategies)
 
-        jobs_complete = all(row.get("status") == "success" for row in jobs)
+        jobs_complete = all(
+            row.get("status") in {"success", "not_applicable"} for row in jobs
+        )
         evidence_complete = all(
             section.get("status") == "complete" for section in (outcomes, strategies)
         )
@@ -917,6 +1001,7 @@ class ScheduledSnapshotService:
         now = self.clock()
         today = now.date().isoformat()
         trading_day = self._trading_day(today)
+        phase = _report_phase(now, trading_day)
         cockpit = self._cockpit()
         try:
             selection_value = self.selection_reader() or {}
@@ -1000,9 +1085,29 @@ class ScheduledSnapshotService:
             cash_fact = self.cash_reader() or {}
         except Exception:
             cash_fact = {"status": "missing", "reason": "cash_reader_unavailable"}
-        available_cash = (
-            cash_fact.get("amount") if cash_fact.get("status") == "confirmed" else None
+        try:
+            security_metadata = self.security_metadata_reader(today) or {}
+        except Exception:
+            security_metadata = {
+                "stock_symbols": set(), "fund_symbols": set(),
+                "sources": [], "errors": ["security_metadata_reader_unavailable"],
+            }
+        stock_budget = derive_stock_budget(
+            holding_rows, quote_rows, security_metadata,
         )
+        available_cash = stock_budget.get("available_cash_cny")
+        preview_context = context
+        if context is not None and stock_budget.get("status") == "complete":
+            classifications = stock_budget.get("classifications") or {}
+            preview_context = {
+                **context,
+                "holdings": [
+                    row for row in (context.get("holdings") or [])
+                    if classifications.get(
+                        str(row.get("code") or row.get("symbol") or "").zfill(6)
+                    ) == "stock"
+                ],
+            }
 
         if context is None:
             account_plan = {"status": "missing", "preview_only": True,
@@ -1019,9 +1124,12 @@ class ScheduledSnapshotService:
                                     "alternatives": []}
                 else:
                     account_plan = build_account_preview(
-                        owner_id=owner_id, capsule=capsule, context=context,
+                        owner_id=owner_id, capsule=capsule, context=preview_context,
                         raw_quotes=raw_quotes, available_cash=available_cash,
                         allow_add=False, now=now,
+                        cash_basis=(
+                            STOCK_BUDGET_BASIS if available_cash is not None else None
+                        ),
                         quote_ttl_seconds=int(
                             float(quote_quality.get("stale_minutes") or 8) * 60
                         ),
@@ -1063,31 +1171,63 @@ class ScheduledSnapshotService:
             if row.get("trade_plan") or persisted_plans.get(row.get("symbol"))
         ]
         plan_projection = _action_plan(account_plan)
+        raw_plan_blockers = list(plan_projection.get("blockers") or [])
+        buy_blockers = [item for item in raw_plan_blockers if item == "cash_unknown"]
+        operational_blockers = [item for item in raw_plan_blockers if item != "cash_unknown"]
+        plan_projection["blockers"] = operational_blockers
+        plan_projection["buy_blockers"] = buy_blockers
+        plan_projection["sell_blockers"] = operational_blockers
         plan_state = str(plan_projection.get("status") or "complete")
-        if plan_projection.get("error_code") or plan_projection.get("blockers"):
+        if plan_projection.get("error_code") or operational_blockers:
             plan_state = "degraded" if plan_state not in {"missing", "stale"} else plan_state
         candidate_follow_up = self._candidate_follow_up(
             formal, quote_rows, trade_plans=review_plans,
+            stock_budget=stock_budget, phase=phase,
         )
         trade_plans = {
-            "status": plan_state,
+            "status": plan_state if phase == "intraday" else "pending",
+            "phase": phase,
             "formal": formal_plans[:15],
             "formal_candidate_follow_up": candidate_follow_up,
             "next_premarket_check": self._next_premarket_check(formal, independent=independent),
             "portfolio_risk": plan_projection,
             "holding_actions": clean_json(intraday.get("holdings") or [])[:100],
+            "holding_actions_authority": {
+                "status": "current" if phase == "intraday" else "historical_reference",
+                "as_of": intraday.get("generated_at"),
+                "reason": (
+                    "same_session_intraday_decisions" if phase == "intraday" else
+                    "intraday_decisions_are_not_authoritative_after_close"
+                ),
+            },
             "intraday_as_of": intraday.get("generated_at"),
             "intraday_plan_binding": {
-                "status": "current" if plan_run_matches else "stale_or_missing",
+                "status": (
+                    "current" if plan_run_matches and phase == "intraday" else
+                    "historical_reference" if plan_run_matches else "stale_or_missing"
+                ),
                 "selection_run_id": intraday.get("selection_run_id"),
                 "expected_run_id": formal.get("run_id"),
             },
             "cash_policy": {
-                "cash_basis": cash_fact.get("basis") or "unknown_unverified",
-                "cash_status": cash_fact.get("status") or "missing",
-                "cash_as_of": cash_fact.get("as_of"),
+                "cash_basis": STOCK_BUDGET_BASIS,
+                "cash_status": stock_budget.get("status") or "blocked",
+                "cash_as_of": stock_budget.get("as_of"),
+                "stock_budget": stock_budget,
                 "new_or_add_positions_allowed": False,
                 "conservative_reductions_allowed": True,
+                "buy_side": {
+                    "status": "preview_only" if available_cash is not None else "blocked",
+                    "blockers": list(stock_budget.get("buy_side_blockers") or []),
+                },
+                "sell_side": {
+                    "status": "available",
+                    "blockers": operational_blockers,
+                },
+                "affects_snapshot_quality": False,
+                "broker_cash_source": "unavailable",
+                "broker_cash_balance": False,
+                "user_declared_total_budget_cny": stock_budget.get("total_budget_cny"),
                 "reason": (
                     "scheduled_preview_never_enables_additions"
                     if available_cash is not None else
@@ -1119,15 +1259,22 @@ class ScheduledSnapshotService:
                     "authoritative_for": "persisted_intraday_decisions",
                 },
                 "cash_balance": {
-                    "source": "application.account_reconciliation.confirmed_account_fact",
-                    "authoritative_for": "latest_explicit_cash_balance_only",
-                    "status": cash_fact.get("status") or "missing",
+                    "source": "application.stock_budget.derive_stock_budget",
+                    "authoritative_for": "stock_budget_available_cash_preview_only",
+                    "basis": STOCK_BUDGET_BASIS,
+                    "status": stock_budget.get("status") or "blocked",
+                    "broker_cash_balance": False,
+                    "legacy_confirmed_cash_fact_status": cash_fact.get("status") or "missing",
                 },
             },
             "preview_only": True,
             "auto_execution": False,
             "pricing_status": quote_quality.get("status") or quote_state,
             "pricing_context": quote_quality.get("mode") or "intraday",
+            "current_authority": (
+                "intraday_rule_plan" if phase == "intraday" else
+                "pending_post_close_review"
+            ),
         }
 
         post_close_review, adjustment_proposals = self._post_close_review(now, trading_day)
@@ -1143,6 +1290,9 @@ class ScheduledSnapshotService:
         post_close_review["holdings_review_status"] = holdings_review.get("status")
         post_close_review["next_session_plan_status"] = next_session_plan.get("status")
         post_close_review["source_comparison_status"] = source_comparison.get("status")
+        if phase == "post_close_review":
+            trade_plans["status"] = next_session_plan.get("status") or "degraded"
+            trade_plans["current_authority"] = "next_session_plan"
 
         section_status = {
             "trading_day": trading_day.get("status"),
@@ -1159,12 +1309,26 @@ class ScheduledSnapshotService:
             "source_comparison": source_comparison.get("status"),
             "strategy_adjustment_proposals": adjustment_proposals.get("status"),
         }
-        healthy_states = {"complete", "success", "pending", "not_applicable"}
-        healthy = all(value in healthy_states for value in section_status.values())
+        optional_sections = {"wencai_reference"}
+        pending_allowed = {
+            "post_close_review", "holdings_review", "next_session_plan",
+            "strategy_adjustment_proposals",
+        }
+        if phase == "post_close_pending":
+            pending_allowed.add("trade_plans")
+        healthy_states = {"complete", "success", "not_applicable"}
+        blocking_sections = [
+            name for name, value in section_status.items()
+            if name not in optional_sections
+            and value not in healthy_states
+            and not (value == "pending" and name in pending_allowed)
+        ]
+        healthy = not blocking_sections
         captured_at = now.isoformat(timespec="seconds")
         snapshot = {
             "schema_version": "scheduled-agent-snapshot-v1",
             "status": "complete" if healthy else "degraded",
+            "phase": phase,
             "trading_day": trading_day,
             "cockpit": cockpit,
             "formal_selection": formal,
@@ -1190,8 +1354,17 @@ class ScheduledSnapshotService:
                     captured_at if post_close_review.get("due") else None
                 ),
             },
-            "quality": {"status": "complete" if healthy else "degraded",
-                        "sections": section_status},
+            "quality": {
+                "status": "complete" if healthy else "degraded",
+                "phase": phase,
+                "sections": section_status,
+                "blocking_sections": blocking_sections,
+                "optional_degradations": [
+                    name for name in optional_sections
+                    if section_status.get(name) not in healthy_states
+                ],
+                "pending_is_normal": phase == "post_close_pending",
+            },
         }
         snapshot = _redact(snapshot)
         snapshot_id = payload_hash(snapshot)
@@ -1207,8 +1380,7 @@ class ScheduledSnapshotService:
                 policy_hash=(selection_value.get("provenance") or {}).get("policy_hash"),
                 code_revision=(selection_value.get("provenance") or {}).get("code_revision"),
             ),
-            warnings=[name for name, value in section_status.items()
-                      if value not in healthy_states],
+            warnings=blocking_sections,
             data=snapshot,
             model_payload=snapshot,
         )

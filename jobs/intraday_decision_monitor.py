@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_KEY = "intraday_decision"
 VERSION = "intraday-decision-v1"
+ACTION_REASON_VERSION = "portfolio-action-reason-v2"
 ACTION_RANK = {"data_insufficient": -1, "hold": 0, "add": 1, "reduce": 2, "sell": 3}
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,18 @@ def _finite(value: Any) -> float | None:
 def _code(value: Any) -> str:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     return digits[-6:] if len(digits) >= 6 else ""
+
+
+def _reason_family(reason: Any) -> str:
+    text = str(reason or "")
+    for marker, family in (
+        ("止损", "stop_loss"), ("止盈", "take_profit"),
+        ("组合级保护", "portfolio_guard"), ("风险", "technical_risk"),
+        ("均线", "technical_risk"), ("数据", "data_quality"),
+    ):
+        if marker in text:
+            return family
+    return "other"
 
 
 def trading_session(now: datetime | None = None) -> bool:
@@ -354,19 +367,20 @@ def _holding_decision(item: dict[str, Any], quote: dict[str, Any], plan: dict[st
     stop = _finite(plan.get("stop_loss"))
     target = _finite(plan.get("target_price"))
     if stop and price <= stop:
-        action, reason = "sell", f"当前价触及 trade_plan 止损 {stop:.2f}"
+        action, reason, source = "sell", f"当前价触及 trade_plan 止损 {stop:.2f}", "hard_risk"
     elif target and price >= target:
-        action, reason = "reduce", f"当前价触及 trade_plan 第一目标 {target:.2f}"
+        action, reason, source = "reduce", f"当前价触及 trade_plan 第一目标 {target:.2f}", "formal_signal"
     elif score >= 3:
-        action, reason = "sell", "；".join(reasons)
+        action, reason, source = "sell", "；".join(reasons), "portfolio_risk"
     elif score >= 1:
-        action, reason = "reduce", "；".join(reasons)
+        action, reason, source = "reduce", "；".join(reasons), "portfolio_risk"
     else:
-        action, reason = "hold", "未触及止损/止盈或技术减仓条件"
+        action, reason, source = "hold", "未触及止损/止盈或技术减仓条件", "formal_signal"
     return {
         "action": action,
         "action_cn": {"hold": "不动", "reduce": "减仓", "sell": "卖出"}[action],
         "reason": reason,
+        "source": source,
         "holding_pnl_pct": pnl,
     }
 
@@ -436,6 +450,7 @@ def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, A
         "reason": decision.get("reason"),
         "decision_source": decision.get("source") or decision.get("decision_source"),
         "action_guard": decision.get("action_guard") or {},
+        "reason_version": decision.get("reason_version") or ACTION_REASON_VERSION,
         "holding_pnl_pct": decision.get("holding_pnl_pct"),
         "entry_low": _finite(plan.get("entry_low")),
         "entry_high": _finite(plan.get("entry_high")),
@@ -581,6 +596,14 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     cooldown = max(60, int(os.getenv("INTRADAY_ALERT_COOLDOWN_MINUTES", "60")))
     events: list[dict[str, Any]] = []
     decisions: dict[str, dict[str, Any]] = {}
+    previous_holdings = {
+        str(row.get("symbol") or ""): row
+        for row in (previous.get("holdings") or []) if isinstance(row, dict)
+    } if str(previous.get("trade_date") or "") == current.date().isoformat() else {}
+    max_upgrades = max(1, int(os.getenv("INTRADAY_MAX_ACTION_UPGRADES", "8")))
+    max_same_reason = max(1, int(os.getenv("INTRADAY_MAX_SAME_REASON_UPGRADES", "3")))
+    upgrade_count = 0
+    upgrade_families: dict[str, int] = {}
 
     for item in pool:
         symbol = item["symbol"]
@@ -593,16 +616,14 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
             _holding_decision(item, quote, plan, snapshot_loader, row_fail_closed)
             if is_holding else _candidate_decision(quote, plan, row_fail_closed)
         )
+        base_action = str(base_decision.get("action") or "hold")
+        base_source = str(base_decision.get("source") or (
+            "portfolio_risk" if base_action in {"reduce", "sell"} else "formal_signal"
+        ))
         if (is_holding and isinstance(override, dict) and not row_fail_closed
                 and quote.get("price_actionable")):
             from core.action_decision import resolve_action
 
-            base_action = str(base_decision.get("action") or "hold")
-            base_source = (
-                "hard_risk" if base_action == "sell" else
-                "portfolio_risk" if base_action == "reduce" else
-                "formal_signal"
-            )
             decision = resolve_action([
                 {"source": base_source, "action": base_action,
                  "reason": base_decision.get("reason") or ""},
@@ -621,6 +642,46 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
             decision["action_guard"] = override.get("action_guard") or {}
         else:
             decision = base_decision
+            decision["decision_source"] = base_source
+        decision["reason_version"] = ACTION_REASON_VERSION
+        if is_holding and quote.get("price_actionable") and not row_fail_closed:
+            prior = previous_holdings.get(symbol) or {}
+            prior_action = str(prior.get("action") or "hold")
+            proposed_action = str(decision.get("action") or "hold")
+            prior_rank = ACTION_RANK.get(prior_action, 0)
+            proposed_rank = ACTION_RANK.get(proposed_action, 0)
+            source = str(decision.get("source") or decision.get("decision_source") or base_source)
+            family = _reason_family(decision.get("reason"))
+            transition_reasons = []
+            guarded_action = proposed_action
+            if prior and source != "hard_risk" and proposed_rank > prior_rank:
+                if proposed_rank - prior_rank > 1:
+                    guarded_action = "reduce"
+                    transition_reasons.append("multi_level_action_jump")
+                if upgrade_count >= max_upgrades:
+                    guarded_action = prior_action
+                    transition_reasons.append("portfolio_upgrade_count_limit")
+                elif upgrade_families.get(family, 0) >= max_same_reason:
+                    guarded_action = prior_action
+                    transition_reasons.append("same_reason_upgrade_limit")
+                if ACTION_RANK.get(guarded_action, 0) > prior_rank:
+                    upgrade_count += 1
+                    upgrade_families[family] = upgrade_families.get(family, 0) + 1
+                if guarded_action != proposed_action:
+                    prior_guard = dict(decision.get("action_guard") or {})
+                    decision["action"] = guarded_action
+                    decision["action_cn"] = {
+                        "hold": "不动", "reduce": "减仓", "sell": "卖出", "add": "加仓",
+                    }.get(guarded_action, "不动")
+                    decision["reason"] = "动作跃迁保护：本轮升级过快或同因触发过于集中"
+                    decision["source"] = "portfolio_action_guard"
+                    decision["decision_source"] = "portfolio_action_guard"
+                    decision["action_guard"] = {
+                        **prior_guard, "changed": True,
+                        "transition_reasons": transition_reasons,
+                        "previous_action": prior_action,
+                        "proposed_action": proposed_action,
+                    }
         row = _decision_row(item, quote, plan, decision)
         decisions[symbol] = row
         actionable = bool(quote.get("price_actionable")) and not fail_closed

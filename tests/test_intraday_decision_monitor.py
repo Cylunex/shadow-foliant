@@ -375,6 +375,50 @@ def test_portfolio_guard_override_beats_ordinary_holding_advice():
     assert holding["action_guard"]["changed"] is True
 
 
+def test_same_reason_action_upgrades_are_bounded_and_versioned():
+    now = datetime(2026, 9, 10, 14, 30, tzinfo=TZ)
+    holding_codes = [f"00000{i}" for i in range(1, 6)]
+    plans = _plans()
+    plans.update({code: dict(next(iter(plans.values()))) for code in holding_codes})
+    previous = {
+        "trade_date": now.date().isoformat(),
+        "selection_run_id": "formal-run-1",
+        "plans": plans,
+        "holdings": [{"symbol": code, "action": "hold"} for code in holding_codes],
+    }
+
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [
+            {"code": code, "quantity": 100, "cost_price": 10}
+            for code in holding_codes
+        ],
+        quote_loader=lambda codes: {
+            code: {"price": 10, "change_pct": 0,
+                   "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+        holding_overrides={code: {
+            "action": "sell", "reason": "组合级保护集中触发",
+            "decision_source": "formal_signal",
+        } for code in holding_codes},
+    )
+
+    actions = [row["action"] for row in result["holdings"]]
+    assert actions.count("sell") == 0
+    assert actions.count("reduce") == 3
+    assert actions.count("hold") == 2
+    assert all(row["reason_version"] == "portfolio-action-reason-v2"
+               for row in result["holdings"])
+    changed = [row for row in result["holdings"] if row["action_guard"].get("changed")]
+    assert len(changed) == 5
+    assert all(row["decision_source"] == "portfolio_action_guard" for row in changed)
+
+
 def test_nine_forty_five_summary_keeps_five_reference_states_and_overlap_bounded():
     results = {
         "主力资金": (True, pd.DataFrame([{"股票代码": "600001", "股票简称": "甲"}]), "ok"),

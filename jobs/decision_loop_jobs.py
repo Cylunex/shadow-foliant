@@ -23,7 +23,7 @@ def refresh_quality(store=None):
 def cached_quality(store=None):
     """Read the quality artifact produced by the research-sync jobs.
 
-    The daily decision loop is part of ``eod_outcomes`` and has a hard 900s
+    The daily decision loop is part of ``eod_outcomes`` and has a hard 1800s
     budget.  Re-scoring the full market here duplicated the earlier research
     sync and could consume that entire budget.  Quality is optional evidence
     for this loop, so a missing/stale artifact is reported explicitly without
@@ -138,7 +138,7 @@ def daily_decision_loop(store=None):
     from application.reliability_jobs import refresh_reliability
     try:
         # Historical revision replay can rebuild entire frozen selections and is
-        # intentionally not part of eod_outcomes' 900s settlement budget.  This
+        # intentionally not part of eod_outcomes' 1800s settlement budget.  This
         # run still flushes evidence, reviews cases and reports the durable replay
         # queue for a separately budgeted reliability invocation.
         reliability = refresh_reliability(

@@ -36,7 +36,7 @@ def account_quote_symbols(capsule, holdings, *, extra_symbols=()):
 
 def build_account_preview(*, owner_id, capsule, context, raw_quotes,
                           available_cash=None, allow_add=False, now=None,
-                          quote_ttl_seconds=120):
+                          quote_ttl_seconds=120, cash_basis=None):
     """Build the existing authoritative account plan from already loaded facts.
 
     This seam lets aggregate readers share exactly one batched quote request while
@@ -79,7 +79,10 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
     plan = build_action_plan(capsule, holdings, quotes, holdings_version=watermark,
                              now=now.isoformat(), cash=available_cash, allow_add=allow_add,
                              owner_id=owner_id, limits=limits)
-    plan["cash_basis"] = "user_confirmed" if available_cash is not None else "unknown"
+    plan["cash_basis"] = (
+        str(cash_basis) if cash_basis else
+        "user_confirmed" if available_cash is not None else "unknown"
+    )
     stamps = sorted(
         str(row.get("observed_at") or "") for row in quotes.values()
         if row.get("observed_at")

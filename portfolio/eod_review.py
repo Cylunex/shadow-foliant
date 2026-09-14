@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 _ACT_MAP = {'清仓': 'sell', '卖出': 'sell', '减仓': 'reduce', '减持': 'reduce',
             '持有': 'hold', '观望': 'watch', '加仓': 'add', '增持': 'add'}
 _ACT_ORDER = {'sell': 0, 'reduce': 1, 'add': 2, 'hold': 3, 'watch': 4}
+ACTION_REASON_VERSION = "portfolio-action-reason-v2"
 
 
 def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -110,6 +111,7 @@ def _apply_portfolio_action_guard(
             "changed": action != original,
             "reasons": guard_reasons,
         }
+        item["reason_version"] = ACTION_REASON_VERSION
         item.pop("position_value", None)
         output.append(item)
     return output, {

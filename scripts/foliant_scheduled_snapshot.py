@@ -145,6 +145,7 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     proposals = snapshot.get("strategy_adjustment_proposals") or {}
     top5 = formal.get("formal_top5") or []
     risk = plans.get("portfolio_risk") or {}
+    stock_budget = (plans.get("cash_policy") or {}).get("stock_budget") or {}
     lines = [
         f"日期：{day.get('date') or '未知'}；交易日证据："
         f"{'已确认' if day.get('confirmed') else '未知'}",
@@ -167,9 +168,20 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
         f"状态 {holdings.get('status') or 'missing'}",
+        (
+            f"股票预算：¥{float(stock_budget.get('total_budget_cny') or 0):,.0f}；"
+            f"股票 {stock_budget.get('stock_holding_count', '未知')} 只/市值 "
+            f"¥{float(stock_budget.get('stock_market_value_cny') or 0):,.0f}；"
+            f"基金排除 {stock_budget.get('excluded_fund_holding_count', '未知')} 只；"
+            f"可用 ¥{float(stock_budget.get('available_cash_cny') or 0):,.0f}；"
+            f"as-of {stock_budget.get('as_of') or '不可用'}"
+            if stock_budget.get("status") == "complete" else
+            "股票预算：分类或行情不完整，买入侧失败关闭；卖出复核与完整持仓报告继续。"
+        ),
         f"持仓风控：{risk.get('summary') or '暂无有效结果'}；"
         f"状态 {plans.get('status') or 'missing'}",
-        f"快照质量：{snapshot.get('status') or 'degraded'}；仅供研究，不自动下单。",
+        f"快照质量：{snapshot.get('status') or 'degraded'}；"
+        f"阶段 {snapshot.get('phase') or 'unknown'}；仅供研究，不自动下单。",
     ])
     if post_close.get("due"):
         lines.append(f"盘后结论：{post_close.get('conclusion') or '盘后闭环结果不可用。'}")
