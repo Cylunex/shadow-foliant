@@ -22,15 +22,15 @@ _PERSIST_WORKER_LOCK = threading.Lock()
 DATASET_ROUTES: dict[str, dict[str, Any]] = {
     "security_master": {"primary": "zzshare.security_master", "fallback": []},
     "trade_calendar": {
-        "primary": "zzshare.trade_calendar", "validators": ["baostock.calendar"],
+        "primary": "fuyao_aicubes.calendar", "validators": ["zzshare.trade_calendar", "baostock.calendar"],
         "policy": "two_provider_consensus",
     },
     "daily_qfq": {
-        "primary": "zzshare.daily_market", "fallback": ["baostock.daily"],
-        "policy": "baostock_exact_date_repair_only",
+        "primary": "zzshare.daily_market", "fallback": ["fuyao_aicubes.historical", "baostock.daily"],
+        "policy": "bounded_exact_date_repair_only",
     },
     "daily_raw_validation": {
-        "primary": "eltdx.bars", "fallback": ["tdx_python.bars", "baostock.daily"],
+        "primary": "fuyao_aicubes.historical", "fallback": ["eltdx.bars", "tdx_python.bars", "baostock.daily"],
         "policy": "never_repair_qfq",
     },
     "minute": {
@@ -39,14 +39,18 @@ DATASET_ROUTES: dict[str, dict[str, Any]] = {
         "policy": "mairui_compatible_sources_support_5m_plus_without_pro",
     },
     "realtime_quote": {
-        "primary": "zzshare.realtime",
-        "fallback": ["eltdx.quotes", "tdx_python.quotes", "mairui.realtime", "moma.realtime"],
+        "primary": "fuyao_aicubes.snapshot",
+        "fallback": ["zzshare.realtime", "eltdx.quotes", "tdx_python.quotes", "mairui.realtime", "moma.realtime"],
     },
-    "valuation": {"primary": "zzshare.valuation", "fallback": [
-        "tushare.valuation", "baostock.daily", "tencent.valuation",
+    "valuation": {"primary": "fuyao_aicubes.valuation", "fallback": [
+        "zzshare.valuation", "tushare.valuation", "baostock.daily", "tencent.valuation",
         "mairui.realtime", "moma.realtime", "eastmoney.valuation"],
         "policy": "dated_field_composition_before_freeze; live_sources_same_day_close_only"},
-    "financial_pit": {"primary": "zzshare.finance_pit", "fallback": []},
+    "financial_pit": {"primary": "zzshare.finance_pit", "fallback": ["fuyao_aicubes.financials"]},
+    "call_auction": {"primary": "fuyao_aicubes.auction", "fallback": []},
+    "special_market_data": {"primary": "fuyao_aicubes.special_data", "fallback": []},
+    "fuyao_capital_flow": {"primary": "fuyao_aicubes.capital_flow", "fallback": [],
+        "policy": "explicitly_degraded_external_access_unavailable"},
     "official_disclosure": {
         "primary": "cninfo.announcements",
         "fallback": ["mairui.announcements"],
@@ -81,8 +85,16 @@ def _now_iso() -> str:
 
 
 def _configured(provider: str, auth: str) -> bool:
+    if auth == "unavailable_external":
+        return False
     if auth in {"none", "anonymous_login"}:
         return True
+    if provider == "fuyao_aicubes":
+        try:
+            from data.sources.fuyao_aicubes import api_key
+            return bool(api_key())
+        except Exception:
+            return False
     names = {
         "zzshare": ("ZZSHARE_TOKEN",),
         "pywencai": ("PYWENCAI_COOKIE", "WENCAI_COOKIE"),
@@ -90,6 +102,7 @@ def _configured(provider: str, auth: str) -> bool:
         "moma": ("MOMA_TOKEN",),
         "tushare": ("TUSHARE_TOKEN",),
         "eastmoney_saas": ("EM_API_KEY",),
+        "fuyao_aicubes": ("FUYAO_AICUBES_API_KEY", "FUYAO_AICUBES_API_KEY_FILE"),
     }.get(provider, ())
     return any(str(os.getenv(name) or "").strip() for name in names)
 
@@ -103,6 +116,7 @@ def _enabled(provider: str) -> bool:
         "mootdx": "TDX_USE_MOOTDX",
         "mairui": "MAIRUI_ENABLED",
         "moma": "MOMA_ENABLED",
+        "fuyao_aicubes": "FUYAO_AICUBES_ENABLED",
     }
     name = flags.get(provider)
     if not name:

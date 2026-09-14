@@ -12,7 +12,7 @@ import time
 
 import pandas as pd
 
-from data.sources import baostock, valuation as sources
+from data.sources import baostock, fuyao_aicubes, valuation as sources
 from data.valuation_contract import TZ, complete, iso_day, merge_snapshot, number
 
 log = logging.getLogger(__name__)
@@ -125,12 +125,16 @@ class ValuationSynchronizer:
             # Priority is resolved PER FIELD, independently of arrival order.
             if not bulk_only and datetime.now(TZ).date().isoformat() == day and evening:
                 live_deadline = min(deadline, started + seconds * .35)
-                for provider in ('tencent', 'mairui', 'moma', 'eastmoney'):
+                live_providers = ['tencent', 'mairui', 'moma', 'eastmoney']
+                if fuyao_aicubes.available():
+                    live_providers.insert(0, 'fuyao_aicubes')
+                for provider in live_providers:
                     fields = ('pb',) if provider in ('mairui', 'moma') else ('pb', 'market_cap')
                     codes = missing(fields)
                     if not codes:
                         continue
-                    chunk = 20 if provider in ('mairui', 'moma') else 80
+                    chunk = (20 if provider in ('mairui', 'moma') else
+                             100 if provider == 'fuyao_aicubes' else 80)
                     cap = _setting('VALUATION_PAID_BATCHES_PER_SOURCE', 30, 100) if chunk == 20 else 80
                     calls, received, empty = 0, 0, 0
                     # Each fallback gets a slice; a slow first source must not

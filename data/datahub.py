@@ -149,13 +149,17 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
     # 每只吃 quotes60s+kline135s 拖到任务超时(1813s 加仓审核即此)。冷却 120s 后自动放行重试 → 自愈。
     if sources and all(_health(f"{capability}:{n}", now) < -0.5 for n, _ in sources):
         return empty
-    from data.provider_governor import PROVIDERS
+    from data.provider_governor import PROVIDERS, operational_priority
     aliases = {"east": "eastmoney", "em": "eastmoney", "em_datacenter": "eastmoney", "bkzj": "eastmoney",
                "east_qfq": "eastmoney", "bs": "baostock", "baostock_qfq": "baostock", "baostock_idx": "baostock",
                "sina_qfq": "sina", "sina_raw": "sina", "tickflow_qfq": "tickflow", "akshare_idx": "akshare",
                "a_stock": "default", "fetcher": "default", "dsm": "default"}
+    def configured_tier(name: str) -> int:
+        provider = aliases.get(name, name)
+        return operational_priority(provider)
+
     ordered = sorted(sources, key=lambda ns: (
-        PROVIDERS.get(aliases.get(ns[0], ns[0]), (2,))[0],
+        configured_tier(ns[0]),
         -_health(f"{capability}:{ns[0]}", now)))
     for name, fn in ordered:
         key = f"{capability}:{name}"
@@ -599,6 +603,31 @@ def _quotes_moma(codes: List[str]) -> Dict[str, dict]:
         return {}
 
 
+def _fuyao_available() -> bool:
+    try:
+        from data.sources import fuyao_aicubes as _source
+        return _source.available()
+    except Exception:
+        return False
+
+
+def _quotes_fuyao(codes: List[str]) -> Dict[str, dict]:
+    try:
+        from data.sources import fuyao_aicubes as _source
+        return _source.get_quotes(codes)
+    except Exception:
+        return {}
+
+
+def _fuyao_priority_tier() -> int:
+    try:
+        return min(3, max(0, int(_os.environ.get(
+            "FUYAO_AICUBES_PRIORITY_TIER", "0"
+        ))))
+    except (TypeError, ValueError):
+        return 0
+
+
 def quotes(codes: List[str]) -> Dict[str, dict]:
     """批量实时行情。返回 {code(6位): 标准quote dict}。
     datahub 级多源链(2026-08 增补正式 API 与 TDX 协议源):
@@ -622,6 +651,10 @@ def quotes(codes: List[str]) -> Dict[str, dict]:
         ("eastmoney", _quotes_eastmoney),
         ("sina", lambda wanted: _adapter().get_quotes_sina(wanted)),
     ]
+    if _fuyao_available():
+        insert_at = {0: 0, 1: 1, 2: 3, 3: len(sources)}[_fuyao_priority_tier()]
+        sources.insert(insert_at,
+                       ("fuyao_aicubes", _quotes_fuyao))
     if _zzshare_available():
         sources.append(("zzshare", _quotes_zzshare))
     if _eltdx_available():
@@ -997,6 +1030,15 @@ def _zzshare_available() -> bool:
         return _zz.available()
     except Exception:
         return False
+
+
+def _kline_fuyao(code: str, period: str = '1y', interval: str = '1d',
+                  adjust: str = 'raw') -> pd.DataFrame:
+    try:
+        from data.sources import fuyao_aicubes as _source
+        return _source.get_kline(code, period=period, interval=interval, adjust=adjust)
+    except Exception:
+        return pd.DataFrame()
 
 
 def _kline_easy_tdx(code: str, period: str = '1y', interval: str = '1d') -> pd.DataFrame:
@@ -1445,6 +1487,9 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
             ("sina_raw", lambda: _kline_sina_raw(code, period, interval)),
             ("baostock", lambda: _kline_baostock(code, period, interval, 'raw')),
         ]
+        if _fuyao_available():
+            _srcs_raw.insert(0, ("fuyao_aicubes", lambda: _kline_fuyao(
+                code, period, interval, 'raw')))
         if _zzshare_available():
             _srcs_raw.append(("zzshare", lambda: _kline_zzshare(code, period, interval, 'raw')))
         if _eltdx_available():
@@ -1477,6 +1522,8 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
                 and _health('kline_qfq:sina_qfq', _now) < -0.5
                 and _health('kline_qfq:tickflow_qfq', _now) < -0.5
                 and _health('kline_qfq:baostock_qfq', _now) < -0.5
+                and (not _fuyao_available()
+                     or _health('kline_qfq:fuyao_aicubes', _now) < -0.5)
                 and (not _zzshare_available()
                      or _health('kline_qfq:zzshare_qfq', _now) < -0.5)):
             return kline(code, period, interval, use_cache=use_cache, adjust='raw')
@@ -1489,6 +1536,9 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         _tick_q = ("tickflow_qfq", lambda: _kline_tickflow_qfq(code, period, interval))
         # 长历史(≥2y)已在上面直调 baostock,这里只管常规多源(短周期/长历史 baostock 失败的兜底)
         _qfq_sources = [_sina_q, _bao_q]
+        if _fuyao_available():
+            _qfq_sources.insert(0, ("fuyao_aicubes", lambda: _kline_fuyao(
+                code, period, interval, 'qfq')))
         if _zzshare_available():
             _qfq_sources.append(
                 ("zzshare_qfq", lambda: _kline_zzshare(code, period, interval, 'qfq'))
@@ -1976,12 +2026,52 @@ def financials(code: str, report_type: str = "lrb") -> List[dict]:
     def _sina_fin():
         from data.sources import sina as _sina
         return _sina.financials(code, report_type)
-    return _route("financials", [("sina", _sina_fin)], empty=[]) or []
+    sources = []
+    if _fuyao_available():
+        sources.append(("fuyao_aicubes", lambda: __import__(
+            "data.sources.fuyao_aicubes", fromlist=["get_financials"]
+        ).get_financials(code, report_type)))
+    sources.append(("sina", _sina_fin))
+    return _route("financials", sources, empty=[]) or []
 
 
 def valuation(code: str) -> dict:
     """估值(PE/PB/市值等)。dict。源:adapter.full_valuation。"""
-    return _route("valuation", [("a_stock", lambda: _adapter().full_valuation(code))], empty={}) or {}
+    sources = []
+    if _fuyao_available():
+        def _fuyao_valuation():
+            from data.sources import fuyao_aicubes as _source
+            frame = _source.get_valuations([code])
+            return frame.iloc[0].dropna().to_dict() if not frame.empty else {}
+        sources.append(("fuyao_aicubes", _fuyao_valuation))
+    sources.append(("a_stock", lambda: _adapter().full_valuation(code)))
+    return _route("valuation", sources, empty={}) or {}
+
+
+def financial_indicators(code: str, report: str) -> dict:
+    if not _fuyao_available():
+        return {"status": "degraded", "data": {}}
+    from data.sources import fuyao_aicubes as _source
+    return _source.get_financial_indicators(code, report)
+
+
+def auction_snapshot(codes: List[str], stage: str = "final") -> dict:
+    if not _fuyao_available():
+        return {"status": "degraded", "items": []}
+    from data.sources import fuyao_aicubes as _source
+    return _source.get_auction_snapshot(codes, stage=stage)
+
+
+def special_market_data(kind: str, **params) -> dict:
+    if not _fuyao_available():
+        return {"status": "degraded", "items": []}
+    from data.sources import fuyao_aicubes as _source
+    return _source.get_special_data(kind, **params)
+
+
+def fuyao_capabilities() -> dict:
+    from data.sources import fuyao_aicubes as _source
+    return _source.capability_status()
 
 
 def full_valuation(code: str) -> dict:

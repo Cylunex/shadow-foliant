@@ -12,7 +12,7 @@ import pandas as pd
 
 from data.research_store import ResearchStore
 from data.research_readiness import resolve_valuation, valuation_lag_budget
-from data.sources import akshare, baostock, zzshare
+from data.sources import akshare, baostock, fuyao_aicubes, zzshare
 from data.valuation_sync import ValuationSynchronizer
 
 
@@ -93,6 +93,11 @@ def _fetch_calendar_sources(start_date: str, end_date: str, *,
         "zzshare": lambda: zzshare.get_trade_calendar_evidence(start_date, end_date),
         "baostock": lambda: baostock.trade_calendar_evidence(start_date, end_date),
     }
+    rolling_floor = date.today() - timedelta(days=370)
+    if fuyao_aicubes.available() and pd.Timestamp(start_date).date() >= rolling_floor:
+        calls["fuyao_aicubes"] = lambda: fuyao_aicubes.get_trade_calendar_evidence(
+            start_date, end_date
+        )
     futures = {
         provider: _CALENDAR_EXECUTOR.submit(call) for provider, call in calls.items()
     }
@@ -139,11 +144,20 @@ def _normalize_market_bars(frame: pd.DataFrame, trade_date: str) -> pd.DataFrame
 
 
 def _fallback_qfq_bar(symbol: str, trade_date: str) -> pd.DataFrame:
-    """BaoStock alone repairs qfq rows; raw TDX remains a validation/quote source."""
+    """Repair bounded qfq gaps with Fuyao first, then independent BaoStock."""
+    provider = "baostock"
     try:
-        frame = baostock.kline(symbol, "1mo", "1d", "qfq")
+        frame = (fuyao_aicubes.get_kline(symbol, "1mo", "1d", "qfq")
+                 if fuyao_aicubes.available() else pd.DataFrame())
     except Exception:
         frame = pd.DataFrame()
+    if frame is None or frame.empty:
+        try:
+            frame = baostock.kline(symbol, "1mo", "1d", "qfq")
+        except Exception:
+            frame = pd.DataFrame()
+    else:
+        provider = "fuyao_aicubes"
     if frame is None or frame.empty:
         return pd.DataFrame()
     if "date" in frame.columns:
@@ -165,7 +179,7 @@ def _fallback_qfq_bar(symbol: str, trade_date: str) -> pd.DataFrame:
     row = row.copy()
     row["ts_code"] = symbol
     row.attrs["provenance"] = {
-        "provider": "baostock", "origin": "independent_qfq_fallback", "as_of": trade_date,
+        "provider": provider, "origin": "independent_qfq_fallback", "as_of": trade_date,
         "effective_at": trade_date, "retrieved_at": pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
         "adjustment": "qfq", "unit": "price/currency/shares", "schema_version": "2",
         "quality_status": "fallback",
@@ -204,12 +218,14 @@ class ResearchSynchronizer:
             raise
 
     def sync_calendar(self, start_date: str, end_date: str) -> dict:
-        """Build explicit open/closed evidence and require zzshare/BaoStock consensus."""
+        """Build explicit evidence and require consensus from at least two sources."""
         start = pd.Timestamp(start_date).date().isoformat()
         end = pd.Timestamp(end_date).date().isoformat()
         run_id = self.store.start_sync("consensus", "trade_calendar", end)
         try:
             provider_evidence = {"zzshare": [], "baostock": []}
+            if fuyao_aicubes.available():
+                provider_evidence["fuyao_aicubes"] = []
             incomplete_chunks = []
             for chunk_start, chunk_end in _calendar_chunks(start, end):
                 chunks, failures = _fetch_calendar_sources(chunk_start, chunk_end)
@@ -237,9 +253,11 @@ class ResearchSynchronizer:
                             "provider": provider, "start": chunk_start, "end": chunk_end,
                             **chunk_detail,
                         })
-            primary = {day for day, state in provider_evidence["zzshare"] if state}
-            validator = {day for day, state in provider_evidence["baostock"] if state}
-            if not primary or not validator:
+            open_sets = {
+                provider: {day for day, state in rows if state}
+                for provider, rows in provider_evidence.items() if rows
+            }
+            if len(open_sets) < 2 or any(not days for days in open_sets.values()):
                 unavailable = [
                     provider for provider, rows in provider_evidence.items() if not rows
                 ]
@@ -247,12 +265,16 @@ class ResearchSynchronizer:
                     "independent trade calendar source unavailable: "
                     + ",".join(unavailable)
                 )
-            confirmed = sorted(primary & validator)
-            disagreements = sorted(primary ^ validator)
-            self.store.upsert_trade_days(confirmed, provider="zzshare+baostock")
+            sets = list(open_sets.values())
+            confirmed_set = set.intersection(*sets)
+            union_set = set.union(*sets)
+            confirmed = sorted(confirmed_set)
+            disagreements = sorted(union_set - confirmed_set)
+            consensus_provider = "+".join(sorted(open_sets))
+            self.store.upsert_trade_days(confirmed, provider=consensus_provider)
             quality = "ok" if not disagreements and not incomplete_chunks else "incomplete"
             detail = {
-                "provider_count": 2,
+                "provider_count": len(open_sets),
                 "confirmed_open_days": len(confirmed),
                 "disagreement_count": len(disagreements),
                 "coverage_through_date": end,
@@ -425,13 +447,22 @@ class ResearchSynchronizer:
                 }
                 missing = [symbol for symbol in universe["symbol"].tolist() if symbol not in got]
             fallback_rows = 0
+            fallback_by_provider: Dict[str, int] = {}
             if fallback and missing:
                 cap = max(0, int(os.getenv("RESEARCH_FALLBACK_SYMBOLS_PER_RUN", "100")))
                 for symbol in missing[:cap]:
                     row = _fallback_qfq_bar(symbol, trade_date)
                     if not row.empty:
-                        fallback_rows += self.store.upsert_daily_bars(row, adjustment="qfq")
-            result["providers"]["baostock_qfq_fallback"] = fallback_rows
+                        written = self.store.upsert_daily_bars(row, adjustment="qfq")
+                        fallback_rows += written
+                        provider = str(row.attrs.get("provenance", {}).get("provider") or "unknown")
+                        fallback_by_provider[provider] = fallback_by_provider.get(provider, 0) + written
+            result["providers"]["fuyao_aicubes_qfq_fallback"] = fallback_by_provider.get(
+                "fuyao_aicubes", 0
+            )
+            result["providers"]["baostock_qfq_fallback"] = fallback_by_provider.get(
+                "baostock", 0
+            )
 
             stage = "valuation"
             result.update(ValuationSynchronizer(self.store).sync(

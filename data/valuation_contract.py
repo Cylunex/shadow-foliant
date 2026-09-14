@@ -9,8 +9,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 TZ = ZoneInfo("Asia/Shanghai")
-PRIORITY = {"zzshare": 0, "tushare": 1, "baostock": 2,
-            "tencent": 3, "mairui": 4, "moma": 5, "eastmoney": 6}
+PRIORITY = {"zzshare": 0, "tushare": 1, "fuyao_aicubes": 2,
+            "baostock": 3, "tencent": 4, "mairui": 5, "moma": 6,
+            "eastmoney": 7}
 FIELDS = ("pe_ttm", "pb", "market_cap", "circulating_market_cap", "pe_lyr",
           "ps", "pcf", "dividend_yield", "turnover_ratio")
 ALIASES = {"pe_ttm": "pe_ratio", "pb": "pb_ratio", "pe_lyr": "pe_ratio_lyr",

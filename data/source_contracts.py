@@ -93,6 +93,41 @@ def contracts() -> Dict[str, Dict[str, dict]]:
 
 
 _BASE_CONTRACTS: Dict[Tuple[str, str], EndpointContract] = {
+    ("fuyao_aicubes", "calendar"): EndpointContract(
+        "fuyao_aicubes", "calendar", "a_share_trade_calendar", "api_key", None, None,
+        0.5, 1, 20.0, 2, supports_pit=True, quota_basis="operational",
+        notes="Official endpoint returns a rolling one-year open-day list."),
+    ("fuyao_aicubes", "snapshot"): EndpointContract(
+        "fuyao_aicubes", "snapshot", "batch_realtime_quote", "api_key", None, 100,
+        0.5, 1, 20.0, 2, adjustment="raw", volume_unit="shares",
+        amount_unit="yuan", quota_basis="operational",
+        notes="Foliant batches 100 symbols conservatively; upstream does not publish a snapshot maximum."),
+    ("fuyao_aicubes", "historical"): EndpointContract(
+        "fuyao_aicubes", "historical", "daily_ohlcv", "api_key", None, None,
+        0.5, 1, 20.0, 2, supports_pit=True, adjustment="none/forward/backward",
+        volume_unit="shares", amount_unit="yuan", quota_basis="published",
+        notes="One symbol per request; interval=1d; maximum span ten years."),
+    ("fuyao_aicubes", "valuation"): EndpointContract(
+        "fuyao_aicubes", "valuation", "latest_valuation_snapshot", "api_key", 100, 100,
+        0.5, 1, 20.0, 2, quota_basis="published",
+        notes="Latest snapshot only; order-preserving de-duplication up to 100 symbols."),
+    ("fuyao_aicubes", "financials"): EndpointContract(
+        "fuyao_aicubes", "financials", "financial_statements", "api_key", 20, 20,
+        0.5, 1, 20.0, 2, supports_pit=True, quota_basis="published",
+        notes="One symbol; annual or quarterly; recent limit is 1-20."),
+    ("fuyao_aicubes", "financial_indicators"): EndpointContract(
+        "fuyao_aicubes", "financial_indicators", "financial_indicators", "api_key", None, None,
+        0.5, 1, 20.0, 2, supports_pit=True, quota_basis="published"),
+    ("fuyao_aicubes", "auction"): EndpointContract(
+        "fuyao_aicubes", "auction", "call_auction_snapshot", "api_key", 100, 100,
+        0.5, 1, 20.0, 1, quota_basis="published"),
+    ("fuyao_aicubes", "special_data"): EndpointContract(
+        "fuyao_aicubes", "special_data", "special_market_data", "api_key", None, None,
+        0.5, 1, 20.0, 1, quota_basis="published"),
+    ("fuyao_aicubes", "capital_flow"): EndpointContract(
+        "fuyao_aicubes", "capital_flow", "unavailable_external", "unavailable_external", None, None,
+        0.5, 1, 1.0, 0, quota_basis="published",
+        notes="Official documentation states external access is not open; never called."),
     ("tushare", "dividend"): EndpointContract(
         "tushare", "dividend", "corporate_actions", "token_and_permission", None, None,
         1.0, 1, 15.0, 0, notes="Dividends only; no all-action completeness or holder-specific net tax guarantee"),

@@ -53,6 +53,7 @@
 - **阶段 4(✅ 主体完成 2026-06-28)**:✅ 清 orphan `_sina_financial_report` 死链;✅ 扩 smoke(raw 链逐原子源契约+同构);✅ `akshare.py` 收齐板块 ths(`sector_ranking`/`sector_fund_flow`/`sector_spot`,adapter/datahub 委托);✅ 删 `manager.get_stock_hist_data` 8 源链 + `data/ashare_fallback.py`(info/情绪 2 消费方改委托 datahub.kline)。**K线取数 100% 收口 datahub.kline,阶段 0–4 全部完成。** 详见重构计划 §7。
 - **A股分钟源(2026-08)**:`zzshare.py` 为正式 API 主源；`eltdx.py` 是兼容生产 Python 3.11 的 TDX 主兜底；`tdx_python.py` 是 Python 3.12+ 增强兜底并隔离原生节点日志；`easy_tdx.py` / `mootdx.py` 只保留旧协议兼容。分钟链和日线链仍统一由 `datahub.kline` 编排。
 - **额度型补洞源(2026-08)**:`mairui.py` 与 `moma.py` 共享安全传输和基础字段归一，但分别持久化每日额度、健康度与熔断状态。两者仅在既有行情/资金流链失败时兜底；只有官网已确认这些接口的 Mairui 额外补巨潮公告，并提供问董秘、集合竞价、涨跌停表现等 `reference_only` 能力。两者不作为独立故障域，也不进入正式因子评分。所有请求强制 HTTPS，路径 Token 不进入日志、异常或业务数据库。
+- **扶摇同花顺官方源(2026-09)**:`fuyao_aicubes.py` 提供近一年交易日历、批量实时行情、1d 历史 K 线、最新估值、财务三表/指标、集合竞价和特色数据。它进入 datahub 正式路由并受统一超时、限速、缓存和熔断约束；官方尚未开放的资金流能力只报告明确降级，绝不尝试调用。详见 [扶摇接入说明](../../docs/FUYAO_AICUBES_DATA_SOURCE.md)。
 
 > ⚠️ 搬迁原则:**一阶段一域一验证、datahub 域函数签名/返回格式全程不变**。每域改后用
 > `scripts/smoke_test_datahub_sources.py` 与改前输出逐字段对照。
