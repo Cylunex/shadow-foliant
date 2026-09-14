@@ -45,6 +45,16 @@ def live(provider, codes, day):
     now = datetime.now(TZ)
     if now.date().isoformat() != day or now.hour < 15:
         return pd.DataFrame()
+    if provider == "fuyao_aicubes":
+        from . import fuyao_aicubes
+        if not fuyao_aicubes.available():
+            return pd.DataFrame()
+        frame = fuyao_aicubes.get_valuations(codes)
+        if frame.empty:
+            return frame
+        frame = frame[frame["trade_date"].map(iso_day).eq(day)].copy()
+        frame.attrs["provenance"] = {"provider": provider, "quality_status": "ok"}
+        return frame
     if provider in {"mairui", "moma"}:
         from . import mairui, moma
         module = mairui if provider == "mairui" else moma

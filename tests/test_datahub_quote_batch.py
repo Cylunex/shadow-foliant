@@ -66,3 +66,32 @@ def test_sina_prefix_maps_shenzhen_lof_without_exchange_collision():
     assert sina_code("159516") == "sz159516"
     assert sina_code("160723") == "sz160723"
     assert sina_code("510880") == "sh510880"
+
+
+def test_fuyao_partial_batch_falls_through_and_priority_is_configurable():
+    calls = []
+
+    def route(_capability, sources, empty=None, timeout=None):
+        name, thunk = sources[0]
+        calls.append(name)
+        if name == "fuyao_aicubes":
+            return {"600001": {"price": 10.0, "quote_time": "2026-09-14T15:00:00+08:00"}}
+        if name == "a_stock":
+            return {"510300": {"price": 4.2}}
+        return empty
+
+    with patch.dict("os.environ", {"FUYAO_AICUBES_PRIORITY_TIER": "1"}), \
+            patch.object(datahub, "_route", side_effect=route), \
+            patch.object(datahub, "_name_remember"), \
+            patch.object(datahub, "_fuyao_available", return_value=True), \
+            patch.object(datahub, "_zzshare_available", return_value=False), \
+            patch.object(datahub, "_eltdx_available", return_value=False), \
+            patch.object(datahub, "_tdx_python_available", return_value=False), \
+            patch.object(datahub, "_easy_tdx_available", return_value=False), \
+            patch.object(datahub, "_mairui_available", return_value=False), \
+            patch.object(datahub, "_moma_available", return_value=False):
+        result = datahub.quotes.__wrapped__(["600001", "510300"])
+
+    assert calls == ["a_stock", "fuyao_aicubes"]
+    assert set(result) == {"600001", "510300"}
+    assert result["600001"]["quote_time_source"] == "provider"

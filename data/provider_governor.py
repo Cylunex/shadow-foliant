@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 # Operational safety ceilings, not claims about vendors' purchased quotas.
 PROVIDERS = {
+    "fuyao_aicubes": (0, .5, 5000),
     "zzshare": (0, 1., 30000), "baostock": (0, .2, 45000),
     "tushare": (0, 1., 10000), "tencent": (1, .5, 10000),
     "sina": (1, 1., 5000), "cninfo": (1, 1., 3000),
@@ -34,7 +35,8 @@ PROVIDERS = {
     "jsl": (3, 3., 500), "easy_tdx": (3, .2, 5000), "mootdx": (3, .2, 5000),
     "default": (3, 2., 1000),
 }
-_HOSTS = (("ai-saas", "eastmoney_saas"), ("iwencai", "pywencai"),
+_HOSTS = (("fuyao.aicubes.cn", "fuyao_aicubes"),
+          ("ai-saas", "eastmoney_saas"), ("iwencai", "pywencai"),
           ("eastmoney", "eastmoney"), ("10jqka", "ths"), ("hexin", "ths"),
           ("sinajs", "sina"), ("sina.com", "sina"), ("gtimg", "tencent"),
           ("qq.com", "tencent"), ("cninfo", "cninfo"), ("tushare", "tushare"),
@@ -59,6 +61,16 @@ def operational_interval(provider: str) -> float:
         return max(floor, value) if math.isfinite(value) else floor
     except (ValueError, TypeError):
         return floor
+
+
+def operational_priority(provider: str) -> int:
+    tier = PROVIDERS.get(provider, PROVIDERS["default"])[0]
+    if provider != "fuyao_aicubes":
+        return tier
+    try:
+        return min(3, max(0, int(os.getenv("FUYAO_AICUBES_PRIORITY_TIER", tier))))
+    except (ValueError, TypeError):
+        return tier
 
 
 def _directory() -> Path:
@@ -191,7 +203,7 @@ def budget_snapshot():
             limit = max(0, min(ceiling, int(os.getenv("SOURCE_DAILY_LIMIT_" + provider.upper(), ceiling))))
         except ValueError:
             limit = ceiling
-        value = {"priority_tier": tier, "operational_daily_ceiling": ceiling,
+        value = {"priority_tier": operational_priority(provider), "operational_daily_ceiling": ceiling,
                  "configured_daily_limit": limit,
                  "minimum_interval_seconds": operational_interval(provider),
                  "max_concurrency": 1, "count": None, "status": "not_observed"}
