@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,7 +33,9 @@ class CalendarStore:
         return dict(self.value)
 
 
-def selection(*, day="2026-09-10", with_wencai=True, independent_day: str | None = None):
+def selection(*, day="2026-09-10", market_as_of: str | None = None,
+              with_wencai=True, independent_day: str | None = None):
+    market_as_of = market_as_of or day
     top15 = [{
         "symbol": f"600{i:03d}", "name": f"候选{i}", "rank": i,
         "trade_plan": {"available": True, "action": "hold", "reason": "规则计划"},
@@ -46,7 +48,7 @@ def selection(*, day="2026-09-10", with_wencai=True, independent_day: str | None
     return {
         "status": "complete",
         "warnings": [],
-        "provenance": {"run_id": "formal-run", "market_as_of": day,
+        "provenance": {"run_id": "formal-run", "market_as_of": market_as_of,
                        "input_manifest_id": "manifest", "policy_hash": "policy",
                        "code_revision": "revision"},
         "data": {
@@ -59,7 +61,7 @@ def selection(*, day="2026-09-10", with_wencai=True, independent_day: str | None
                     "status": "ready", "strategy_id": "codex-independent",
                     "strategy_version": "codex-independent-v1", "strategy_hash": "fixed",
                     "manifest_id": "manifest", "input_snapshot_id": "independent-snapshot",
-                    "market_as_of": independent_day if independent_day is not None else day,
+                    "market_as_of": independent_day if independent_day is not None else market_as_of,
                     "weights": {"fundamental_quality": 30, "medium_trend": 25,
                                 "valuation": 20, "flow_liquidity": 15,
                                 "risk_discount": 10},
@@ -192,6 +194,33 @@ def test_independent_selection_stale_when_as_of_mismatch():
                for item in result["independent_selection"]["warnings"])
     assert result["quality"]["sections"]["independent_selection"] == "stale"
     assert result["status"] == "degraded"
+
+
+def test_monday_independent_matches_formal_market_cutoff_not_selection_date():
+    value = selection(
+        day="2026-09-14", market_as_of="2026-09-11",
+        independent_day="2026-09-11",
+    )
+    result = build_service(selection_value=value).read(owner_id="scheduled-agent")["data"]
+    assert result["formal_selection"]["selection_date"] == "2026-09-14"
+    assert result["formal_selection"]["market_as_of"] == "2026-09-11"
+    assert result["independent_selection"]["status"] == "complete"
+    assert result["independent_selection"]["expected_market_as_of"] == "2026-09-11"
+    assert result["independent_selection"]["warnings"] == []
+
+
+def test_risk_preview_uses_same_quote_freshness_window_and_snapshot():
+    result = build_service(quote_time=NOW - timedelta(minutes=4)).read(
+        owner_id="scheduled-agent"
+    )["data"]
+    risk = result["trade_plans"]["portfolio_risk"]
+    assert result["quotes"]["status"] == "success"
+    assert result["quotes"]["quote_ttl_seconds"] == 480
+    assert risk["risk_snapshot"]["status"] == "complete"
+    assert risk["risk_snapshot"]["missing_prices"] == []
+    assert risk["blockers"] == ["cash_unknown"]
+    assert risk["pricing_snapshot"]["snapshot_id"] == result["quotes"]["snapshot_id"]
+    assert risk["pricing_snapshot"]["oldest_as_of"] == result["quotes"]["oldest_usable_as_of"]
 
 
 def test_missing_wencai_does_not_change_formal_candidates():

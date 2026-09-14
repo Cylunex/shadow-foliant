@@ -3761,7 +3761,10 @@ def _preopen_research_context(syncer, selection_date=None):
         policy_version=selector.policy.version,
         policy_hash=selector.policy.policy_hash,
     )
-    syncer.refresh_calendar_for_day(context.market_cutoff)
+    # Trade-calendar evidence is known independently of market bars. Refresh it
+    # through the selection day so same-day readers can prove whether today is
+    # open, while the PIT market boundary remains ``context.market_cutoff``.
+    syncer.refresh_calendar_for_day(selected)
     effective_market_date = syncer.store.expected_market_as_of(
         context.market_cutoff, inclusive=True
     )
@@ -4568,9 +4571,9 @@ def task_unified_selection():
     try:
         # 1. 本地 PIT 数据仓先独立产出并持久化。外部参考即使超时也不能延迟
         #    数据门槛判断，更不能在本地仓不完整时成为救援候选。
-        #    交易日历是本地准入的一部分。盘前只能刷新决策上下文允许使用的
-        #    已完成市场截止日，不能要求独立数据源提前证明选择日当天；瞬时
-        #    失败时 refresh_calendar_for_day 会复用同截止日的完整双源缓存。
+        #    交易日历是本地准入的一部分，可刷新到选择日以确认当天开闭市；
+        #    行情与估值仍严格停在决策上下文的已完成市场截止日。瞬时失败时
+        #    refresh_calendar_for_day 会复用同目标日的完整双源日历缓存。
         from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
         from analysis.local_stock_selector import _normalize_reference
         selection_date = datetime.now().strftime('%Y-%m-%d')

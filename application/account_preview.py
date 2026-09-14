@@ -3,7 +3,7 @@ from dataclasses import asdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from analysis.account_action_plan import build_action_plan
+from analysis.account_action_plan import AccountLimits, build_action_plan
 from analysis.decision_evaluation import equity_rules
 from application.decision_loop import DecisionLoopService
 from application.results import clean_json, payload_hash
@@ -35,7 +35,8 @@ def account_quote_symbols(capsule, holdings, *, extra_symbols=()):
 
 
 def build_account_preview(*, owner_id, capsule, context, raw_quotes,
-                          available_cash=None, allow_add=False, now=None):
+                          available_cash=None, allow_add=False, now=None,
+                          quote_ttl_seconds=120):
     """Build the existing authoritative account plan from already loaded facts.
 
     This seam lets aggregate readers share exactly one batched quote request while
@@ -73,16 +74,32 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
         # Imported records are not a live broker sellability feed. Leave unknown
         # sellability unknown; never silently treat full holdings as sellable.
         holding.setdefault("sellable", None)
+    quote_ttl_seconds = max(1, min(600, int(quote_ttl_seconds)))
+    limits = AccountLimits(quote_ttl_seconds=quote_ttl_seconds)
     plan = build_action_plan(capsule, holdings, quotes, holdings_version=watermark,
                              now=now.isoformat(), cash=available_cash, allow_add=allow_add,
-                             owner_id=owner_id)
+                             owner_id=owner_id, limits=limits)
     plan["cash_basis"] = "user_confirmed" if available_cash is not None else "unknown"
+    stamps = sorted(
+        str(row.get("observed_at") or "") for row in quotes.values()
+        if row.get("observed_at")
+    )
+    plan["pricing_snapshot"] = {
+        "snapshot_id": payload_hash({
+            symbol: {"price": row.get("price"), "observed_at": row.get("observed_at")}
+            for symbol, row in sorted(quotes.items())
+        }),
+        "quote_count": len(quotes),
+        "as_of": stamps[-1] if stamps else None,
+        "oldest_as_of": stamps[0] if stamps else None,
+        "quote_ttl_seconds": quote_ttl_seconds,
+    }
     from analysis.portfolio_scenarios import risk_snapshot, stress, explain_actual_formal
     def usable_price(holding):
         quote = quotes.get(holding["symbol"], {})
         try:
             age = (now - datetime.fromisoformat(quote["observed_at"])).total_seconds()
-            return 0 <= age <= 120 and float(quote["price"]) > 0
+            return 0 <= age <= quote_ttl_seconds and float(quote["price"]) > 0
         except (KeyError, ValueError, TypeError):
             return False
     priced = [h for h in holdings if usable_price(h)]

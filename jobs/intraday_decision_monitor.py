@@ -232,6 +232,7 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
     return {
         "status": status,
         "mode": mode,
+        "stale_minutes": stale_minutes,
         "requested": requested,
         "valid": len(valid),
         "coverage": round(coverage, 4),

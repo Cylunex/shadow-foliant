@@ -172,6 +172,23 @@ def test_retry_after_is_bounded_and_cooldown_can_recover(wencai, monkeypatch):
     assert proxy.request('GET', 'https://www.iwencai.com/test').status_code == 200
 
 
+def test_breaker_allows_every_premarket_strategy_one_provider_attempt(wencai, monkeypatch):
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError('provider unavailable')
+
+    monkeypatch.setattr(wencai, '_invoke_pywencai', unavailable)
+    for index in range(5):
+        with pytest.raises(RuntimeError, match='provider unavailable'):
+            wencai.pywencai_get(f'strategy-{index}', timeout=.1)
+        assert wencai.breaker_open() is False
+
+    with pytest.raises(RuntimeError, match='provider unavailable'):
+        wencai.pywencai_get('strategy-5', timeout=.1)
+    assert wencai.breaker_open() is True
+    with pytest.raises(TimeoutError, match='熔断'):
+        wencai.pywencai_get('blocked-after-all-opportunities', timeout=.1)
+
+
 def test_timeout_does_not_queue_another_wencai_worker(wencai, monkeypatch):
     release = threading.Event()
     entered = threading.Event()

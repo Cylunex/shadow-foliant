@@ -21,7 +21,7 @@ class AccountLimits:
         for key, value in asdict(self).items():
             if key != "quote_ttl_seconds" and (isinstance(value, bool) or not 0 < value <= 1):
                 raise ValueError("invalid_account_limit")
-        if not 1 <= self.quote_ttl_seconds <= 300:
+        if not 1 <= self.quote_ttl_seconds <= 600:
             raise ValueError("invalid_quote_ttl")
 
 

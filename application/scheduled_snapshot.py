@@ -96,6 +96,7 @@ def _action_plan(value: Any) -> dict[str, Any]:
         "schema_version", "status", "error_code", "preview_only", "summary", "created_at",
         "expires_at", "cash_basis", "blockers", "missing_information", "risk_snapshot",
         "stress_scenarios", "actual_formal_difference", "alternatives", "rejected_candidates",
+        "pricing_snapshot",
     )
     return clean_json({key: value.get(key) for key in allowed if key in value})
 
@@ -360,6 +361,7 @@ class ScheduledSnapshotService:
         return {
             "status": "complete" if state == "success" else state,
             "selection_date": selection_date or None,
+            "market_as_of": (value.get("provenance") or {}).get("market_as_of"),
             "run_id": (value.get("provenance") or {}).get("run_id"),
             "formal_top15": top15[:15],
             "formal_top5": top5[:5],
@@ -891,7 +893,7 @@ class ScheduledSnapshotService:
         formal = self._formal(selection_value, trading_day)
         wencai = self._wencai(selection_value)
         independent = self._independent(
-            selection_value, expected_market_as_of=formal.get("selection_date"),
+            selection_value, expected_market_as_of=formal.get("market_as_of"),
         )
         source_comparison = self._source_comparison(
             selection_value, formal, independent, wencai,
@@ -979,10 +981,21 @@ class ScheduledSnapshotService:
                     account_plan = build_account_preview(
                         owner_id=owner_id, capsule=capsule, context=context,
                         raw_quotes=raw_quotes, available_cash=None, allow_add=False, now=now,
+                        quote_ttl_seconds=int(
+                            float(quote_quality.get("stale_minutes") or 8) * 60
+                        ),
                     )
             except Exception:
                 account_plan = {"status": "degraded", "preview_only": True,
                                 "error_code": "portfolio_risk_unavailable"}
+
+        pricing_snapshot = (
+            account_plan.get("pricing_snapshot")
+            if isinstance(account_plan, dict) else None
+        ) or {}
+        quotes["snapshot_id"] = pricing_snapshot.get("snapshot_id")
+        quotes["oldest_usable_as_of"] = quote_quality.get("quote_as_of")
+        quotes["quote_ttl_seconds"] = pricing_snapshot.get("quote_ttl_seconds")
 
         try:
             intraday_value = self.intraday_reader() or {}
