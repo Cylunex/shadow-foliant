@@ -191,6 +191,23 @@ def _report_phase(now: datetime, trading_day: dict[str, Any]) -> str:
     return "post_close_review"
 
 
+def _cockpit_quality_for_phase(cockpit: dict[str, Any], phase: str) -> str:
+    """Do not let an expired intraday add gate fail a post-close report."""
+    state = str(cockpit.get("status") or "missing")
+    if phase not in {"post_close_pending", "post_close_review", "closed_day"}:
+        return state
+    tasks = cockpit.get("tasks") or {}
+    if (state == "degraded"
+            and not (tasks.get("failed_recent") or [])
+            and not (tasks.get("disabled_core") or [])
+            and not (tasks.get("running_manual") or [])):
+        policy = cockpit.get("portfolio_policy") or {}
+        signal = policy.get("market_add_signal") or {}
+        if policy.get("fail_closed") and signal.get("stale"):
+            return "complete"
+    return state
+
+
 def _outcome_evidence(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"status": "missing", "dimension": "source_type", "buckets": []}
@@ -1015,6 +1032,12 @@ class ScheduledSnapshotService:
         trading_day = self._trading_day(today)
         phase = _report_phase(now, trading_day)
         cockpit = self._cockpit()
+        cockpit["raw_status"] = cockpit.get("status")
+        cockpit["phase_quality_status"] = _cockpit_quality_for_phase(cockpit, phase)
+        if cockpit["phase_quality_status"] != cockpit.get("status"):
+            cockpit["expected_phase_degradations"] = [
+                "intraday_market_add_signal_expired_after_close",
+            ]
         try:
             selection_value = self.selection_reader() or {}
         except Exception:
@@ -1308,7 +1331,7 @@ class ScheduledSnapshotService:
 
         section_status = {
             "trading_day": trading_day.get("status"),
-            "cockpit": cockpit.get("status"),
+            "cockpit": cockpit.get("phase_quality_status") or cockpit.get("status"),
             "formal_selection": formal.get("status"),
             "independent_selection": independent.get("status"),
             "wencai_reference": wencai.get("status"),

@@ -486,6 +486,37 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
             assert snapshot["next_session_plan"]["status"] == "complete"
 
 
+def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
+    evening = NOW.replace(hour=18, minute=23)
+
+    def degraded_cockpit(**_kwargs):
+        return {"status": "degraded", "meta": {"as_of": evening.isoformat()}, "data": {
+            "tasks": {"total": 47, "failed_recent": [], "disabled_core": [],
+                      "running_manual": []},
+            "holding_count": 53, "active_recommendation_count": 0,
+            "active_signal_count": 0,
+            "datahub": {"sources": {"primary": {"fail": 1},
+                                     "fallback": {"ok": 1}}},
+            "portfolio_policy": {
+                "fail_closed": True,
+                "market_add_signal": {"stale": True, "fresh": False},
+            },
+            "strategy_deployment": {},
+        }}
+
+    service = build_service(clock=lambda: evening, quote_time=evening)
+    service.cockpit_reader = degraded_cockpit
+    snapshot = service.read(owner_id="scheduled-agent")["data"]
+
+    assert snapshot["cockpit"]["raw_status"] == "degraded"
+    assert snapshot["cockpit"]["phase_quality_status"] == "complete"
+    assert snapshot["cockpit"]["expected_phase_degradations"] == [
+        "intraday_market_add_signal_expired_after_close",
+    ]
+    assert snapshot["quality"]["sections"]["cockpit"] == "complete"
+    assert snapshot["status"] == "complete"
+
+
 def test_unknown_cash_blocks_additions_but_keeps_reduction_preview():
     account_plan = {
         "status": "complete", "preview_only": True,
