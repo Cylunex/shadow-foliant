@@ -44,13 +44,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '🏦 问财参考盘前预取',
         'schedule': '09:15 每日(盘前)',
         'category': '数据', 'default': True,
-        'description': '按低价擒牛、小市值、净利增长、低估值、主力资金顺序逐组隔离预取（主力最后且短等待）；09:45 仅与本地主链对照，不参与准入或评分',
+        'description': '按低价擒牛、低估值、主力资金、小市值、净利增长顺序逐组隔离预取（主力使用短等待）；09:45 仅与本地主链对照，不参与准入或评分',
     },
     'strategy_prefetch_retry': {
         'cn': '🔁 问财策略盘前补取',
         'schedule': '09:30 每日(仅补 09:15 缓存缺口)',
         'category': '数据', 'default': True,
-        'description': '按固定顺序独立补取09:15缺失的五组问财参考，主力资金最后且失败不阻断09:45本地PIT选股',
+        'description': '按低价擒牛、低估值、主力资金、小市值、净利增长顺序独立补取09:15缺失项，单组失败不阻断09:45本地PIT选股',
     },
     'unified_selection': {
         'cn': '🎯 综合选股 TOP15 + 最终TOP5',

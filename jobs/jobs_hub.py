@@ -4407,7 +4407,7 @@ _WENCAI_PREFETCH_JOBS = [
 ]
 
 _WENCAI_REFERENCE_ORDER = (
-    '低价擒牛', '小市值', '净利增长', '低估值', '主力资金',
+    '低价擒牛', '低估值', '主力资金', '小市值', '净利增长',
 )
 _WENCAI_GROUP_TIMEOUTS = {
     '低价擒牛': 45, '小市值': 45, '净利增长': 45, '低估值': 45,
@@ -4586,7 +4586,7 @@ def task_strategy_prefetch():
 
 
 def task_strategy_prefetch_retry():
-    """09:30 软重试：逐组隔离补缓存，主力资金最后且等待最短。"""
+    """09:30 软重试：按固定顺序逐组隔离补缓存，主力资金等待最短。"""
     job = 'strategy_prefetch_retry'
     if _skip_if_not_trading(job):
         return

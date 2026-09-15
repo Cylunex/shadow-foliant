@@ -191,7 +191,7 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert len(snapshot["independent_selection"]["top5"]) == 5
     assert snapshot["quality"]["sections"]["independent_selection"] == "complete"
     assert [row["name"] for row in snapshot["wencai_reference"]["strategies"]] == [
-        "低价擒牛", "小市值", "净利增长", "低估值", "主力资金",
+        "低价擒牛", "低估值", "主力资金", "小市值", "净利增长",
     ]
 
 

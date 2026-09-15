@@ -220,7 +220,7 @@ class WencaiRetryScheduleTests(unittest.TestCase):
         self.assertEqual(log_run.call_args.args[:2], ("strategy_prefetch_retry", "skipped"))
         self.assertIn("source_unavailable 0/5", log_run.call_args.kwargs["error"])
 
-    def test_group_isolation_keeps_first_four_when_main_force_times_out(self):
+    def test_group_isolation_continues_remaining_groups_when_main_force_times_out(self):
         from jobs import jobs_hub as module
         import strategy_cache
 
@@ -245,12 +245,15 @@ class WencaiRetryScheduleTests(unittest.TestCase):
             self.assertEqual(
                 [name for name, _timeout in calls], list(module._WENCAI_REFERENCE_ORDER)
             )
-            self.assertEqual(calls[-1], ("主力资金", 20))
-            self.assertTrue(all(timeout == 45 for _, timeout in calls[:-1]))
+            self.assertEqual(dict(calls)["主力资金"], 20)
+            self.assertTrue(all(
+                timeout == 45 for name, timeout in calls if name != "主力资金"
+            ))
             self.assertEqual(batch["available"], 4)
             self.assertEqual([row["status"] for row in batch["diagnostics"]],
-                             ["ready", "ready", "ready", "ready", "failed"])
-            self.assertEqual(batch["diagnostics"][-1]["failure_code"], "timeout")
+                             ["ready", "ready", "failed", "ready", "ready"])
+            by_name = {row["strategy"]: row for row in batch["diagnostics"]}
+            self.assertEqual(by_name["主力资金"]["failure_code"], "timeout")
             self.assertLessEqual(batch["max_elapsed_seconds"], 205)
             self.assertEqual(
                 len({row["cache_key"] for row in batch["diagnostics"]}), 5

@@ -21,7 +21,7 @@ from application.stock_budget import (
 
 
 EXPECTED_WENCAI_STRATEGIES = (
-    "低价擒牛", "小市值", "净利增长", "低估值", "主力资金",
+    "低价擒牛", "低估值", "主力资金", "小市值", "净利增长",
 )
 POST_CLOSE_REVIEW_HOUR = 20
 POST_CLOSE_REVIEW_MINUTE = 45
