@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_KEY = "intraday_decision"
 VERSION = "intraday-decision-v1"
-ACTION_REASON_VERSION = "portfolio-action-reason-v2"
+ACTION_REASON_VERSION = "portfolio-action-reason-v3"
 ACTION_RANK = {"data_insufficient": -1, "hold": 0, "add": 1, "reduce": 2, "sell": 3}
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +45,71 @@ def _reason_family(reason: Any) -> str:
         if marker in text:
             return family
     return "other"
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return min(maximum, max(minimum, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_current_action_limit(
+    decision: dict[str, Any], state: dict[str, Any],
+) -> dict[str, Any]:
+    """Cap correlated ordinary holding actions in every snapshot, not only upgrades.
+
+    A real trade-plan stop is kept as a hard-risk action. All other sell/reduce
+    advice shares portfolio, sell-count and reason-family budgets so a previously
+    concentrated snapshot cannot bypass the guard merely by persisting unchanged.
+    """
+    action = str(decision.get("action") or "hold")
+    source = str(decision.get("source") or decision.get("decision_source") or "")
+    if action not in {"sell", "reduce"}:
+        return decision
+    if source == "hard_risk":
+        state["hard_risk_count"] += 1
+        return decision
+
+    family = _reason_family(decision.get("reason"))
+    reasons: list[str] = []
+    guarded_action = action
+    if state["reason_counts"].get(family, 0) >= state["max_same_reason"]:
+        guarded_action = "hold"
+        reasons.append("same_reason_action_limit")
+    elif action == "sell" and state["sell_count"] >= state["max_sells"]:
+        guarded_action = "reduce"
+        reasons.append("portfolio_sell_count_limit")
+    if guarded_action in {"sell", "reduce"} and state["action_count"] >= state["max_actions"]:
+        guarded_action = "hold"
+        reasons.append("portfolio_action_count_limit")
+
+    if guarded_action in {"sell", "reduce"}:
+        state["action_count"] += 1
+        state["sell_count"] += int(guarded_action == "sell")
+        state["reason_counts"][family] = state["reason_counts"].get(family, 0) + 1
+    if guarded_action == action:
+        return decision
+
+    state["guarded_count"] += 1
+    prior_guard = dict(decision.get("action_guard") or {})
+    original_reason = str(decision.get("reason") or "")
+    decision["action"] = guarded_action
+    decision["action_cn"] = {
+        "hold": "不动", "reduce": "减仓", "sell": "卖出",
+    }[guarded_action]
+    decision["reason"] = "组合级保护：本轮同类或总动作过于集中，保留更高优先级风险项"
+    decision["source"] = "portfolio_action_guard"
+    decision["decision_source"] = "portfolio_action_guard"
+    decision["action_guard"] = {
+        **prior_guard,
+        "changed": True,
+        "current_limit_reasons": reasons,
+        "original_action": action,
+        "original_reason": original_reason[:300],
+        "reason_family": family,
+    }
+    return decision
 
 
 def trading_session(now: datetime | None = None) -> bool:
@@ -600,10 +665,20 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         str(row.get("symbol") or ""): row
         for row in (previous.get("holdings") or []) if isinstance(row, dict)
     } if str(previous.get("trade_date") or "") == current.date().isoformat() else {}
-    max_upgrades = max(1, int(os.getenv("INTRADAY_MAX_ACTION_UPGRADES", "8")))
-    max_same_reason = max(1, int(os.getenv("INTRADAY_MAX_SAME_REASON_UPGRADES", "3")))
+    max_upgrades = _bounded_env_int("INTRADAY_MAX_ACTION_UPGRADES", 8, 1, 100)
+    max_same_reason = _bounded_env_int("INTRADAY_MAX_SAME_REASON_UPGRADES", 3, 1, 100)
     upgrade_count = 0
     upgrade_families: dict[str, int] = {}
+    current_action_state = {
+        "max_actions": _bounded_env_int("INTRADAY_MAX_ACTIVE_HOLDING_ACTIONS", 8, 1, 100),
+        "max_sells": _bounded_env_int("INTRADAY_MAX_ACTIVE_SELL_ACTIONS", 3, 1, 100),
+        "max_same_reason": _bounded_env_int("INTRADAY_MAX_SAME_REASON_ACTIONS", 3, 1, 100),
+        "action_count": 0,
+        "sell_count": 0,
+        "hard_risk_count": 0,
+        "guarded_count": 0,
+        "reason_counts": {},
+    }
 
     for item in pool:
         symbol = item["symbol"]
@@ -682,6 +757,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
                         "previous_action": prior_action,
                         "proposed_action": proposed_action,
                     }
+            decision = _apply_current_action_limit(decision, current_action_state)
         row = _decision_row(item, quote, plan, decision)
         decisions[symbol] = row
         actionable = bool(quote.get("price_actionable")) and not fail_closed
@@ -734,6 +810,18 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         "plans": plans,
         "trigger_state": states,
         "events": [{key: value for key, value in event.items() if key != "item"} for event in events],
+        "portfolio_action_guard": {
+            "status": "applied",
+            "reason_version": ACTION_REASON_VERSION,
+            "max_ordinary_action_count": current_action_state["max_actions"],
+            "max_ordinary_sell_count": current_action_state["max_sells"],
+            "max_same_reason_count": current_action_state["max_same_reason"],
+            "ordinary_action_count": current_action_state["action_count"],
+            "ordinary_sell_count": current_action_state["sell_count"],
+            "hard_risk_count": current_action_state["hard_risk_count"],
+            "guarded_count": current_action_state["guarded_count"],
+            "hard_risk_exempt": True,
+        },
         "execution_boundary": "research_only_no_broker_no_auto_order",
     }
     snapshot_saver(SNAPSHOT_KEY, snapshot)

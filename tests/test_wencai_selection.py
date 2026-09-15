@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -64,6 +65,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(ok)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 40)
+        self.assertEqual(get.call_args.kwargs["retry"], 1)
 
     def test_selector_returns_unique_canonical_code(self):
         from selection import low_price_bull_selector as module
@@ -96,6 +99,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(ok)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 40)
+        self.assertEqual(get.call_args.kwargs["retry"], 1)
 
     def test_profit_growth_selector_requests_wencai_once(self):
         from selection import profit_growth_selector as module
@@ -106,6 +111,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(ok)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 40)
+        self.assertEqual(get.call_args.kwargs["retry"], 1)
 
     def test_value_selector_requests_wencai_once(self):
         from selection import value_stock_selector as module
@@ -116,6 +123,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(ok)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 40)
+        self.assertEqual(get.call_args.kwargs["retry"], 1)
 
     def test_main_force_requests_only_first_page(self):
         from selection import main_force_selector as module
@@ -136,6 +145,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         get.assert_called_once()
         self.assertFalse(get.call_args.kwargs["loop"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 15)
+        self.assertEqual(get.call_args.kwargs["retry"], 0)
         self.assertEqual(get.call_args.args[0], "主力资金净流入排名")
 
     def test_main_force_filters_st_and_star_market_locally(self):
@@ -173,7 +184,7 @@ class WencaiRetryScheduleTests(unittest.TestCase):
         self.assertEqual(_WENCAI_SOURCE_LABELS["主力资金"], "问财·主力")
         self.assertEqual(_WENCAI_SOURCE_LABELS["小市值"], "问财·小市值")
 
-    def test_prefetch_runs_main_force_before_other_wencai_queries(self):
+    def test_prefetch_uses_fixed_isolated_batch(self):
         from jobs import jobs_hub as module
         import mx_strategies
 
@@ -181,47 +192,105 @@ class WencaiRetryScheduleTests(unittest.TestCase):
         with patch.object(module, "_skip_if_not_trading", return_value=False), \
                 patch.object(
                     module,
-                    "_prefetch_main_force",
-                    side_effect=lambda **_kwargs: calls.append("main_force") or 0,
-                ), \
-                patch.object(
-                    module,
-                    "_prefetch_wencai_strategies",
-                    side_effect=lambda **_kwargs: calls.append("others") or 0,
+                    "_prefetch_wencai_batch",
+                    side_effect=lambda **kwargs: calls.append(kwargs) or {"available": 0},
                 ), \
                 patch.object(module, "_log_run") as log_run, \
                 patch.object(mx_strategies, "MX_STRATEGIES", []):
             module.task_strategy_prefetch()
 
-        self.assertEqual(calls, ["main_force", "others"])
+        self.assertEqual(calls, [{"use_cache": False, "log_job": "strategy_prefetch"}])
         self.assertEqual(log_run.call_args.args[:2], ("strategy_prefetch", "skipped"))
         self.assertIn("source_unavailable 0/5", log_run.call_args.kwargs["error"])
 
-    def test_retry_also_prioritizes_main_force(self):
+    def test_retry_uses_same_fixed_isolated_batch(self):
         from jobs import jobs_hub as module
 
         calls = []
         with patch.object(module, "_skip_if_not_trading", return_value=False), \
                 patch.object(
                     module,
-                    "_prefetch_main_force",
-                    side_effect=lambda **kwargs: calls.append(
-                        ("main_force", kwargs["use_cache"])
-                    ) or 0,
-                ), \
-                patch.object(
-                    module,
-                    "_prefetch_wencai_strategies",
-                    side_effect=lambda **kwargs: calls.append(
-                        ("others", kwargs["use_cache"])
-                    ) or 0,
+                    "_prefetch_wencai_batch",
+                    side_effect=lambda **kwargs: calls.append(kwargs) or {"available": 0},
                 ), \
                 patch.object(module, "_log_run") as log_run:
             module.task_strategy_prefetch_retry()
 
-        self.assertEqual(calls, [("main_force", True), ("others", True)])
+        self.assertEqual(calls, [{"use_cache": True, "log_job": "strategy_prefetch_retry"}])
         self.assertEqual(log_run.call_args.args[:2], ("strategy_prefetch_retry", "skipped"))
         self.assertIn("source_unavailable 0/5", log_run.call_args.kwargs["error"])
+
+    def test_group_isolation_keeps_first_four_when_main_force_times_out(self):
+        from jobs import jobs_hub as module
+        import strategy_cache
+
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(strategy_cache, "_cache_dir", return_value=tmp):
+            def isolated(_name, _func, args, _kwargs, **options):
+                strategy = args[0]
+                calls.append((strategy, options["timeout_seconds"]))
+                if strategy == "主力资金":
+                    return {"status": "timeout", "isolation": "spawn"}
+                strategy_cache.save(
+                    strategy, pd.DataFrame([{"code": "600001", "name": strategy}])
+                )
+                return {"status": "complete", "isolation": "spawn"}
+
+            with patch("jobs.isolated_runtime.run_isolated_task", side_effect=isolated):
+                batch = module._prefetch_wencai_batch(
+                    use_cache=False, log_job="test",
+                )
+
+            self.assertEqual(
+                [name for name, _timeout in calls], list(module._WENCAI_REFERENCE_ORDER)
+            )
+            self.assertEqual(calls[-1], ("主力资金", 20))
+            self.assertTrue(all(timeout == 45 for _, timeout in calls[:-1]))
+            self.assertEqual(batch["available"], 4)
+            self.assertEqual([row["status"] for row in batch["diagnostics"]],
+                             ["ready", "ready", "ready", "ready", "failed"])
+            self.assertEqual(batch["diagnostics"][-1]["failure_code"], "timeout")
+            self.assertLessEqual(batch["max_elapsed_seconds"], 205)
+            self.assertEqual(
+                len({row["cache_key"] for row in batch["diagnostics"]}), 5
+            )
+            self.assertEqual(
+                len({row["circuit_scope"] for row in batch["diagnostics"]}), 5
+            )
+
+    def test_one_group_failure_and_cache_fallback_do_not_pollute_neighbors(self):
+        from jobs import jobs_hub as module
+        import strategy_cache
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(strategy_cache, "_cache_dir", return_value=tmp):
+            strategy_cache.save(
+                "低价擒牛", pd.DataFrame([{"code": "600001", "name": "cached"}])
+            )
+
+            def isolated(_name, _func, args, _kwargs, **_options):
+                strategy = args[0]
+                if strategy in {"低价擒牛", "小市值"}:
+                    return {"status": "timeout", "isolation": "spawn"}
+                strategy_cache.save(
+                    strategy, pd.DataFrame([{"code": "600002", "name": strategy}])
+                )
+                return {"status": "complete", "isolation": "spawn"}
+
+            with patch("jobs.isolated_runtime.run_isolated_task", side_effect=isolated):
+                batch = module._prefetch_wencai_batch(
+                    use_cache=False, log_job="test",
+                )
+
+            by_name = {row["strategy"]: row for row in batch["diagnostics"]}
+            self.assertEqual(by_name["低价擒牛"]["status"], "cached_degraded")
+            self.assertEqual(by_name["小市值"]["status"], "failed")
+            self.assertEqual(by_name["净利增长"]["status"], "ready")
+            self.assertEqual(by_name["低估值"]["status"], "ready")
+            self.assertEqual(by_name["主力资金"]["status"], "ready")
+            self.assertEqual(strategy_cache.load_run("小市值")["failure_code"], "timeout")
+            self.assertIsNone(strategy_cache.load_failure("净利增长"))
 
 
 class WencaiCookieTests(unittest.TestCase):

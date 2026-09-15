@@ -412,11 +412,103 @@ def test_same_reason_action_upgrades_are_bounded_and_versioned():
     assert actions.count("sell") == 0
     assert actions.count("reduce") == 3
     assert actions.count("hold") == 2
-    assert all(row["reason_version"] == "portfolio-action-reason-v2"
+    assert all(row["reason_version"] == "portfolio-action-reason-v3"
                for row in result["holdings"])
     changed = [row for row in result["holdings"] if row["action_guard"].get("changed")]
     assert len(changed) == 5
     assert all(row["decision_source"] == "portfolio_action_guard" for row in changed)
+
+
+def test_current_action_guard_caps_already_concentrated_snapshot(monkeypatch):
+    now = datetime(2026, 9, 10, 10, 15, tzinfo=TZ)
+    holding_codes = [f"000{i:03d}" for i in range(1, 13)]
+    plans = _plans()
+    plans.update({code: dict(next(iter(plans.values()))) for code in holding_codes})
+    previous = {
+        "trade_date": now.date().isoformat(),
+        "selection_run_id": "formal-run-1",
+        "plans": plans,
+        "holdings": [{"symbol": code, "action": "sell"} for code in holding_codes],
+    }
+    monkeypatch.setenv("INTRADAY_MAX_ACTIVE_HOLDING_ACTIONS", "8")
+    monkeypatch.setenv("INTRADAY_MAX_ACTIVE_SELL_ACTIONS", "3")
+    monkeypatch.setenv("INTRADAY_MAX_SAME_REASON_ACTIONS", "20")
+
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [
+            {"code": code, "quantity": 100, "cost_price": 10}
+            for code in holding_codes
+        ],
+        quote_loader=lambda codes: {
+            code: {"price": 10, "change_pct": 0,
+                   "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+        holding_overrides={code: {
+            "action": "sell", "reason": f"ordinary-case-{index}",
+            "decision_source": "formal_signal",
+        } for index, code in enumerate(holding_codes)},
+    )
+
+    actions = [row["action"] for row in result["holdings"]]
+    assert actions.count("sell") == 3
+    assert actions.count("reduce") == 5
+    assert actions.count("hold") == 4
+    assert result["portfolio_action_guard"] == {
+        "status": "applied",
+        "reason_version": "portfolio-action-reason-v3",
+        "max_ordinary_action_count": 8,
+        "max_ordinary_sell_count": 3,
+        "max_same_reason_count": 20,
+        "ordinary_action_count": 8,
+        "ordinary_sell_count": 3,
+        "hard_risk_count": 0,
+        "guarded_count": 9,
+        "hard_risk_exempt": True,
+    }
+
+
+def test_current_action_guard_never_demotes_actual_stop_losses(monkeypatch):
+    now = datetime(2026, 9, 10, 10, 15, tzinfo=TZ)
+    holding_codes = [f"00000{i}" for i in range(1, 6)]
+    plans = _plans()
+    plans.update({code: {**dict(next(iter(plans.values()))), "stop_loss": 11}
+                  for code in holding_codes})
+    previous = {
+        "trade_date": now.date().isoformat(),
+        "selection_run_id": "formal-run-1",
+        "plans": plans,
+    }
+    monkeypatch.setenv("INTRADAY_MAX_ACTIVE_HOLDING_ACTIONS", "1")
+    monkeypatch.setenv("INTRADAY_MAX_ACTIVE_SELL_ACTIONS", "1")
+    monkeypatch.setenv("INTRADAY_MAX_SAME_REASON_ACTIONS", "1")
+
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [
+            {"code": code, "quantity": 100, "cost_price": 10}
+            for code in holding_codes
+        ],
+        quote_loader=lambda codes: {
+            code: {"price": 10, "change_pct": 0,
+                   "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+    )
+
+    assert [row["action"] for row in result["holdings"]] == ["sell"] * 5
+    assert all(row["decision_source"] == "hard_risk" for row in result["holdings"])
+    assert result["portfolio_action_guard"]["hard_risk_count"] == 5
+    assert result["portfolio_action_guard"]["ordinary_action_count"] == 0
 
 
 def test_nine_forty_five_summary_keeps_five_reference_states_and_overlap_bounded():

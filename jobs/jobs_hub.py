@@ -1707,8 +1707,8 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
-    'strategy_prefetch':         1000,   # 盘前预取 5 条问财外部参考；失败不影响本地主链
-    'strategy_prefetch_retry':    360,    # 09:30 只补 4 条问财缓存缺口；4×75s 外层上限，09:45 前必收尾
+    'strategy_prefetch':          240,   # 五组逐进程隔离；4×45s+主力20s+收尾，整体硬上限
+    'strategy_prefetch_retry':    240,   # 同顺序独立补缓存；不与09:45本地主链长期重叠
     'unified_selection':         1800,   # 本地多赛道选股 + 正式TOP5红蓝参考
     'morning_portfolio':         900,
     'intraday_decision_monitor': 180,
@@ -2427,7 +2427,7 @@ def _format_strategy_results(results: dict) -> str:
 def _format_wencai_reference_notification(results: dict, *, max_per_strategy: int = 3) -> str:
     """通知中有界展示五组问财参考；不可用也必须显式可见。"""
     lines = ['🌐 问财选股参考（仅供对照，不参与正式排名）']
-    order = ('主力资金', '低价擒牛', '低估值', '小市值', '净利增长')
+    order = _WENCAI_REFERENCE_ORDER
     for strategy in order:
         ok, frame, message = (results or {}).get(strategy, (False, None, '未执行'))
         if not ok or frame is None or len(frame) == 0:
@@ -2493,7 +2493,7 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
     overlap = _format_wencai_overlap_notification(comparison, names)
     note = re.sub(r'\s+', ' ', str(data_note or '')).strip()
     lines.append(f'正式TOP15：{len(top15_rows or [])}只｜{overlap}' + (f'｜{note[:70]}' if note else ''))
-    order = ('主力资金', '低价擒牛', '低估值', '小市值', '净利增长')
+    order = _WENCAI_REFERENCE_ORDER
     for strategy in order:
         ok, frame, message = (results or {}).get(strategy, (False, None, '未执行'))
         if not ok or frame is None or len(frame) == 0:
@@ -4406,6 +4406,18 @@ _WENCAI_PREFETCH_JOBS = [
     ('低估值',   'value_stock_selector',    'ValueStockSelector',   'get_value_stocks'),
 ]
 
+_WENCAI_REFERENCE_ORDER = (
+    '低价擒牛', '小市值', '净利增长', '低估值', '主力资金',
+)
+_WENCAI_GROUP_TIMEOUTS = {
+    '低价擒牛': 45, '小市值': 45, '净利增长': 45, '低估值': 45,
+    '主力资金': 20,
+}
+_WENCAI_RETRY_BUDGETS = {
+    '低价擒牛': 1, '小市值': 1, '净利增长': 1, '低估值': 1,
+    '主力资金': 0,
+}
+
 _WENCAI_SOURCE_LABELS = {
     '主力资金': '问财·主力',
     '低价擒牛': '问财·低价',
@@ -4444,90 +4456,127 @@ def _wencai_definition_hash(strategy_name: str) -> str:
     return hashlib.sha256(identity.encode('utf-8')).hexdigest()
 
 
-def _prefetch_main_force(*, use_cache: bool, log_job: str) -> int:
-    """预取问财主力资金，成功返回 1。
-
-    09:15 最先请求；09:30 命中缓存时零请求，缺失时才补一次。
-    """
+def _prefetch_one_wencai_group(strategy_name: str, use_cache: bool) -> None:
+    """Fetch and persist exactly one Wencai group inside its own process."""
     import strategy_cache as _sc
-    try:
+
+    if strategy_name == '主力资金':
         from main_force_selector import MainForceStockSelector
-        ok, df, msg = _call_with_hard_timeout(
-            '主力资金',
-            lambda: MainForceStockSelector().get_main_force_stocks_cached(
-                days_ago=5, use_cache=use_cache),
-            60,
-        )
-        n = len(df) if (
-            ok and df is not None and hasattr(df, 'empty') and not df.empty
-        ) else 0
-        print(f'[{log_job}] {"✅" if n else "⚠️"} 主力资金 {n} 只 '
-              f'({str(msg)[:70]})', flush=True)
-        if n:
-            _sc.clear_failure('主力资金')
-        else:
-            _sc.record_failure('主力资金', msg or 'empty_result')
-        return 1 if n else 0
-    except Exception as e:
-        _sc.record_failure('主力资金', e)
-        print(f'[{log_job}] ⚠️ 主力资金异常/超时: '
-              f'{type(e).__name__}: {str(e)[:80]}', flush=True)
-        return 0
 
-
-def _prefetch_wencai_strategies(*, use_cache: bool, log_job: str) -> int:
-    """预取 4 条精确问财策略，返回已有结果的策略数。
-
-    ``use_cache=False`` 用于 09:15 首次刷新；``True`` 用于 09:30 缺口补取：
-    当日已有缓存直接命中，只有失败项才会再次访问问财。每条 selector 只发一个
-    精确问句，外层 75 秒兜底，避免同一策略双请求把全局熔断打穿。
-    """
-    import strategy_cache as _sc
-    done = 0
-    for name, mod, cls, fn in _WENCAI_PREFETCH_JOBS:
-        try:
-            _m = __import__(mod)
-            sel = getattr(_m, cls)()
-            ok, df, msg = _call_with_hard_timeout(
-                name,
-                lambda s=sel, f=fn, nm=name: _sc.cached(
-                    nm, lambda: getattr(s, f)(top_n=5), use_cache=use_cache),
-                75,
+        def fetch():
+            selector = MainForceStockSelector()
+            ok, frame, message = selector.get_main_force_stocks_cached(
+                days_ago=5, use_cache=use_cache,
             )
-            n = len(df) if (
-                ok and df is not None and hasattr(df, 'empty') and not df.empty
-            ) else 0
-            if n:
-                done += 1
-            else:
-                _sc.record_failure(name, msg or 'empty_result')
-            print(f'[{log_job}] {"✅" if n else "⚠️"} {name} {n} 只 '
-                  f'({str(msg)[:70]})', flush=True)
-        except Exception as e:
-            _sc.record_failure(name, e)
-            print(f'[{log_job}] ⚠️ {name} 异常/超时: '
-                  f'{type(e).__name__}: {str(e)[:80]}', flush=True)
-    return done
+            if ok and frame is not None and len(frame) > 0:
+                frame = selector.get_top_stocks(frame, top_n=5)
+            return ok, frame, message
+    else:
+        target = next(
+            (row for row in _WENCAI_PREFETCH_JOBS if row[0] == strategy_name),
+            None,
+        )
+        if target is None:
+            raise ValueError('unknown_wencai_strategy')
+        _name, module_name, class_name, method_name = target
+        module = __import__(module_name)
+        selector = getattr(module, class_name)()
+        fetch = lambda: getattr(selector, method_name)(top_n=5)
+
+    ok, frame, message = _sc.cached(
+        strategy_name, fetch, use_cache=use_cache,
+    )
+    if not ok or frame is None or not hasattr(frame, 'empty') or frame.empty:
+        _sc.record_failure(strategy_name, message or 'empty_result')
+
+
+def _prefetch_wencai_batch(*, use_cache: bool, log_job: str) -> dict:
+    """Run five isolated groups in fixed order with a hard aggregate budget."""
+    import time as _time
+    import strategy_cache as _sc
+    from jobs.isolated_runtime import run_isolated_task
+
+    diagnostics = []
+    results = {}
+    for strategy_name in _WENCAI_REFERENCE_ORDER:
+        started_at = datetime.now().astimezone()
+        started = _time.monotonic()
+        timeout = _WENCAI_GROUP_TIMEOUTS[strategy_name]
+        isolated = run_isolated_task(
+            f'wencai:{strategy_name}',
+            _prefetch_one_wencai_group,
+            (strategy_name, use_cache),
+            {},
+            timeout_seconds=timeout,
+            cancel_grace_seconds=1,
+        )
+        elapsed = round(_time.monotonic() - started, 3)
+        finished_at = datetime.now().astimezone()
+        isolated_status = str(isolated.get('status') or 'error')
+        if isolated_status != 'complete':
+            failure_code = (
+                'timeout' if isolated_status in {'timeout', 'deadline_exceeded'}
+                else _sc.classify_failure(isolated.get('error_category') or isolated_status)
+            )
+            _sc.record_failure(strategy_name, isolated_status, code=failure_code)
+        failure = _sc.load_failure(strategy_name) or {}
+        cache = _sc.cache_status(strategy_name)
+        frame = _sc.load(strategy_name) if cache.get('cache_present') else None
+        cache_ready = bool(
+            frame is not None and hasattr(frame, 'empty') and not frame.empty
+        )
+        failure_code = failure.get('failure_code')
+        status = (
+            'ready' if isolated_status == 'complete' and cache_ready and not failure_code else
+            'cached_degraded' if cache_ready else 'failed'
+        )
+        if status == 'ready':
+            _sc.clear_failure(strategy_name)
+            failure_code = None
+        elif failure_code is None:
+            failure_code = failure.get('failure_code') or 'empty_result'
+        diagnostic = {
+            'strategy': strategy_name,
+            'status': status,
+            'started_at': started_at.isoformat(timespec='seconds'),
+            'finished_at': finished_at.isoformat(timespec='seconds'),
+            'elapsed_seconds': elapsed,
+            'timeout_seconds': timeout,
+            'retry_budget': _WENCAI_RETRY_BUDGETS[strategy_name],
+            'failure_code': failure_code,
+            'cache_key': cache.get('cache_key'),
+            'cache_age_seconds': cache.get('cache_age_seconds'),
+            'result_as_of': cache.get('result_as_of'),
+            'circuit_scope': f'isolated_process:{_WENCAI_STRATEGY_IDS[strategy_name]}',
+            'isolation': isolated.get('isolation') or 'spawn',
+        }
+        _sc.record_run(strategy_name, diagnostic)
+        diagnostics.append(diagnostic)
+        results[strategy_name] = (
+            cache_ready, frame, status if cache_ready else str(failure_code or 'failed')
+        )
+        print(
+            f'[{log_job}] {"✅" if cache_ready else "⚠️"} {strategy_name} '
+            f'{len(frame) if cache_ready else 0}只 status={status} elapsed={elapsed:.1f}s '
+            f'failure={failure_code or "none"}',
+            flush=True,
+        )
+    return {
+        'available': sum(1 for row in diagnostics if row['status'] in {'ready', 'cached_degraded'}),
+        'diagnostics': diagnostics,
+        'results': results,
+        'max_elapsed_seconds': sum(_WENCAI_GROUP_TIMEOUTS.values()) + len(_WENCAI_REFERENCE_ORDER),
+    }
 
 
 def task_strategy_prefetch():
-    """🏦 盘前预取 5 条问财参考策略，09:45 只做本地主链结果对照。
-    **串行、慢慢来**:盘前无并发压力,逐个跑、每个给足超时;非交易日跳过;失败不影响主选股。
-      ① 主力资金(问财，最高优先级，避免前序请求耗尽额度)
-      ② 低价擒牛 / 小市值 / 净利增长 / 低估值(问财,走 strategy_cache 当日缓存)"""
+    """🏦 按固定顺序逐进程隔离预取五组问财参考。"""
     job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    done, total = 0, 5
-    # 主力资金曾放在最后，实测前三条普通策略全量分页后低估值/主力连续
-    # 403。现在主力优先，所有 TOP 查询均只拉单页。
-    # ① 主力资金最高优先级。
-    done += _prefetch_main_force(
-        use_cache=False, log_job='strategy_prefetch')
-    # ② 4 个普通问财策略：每条只发一次精确问句，成功写 strategy_cache。
-    done += _prefetch_wencai_strategies(
-        use_cache=False, log_job='strategy_prefetch')
+    batch = _prefetch_wencai_batch(use_cache=False, log_job=job)
+    done, total = batch['available'], len(_WENCAI_REFERENCE_ORDER)
     _log_run(
         job, 'success' if done else 'skipped',
         error=(f'prefetched {done}/{total}' if done
@@ -4537,20 +4586,13 @@ def task_strategy_prefetch():
 
 
 def task_strategy_prefetch_retry():
-    """09:30 软重试：优先补主力资金，再补其余问财缓存缺口。
-
-    这是外部发现参考，不是 09:45 本地选股的依赖。即便问财持续不可用，
-    unified_selection 仍应只使用本地 PIT 主链，不能把参考源提升为候选源。
-    60s+75s×4 的理论上限为 360s，不与 09:45 主选股长期重叠。
-    """
+    """09:30 软重试：逐组隔离补缓存，主力资金最后且等待最短。"""
     job = 'strategy_prefetch_retry'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
-    done = _prefetch_main_force(
-        use_cache=True, log_job=job)
-    done += _prefetch_wencai_strategies(
-        use_cache=True, log_job=job)
+    batch = _prefetch_wencai_batch(use_cache=True, log_job=job)
+    done = batch['available']
     _log_run(
         job, 'success' if done else 'skipped',
         error=(f'available {done}/5' if done
@@ -4617,14 +4659,14 @@ def task_unified_selection():
             strategy_scan = {'results': {}}
         wencai_reference = []
         wencai_strategy_runs = {
-            'version': 'wencai-reference-v2',
+            'version': 'wencai-reference-v3',
             'executed_at': datetime.now().astimezone().isoformat(timespec='seconds'),
             'strategies': {},
             'reference_affects_membership': False,
         }
         import strategy_cache as _strategy_cache
         wencai_nominations = []
-        for sname in ('主力资金', '低价擒牛', '小市值', '净利增长', '低估值'):
+        for sname in _WENCAI_REFERENCE_ORDER:
             ok, df, msg = strategy_scan.get('results', {}).get(
                 sname, (False, None, wencai_scan_error or 'strategy_result_missing')
             )
@@ -4654,12 +4696,30 @@ def task_unified_selection():
                             'priority_weight': 0,
                             'evidence': {'source': 'wencai', 'reference_only': True},
                         })
+            run_diagnostic = _strategy_cache.load_run(sname) or {}
+            diagnostic_status = str(run_diagnostic.get('status') or '')
+            reference_status = (
+                'ready' if ok and diagnostic_status in {'', 'ready'} else
+                'degraded' if ok else 'failed'
+            )
             wencai_strategy_runs['strategies'][sname] = {
                 'strategy_id': strategy_id,
                 'strategy_version': strategy_version,
                 'definition_hash': definition_hash,
-                'status': 'ready' if ok else 'failed',
-                'failure_code': (None if ok else _strategy_cache.classify_failure(msg)),
+                'status': reference_status,
+                'failure_code': (
+                    run_diagnostic.get('failure_code')
+                    if reference_status == 'degraded' else
+                    None if ok else _strategy_cache.classify_failure(msg)
+                ),
+                **{
+                    key: run_diagnostic.get(key)
+                    for key in (
+                        'started_at', 'finished_at', 'elapsed_seconds',
+                        'timeout_seconds', 'retry_budget', 'cache_key',
+                        'cache_age_seconds', 'result_as_of', 'circuit_scope',
+                    )
+                },
                 'message': str(msg or '')[:300],
                 'picks': _normalize_reference(strategy_picks),
             }

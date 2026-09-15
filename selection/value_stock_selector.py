@@ -73,7 +73,7 @@ class ValueStockSelector:
 
             _throttle('pywencai')
             # 已按流通市值排序且只取 TOP N，单页足够。
-            result = pywencai_get(query, timeout=60, loop=False)
+            result = pywencai_get(query, timeout=40, loop=False, retry=1)
             if result is None:
                 return False, None, "问财接口返回None，请检查网络或稍后重试"
             df_result = self._convert_to_dataframe(result)

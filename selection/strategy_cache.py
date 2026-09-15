@@ -12,6 +12,7 @@
 import json
 import os
 import pickle
+import time
 from datetime import date, datetime
 
 try:
@@ -35,6 +36,63 @@ def _cache_dir() -> str:
 
 def _key(name: str) -> str:
     return f"{name}_{date.today().isoformat()}"
+
+
+def cache_status(name: str) -> dict:
+    """Return per-strategy cache facts without reading another strategy's state."""
+    key = _key(name)
+    path = os.path.join(_cache_dir(), key + '.pkl')
+    try:
+        stamp = os.path.getmtime(path)
+        return {
+            "cache_key": key,
+            "cache_present": True,
+            "cache_age_seconds": round(max(0.0, time.time() - stamp), 3),
+            "result_as_of": datetime.fromtimestamp(stamp).astimezone().isoformat(
+                timespec="seconds"
+            ),
+        }
+    except OSError:
+        return {
+            "cache_key": key,
+            "cache_present": False,
+            "cache_age_seconds": None,
+            "result_as_of": None,
+        }
+
+
+def record_run(name: str, payload: dict) -> dict:
+    """Atomically persist one strategy's bounded execution diagnostics."""
+    value = {
+        "strategy": str(name),
+        "trade_date": date.today().isoformat(),
+        **dict(payload or {}),
+    }
+    path = os.path.join(_cache_dir(), _key(name) + ".run.json")
+    temporary = path + f".{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        except Exception:
+            pass
+    return value
+
+
+def load_run(name: str):
+    try:
+        path = os.path.join(_cache_dir(), _key(name) + ".run.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        if value.get("trade_date") == date.today().isoformat():
+            return value
+    except Exception:
+        pass
+    return None
 
 
 def load(name: str):

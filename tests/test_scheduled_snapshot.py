@@ -111,6 +111,7 @@ def build_service(
     *, store=None, selection_value=None, quote_spy=None, context_reader=context,
     clock=lambda: NOW, job_runs_reader=lambda **_kwargs: [],
     quote_time=None, intraday_value=None,
+    intraday_projector=None,
     outcome_stats_reader=lambda **_kwargs: {"dimension": "source_type", "days": 180,
                                             "buckets": []},
     cash_reader=lambda: {"status": "missing", "amount": None,
@@ -135,6 +136,22 @@ def build_service(
                          "amount_wan": 100, "limit_up": 11, "limit_down": 9}
                 for symbol in symbols}
 
+    if intraday_projector is None:
+        def intraday_projector(**kwargs):
+            previous = kwargs.get("previous") or {}
+            current = kwargs["now"]
+            return {
+                **previous,
+                "plans": (
+                    previous.get("plans") or {}
+                    if previous.get("selection_run_id") == "formal-run" else {}
+                ),
+                "status": "success",
+                "trade_date": current.date().isoformat(),
+                "generated_at": current.isoformat(timespec="seconds"),
+                "selection_run_id": previous.get("selection_run_id") or "formal-run",
+            }
+
     return ScheduledSnapshotService(
         store=store or CalendarStore(),
         selection_reader=lambda: selection_value or selection(),
@@ -142,6 +159,7 @@ def build_service(
         context_reader=context_reader,
         capsule_reader=capsule,
         intraday_reader=lambda: intraday_value or {},
+        intraday_projector=intraday_projector,
         quote_loader=quotes,
         job_runs_reader=job_runs_reader,
         outcome_stats_reader=outcome_stats_reader,
@@ -172,6 +190,74 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert snapshot["independent_selection"]["status"] == "complete"
     assert len(snapshot["independent_selection"]["top5"]) == 5
     assert snapshot["quality"]["sections"]["independent_selection"] == "complete"
+    assert [row["name"] for row in snapshot["wencai_reference"]["strategies"]] == [
+        "低价擒牛", "小市值", "净利增长", "低估值", "主力资金",
+    ]
+
+
+def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():
+    calls = []
+    pricing_at = NOW + timedelta(seconds=5)
+    clock_values = iter((NOW, pricing_at))
+    old = {
+        "selection_run_id": "formal-run",
+        "trade_date": NOW.date().isoformat(),
+        "generated_at": (NOW - timedelta(minutes=20)).isoformat(),
+        "holdings": [{"symbol": "000001", "action": "sell"}],
+        "plans": {"000001": {"available": True, "action": "hold"}},
+    }
+
+    def projector(**kwargs):
+        assert calls, "the single quote batch must be loaded before action projection"
+        assert set(kwargs["raw_quotes"]) == set(calls[0])
+        return {
+            **kwargs["previous"],
+            "status": "success",
+            "trade_date": kwargs["now"].date().isoformat(),
+            "generated_at": kwargs["now"].isoformat(timespec="seconds"),
+            "selection_run_id": "formal-run",
+            "holdings": [{"symbol": "000001", "action": "hold"}],
+            "portfolio_action_guard": {"status": "applied", "guarded_count": 1},
+        }
+
+    snapshot = build_service(
+        quote_spy=calls,
+        quote_time=pricing_at,
+        clock=lambda: next(clock_values),
+        intraday_value={"data": old},
+        intraday_projector=projector,
+    ).read(owner_id="scheduled-agent")["data"]
+
+    authority = snapshot["trade_plans"]["holding_actions_authority"]
+    assert len(calls) == 1
+    assert snapshot["trade_plans"]["intraday_as_of"] == pricing_at.isoformat(timespec="seconds")
+    assert snapshot["quotes"]["captured_at"] == pricing_at.isoformat(timespec="seconds")
+    assert snapshot["trade_plans"]["holding_actions"][0]["action"] == "hold"
+    assert authority["status"] == "current"
+    assert authority["quote_binding"] == "same_snapshot_quote_batch"
+    assert authority["pricing_snapshot_id"] == snapshot["quotes"]["snapshot_id"]
+    assert snapshot["trade_plans"]["intraday_plan_binding"]["quote_binding"] == (
+        "same_snapshot_quote_batch"
+    )
+    assert snapshot["trade_plans"]["portfolio_action_guard"]["guarded_count"] == 1
+
+
+def test_intraday_projection_failure_never_labels_persisted_actions_current():
+    old = {
+        "selection_run_id": "formal-run",
+        "trade_date": NOW.date().isoformat(),
+        "generated_at": (NOW - timedelta(minutes=20)).isoformat(),
+        "holdings": [{"symbol": "000001", "action": "sell"}],
+    }
+    snapshot = build_service(
+        intraday_value={"data": old},
+        intraday_projector=lambda **_kwargs: {},
+    ).read(owner_id="scheduled-agent")["data"]
+
+    authority = snapshot["trade_plans"]["holding_actions_authority"]
+    assert snapshot["trade_plans"]["status"] == "degraded"
+    assert authority["status"] == "stale_or_missing"
+    assert authority["quote_binding"] == "persisted_reference"
 
 
 def test_unknown_calendar_never_uses_weekday_fallback():
