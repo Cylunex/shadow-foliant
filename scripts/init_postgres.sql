@@ -890,6 +890,13 @@ CREATE TABLE IF NOT EXISTS external_overlay_outcomes (
     evaluated_at TEXT NOT NULL,
     PRIMARY KEY(overlay_id,symbol,horizon_days)
 );
+CREATE TABLE IF NOT EXISTS external_research_submissions (
+    idempotency_key TEXT PRIMARY KEY, channel TEXT NOT NULL,
+    overlay_id TEXT NOT NULL UNIQUE, request_hash TEXT NOT NULL,
+    notification_status TEXT NOT NULL,
+    notification_consumed_at TEXT, actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_external_evidence_decision
     ON external_research_evidence(channel,decision_as_of);
 CREATE INDEX IF NOT EXISTS idx_external_overlay_latest
@@ -996,6 +1003,9 @@ VALUES ('09-operational-integrity-v5', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('14-external-independent-research', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('15-external-report-idempotency', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

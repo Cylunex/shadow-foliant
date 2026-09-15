@@ -29,6 +29,10 @@ Codex heartbeat / cron CLI
 `trading_day.confirmed=true` 只在仓库内双源日历共识覆盖目标自然日时成立。在线日历失败后的
 weekday fallback 不进入这个合同。正式产物日期相对最近确认开市日落后时标记 stale。
 
+盘后模式只接受当日经行情质量层标记为 `closing_current` 的收盘价格。该价格不受盘中 TTL 二次
+淘汰；组合风险、持仓复盘和次日计划均绑定同一个价格批次 snapshot ID/as-of。基金仍保留在完整
+持仓报告中，但继续排除在 30 万股票预算和股票组合风险口径之外。
+
 ## 通知
 
 CLI 默认 dry/no-send。`--send-qq` 只把字段白名单渲染成短报告，并显式调用

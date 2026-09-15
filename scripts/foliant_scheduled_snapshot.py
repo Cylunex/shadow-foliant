@@ -27,6 +27,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 ENDPOINT = "/api/machine/v1/agent/scheduled-snapshot"
+EXTERNAL_ENDPOINT = "/api/machine/v1/agent/external-independent-research"
+EXTERNAL_CLAIM_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-claim"
+MAX_EXTERNAL_BUNDLE_BYTES = 262144
 SECRET_PATTERN = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|(?:token|secret|password|cookie)\s*[:=]\s*\S+)"
 )
@@ -59,6 +62,16 @@ def _load_token() -> str:
         except (OSError, UnicodeError):
             return ""
     return os.getenv("FOLIANT_AGENT_TOKEN", "").strip()
+
+
+def _load_external_token() -> str:
+    token_file = os.getenv("FOLIANT_EXTERNAL_RESEARCH_TOKEN_FILE", "").strip()
+    if token_file:
+        try:
+            return Path(token_file).read_text("utf-8").strip()
+        except (OSError, UnicodeError):
+            return ""
+    return os.getenv("FOLIANT_EXTERNAL_RESEARCH_TOKEN", "").strip()
 
 
 def _configured_client():
@@ -133,11 +146,116 @@ def fetch_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def _load_external_bundle(path_value: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    path = Path(path_value)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("external_bundle_not_regular_file")
+        if path.stat().st_size > MAX_EXTERNAL_BUNDLE_BYTES:
+            raise ValueError("external_bundle_too_large")
+        raw = json.loads(path.read_text("utf-8"))
+        from webui.external_research_routes import ExternalIndependentBundleReq
+
+        validated = ExternalIndependentBundleReq.model_validate(raw)
+        bundle = validated.model_dump()
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        return None, _failure(
+            "external_bundle_invalid",
+            "Provide one strict codex-external-independent-v1 JSON file under 256 KiB.",
+        )
+    return bundle, None
+
+
+def _external_client(endpoint: str):
+    base_url = os.getenv("FOLIANT_AGENT_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        return None, _failure(
+            "agent_base_url_missing", "Set FOLIANT_AGENT_BASE_URL outside the repository.",
+        )
+    parsed = urlsplit(base_url)
+    loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    allow_http = os.getenv("FOLIANT_AGENT_ALLOW_HTTP", "").lower() == "true"
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and (loopback or allow_http)):
+        return None, _failure(
+            "agent_transport_insecure",
+            "Use HTTPS, loopback HTTP, or explicitly set FOLIANT_AGENT_ALLOW_HTTP=true.",
+        )
+    token = _load_external_token()
+    if not token:
+        return None, _failure(
+            "external_research_token_missing",
+            "Set FOLIANT_EXTERNAL_RESEARCH_TOKEN_FILE outside the repository.",
+        )
+    try:
+        timeout = min(60.0, max(1.0, float(os.getenv("FOLIANT_AGENT_TIMEOUT_SECONDS", "30"))))
+    except ValueError:
+        timeout = 30.0
+    return (base_url + endpoint, token, timeout), None
+
+
+def _external_post(endpoint: str, body: dict[str, Any], failure_code: str):
+    client, failure = _external_client(endpoint)
+    if failure:
+        return None, failure
+    url, token, timeout = client
+    try:
+        response = requests.post(
+            url, json=body,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=timeout,
+        )
+    except requests.RequestException:
+        return None, _failure(failure_code, "Verify the protected Foliant service connectivity.", status="degraded")
+    if response.status_code in {401, 403}:
+        return None, _failure(
+            "external_research_authorization_failed",
+            "Provision a separate writer with stock.research and foliant.selection.preview.",
+        )
+    if response.status_code != 200:
+        return None, _failure(failure_code, "Inspect protected Foliant logs by request time.", status="degraded")
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, _failure(failure_code, "The protected Foliant response was invalid.", status="degraded")
+    return _safe(payload), None
+
+
+def submit_external_bundle(bundle: dict[str, Any]):
+    return _external_post(EXTERNAL_ENDPOINT, bundle, "external_research_submit_failed")
+
+
+def claim_external_notification(idempotency_key: str, overlay_id: str):
+    return _external_post(EXTERNAL_CLAIM_ENDPOINT, {
+        "idempotency_key": idempotency_key, "overlay_id": overlay_id,
+    }, "external_notification_claim_failed")
+
+
+def _merge_external_submission(snapshot: dict[str, Any], submission: dict[str, Any]):
+    submitted = (submission.get("data") or {}).get("overlay") or {}
+    merged = snapshot.get("external_independent_research") or {}
+    required = (
+        merged.get("status") == "complete"
+        and merged.get("overlay_id") == submitted.get("overlay_id")
+        and merged.get("idempotency_key") == submitted.get("idempotency_key")
+        and merged.get("selection_run_id") == submitted.get("selection_run_id")
+        and bool(merged.get("decision_as_of"))
+        and bool(merged.get("ranking_locked_at"))
+    )
+    if not required:
+        return _failure(
+            "external_research_snapshot_mismatch",
+            "Do not notify; refresh only after the submitted overlay is visible in the same snapshot.",
+            status="degraded",
+        )
+    return None
+
+
 def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     """Render only whitelisted business fields; never interpolate errors or config."""
     day = snapshot.get("trading_day") or {}
     formal = snapshot.get("formal_selection") or {}
     independent = snapshot.get("independent_selection") or {}
+    external = snapshot.get("external_independent_research") or {}
     reference = snapshot.get("wencai_reference") or {}
     holdings = snapshot.get("holdings") or {}
     plans = snapshot.get("trade_plans") or {}
@@ -164,6 +282,17 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         lines.append("独立TOP5：" + ("、".join(labels) or "无候选"))
     else:
         lines.append("独立TOP5：不可用（必要输入不完整）")
+    if external.get("status") == "complete":
+        labels = [
+            f"{row.get('name') or row.get('symbol')}({row.get('symbol')})"
+            for row in external.get("top5") or []
+        ]
+        lines.append(
+            f"外部独立：{external.get('market_regime') or 'unknown'}；TOP5 "
+            f"{'、'.join(labels) or '无候选'}；证据 {len(external.get('evidence') or [])} 条；"
+            f"decision {external.get('decision_as_of') or '不可用'}；"
+            f"locked {external.get('ranking_locked_at') or '不可用'}"
+        )
     lines.extend([
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
@@ -226,12 +355,60 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one bounded Foliant scheduled snapshot")
     parser.add_argument("--send-qq", action="store_true", help="explicitly send a compact QQ report")
+    parser.add_argument(
+        "--external-bundle",
+        help="strict codex-external-independent-v1 JSON submitted before snapshot retrieval",
+    )
     args = parser.parse_args(argv)
+    submission = None
+    if args.external_bundle:
+        bundle, failure = _load_external_bundle(args.external_bundle)
+        if failure:
+            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            return 2
+        submission, failure = submit_external_bundle(bundle)
+        if failure:
+            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            return 2
     snapshot = fetch_snapshot()
+    if submission:
+        failure = _merge_external_submission(snapshot, submission)
+        if failure:
+            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            return 2
     if args.send_qq:
-        snapshot["notification"] = send_qq(snapshot)
+        external = snapshot.get("external_independent_research") or {}
+        if external.get("status") == "complete" and not submission:
+            snapshot["notification"] = {
+                "requested": True, "sent": False,
+                "error_code": "external_submission_claim_required",
+            }
+        elif submission:
+            overlay = (submission.get("data") or {}).get("overlay") or {}
+            claim, failure = claim_external_notification(
+                str(overlay.get("idempotency_key") or ""), str(overlay.get("overlay_id") or ""),
+            )
+            if failure:
+                snapshot["notification"] = failure.get("notification") | {
+                    "requested": True, "sent": False,
+                    "error_code": (failure.get("error") or {}).get("code"),
+                }
+            elif (claim.get("data") or {}).get("should_send"):
+                snapshot["notification"] = send_qq(snapshot)
+            else:
+                snapshot["notification"] = {
+                    "requested": True, "sent": False,
+                    "duplicate_suppressed": True, "error_code": None,
+                }
+        else:
+            snapshot["notification"] = send_qq(snapshot)
     print(json.dumps(_safe(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    return 0 if snapshot.get("status") in {"complete", "degraded"} else 2
+    notification = snapshot.get("notification") or {}
+    notification_failed = bool(
+        args.send_qq and not notification.get("sent")
+        and not notification.get("duplicate_suppressed")
+    )
+    return 0 if snapshot.get("status") in {"complete", "degraded"} and not notification_failed else 2
 
 
 if __name__ == "__main__":

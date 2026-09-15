@@ -45,3 +45,16 @@ Then 输出明确 `external_can_create_execution_price=false` 和 `auto_executio
 Given 请求声明 999 个样本和 999 周但数据库没有到期后验
 When 保存调优提案
 Then 服务端重算为实际数量，状态为 `evidence_insufficient`，且不应用策略。
+
+## Requirement: 同快照一次性报告
+
+CLI MUST 先提交严格的 `codex-external-independent-v1` bundle，再读取已经包含同一 overlay 的生产
+计划快照。提交 MUST 具有请求哈希绑定的幂等键、服务端 `ranking_locked_at` 和当代
+`decision_as_of`。QQ 通知 MUST 在发送前原子消费该提交的一次性 claim；相同请求重放 MUST NOT
+再次发送。外部 writer MUST NOT 因此获得私人持仓读取权限。
+
+### Scenario: 调度器重试同一外部报告
+
+Given 同一幂等键和完全相同的 bundle 已提交并已消费通知 claim
+When 调度器再次提交、读取快照并请求发送
+Then 返回原 overlay，快照 ID 和锁定时间不变，第二次 QQ 被抑制且不生成任何交易动作。

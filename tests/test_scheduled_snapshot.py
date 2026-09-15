@@ -562,6 +562,11 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
                for row in snapshot["quotes"]["rows"])
     assert snapshot["trade_plans"]["pricing_status"] == "success"
     assert snapshot["trade_plans"]["pricing_context"] == "post_close"
+    risk = snapshot["trade_plans"]["portfolio_risk"]
+    assert risk["risk_snapshot"]["status"] == "complete"
+    assert risk["risk_snapshot"]["missing_prices"] == []
+    assert float(risk["risk_snapshot"]["securities_value"]) > 0
+    assert risk["stress_scenarios"]
     assert snapshot["holdings_review"]["status"] == "complete"
     assert snapshot["holdings_review"]["count"] == 2
     assert all(row["reference_close"] == 10
@@ -578,6 +583,11 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
     assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == "historical_reference"
     assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
+    shared = snapshot["holdings_review"]["pricing_snapshot"]
+    assert shared == snapshot["next_session_plan"]["pricing_snapshot"]
+    assert shared["snapshot_id"] == risk["pricing_snapshot"]["snapshot_id"]
+    assert shared["as_of"] == risk["pricing_snapshot"]["oldest_as_of"]
+    assert shared["mode"] == "post_close"
 
 
 def test_four_report_phases_keep_expected_authority_and_pending_semantics():
@@ -888,6 +898,85 @@ def test_cli_report_appends_due_post_close_conclusion():
     assert "策略调整：1 项待复核；仅生成建议，不自动应用。" in body
     assert "股票 40 只/市值 ¥184,388" in body
     assert "基金排除 13 只；可用 ¥115,612" in body
+
+
+def _external_cli_bundle():
+    return {
+        "channel": "codex-external-independent-v1",
+        "idempotency_key": "ext-20260915-cli-test",
+        "selection_run_id": "formal-run",
+        "decision_as_of": "2026-09-15T20:45:00+08:00",
+        "market_regime": "risk_off",
+        "external_evidence": [],
+        "independent_overlay": [
+            {"symbol": f"600{i:03d}", "event_adjustment": 0.0,
+             "risk_veto": False, "evidence_ids": []}
+            for i in range(1, 16)
+        ],
+        "news_watchlist": [],
+        "tuning_proposals": [],
+    }
+
+
+def test_cli_external_bundle_is_strict_and_rejects_private_fields(tmp_path):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    path = tmp_path / "external.json"
+    value = _external_cli_bundle()
+    value["holdings"] = [{"symbol": "000001"}]
+    path.write_text(json.dumps(value), encoding="utf-8")
+    bundle, failure = cli._load_external_bundle(str(path))
+    assert bundle is None
+    assert failure["error"]["code"] == "external_bundle_invalid"
+
+
+def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, monkeypatch, capsys):
+    from copy import deepcopy
+    from scripts import foliant_scheduled_snapshot as cli
+
+    path = tmp_path / "external.json"
+    bundle = _external_cli_bundle()
+    path.write_text(json.dumps(bundle), encoding="utf-8")
+    overlay = {
+        "overlay_id": "eio_" + "a" * 40,
+        "idempotency_key": bundle["idempotency_key"],
+        "selection_run_id": bundle["selection_run_id"],
+    }
+    submission = {"status": "complete", "data": {"overlay": overlay}}
+    snapshot = {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "complete",
+        "external_independent_research": {
+            "status": "complete", **overlay,
+            "decision_as_of": bundle["decision_as_of"],
+            "ranking_locked_at": "2026-09-15T20:45:01+08:00",
+        },
+    }
+    events = []
+    monkeypatch.setattr(cli, "submit_external_bundle", lambda value: (
+        events.append(("submit", value["idempotency_key"])) or submission, None
+    ))
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
+        events.append(("fetch", None)) or deepcopy(snapshot)
+    ))
+    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
+        events.append(("claim", None)) or {"data": {"should_send": True}}, None
+    ))
+    monkeypatch.setattr(cli, "send_qq", lambda _snapshot: (
+        events.append(("qq", None)) or {"requested": True, "sent": True, "channel": "qq"}
+    ))
+
+    assert cli.main(["--external-bundle", str(path), "--send-qq"]) == 0
+    assert [name for name, _ in events] == ["submit", "fetch", "claim", "qq"]
+    assert json.loads(capsys.readouterr().out)["notification"]["sent"] is True
+
+    events.clear()
+    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
+        events.append(("claim", None)) or {"data": {"should_send": False}}, None
+    ))
+    assert cli.main(["--external-bundle", str(path), "--send-qq"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert [name for name, _ in events] == ["submit", "fetch", "claim"]
+    assert output["notification"]["duplicate_suppressed"] is True
 
 
 def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):

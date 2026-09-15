@@ -805,6 +805,9 @@ class ScheduledSnapshotService:
         return clean_json({
             "status": "complete" if current else "stale" if overlay else "missing",
             "channel": raw.get("channel") or "codex-external-independent-v1",
+            "overlay_id": overlay.get("overlay_id"),
+            "idempotency_key": overlay.get("idempotency_key")
+            or (raw.get("idempotency") or {}).get("key"),
             "selection_run_id": overlay.get("selection_run_id"),
             "decision_as_of": overlay.get("decision_as_of"),
             "ranking_locked_at": overlay.get("ranking_locked_at"),
@@ -828,9 +831,11 @@ class ScheduledSnapshotService:
     def _holdings_review(
         *, due: bool, trading_day: dict[str, Any], holdings: list[dict[str, Any]],
         quote_rows: list[dict[str, Any]], plans: dict[str, dict[str, Any]],
+        pricing_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         base = {
             "review_date": trading_day.get("date"),
+            "pricing_snapshot": pricing_snapshot,
             "preview_only": True,
             "auto_execution": False,
         }
@@ -905,10 +910,11 @@ class ScheduledSnapshotService:
     def _next_session_plan(
         *, due: bool, trading_day: dict[str, Any], formal: dict[str, Any],
         holdings: list[dict[str, Any]], quote_rows: list[dict[str, Any]],
-        plans: dict[str, dict[str, Any]],
+        plans: dict[str, dict[str, Any]], pricing_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         base = {
             "based_on_session": trading_day.get("date"),
+            "pricing_snapshot": pricing_snapshot,
             "target_session_date": None,
             "target_date_basis": "next_confirmed_open_date_requires_fresh_two_source_consensus",
             "preview_only": True,
@@ -1254,17 +1260,18 @@ class ScheduledSnapshotService:
             pricing_at = pricing_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
         pricing_at = pricing_at.astimezone(ZoneInfo("Asia/Shanghai"))
         quote_rows = [_quote(symbol, raw_quotes.get(symbol)) for symbol in symbols]
+        quote_mode = (
+            "post_close"
+            if trading_day.get("confirmed") and trading_day.get("is_trading_day")
+            and (now.hour, now.minute) >= (15, 0)
+            else "intraday"
+        )
         try:
             from jobs.intraday_decision_monitor import assess_quotes
 
             quote_quality = assess_quotes(
                 [{"symbol": symbol} for symbol in symbols], raw_quotes, pricing_at,
-                mode=(
-                    "post_close"
-                    if trading_day.get("confirmed") and trading_day.get("is_trading_day")
-                    and (now.hour, now.minute) >= (15, 0)
-                    else "intraday"
-                ),
+                mode=quote_mode,
             )
             by_symbol = quote_quality.get("items") or {}
             for row in quote_rows:
@@ -1354,6 +1361,10 @@ class ScheduledSnapshotService:
                         quote_ttl_seconds=int(
                             float(quote_quality.get("stale_minutes") or 8) * 60
                         ),
+                        quote_freshness_by_symbol={
+                            row["symbol"]: row.get("freshness") for row in quote_rows
+                        },
+                        pricing_mode=quote_mode,
                     )
             except Exception:
                 account_plan = {"status": "degraded", "preview_only": True,
@@ -1369,6 +1380,13 @@ class ScheduledSnapshotService:
         quotes["latest_as_of"] = quotes.get("as_of")
         quotes["as_of"] = pricing_snapshot.get("oldest_as_of") or quotes.get("as_of")
         quotes["captured_at"] = pricing_at.isoformat(timespec="seconds")
+        closing_pricing_snapshot = clean_json({
+            "snapshot_id": quotes.get("snapshot_id"),
+            "as_of": quotes.get("as_of"),
+            "latest_as_of": quotes.get("latest_as_of"),
+            "captured_at": quotes.get("captured_at"),
+            "mode": quote_mode,
+        })
 
         try:
             intraday_value = self.intraday_reader() or {}
@@ -1566,10 +1584,12 @@ class ScheduledSnapshotService:
         holdings_review = self._holdings_review(
             due=review_due, trading_day=trading_day, holdings=holding_rows,
             quote_rows=quote_rows, plans=review_plans,
+            pricing_snapshot=closing_pricing_snapshot,
         )
         next_session_plan = self._next_session_plan(
             due=review_due, trading_day=trading_day, formal=formal,
             holdings=holding_rows, quote_rows=quote_rows, plans=review_plans,
+            pricing_snapshot=closing_pricing_snapshot,
         )
         post_close_review["holdings_review_status"] = holdings_review.get("status")
         post_close_review["next_session_plan_status"] = next_session_plan.get("status")

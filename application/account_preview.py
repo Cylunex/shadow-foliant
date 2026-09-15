@@ -36,7 +36,8 @@ def account_quote_symbols(capsule, holdings, *, extra_symbols=()):
 
 def build_account_preview(*, owner_id, capsule, context, raw_quotes,
                           available_cash=None, allow_add=False, now=None,
-                          quote_ttl_seconds=120, cash_basis=None):
+                          quote_ttl_seconds=120, cash_basis=None,
+                          quote_freshness_by_symbol=None, pricing_mode="intraday"):
     """Build the existing authoritative account plan from already loaded facts.
 
     This seam lets aggregate readers share exactly one batched quote request while
@@ -55,12 +56,14 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
     if isinstance(now, str):
         now = datetime.fromisoformat(now)
     quotes = {}
+    quote_freshness_by_symbol = quote_freshness_by_symbol or {}
     for symbol, row in (raw_quotes or {}).items():
         stamp = row.get("quote_time") or row.get("observed_at") or row.get("retrieved_at")
         try:
             timestamp = _quote_timestamp(stamp)
             rules = equity_rules(symbol)
             quotes[symbol] = {"price": row.get("price"), "observed_at": timestamp.isoformat(),
+                              "freshness": quote_freshness_by_symbol.get(symbol),
                               "execution_rules": asdict(rules) if rules else None,
                               "suspended": bool(row.get("suspended")) or row.get("volume") == 0,
                               "liquidity_budget": max(0, float(row.get("amount_wan") or 0) * 100),
@@ -78,7 +81,7 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
     limits = AccountLimits(quote_ttl_seconds=quote_ttl_seconds)
     plan = build_action_plan(capsule, holdings, quotes, holdings_version=watermark,
                              now=now.isoformat(), cash=available_cash, allow_add=allow_add,
-                             owner_id=owner_id, limits=limits)
+                             owner_id=owner_id, limits=limits, pricing_mode=pricing_mode)
     plan["cash_basis"] = (
         str(cash_basis) if cash_basis else
         "user_confirmed" if available_cash is not None else "unknown"
@@ -96,13 +99,26 @@ def build_account_preview(*, owner_id, capsule, context, raw_quotes,
         "as_of": stamps[-1] if stamps else None,
         "oldest_as_of": stamps[0] if stamps else None,
         "quote_ttl_seconds": quote_ttl_seconds,
+        "pricing_mode": pricing_mode,
+        "freshness_counts": {
+            freshness: sum(1 for row in quotes.values() if row.get("freshness") == freshness)
+            for freshness in sorted({
+                str(row.get("freshness")) for row in quotes.values() if row.get("freshness")
+            })
+        },
     }
     from analysis.portfolio_scenarios import risk_snapshot, stress, explain_actual_formal
     def usable_price(holding):
         quote = quotes.get(holding["symbol"], {})
         try:
-            age = (now - datetime.fromisoformat(quote["observed_at"])).total_seconds()
-            return 0 <= age <= quote_ttl_seconds and float(quote["price"]) > 0
+            observed = datetime.fromisoformat(quote["observed_at"])
+            age = (now - observed).total_seconds()
+            same_session_close = (
+                pricing_mode == "post_close"
+                and quote.get("freshness") == "closing_current"
+                and observed.astimezone(now.tzinfo).date() == now.date()
+            )
+            return (same_session_close or 0 <= age <= quote_ttl_seconds) and float(quote["price"]) > 0
         except (KeyError, ValueError, TypeError):
             return False
     priced = [h for h in holdings if usable_price(h)]

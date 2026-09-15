@@ -56,6 +56,13 @@ Then `trading_day.confirmed=false` 且 `is_trading_day=null`。
 When 生成快照
 Then 行情适配器只收到一次去重后的证券列表，不发生逐只行情调用。
 
+### Scenario: 20:45 读取当日收盘快照
+
+Given 行情质量层已将持仓价格标记为当日 `closing_current`
+When 20:45 后生成组合风险、持仓复盘和次日计划
+Then 三者 MUST 使用同一价格 snapshot ID/as-of，股票市值、现金、仓位和压力测试 MUST 重算完整，
+且不得因盘中 TTL 将当日收盘价格标记为陈旧。
+
 ## Requirement: 盘后闭环与保守调整建议
 
 20:45 后的快照 MUST 投影当日 `eod_outcomes`、`daily_backtest` 运行状态、决策信号后验和

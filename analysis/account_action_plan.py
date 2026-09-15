@@ -40,7 +40,8 @@ def model_portfolio(capsule, *, max_weight=.2):
 
 
 def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
-                      cash=None, allow_add=False, limits=None, owner_id=None, _include_replace=True):
+                      cash=None, allow_add=False, limits=None, owner_id=None,
+                      pricing_mode="intraday", _include_replace=True):
     """Generate mutually exclusive previews with shared constraints and no writes.
 
     Holdings/quotes/instrument rules must be authorized server-loaded facts. Unknown
@@ -48,6 +49,8 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
     """
     if not owner_id or not holdings_version:
         raise ValueError("authorized_holdings_context_required")
+    if pricing_mode not in {"intraday", "post_close"}:
+        raise ValueError("invalid_pricing_mode")
     limits = limits or AccountLimits()
     clock = datetime.fromisoformat(now)
     if clock.tzinfo is None:
@@ -58,9 +61,15 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
     def price_for(symbol):
         quote = quotes.get(symbol) or {}
         try:
-            age = (clock - datetime.fromisoformat(quote["observed_at"])).total_seconds()
+            observed = datetime.fromisoformat(quote["observed_at"])
+            age = (clock - observed).total_seconds()
             price = unit_price(quote["price"])
-            if not 0 <= age <= limits.quote_ttl_seconds or price <= 0:
+            same_session_close = (
+                pricing_mode == "post_close"
+                and quote.get("freshness") == "closing_current"
+                and observed.astimezone(clock.tzinfo).date() == clock.date()
+            )
+            if (not same_session_close and not 0 <= age <= limits.quote_ttl_seconds) or price <= 0:
                 return None
             return price
         except (KeyError, ValueError, TypeError, ArithmeticError):
@@ -198,6 +207,7 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
             projected_plan = build_action_plan(
                 capsule, projected, quotes, holdings_version=holdings_version, now=now,
                 cash=projected_cash, allow_add=True, owner_id=owner_id, _include_replace=False,
+                pricing_mode=pricing_mode,
                 limits=AccountLimits(**{**asdict(limits), "max_turnover": remaining_turnover}))
             buys = next(a["actions"] for a in projected_plan["alternatives"] if a["kind"] == "add")
             if buys:
@@ -210,6 +220,7 @@ def build_action_plan(capsule, holdings, quotes, *, holdings_version, now,
               "holdings_version": holdings_version, "created_at": now,
               "expires_at": (clock + timedelta(seconds=limits.quote_ttl_seconds)).isoformat(),
               "quote_fingerprint": payload_hash(quotes), "limits": asdict(limits),
+              "pricing_mode": pricing_mode,
               "preview_only": True, "alternatives": alternatives, "blockers": failures,
               "rejected_candidates": rejected,
               "summary": "可考虑分批加仓" if additions else "没有合格加仓标的，暂不操作" if allow_add else "未请求加仓，先观察账户约束"}

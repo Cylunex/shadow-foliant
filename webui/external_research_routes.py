@@ -62,13 +62,23 @@ class TuningProposalReq(StrictExternalModel):
 
 class ExternalIndependentBundleReq(StrictExternalModel):
     channel: Literal["codex-external-independent-v1"]
+    idempotency_key: Annotated[
+        str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+    ]
     selection_run_id: ShortText
     decision_as_of: Timestamp
-    market_regime: Literal["bull", "sideways", "bear", "unknown"] = "unknown"
+    market_regime: Literal["bull", "sideways", "bear", "risk_off", "unknown"] = "unknown"
     external_evidence: list[ExternalEvidenceReq] = Field(default_factory=list, max_length=100)
     independent_overlay: list[IndependentOverlayReq] = Field(min_length=15, max_length=15)
     news_watchlist: list[NewsWatchReq] = Field(default_factory=list, max_length=100)
     tuning_proposals: list[TuningProposalReq] = Field(default_factory=list, max_length=50)
+
+
+class ExternalNotificationClaimReq(StrictExternalModel):
+    idempotency_key: Annotated[
+        str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+    ]
+    overlay_id: Annotated[str, StringConstraints(pattern=r"^eio_[0-9a-f]{40}$")]
 
 
 def register_external_research_routes(
@@ -104,6 +114,27 @@ def register_external_research_routes(
                     value, actor_id=str(identity.agent_id),
                 ),
                 max_bytes=262144,
+            )
+        except Exception as exc:
+            return agent_error(exc)
+
+    @app.post(
+        "/api/machine/v1/agent/external-independent-research/notification-claim",
+        operation_id="claim_agent_external_independent_notification",
+    )
+    def external_independent_notification_claim(
+        req: ExternalNotificationClaimReq, request: Request,
+    ):
+        try:
+            from application.external_research import ExternalIndependentResearchService
+
+            identity = request.state.agent_identity
+            return agent_result(
+                ExternalIndependentResearchService().claim_notification(
+                    idempotency_key=req.idempotency_key,
+                    overlay_id=req.overlay_id,
+                    actor_id=str(identity.agent_id),
+                )
             )
         except Exception as exc:
             return agent_error(exc)

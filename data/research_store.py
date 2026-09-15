@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "14"
+SCHEMA_VERSION = "15"
 
 
 def _json(value) -> str:
@@ -386,6 +386,13 @@ class ResearchStore:
                 evaluated_at TEXT NOT NULL,
                 PRIMARY KEY(overlay_id,symbol,horizon_days)
             )""",
+            """CREATE TABLE IF NOT EXISTS external_research_submissions (
+                idempotency_key TEXT PRIMARY KEY, channel TEXT NOT NULL,
+                overlay_id TEXT NOT NULL UNIQUE, request_hash TEXT NOT NULL,
+                notification_status TEXT NOT NULL,
+                notification_consumed_at TEXT, actor_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
             "CREATE INDEX IF NOT EXISTS idx_external_evidence_decision ON external_research_evidence(channel,decision_as_of)",
             "CREATE INDEX IF NOT EXISTS idx_external_overlay_latest ON external_independent_overlays(channel,ranking_locked_at)",
             "CREATE INDEX IF NOT EXISTS idx_external_outcomes_horizon ON external_overlay_outcomes(horizon_days,decision_as_of)",
@@ -553,6 +560,11 @@ class ResearchStore:
             "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
             "ON CONFLICT(version) DO NOTHING",
             ("14-external-independent-research", datetime.now().astimezone().isoformat()),
+        )
+        cur.execute(
+            "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
+            "ON CONFLICT(version) DO NOTHING",
+            ("15-external-report-idempotency", datetime.now().astimezone().isoformat()),
         )
 
     def _promote_legacy_master(self, cur) -> Optional[str]:

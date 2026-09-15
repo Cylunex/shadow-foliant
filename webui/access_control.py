@@ -221,6 +221,7 @@ _add(
     "/api/machine/v1/agent/selection-runs",
     "/api/machine/v1/agent/backtest-runs",
     "/api/machine/v1/agent/external-independent-research",
+    "/api/machine/v1/agent/external-independent-research/notification-claim",
     "/api/machine/v1/agent/nexus/reviews",
     "/api/machine/v1/agent/nexus/commands",
     "/api/machine/v1/agent/nexus/reviews/{review_id}/commit",
@@ -248,6 +249,8 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/v1/agent/scheduled-snapshot"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/external-independent-research"): "stock.research",
     ("POST", "/api/machine/v1/agent/external-independent-research"): "stock.research",
+    ("POST", "/api/machine/v1/agent/external-independent-research/notification-claim"):
+        "stock.research",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "stock.portfolio.write",
     ("POST", "/api/machine/v1/agent/nexus/commands"): "stock.portfolio.write",
@@ -279,6 +282,8 @@ MACHINE_CAPABILITIES = {
     ("GET", "/api/machine/v1/agent/scheduled-snapshot"): "foliant.scheduled-report.read",
     ("GET", "/api/machine/v1/agent/external-independent-research"): "foliant.selection.read",
     ("POST", "/api/machine/v1/agent/external-independent-research"):
+        "foliant.selection.preview",
+    ("POST", "/api/machine/v1/agent/external-independent-research/notification-claim"):
         "foliant.selection.preview",
     ("GET", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.write",
     ("POST", "/api/machine/v1/agent/nexus/reviews"): "foliant.trades.draft",

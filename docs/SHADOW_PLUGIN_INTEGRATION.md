@@ -52,6 +52,11 @@ Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 c
 reference 不混算，行情对 TOP15 与持仓并集只调用一次批量入口。该工具不发送通知、不触发任务、
 不交易；仓库外 CLI 的 `--send-qq` 才会显式调用既有 `notification_router`。
 
+外部独立研究随同一份 QQ 报告发送时，CLI 使用独立 writer token 和
+`--external-bundle <json>` 先提交严格 schema，再用 scheduled-report 只读 token 读取已合并
+overlay 的生产快照。bundle 不接受持仓、命令或交易动作；幂等键绑定请求内容，通知前一次性
+claim 保证调度重试不会重复发送。盘后组合风险、持仓复盘和次日计划共用同一当日收盘价格快照。
+
 ## 成交录入
 
 股票成交录入是 Stock Web 的 `stock-admins` 能力：

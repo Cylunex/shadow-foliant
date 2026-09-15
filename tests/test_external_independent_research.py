@@ -128,6 +128,7 @@ def _bundle(*, decision=NOW, with_evidence=True, proposal=True):
     }] if proposal else []
     return {
         "channel": CHANNEL,
+        "idempotency_key": f"ext-{decision.strftime('%Y%m%d%H%M%S')}",
         "selection_run_id": RUN_ID,
         "decision_as_of": decision.isoformat(),
         "market_regime": "sideways",
@@ -171,6 +172,7 @@ def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_pa
 
     assert result["status"] == "complete"
     assert data["overlay"]["base_strategy_version"] == "codex-independent-v1"
+    assert data["overlay"]["idempotency_key"] == bundle["idempotency_key"]
     assert {row["symbol"] for row in data["overlay"]["top15"]} == set(BASE_SYMBOLS)
     assert data["overlay"]["top5"][0]["symbol"] == BASE_SYMBOLS[0]
     assert data["overlay"]["top15"][-1]["risk_veto"] is True
@@ -195,6 +197,49 @@ def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_pa
     assert {
         name: value["payload_hash"] for name, value in after["artifacts"].items()
     } == before_hashes
+
+
+def test_submission_is_idempotent_and_notification_is_claimed_once(tmp_path):
+    store, service = _service(tmp_path)
+    bundle = _bundle(proposal=False)
+    first = service.save(bundle, actor_id="research-agent")
+    overlay_id = first["data"]["overlay"]["overlay_id"]
+
+    later = ExternalIndependentResearchService(
+        store=store, clock=lambda: NOW + timedelta(hours=1),
+    )
+    replay = later.save(bundle, actor_id="research-agent")
+    assert replay["data"]["idempotency"] == {
+        "key": bundle["idempotency_key"], "replayed": True,
+        "notification_status": "pending",
+    }
+    first_claim = service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        actor_id="research-agent",
+    )
+    second_claim = service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        actor_id="research-agent",
+    )
+    assert first_claim["should_send"] is True
+    assert second_claim["should_send"] is False
+    with pytest.raises(PermissionError, match="external_submission_actor_mismatch"):
+        service.claim_notification(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            actor_id="other-research-agent",
+        )
+
+    changed = dict(bundle)
+    changed["market_regime"] = "bear"
+    with pytest.raises(ValueError, match="external_idempotency_key_conflict"):
+        later.save(changed, actor_id="research-agent")
+
+    conn = store.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM external_research_submissions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM external_independent_overlays").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_pit_rejects_historical_rank_and_post_decision_evidence_atomically(tmp_path):
@@ -343,6 +388,9 @@ def test_machine_contract_is_strict_and_requires_research_preview_capability():
     ) == 2
     assert access_source.count(
         '("POST", "/api/machine/v1/agent/external-independent-research")'
+    ) == 2
+    assert access_source.count(
+        '("POST", "/api/machine/v1/agent/external-independent-research/notification-claim")'
     ) == 2
     assert '"foliant.selection.read"' in access_source
     assert '"foliant.selection.preview"' in access_source

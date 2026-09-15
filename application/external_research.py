@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import json
 import math
+import re
 from typing import Any, Callable
 
 from application.results import clean_json, now_iso, payload_hash, provenance, tool_result
@@ -18,13 +19,14 @@ from analysis.independent_selector import artifact_payload as independent_artifa
 CHANNEL = "codex-external-independent-v1"
 SOURCE_TYPES = {"announcement", "policy", "macro", "industry", "news"}
 CONTROVERSY_STATUSES = {"confirmed", "unresolved", "disputed"}
-MARKET_REGIMES = {"bull", "sideways", "bear", "unknown"}
+MARKET_REGIMES = {"bull", "sideways", "bear", "risk_off", "unknown"}
 HORIZONS = (1, 3, 5, 10, 20)
 MIN_EVENT_ADJUSTMENT = -15.0
 MAX_EVENT_ADJUSTMENT = 8.0
 MIN_TUNING_SAMPLES = 20
 MIN_TUNING_WEEKS = 4
 CONTEMPORANEOUS_GRACE = timedelta(minutes=15)
+IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
 
 def _encode(value: Any) -> str:
@@ -94,6 +96,56 @@ class ExternalIndependentResearchService:
         if len(rows) != 15:
             raise ValueError("independent_base_top15_incomplete")
         return formal, independent
+
+    @staticmethod
+    def _idempotency_key(value: Any) -> str:
+        key = str(value or "").strip()
+        if not IDEMPOTENCY_PATTERN.fullmatch(key):
+            raise ValueError("external_idempotency_key_invalid")
+        return key
+
+    def _submission_replay(
+        self, *, idempotency_key: str, request_hash: str,
+    ) -> dict[str, Any] | None:
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT s.request_hash,s.notification_status,o.payload
+                   FROM external_research_submissions s
+                   JOIN external_independent_overlays o ON o.overlay_id=s.overlay_id
+                   WHERE s.idempotency_key=? AND s.channel=?""",
+                (idempotency_key, CHANNEL),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            if str(row[0]) != request_hash:
+                raise ValueError("external_idempotency_key_conflict")
+            overlay = _decode(row[2])
+            data = {
+                "status": "ready", "channel": CHANNEL, "overlay": overlay,
+                "idempotency": {
+                    "key": idempotency_key, "replayed": True,
+                    "notification_status": str(row[1]),
+                },
+                "auto_apply": False, "auto_execution": False,
+            }
+            return tool_result(
+                summary="External independent research submission already exists.",
+                resource_uri=(
+                    f"shadow://foliant/external-independent/{overlay.get('overlay_id')}"
+                ),
+                status="complete",
+                provenance_value=provenance(
+                    run_id=overlay.get("overlay_id") or "external-independent-replay",
+                    decision_at=overlay.get("decision_as_of"),
+                    market_as_of=overlay.get("base_market_as_of"),
+                ),
+                data=data, model_payload=data,
+            )
+        finally:
+            conn.close()
 
     def _evidence(self, raw: dict[str, Any], *, decision: datetime) -> dict[str, Any]:
         allowed = {
@@ -202,13 +254,20 @@ class ExternalIndependentResearchService:
         if not actor_id:
             raise PermissionError("actor_required")
         allowed = {
-            "channel", "selection_run_id", "decision_as_of", "market_regime",
+            "channel", "idempotency_key", "selection_run_id", "decision_as_of", "market_regime",
             "external_evidence", "independent_overlay", "news_watchlist",
             "tuning_proposals",
         }
         _exact(bundle, allowed, "external_bundle")
         if bundle.get("channel") != CHANNEL:
             raise ValueError("external_channel_invalid")
+        idempotency_key = self._idempotency_key(bundle.get("idempotency_key"))
+        request_hash = payload_hash(bundle)
+        replay = self._submission_replay(
+            idempotency_key=idempotency_key, request_hash=request_hash,
+        )
+        if replay:
+            return replay
         now = self.clock()
         if now.tzinfo is None:
             raise ValueError("clock_timezone_required")
@@ -304,6 +363,7 @@ class ExternalIndependentResearchService:
         }
         overlay_id = "eio_" + payload_hash(overlay_payload)[:40]
         overlay_payload["overlay_id"] = overlay_id
+        overlay_payload["idempotency_key"] = idempotency_key
         overlay_digest = payload_hash(overlay_payload)
 
         watchlist = []
@@ -445,6 +505,21 @@ class ExternalIndependentResearchService:
                      None, created_at, None),
                 )
                 proposals.append({"proposal_id": proposal_id, **proposal})
+            cur.execute(
+                "SELECT idempotency_key FROM external_research_submissions WHERE overlay_id=?",
+                (overlay_id,),
+            )
+            overlay_submission = cur.fetchone()
+            if overlay_submission and str(overlay_submission[0]) != idempotency_key:
+                raise ValueError("external_overlay_already_registered")
+            cur.execute(
+                """INSERT INTO external_research_submissions
+                   (idempotency_key,channel,overlay_id,request_hash,notification_status,
+                    notification_consumed_at,actor_id,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (idempotency_key, CHANNEL, overlay_id, request_hash, "pending",
+                 None, actor_id, created_at),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -456,6 +531,10 @@ class ExternalIndependentResearchService:
             "status": "ready", "channel": CHANNEL, "overlay": overlay_payload,
             "evidence": evidence, "news_watchlist": watchlist,
             "tuning_proposals": proposals,
+            "idempotency": {
+                "key": idempotency_key, "replayed": False,
+                "notification_status": "pending",
+            },
             "guardrails": {
                 "membership_source": "codex-independent-v1 exact top15",
                 "event_adjustment_bounds": [MIN_EVENT_ADJUSTMENT, MAX_EVENT_ADJUSTMENT],
@@ -475,6 +554,59 @@ class ExternalIndependentResearchService:
                 market_as_of=independent.get("market_as_of"), input_manifest_id=run_id,
             ), data=data, model_payload=data,
         )
+
+    def claim_notification(
+        self, *, idempotency_key: str, overlay_id: str, actor_id: str,
+    ) -> dict[str, Any]:
+        """Consume the one allowed QQ send before delivery (at-most-once)."""
+        if not actor_id:
+            raise PermissionError("actor_required")
+        key = self._idempotency_key(idempotency_key)
+        expected_overlay = str(overlay_id or "").strip()
+        if not expected_overlay.startswith("eio_") or len(expected_overlay) != 44:
+            raise ValueError("external_overlay_id_invalid")
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            consumed_at = self.clock().isoformat(timespec="seconds")
+            cur.execute(
+                """UPDATE external_research_submissions
+                   SET notification_status='consumed',notification_consumed_at=?
+                   WHERE idempotency_key=? AND channel=? AND overlay_id=?
+                     AND actor_id=?
+                     AND notification_status='pending'""",
+                (consumed_at, key, CHANNEL, expected_overlay, actor_id),
+            )
+            claimed = max(0, int(cur.rowcount or 0)) == 1
+            if not claimed:
+                cur.execute(
+                    """SELECT overlay_id,notification_status,actor_id
+                       FROM external_research_submissions
+                       WHERE idempotency_key=? AND channel=?""",
+                    (key, CHANNEL),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("external_submission_missing")
+                if str(row[0]) != expected_overlay:
+                    raise ValueError("external_submission_overlay_mismatch")
+                if str(row[2]) != actor_id:
+                    raise PermissionError("external_submission_actor_mismatch")
+                status = str(row[1])
+            else:
+                status = "consumed"
+            conn.commit()
+            return {
+                "status": status, "idempotency_key": key,
+                "overlay_id": expected_overlay, "should_send": claimed,
+                "delivery_semantics": "at_most_once_claim_before_qq",
+                "auto_execution": False,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _outcome_summary(self, cur: Any) -> dict[str, Any]:
         cur.execute(
