@@ -39,10 +39,12 @@ class FuyaoError(RuntimeError):
     """不含响应正文与凭据的安全错误基类。"""
 
     def __init__(self, category: str, *, code: Optional[int] = None,
-                 request_id: Optional[str] = None):
+                 request_id: Optional[str] = None,
+                 http_status: Optional[int] = None):
         self.category = str(category)
         self.code = code
         self.request_id = _safe_request_id(request_id)
+        self.http_status = int(http_status) if http_status is not None else None
         suffix = f":code={code}" if code is not None else ""
         super().__init__(f"fuyao_aicubes:{self.category}{suffix}")
 
@@ -204,7 +206,8 @@ def _cache_put(key: tuple, value: dict) -> None:
 
 def _status(endpoint: str, status: str, **detail: object) -> None:
     safe = {key: value for key, value in detail.items()
-            if key in {"code", "request_id", "as_of", "rows", "latency_ms"}}
+            if key in {"code", "request_id", "as_of", "rows", "latency_ms",
+                       "failure_category", "http_status"} and value is not None}
     with _STATUS_LOCK:
         _LAST_STATUS[endpoint] = {
             "status": status,
@@ -242,10 +245,11 @@ def _request(endpoint: str, path: str, params: Optional[dict] = None,
              *, use_cache: bool = True) -> dict:
     key_value = api_key()
     if not _flag("FUYAO_AICUBES_ENABLED"):
-        _status(endpoint, "disabled")
+        _status(endpoint, "disabled", failure_category="disabled")
         raise FuyaoPermissionError("disabled")
     if not key_value:
-        _status(endpoint, "degraded")
+        _status(endpoint, "degraded", code=2001,
+                failure_category="not_configured")
         raise FuyaoAuthenticationError("not_configured", code=2001)
     normalized_params = tuple(sorted((str(k), str(v)) for k, v in (params or {}).items()))
     cache_key = (endpoint, path, normalized_params)
@@ -274,80 +278,110 @@ def _request(endpoint: str, path: str, params: Optional[dict] = None,
                     if status_code in {401, 403}:
                         error_type = (FuyaoAuthenticationError if status_code == 401
                                       else FuyaoPermissionError)
-                        raise error_type("http_permission", code=status_code)
+                        raise error_type("http_permission", code=status_code,
+                                         http_status=status_code)
                     if status_code == 429:
-                        raise FuyaoRateLimitError("http_rate_limited", code=4001)
+                        raise FuyaoRateLimitError("http_rate_limited", code=4001,
+                                                  http_status=status_code)
                     if status_code < 200 or status_code >= 300:
                         if status_code >= 500:
-                            raise FuyaoServiceError("http_status", code=status_code)
-                        raise FuyaoContractError("http_status", code=status_code)
+                            raise FuyaoServiceError("http_status", code=status_code,
+                                                    http_status=status_code)
+                        raise FuyaoContractError("http_status", code=status_code,
+                                                 http_status=status_code)
                     try:
                         payload = response.json()
                     except Exception as exc:
-                        raise FuyaoContractError("invalid_json") from exc
+                        raise FuyaoContractError(
+                            "invalid_json", http_status=status_code
+                        ) from exc
                     if not isinstance(payload, dict) or not isinstance(payload.get("code"), int):
-                        raise FuyaoContractError("invalid_envelope")
+                        raise FuyaoContractError(
+                            "invalid_envelope", http_status=status_code
+                        )
                     code = int(payload["code"])
                     request_id = _safe_request_id(payload.get("request_id"))
                     if code == 2001:
                         raise FuyaoAuthenticationError("authentication", code=code,
-                                                       request_id=request_id)
+                                                       request_id=request_id,
+                                                       http_status=status_code)
                     if code == 2003:
                         raise FuyaoPermissionError("permission", code=code,
-                                                   request_id=request_id)
+                                                   request_id=request_id,
+                                                   http_status=status_code)
                     if code in _EMPTY_CODES:
-                        _status(endpoint, "degraded", code=code, request_id=request_id)
+                        _status(endpoint, "degraded", code=code, request_id=request_id,
+                                failure_category="empty_business_result",
+                                http_status=status_code)
                         return {"code": code, "request_id": request_id, "data": None}
                     if code == 4001:
                         raise FuyaoRateLimitError("business_rate_limited", code=code,
-                                                  request_id=request_id)
+                                                  request_id=request_id,
+                                                  http_status=status_code)
                     if code in {5001, 5002, 5003}:
                         raise FuyaoServiceError("upstream_unavailable", code=code,
-                                                request_id=request_id)
+                                                request_id=request_id,
+                                                http_status=status_code)
                     if code != 0:
                         raise FuyaoContractError("business_error", code=code,
-                                                 request_id=request_id)
+                                                 request_id=request_id,
+                                                 http_status=status_code)
                     data = payload.get("data")
                     if data is not None and not isinstance(data, dict):
-                        raise FuyaoContractError("invalid_data", request_id=request_id)
+                        raise FuyaoContractError(
+                            "invalid_data", request_id=request_id,
+                            http_status=status_code,
+                        )
                     safe_payload = {"code": 0, "request_id": request_id,
                                     "data": dict(data or {})}
                     elapsed = round((time.monotonic() - started) * 1000)
                     _status(endpoint, "ok", request_id=request_id,
                             rows=len((safe_payload["data"].get("item") or [])),
-                            latency_ms=elapsed)
+                            latency_ms=elapsed, http_status=status_code)
                     if use_cache:
                         _cache_put(cache_key, safe_payload)
                     return safe_payload
                 except (_PERMISSION_ERROR_TYPES) as exc:
                     _status(endpoint, "degraded", code=exc.code,
-                            request_id=exc.request_id)
+                            request_id=exc.request_id,
+                            failure_category=exc.category,
+                            http_status=exc.http_status)
                     raise
                 except (FuyaoRateLimitError, FuyaoServiceError) as exc:
                     last_error = exc
                     _status(endpoint, "degraded", code=exc.code,
-                            request_id=exc.request_id)
+                            request_id=exc.request_id,
+                            failure_category=exc.category,
+                            http_status=exc.http_status)
                     if attempt >= contract.retries:
                         raise
                     time.sleep(_retry_delay(attempt, response))
+                except FuyaoError as exc:
+                    _status(endpoint, "degraded", code=exc.code,
+                            request_id=exc.request_id,
+                            failure_category=exc.category,
+                            http_status=exc.http_status)
+                    raise
                 except Exception as exc:
                     # A requests exception string can contain URL parameters.
                     if exc.__class__.__name__ in {
                         "Timeout", "ConnectTimeout", "ReadTimeout", "ConnectionError"
                     }:
                         last_error = FuyaoServiceError("transport_unavailable")
-                        _status(endpoint, "degraded")
+                        _status(endpoint, "degraded",
+                                failure_category="transport_unavailable")
                         if attempt < contract.retries:
                             time.sleep(_retry_delay(attempt, response))
                             continue
                         raise last_error from None
                     last_error = exc
-                    _status(endpoint, "degraded")
+                    _status(endpoint, "degraded", failure_category="unexpected_error")
                     raise
     except FuyaoError:
         raise
     except Exception:
-        _status(endpoint, "degraded")
+        _status(endpoint, "degraded",
+                failure_category="source_admission_or_unexpected_error")
         raise
     raise last_error or FuyaoServiceError("unavailable")
 
@@ -362,7 +396,7 @@ def _safe_call(endpoint: str, path: str, params: Optional[dict] = None,
     except FuyaoError:
         return None
     except Exception:
-        _status(endpoint, "degraded")
+        _status(endpoint, "degraded", failure_category="unexpected_error")
         return None
 
 
