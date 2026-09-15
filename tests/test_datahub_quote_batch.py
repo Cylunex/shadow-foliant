@@ -19,6 +19,7 @@ def test_partial_provider_batch_continues_for_missing_fund_and_preserves_batch_t
 
     with patch.object(datahub, "_route", side_effect=route), \
             patch.object(datahub, "_name_remember"), \
+            patch.object(datahub, "_fuyao_available", return_value=False), \
             patch.object(datahub, "_zzshare_available", return_value=False), \
             patch.object(datahub, "_eltdx_available", return_value=False), \
             patch.object(datahub, "_tdx_python_available", return_value=False), \
@@ -48,6 +49,7 @@ def test_atomic_quote_sources_remain_available_when_composite_bucket_is_empty():
 
     with patch.object(datahub, "_route", side_effect=route), \
             patch.object(datahub, "_name_remember"), \
+            patch.object(datahub, "_fuyao_available", return_value=False), \
             patch.object(datahub, "_zzshare_available", return_value=False), \
             patch.object(datahub, "_eltdx_available", return_value=False), \
             patch.object(datahub, "_tdx_python_available", return_value=False), \
