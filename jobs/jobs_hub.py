@@ -1147,10 +1147,10 @@ def task_strategy_policy_weekly():
 
 
 def task_eod_outcomes():
-    """🎯 盘后后验合并(18:50 起)—— 推荐池与决策信号后验:
+    """🎯 盘后后验合并(18:50 起)—— 推荐池、信号与外部独立研究后验:
     收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
     ②决策信号过 horizon 判 hit/miss(run_outcomes)。正式选股后验在 18:05 研究行情入库后更新。
-    盘后链。两段各自 try 包裹:一段失败不拖另一段。开关 eod_outcomes(默认开)。非交易日跳过。"""
+    盘后链。四段各自 try 包裹:一段失败不拖其他段。开关 eod_outcomes(默认开)。非交易日跳过。"""
     job = 'eod_outcomes'
     try:
         from automation_config import is_enabled
@@ -1192,10 +1192,21 @@ def task_eod_outcomes():
     except Exception as e:
         fails += 1
         parts.append(f"decision_loop_err={type(e).__name__}")
-    # 两段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则推荐池回填/信号后验
+    try:
+        from application.external_research import ExternalIndependentResearchService
+
+        external = ExternalIndependentResearchService().settle_outcomes()
+        parts.append(
+            f"external: matured={external.get('inserted', 0)} "
+            f"pending={external.get('pending', 0)}"
+        )
+    except Exception as e:
+        fails += 1
+        parts.append(f"external_err={type(e).__name__}")
+    # 所有分段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则各后验
     # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
-    # 单段失败仍记 success(两段隔离是有意设计,另一段照常工作)。
-    _log_run(job, 'error' if fails >= 3 else 'success', error=' | '.join(parts),
+    # 单段失败仍记 success(分段隔离是有意设计,其他段照常工作)。
+    _log_run(job, 'error' if fails >= 4 else 'success', error=' | '.join(parts),
              started_at=started, finished_at=datetime.now().isoformat(), notify=False)
 
 

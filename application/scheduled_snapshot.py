@@ -270,6 +270,7 @@ class ScheduledSnapshotService:
         capsule_reader: Callable[[], dict[str, Any] | None] | None = None,
         intraday_reader: Callable[[], dict[str, Any]] | None = None,
         intraday_projector: Callable[..., dict[str, Any]] | None = None,
+        external_research_reader: Callable[[], dict[str, Any]] | None = None,
         quote_loader: Callable[[list[str]], dict[str, Any]] | None = None,
         job_runs_reader: Callable[..., list[dict[str, Any]]] | None = None,
         outcome_stats_reader: Callable[..., dict[str, Any]] | None = None,
@@ -285,6 +286,7 @@ class ScheduledSnapshotService:
         self.capsule_reader = capsule_reader
         self.intraday_reader = intraday_reader
         self.intraday_projector = intraday_projector
+        self.external_research_reader = external_research_reader
         self.quote_loader = quote_loader
         self.job_runs_reader = job_runs_reader
         self.outcome_stats_reader = outcome_stats_reader
@@ -360,6 +362,12 @@ class ScheduledSnapshotService:
             from jobs.intraday_decision_monitor import latest_snapshot
 
             self.intraday_reader = latest_snapshot
+        if self.external_research_reader is None:
+            from application.external_research import ExternalIndependentResearchService
+
+            self.external_research_reader = ExternalIndependentResearchService(
+                store=self.store
+            ).latest_data
         if self.quote_loader is None:
             import datahub
 
@@ -722,6 +730,64 @@ class ScheduledSnapshotService:
         })
 
     @staticmethod
+    def _external_research(
+        raw: dict[str, Any], *, formal: dict[str, Any], independent: dict[str, Any],
+        wencai: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = clean_json(raw or {})
+        overlay = raw.get("overlay") or {}
+        current = bool(
+            raw.get("status") == "ready"
+            and overlay.get("selection_run_id") == formal.get("run_id")
+            and overlay.get("base_strategy_version") == independent.get("strategy_version")
+            and overlay.get("base_input_snapshot_id") == independent.get("input_snapshot_id")
+        )
+        external_top15 = [_candidate(row) | {
+            "base_rank": row.get("base_rank"),
+            "base_score": row.get("base_score"),
+            "event_adjustment": row.get("event_adjustment"),
+            "risk_veto": bool(row.get("risk_veto")),
+            "final_score": row.get("final_score"),
+            "evidence_ids": list(row.get("evidence_ids") or [])[:100],
+        } for row in (overlay.get("top15") or [])][:15]
+        formal_top5 = {str(row.get("symbol") or "") for row in formal.get("formal_top5") or []}
+        independent_top5 = {
+            str(row.get("symbol") or "") for row in independent.get("top5") or []
+        }
+        external_top5 = {str(row.get("symbol") or "") for row in external_top15[:5]}
+        wencai_top = {
+            str(row.get("symbol") or "")
+            for group in wencai.get("strategies") or []
+            for row in group.get("picks") or []
+        } if int(wencai.get("ready_groups") or 0) == len(EXPECTED_WENCAI_STRATEGIES) else set()
+        comparison = {
+            "formal_external_top5": sorted(formal_top5 & external_top5),
+            "independent_external_top5": sorted(independent_top5 & external_top5),
+            "wencai_external_top5": sorted(wencai_top & external_top5) if wencai_top else None,
+        }
+        return clean_json({
+            "status": "complete" if current else "stale" if overlay else "missing",
+            "channel": raw.get("channel") or "codex-external-independent-v1",
+            "selection_run_id": overlay.get("selection_run_id"),
+            "decision_as_of": overlay.get("decision_as_of"),
+            "ranking_locked_at": overlay.get("ranking_locked_at"),
+            "market_regime": overlay.get("market_regime"),
+            "top15": external_top15,
+            "top5": external_top15[:5],
+            "evidence": list(raw.get("evidence") or [])[:100],
+            "news_watchlist": list(raw.get("news_watchlist") or [])[:100],
+            "tuning_proposals": list(raw.get("tuning_proposals") or [])[:50],
+            "outcomes": raw.get("outcomes") or {"buckets": []},
+            "comparison": comparison,
+            "identity_boundary": overlay.get("identity_boundary"),
+            "formal_membership_unchanged": True,
+            "external_can_create_execution_price": False,
+            "human_review_required": True,
+            "auto_apply": False,
+            "auto_execution": False,
+        })
+
+    @staticmethod
     def _holdings_review(
         *, due: bool, trading_day: dict[str, Any], holdings: list[dict[str, Any]],
         quote_rows: list[dict[str, Any]], plans: dict[str, dict[str, Any]],
@@ -1052,6 +1118,11 @@ class ScheduledSnapshotService:
                 "formal_selection": {"status": "missing", "formal_top15": [], "formal_top5": []},
                 "independent_selection": {"status": "missing", "top15": [], "top5": []},
                 "wencai_reference": {"status": "missing", "reference_only": True, "strategies": []},
+                "external_independent_research": {
+                    "status": "missing", "channel": "codex-external-independent-v1",
+                    "top15": [], "top5": [], "news_watchlist": [],
+                    "tuning_proposals": [], "auto_apply": False, "auto_execution": False,
+                },
                 "holdings": {"status": "missing", "rows": []},
                 "trade_plans": {
                     "status": "missing", "formal": [], "portfolio_risk": {},
@@ -1101,6 +1172,17 @@ class ScheduledSnapshotService:
         source_comparison = self._source_comparison(
             selection_value, formal, independent, wencai,
         )
+        try:
+            external_raw = self.external_research_reader() or {}
+        except Exception:
+            external_raw = {"status": "missing"}
+        external_research = self._external_research(
+            external_raw, formal=formal, independent=independent, wencai=wencai,
+        )
+        source_comparison["availability"]["external_independent"] = (
+            external_research.get("status") == "complete"
+        )
+        source_comparison["external_top5"] = external_research.get("comparison")
 
         try:
             context = self.context_reader() or {"holdings": [], "watermark": ""}
@@ -1437,6 +1519,7 @@ class ScheduledSnapshotService:
             "formal_selection": formal.get("status"),
             "independent_selection": independent.get("status"),
             "wencai_reference": wencai.get("status"),
+            "external_independent_research": external_research.get("status"),
             "holdings": holdings.get("status"),
             "trade_plans": trade_plans.get("status"),
             "quotes": quotes.get("status"),
@@ -1446,7 +1529,7 @@ class ScheduledSnapshotService:
             "source_comparison": source_comparison.get("status"),
             "strategy_adjustment_proposals": adjustment_proposals.get("status"),
         }
-        optional_sections = {"wencai_reference"}
+        optional_sections = ("wencai_reference", "external_independent_research")
         pending_allowed = {
             "post_close_review", "holdings_review", "next_session_plan",
             "strategy_adjustment_proposals",
@@ -1471,6 +1554,7 @@ class ScheduledSnapshotService:
             "formal_selection": formal,
             "independent_selection": independent,
             "wencai_reference": wencai,
+            "external_independent_research": external_research,
             "holdings": holdings,
             "trade_plans": trade_plans,
             "quotes": quotes,
@@ -1485,6 +1569,7 @@ class ScheduledSnapshotService:
                 "formal_selection": formal.get("selection_date"),
                 "independent_selection": independent.get("market_as_of"),
                 "wencai": wencai.get("as_of"),
+                "external_independent_research": external_research.get("decision_as_of"),
                 "holdings": holdings.get("as_of"),
                 "quotes": quotes.get("as_of"),
                 "post_close_review": (

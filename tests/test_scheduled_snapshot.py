@@ -127,6 +127,7 @@ def build_service(
         "portfolio_comparison": {"matured_runs": 0, "avg_satellite_marginal_pct": None},
         "evidence_snapshot_id": "empty-evidence",
     },
+    external_research_reader=lambda: {"status": "missing"},
 ):
     def quotes(symbols):
         if quote_spy is not None:
@@ -164,6 +165,7 @@ def build_service(
         job_runs_reader=job_runs_reader,
         outcome_stats_reader=outcome_stats_reader,
         strategy_evidence_reader=strategy_evidence_reader,
+        external_research_reader=external_research_reader,
         cash_reader=cash_reader,
         security_metadata_reader=security_metadata_reader,
         clock=clock,
@@ -193,6 +195,63 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert [row["name"] for row in snapshot["wencai_reference"]["strategies"]] == [
         "低价擒牛", "低估值", "主力资金", "小市值", "净利增长",
     ]
+
+
+def test_external_research_is_optional_current_overlay_and_never_a_price_authority():
+    rows = [{
+        "symbol": f"600{i:03d}", "name": f"独立{i}", "rank": i,
+        "base_rank": i, "base_score": 100 - i,
+        "event_adjustment": 8 if i == 5 else 0,
+        "risk_veto": False, "final_score": 108 - i if i == 5 else 100 - i,
+        "evidence_ids": ["ere-1"] if i == 5 else [],
+    } for i in range(1, 16)]
+    rows.sort(key=lambda row: (-row["final_score"], row["symbol"]))
+    external = {
+        "status": "ready", "channel": "codex-external-independent-v1",
+        "overlay": {
+            "selection_run_id": "formal-run",
+            "base_strategy_version": "codex-independent-v1",
+            "base_input_snapshot_id": "independent-snapshot",
+            "decision_as_of": NOW.isoformat(), "ranking_locked_at": NOW.isoformat(),
+            "market_regime": "sideways", "top15": rows,
+            "identity_boundary": "independent-only", "price_authority": "none",
+        },
+        "evidence": [{"evidence_id": "ere-1", "source_type": "announcement"}],
+        "news_watchlist": [{"symbol": "300001", "status": "observation_only"}],
+        "tuning_proposals": [], "outcomes": {"buckets": []},
+    }
+
+    result = build_service(external_research_reader=lambda: external).read(
+        owner_id="scheduled-agent"
+    )["data"]
+    projected = result["external_independent_research"]
+    assert projected["status"] == "complete"
+    assert len(projected["top15"]) == 15
+    assert projected["top5"][0]["symbol"] == "600005"
+    assert projected["formal_membership_unchanged"] is True
+    assert projected["external_can_create_execution_price"] is False
+    assert projected["auto_apply"] is False
+    assert projected["auto_execution"] is False
+    assert result["source_comparison"]["availability"]["external_independent"] is True
+    assert result["quality"]["status"] == "complete"
+
+
+def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():
+    external = {
+        "status": "ready", "channel": "codex-external-independent-v1",
+        "overlay": {
+            "selection_run_id": "formal-run",
+            "base_strategy_version": "codex-independent-v1",
+            "base_input_snapshot_id": "different-snapshot",
+            "decision_as_of": NOW.isoformat(), "top15": [],
+        },
+    }
+    result = build_service(external_research_reader=lambda: external).read(
+        owner_id="scheduled-agent"
+    )["data"]
+    assert result["external_independent_research"]["status"] == "stale"
+    assert result["quality"]["status"] == "complete"
+    assert "external_independent_research" in result["quality"]["optional_degradations"]
 
 
 def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():
@@ -513,6 +572,7 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     assert snapshot["source_comparison"]["status"] == "complete"
     assert snapshot["source_comparison"]["availability"] == {
         "formal": True, "independent": True, "wencai": True,
+        "external_independent": False,
     }
     assert snapshot["post_close_review"]["holdings_review_status"] == "complete"
     assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
@@ -559,7 +619,9 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
         assert snapshot["phase"] == phase
         assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == binding
         assert snapshot["trade_plans"]["current_authority"] == authority
-        assert snapshot["quality"]["optional_degradations"] == ["wencai_reference"]
+        assert snapshot["quality"]["optional_degradations"] == [
+            "wencai_reference", "external_independent_research",
+        ]
         assert snapshot["trade_plans"]["cash_policy"]["buy_side"]["status"] == "blocked"
         assert snapshot["trade_plans"]["cash_policy"]["sell_side"]["status"] == "available"
         assert "trade_plans" not in snapshot["quality"]["blocking_sections"]

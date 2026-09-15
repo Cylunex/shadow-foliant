@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "13"
+SCHEMA_VERSION = "14"
 
 
 def _json(value) -> str:
@@ -351,6 +351,44 @@ class ResearchStore:
                 validation_status TEXT NOT NULL, validation_reason TEXT,
                 applied_policy_hash TEXT, created_at TEXT NOT NULL, applied_at TEXT
             )""",
+            """CREATE TABLE IF NOT EXISTS external_research_evidence (
+                evidence_id TEXT PRIMARY KEY, channel TEXT NOT NULL,
+                source_url TEXT NOT NULL, source_type TEXT NOT NULL,
+                published_at TEXT NOT NULL, event_at TEXT, captured_at TEXT NOT NULL,
+                decision_as_of TEXT NOT NULL, symbols TEXT NOT NULL,
+                industries TEXT NOT NULL, direction REAL NOT NULL,
+                confidence REAL NOT NULL, expiry TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL, primary_source_confirmed INTEGER NOT NULL,
+                controversy_status TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL, actor_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(channel,dedupe_key)
+            )""",
+            """CREATE TABLE IF NOT EXISTS external_independent_overlays (
+                overlay_id TEXT PRIMARY KEY, channel TEXT NOT NULL,
+                selection_run_id TEXT NOT NULL, base_strategy_version TEXT NOT NULL,
+                decision_as_of TEXT NOT NULL, ranking_locked_at TEXT NOT NULL,
+                market_regime TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL, actor_id TEXT NOT NULL, created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS external_news_watchlist (
+                watch_id TEXT PRIMARY KEY, channel TEXT NOT NULL,
+                selection_run_id TEXT NOT NULL, decision_as_of TEXT NOT NULL,
+                symbol TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                payload TEXT NOT NULL, actor_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(channel,selection_run_id,decision_as_of,symbol)
+            )""",
+            """CREATE TABLE IF NOT EXISTS external_overlay_outcomes (
+                overlay_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                horizon_days INTEGER NOT NULL, decision_as_of TEXT NOT NULL,
+                market_regime TEXT NOT NULL, base_score REAL NOT NULL,
+                event_adjustment REAL NOT NULL, risk_veto INTEGER NOT NULL,
+                return_pct REAL, outcome_status TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                PRIMARY KEY(overlay_id,symbol,horizon_days)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_external_evidence_decision ON external_research_evidence(channel,decision_as_of)",
+            "CREATE INDEX IF NOT EXISTS idx_external_overlay_latest ON external_independent_overlays(channel,ranking_locked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_external_outcomes_horizon ON external_overlay_outcomes(horizon_days,decision_as_of)",
             "CREATE INDEX IF NOT EXISTS idx_research_bars_date ON research_daily_bars(trade_date)",
             "CREATE INDEX IF NOT EXISTS idx_market_observation_identity ON research_market_observations(dataset_id,symbol,trade_date,adjustment)",
             "CREATE INDEX IF NOT EXISTS idx_research_fund_flow_date ON research_fund_flow_daily(trade_date,main_net_inflow)",
@@ -511,6 +549,11 @@ class ResearchStore:
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
             )
+        cur.execute(
+            "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
+            "ON CONFLICT(version) DO NOTHING",
+            ("14-external-independent-research", datetime.now().astimezone().isoformat()),
+        )
 
     def _promote_legacy_master(self, cur) -> Optional[str]:
         """Idempotently publish the newest complete V2 master as a V5 snapshot."""
