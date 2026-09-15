@@ -57,7 +57,9 @@ _COOLDOWN_FAILS = 2        # 连续失败达到此数 → 进入冷却(排到最
 
 
 class _Stat:
-    __slots__ = ('ok', 'fail', 'lat_sum', 'lat_n', 'last_ok', 'last_fail', 'streak_fail')
+    __slots__ = ('ok', 'fail', 'lat_sum', 'lat_n', 'last_ok', 'last_fail',
+                 'streak_fail', 'failure_code', 'failure_category',
+                 'http_status', 'request_id')
 
     def __init__(self):
         self.ok = 0
@@ -67,6 +69,10 @@ class _Stat:
         self.last_ok = 0.0
         self.last_fail = 0.0
         self.streak_fail = 0
+        self.failure_code = None
+        self.failure_category = None
+        self.http_status = None
+        self.request_id = None
 
 
 _STATS: Dict[str, _Stat] = {}
@@ -97,7 +103,7 @@ def _health(key: str, now: float) -> float:
     return score
 
 
-def _record(key: str, ok: bool, latency: float):
+def _record(key: str, ok: bool, latency: float, diagnostic: dict = None):
     s = _STATS.get(key)
     if s is None:
         s = _STATS[key] = _Stat()
@@ -112,6 +118,37 @@ def _record(key: str, ok: bool, latency: float):
         s.fail += 1
         s.last_fail = now
         s.streak_fail += 1
+        diagnostic = diagnostic or {}
+        s.failure_code = diagnostic.get('code')
+        s.failure_category = diagnostic.get('failure_category')
+        s.http_status = diagnostic.get('http_status')
+        s.request_id = diagnostic.get('request_id')
+
+
+def _failure_diagnostic(capability: str, source: str) -> dict:
+    """Return allowlisted, non-secret provider diagnostics for routing telemetry."""
+    if source != 'fuyao_aicubes':
+        return {}
+    endpoint = {
+        'quotes': 'snapshot',
+        'kline': 'historical',
+        'kline_qfq': 'historical',
+        'financials': 'financials',
+        'valuation': 'valuation',
+    }.get(capability)
+    if not endpoint:
+        return {}
+    try:
+        from data.sources import fuyao_aicubes as _source
+        status = ((_source.capability_status().get('capabilities') or {})
+                  .get(endpoint) or {})
+    except Exception:
+        return {}
+    return {
+        key: status.get(key)
+        for key in ('code', 'failure_category', 'http_status', 'request_id')
+        if status.get(key) is not None
+    }
 
 
 import os as _os_route
@@ -195,7 +232,8 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
             if fut.cancel():
                 with _ROUTE_INFLIGHT_LOCK:
                     _ROUTE_INFLIGHT.discard(key)
-            _record(key, False, _time.time() - t0)
+            _record(key, False, _time.time() - t0,
+                    {'failure_category': 'route_timeout'})
             _t = _time.time()
             if _t - _TO_LOG_LAST.get(key, 0) >= _TO_LOG_GAP:
                 _TO_LOG_LAST[key] = _t
@@ -205,10 +243,13 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
             if fut is None or fut.done():
                 with _ROUTE_INFLIGHT_LOCK:
                     _ROUTE_INFLIGHT.discard(key)
-            _record(key, False, _time.time() - t0)
+            _record(key, False, _time.time() - t0,
+                    _failure_diagnostic(capability, name)
+                    or {'failure_category': 'route_exception'})
             continue
         good = (not v.empty) if isinstance(v, pd.DataFrame) else bool(v)
-        _record(key, good, _time.time() - t0)
+        _record(key, good, _time.time() - t0,
+                None if good else _failure_diagnostic(capability, name))
         if good:
             if isinstance(v, pd.DataFrame):
                 v.attrs['datahub_route_source'] = name
@@ -229,6 +270,14 @@ def source_stats() -> Dict[str, dict]:
             'streak_fail': s.streak_fail,
             'cooling': s.streak_fail >= _COOLDOWN_FAILS and (now - s.last_fail) < _COOLDOWN_SEC,
         }
+        if s.failure_code is not None:
+            out[key]['failure_code'] = s.failure_code
+        if s.failure_category:
+            out[key]['failure_category'] = s.failure_category
+        if s.http_status is not None:
+            out[key]['http_status'] = s.http_status
+        if s.request_id:
+            out[key]['request_id'] = s.request_id
     return out
 
 

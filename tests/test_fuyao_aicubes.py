@@ -76,6 +76,7 @@ def test_quote_batch_mapping_order_and_metadata(monkeypatch):
     assert result["000001"]["adjustment"] == "raw"
     assert session.calls[0][1]["headers"]["X-api-key"] == "test-only-secret"
     assert "test-only-secret" not in repr(fuyao.capability_status())
+    assert fuyao.capability_status()["capabilities"]["snapshot"]["http_status"] == 200
 
 
 def test_batch_is_bounded_to_one_hundred_and_keeps_requested_order(monkeypatch):
@@ -106,6 +107,10 @@ def test_business_permission_errors_are_classified(monkeypatch, code, error_type
     with pytest.raises(error_type) as caught:
         fuyao._request("snapshot", "/test", use_cache=False)
     assert "must not leak" not in str(caught.value)
+    diagnostic = fuyao.capability_status()["capabilities"]["snapshot"]
+    assert diagnostic["failure_category"] in {"authentication", "permission"}
+    assert diagnostic["code"] == code
+    assert diagnostic["http_status"] == 200
 
 
 @pytest.mark.parametrize("code", [3001, 3002, 3004])
@@ -137,6 +142,9 @@ def test_transport_timeout_retries_and_surfaces_safe_error(monkeypatch):
         fuyao._request("snapshot", "/test", use_cache=False)
     assert "secret" not in str(caught.value)
     assert len(session.calls) == 3
+    assert fuyao.capability_status()["capabilities"]["snapshot"][
+        "failure_category"
+    ] == "transport_unavailable"
 
 
 def test_http_auth_is_not_retried(monkeypatch):
@@ -145,6 +153,9 @@ def test_http_auth_is_not_retried(monkeypatch):
     with pytest.raises(fuyao.FuyaoAuthenticationError):
         fuyao._request("snapshot", "/test", use_cache=False)
     assert len(session.calls) == 1
+    diagnostic = fuyao.capability_status()["capabilities"]["snapshot"]
+    assert diagnostic["http_status"] == 401
+    assert diagnostic["failure_category"] == "http_permission"
 
 
 def test_historical_mapping_adjustment_and_timezone(monkeypatch):

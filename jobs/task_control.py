@@ -901,7 +901,13 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     """Agent 的只读总览：任务健康、选股产物、持仓/推荐/信号数量和数据源状态。"""
     from agent_contract import envelope
     warnings: List[str] = []
+    degradation_reasons: List[str] = []
     data: Dict[str, Any] = {}
+
+    def warn(message: str, reason: str) -> None:
+        warnings.append(message)
+        if reason not in degradation_reasons:
+            degradation_reasons.append(reason)
 
     try:
         from automation_config import list_all
@@ -928,11 +934,11 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
             ],
         }
         if failed:
-            warnings.append(f'{len(failed)} 个任务最近一次运行失败')
+            warn(f'{len(failed)} 个任务最近一次运行失败', 'recent_task_failures')
         if disabled_core:
-            warnings.append(f'{len(disabled_core)} 个核心任务已关闭')
+            warn(f'{len(disabled_core)} 个核心任务已关闭', 'disabled_core_tasks')
     except Exception as exc:
-        warnings.append(f'任务状态读取失败: {exc}')
+        warn(f'任务状态读取失败: {exc}', 'task_status_unavailable')
 
     selection = latest_selection_artifact()
     if compact and isinstance(selection.get('data'), dict):
@@ -943,14 +949,15 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
                 selection['data'][key] = value[:8]
                 selection['data'][f'{key}_total'] = len(value)
     data['selection'] = selection
-    warnings.extend(selection.get('meta', {}).get('warnings') or [])
+    for warning in selection.get('meta', {}).get('warnings') or []:
+        warn(str(warning), 'selection_warning')
 
     try:
         from portfolio_db import portfolio_db
         data['holding_count'] = len(portfolio_db.get_all_stocks() or [])
     except Exception as exc:
         data['holding_count'] = None
-        warnings.append(f'持仓读取失败: {exc}')
+        warn(f'持仓读取失败: {exc}', 'holdings_unavailable')
 
     try:
         from ai_recommendation_monitor import list_active
@@ -960,7 +967,7 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     except Exception as exc:
         data['active_recommendations'] = []
         data['active_recommendation_count'] = None
-        warnings.append(f'推荐池读取失败: {exc}')
+        warn(f'推荐池读取失败: {exc}', 'recommendations_unavailable')
 
     try:
         from decision_signal import list_signals
@@ -970,7 +977,7 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     except Exception as exc:
         data['active_signals'] = []
         data['active_signal_count'] = None
-        warnings.append(f'决策信号读取失败: {exc}')
+        warn(f'决策信号读取失败: {exc}', 'decision_signals_unavailable')
 
     try:
         import datahub
@@ -980,24 +987,31 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
         }
     except Exception as exc:
         data['datahub'] = None
-        warnings.append(f'数据层健康度读取失败: {exc}')
+        warn(f'数据层健康度读取失败: {exc}', 'datahub_health_unavailable')
 
     try:
         from portfolio_policy import status as portfolio_policy_status
         data['portfolio_policy'] = portfolio_policy_status()
         if (data['portfolio_policy'].get('fail_closed')
                 and datetime.now().astimezone().weekday() < 5):
-            warnings.append('高仓位模式下尚无今日加仓判断，自动买入已按保守规则关闭')
+            warn('高仓位模式下尚无今日加仓判断，自动买入已按保守规则关闭',
+                 'fresh_market_add_signal_missing')
+            data['blocking_dimensions'] = [{
+                'dimension': 'fresh_market_add_signal',
+                'status': 'stale_or_missing',
+                'affected_decisions': ['new_positions', 'add_positions'],
+                'decision_boundary': 'pricing_only_no_buy_authorization',
+            }]
     except Exception as exc:
         data['portfolio_policy'] = None
-        warnings.append(f'仓位策略读取失败: {exc}')
+        warn(f'仓位策略读取失败: {exc}', 'portfolio_policy_unavailable')
 
     try:
         from llm_usage import summary as llm_usage_summary
         data['llm_telemetry'] = llm_usage_summary(days=7).get('totals')
     except Exception as exc:
         data['llm_telemetry'] = None
-        warnings.append(f'LLM 遥测读取失败: {exc}')
+        warn(f'LLM 遥测读取失败: {exc}', 'llm_telemetry_unavailable')
 
     try:
         from analysis.strategy_genome import get_live_strategy_set
@@ -1013,7 +1027,9 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
         }
     except Exception as exc:
         data['strategy_deployment'] = None
-        warnings.append(f'策略部署集读取失败: {exc}')
+        warn(f'策略部署集读取失败: {exc}', 'strategy_deployment_unavailable')
+
+    data['degradation_reasons'] = degradation_reasons
 
     return envelope(
         data,

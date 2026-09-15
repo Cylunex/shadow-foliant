@@ -19,6 +19,7 @@ def test_partial_provider_batch_continues_for_missing_fund_and_preserves_batch_t
 
     with patch.object(datahub, "_route", side_effect=route), \
             patch.object(datahub, "_name_remember"), \
+            patch.object(datahub, "_fuyao_available", return_value=False), \
             patch.object(datahub, "_zzshare_available", return_value=False), \
             patch.object(datahub, "_eltdx_available", return_value=False), \
             patch.object(datahub, "_tdx_python_available", return_value=False), \
@@ -48,6 +49,7 @@ def test_atomic_quote_sources_remain_available_when_composite_bucket_is_empty():
 
     with patch.object(datahub, "_route", side_effect=route), \
             patch.object(datahub, "_name_remember"), \
+            patch.object(datahub, "_fuyao_available", return_value=False), \
             patch.object(datahub, "_zzshare_available", return_value=False), \
             patch.object(datahub, "_eltdx_available", return_value=False), \
             patch.object(datahub, "_tdx_python_available", return_value=False), \
@@ -95,3 +97,32 @@ def test_fuyao_partial_batch_falls_through_and_priority_is_configurable():
     assert calls == ["a_stock", "fuyao_aicubes"]
     assert set(result) == {"600001", "510300"}
     assert result["600001"]["quote_time_source"] == "provider"
+
+
+def test_fuyao_route_stats_expose_only_allowlisted_failure_diagnostics():
+    from data.sources import fuyao_aicubes
+
+    datahub._STATS.clear()
+    try:
+        with patch.object(fuyao_aicubes, "capability_status", return_value={
+            "capabilities": {"snapshot": {
+                "status": "degraded",
+                "code": 5001,
+                "failure_category": "upstream_unavailable",
+                "http_status": 200,
+                "request_id": "request_safe",
+                "message": "must not leak",
+            }},
+        }):
+            diagnostic = datahub._failure_diagnostic("quotes", "fuyao_aicubes")
+        datahub._record("quotes:fuyao_aicubes", False, .2, diagnostic)
+        stats = datahub.source_stats()["quotes:fuyao_aicubes"]
+    finally:
+        datahub._STATS.clear()
+
+    assert stats["failure_code"] == 5001
+    assert stats["failure_category"] == "upstream_unavailable"
+    assert stats["http_status"] == 200
+    assert stats["request_id"] == "request_safe"
+    assert "message" not in stats
+    assert "must not leak" not in repr(stats)

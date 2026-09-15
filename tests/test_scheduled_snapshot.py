@@ -665,6 +665,87 @@ def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
     assert snapshot["status"] == "complete"
 
 
+def test_auxiliary_quote_failure_is_non_blocking_when_fallback_coverage_is_complete():
+    def provider_only_degraded_cockpit(**_kwargs):
+        return {"status": "degraded", "meta": {"as_of": NOW.isoformat()}, "data": {
+            "tasks": {"total": 47, "failed_recent": [], "disabled_core": [],
+                      "running_manual": []},
+            "holding_count": 2, "active_recommendation_count": 0,
+            "active_signal_count": 0,
+            "degradation_reasons": ["optional_quote_provider_degraded"],
+            "datahub": {"sources": {
+                "quotes:a_stock": {"ok": 2, "fail": 0, "streak_fail": 0},
+                "quotes:fuyao_aicubes": {
+                    "ok": 0, "fail": 2, "streak_fail": 2,
+                    "failure_code": 5001,
+                    "failure_category": "upstream_unavailable",
+                    "http_status": 200,
+                },
+            }},
+            "portfolio_policy": {"fail_closed": False},
+            "strategy_deployment": {},
+        }}
+
+    service = build_service()
+    service.cockpit_reader = provider_only_degraded_cockpit
+    snapshot = service.read(owner_id="scheduled-agent")["data"]
+
+    assert snapshot["quotes"]["requested_count"] == snapshot["quotes"]["available_count"]
+    assert snapshot["cockpit"]["raw_status"] == "degraded"
+    assert snapshot["cockpit"]["phase_quality_status"] == "complete"
+    assert snapshot["quality"]["sections"]["cockpit"] == "complete"
+    assert snapshot["quality"]["optional_source_degradations"] == [
+        "quotes:fuyao_aicubes",
+    ]
+    assert snapshot["cockpit"]["optional_provider_degradations"][0]["failure_code"] == 5001
+    assert snapshot["status"] == "complete"
+
+
+def test_missing_fresh_add_signal_remains_blocking_at_pricing_boundary():
+    def required_dimension_degraded_cockpit(**_kwargs):
+        return {"status": "degraded", "meta": {"as_of": NOW.isoformat()}, "data": {
+            "tasks": {"total": 47, "failed_recent": [], "disabled_core": [],
+                      "running_manual": []},
+            "holding_count": 2, "active_recommendation_count": 0,
+            "active_signal_count": 0,
+            "degradation_reasons": ["fresh_market_add_signal_missing"],
+            "blocking_dimensions": [{
+                "dimension": "fresh_market_add_signal",
+                "status": "stale_or_missing",
+                "affected_decisions": ["new_positions", "add_positions"],
+                "decision_boundary": "pricing_only_no_buy_authorization",
+            }],
+            "datahub": {"sources": {
+                "quotes:a_stock": {"ok": 2, "fail": 0, "streak_fail": 0},
+                "quotes:fuyao_aicubes": {"ok": 0, "fail": 2, "streak_fail": 2},
+            }},
+            "portfolio_policy": {
+                "fail_closed": True,
+                "market_add_signal": {"stale": True, "fresh": False},
+            },
+            "strategy_deployment": {},
+        }}
+
+    service = build_service()
+    service.cockpit_reader = required_dimension_degraded_cockpit
+    snapshot = service.read(owner_id="scheduled-agent")["data"]
+
+    assert snapshot["quality"]["blocking_sections"] == ["cockpit"]
+    assert snapshot["cockpit"]["blocking_dimensions"][0]["dimension"] == (
+        "fresh_market_add_signal"
+    )
+    assert snapshot["trade_plans"]["decision_boundary"] == {
+        "status": "pricing_only",
+        "blocking_dimensions": ["fresh_market_add_signal"],
+        "blocked_actions": ["add_positions", "new_positions"],
+        "auto_execution": False,
+    }
+    assert snapshot["quality"]["optional_source_degradations"] == [
+        "quotes:fuyao_aicubes",
+    ]
+    assert snapshot["status"] == "degraded"
+
+
 def test_unknown_cash_blocks_additions_but_keeps_reduction_preview():
     account_plan = {
         "status": "complete", "preview_only": True,

@@ -191,9 +191,44 @@ def _report_phase(now: datetime, trading_day: dict[str, Any]) -> str:
     return "post_close_review"
 
 
-def _cockpit_quality_for_phase(cockpit: dict[str, Any], phase: str) -> str:
-    """Do not let an expired intraday add gate fail a post-close report."""
+def _quote_coverage_complete(quotes: dict[str, Any] | None) -> bool:
+    quotes = quotes or {}
+    requested = int(quotes.get("requested_count") or 0)
+    available = int(quotes.get("available_count") or 0)
+    return (requested > 0 and available == requested
+            and str(quotes.get("status") or "") in {"complete", "success"})
+
+
+def _optional_quote_provider_degradations(
+        cockpit: dict[str, Any], quotes: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Report a failed auxiliary quote source without weakening coverage truth."""
+    if not _quote_coverage_complete(quotes):
+        return []
+    sources = ((cockpit.get("datahub") or {}).get("sources") or {})
+    primary = sources.get("quotes:a_stock") or {}
+    auxiliary = sources.get("quotes:fuyao_aicubes") or {}
+    if int(primary.get("ok") or 0) < 1 or int(auxiliary.get("streak_fail") or 0) < 1:
+        return []
+    return [{
+        "source": "quotes:fuyao_aicubes",
+        "role": "auxiliary",
+        "fallback_source": "quotes:a_stock",
+        "fallback_coverage": "complete",
+        "failure_code": auxiliary.get("failure_code"),
+        "failure_category": auxiliary.get("failure_category"),
+        "http_status": auxiliary.get("http_status"),
+    }]
+
+
+def _cockpit_quality_for_phase(
+        cockpit: dict[str, Any], phase: str, quotes: dict[str, Any] | None = None) -> str:
+    """Classify real blockers separately from covered auxiliary-source failures."""
     state = str(cockpit.get("status") or "missing")
+    reasons = set(cockpit.get("degradation_reasons") or [])
+    if (state == "degraded" and reasons
+            and reasons <= {"optional_quote_provider_degraded"}
+            and _quote_coverage_complete(quotes)):
+        return "complete"
     if phase not in {"post_close_pending", "post_close_review", "closed_day"}:
         return state
     tasks = cockpit.get("tasks") or {}
@@ -460,6 +495,8 @@ class ScheduledSnapshotService:
             "active_signal_count": data.get("active_signal_count"),
             "datahub": data.get("datahub"),
             "portfolio_policy": data.get("portfolio_policy"),
+            "degradation_reasons": list(data.get("degradation_reasons") or [])[:20],
+            "blocking_dimensions": list(data.get("blocking_dimensions") or [])[:20],
             "strategy_deployment": data.get("strategy_deployment"),
             "as_of": (value.get("meta") or {}).get("as_of"),
         }
@@ -1155,11 +1192,6 @@ class ScheduledSnapshotService:
         phase = _report_phase(now, trading_day)
         cockpit = self._cockpit()
         cockpit["raw_status"] = cockpit.get("status")
-        cockpit["phase_quality_status"] = _cockpit_quality_for_phase(cockpit, phase)
-        if cockpit["phase_quality_status"] != cockpit.get("status"):
-            cockpit["expected_phase_degradations"] = [
-                "intraday_market_add_signal_expired_after_close",
-            ]
         try:
             selection_value = self.selection_reader() or {}
         except Exception:
@@ -1252,6 +1284,23 @@ class ScheduledSnapshotService:
             "missing_by_asset_type": quote_quality.get("missing_by_asset_type") or {},
             "unsupported_asset_symbols": quote_quality.get("unsupported_asset_symbols") or [],
         }
+        quotes["missing_symbols"] = [
+            row["symbol"] for row in quote_rows if row.get("price") is None
+        ]
+        quotes["missing_count"] = len(quotes["missing_symbols"])
+        cockpit["optional_provider_degradations"] = (
+            _optional_quote_provider_degradations(cockpit, quotes)
+        )
+        cockpit["phase_quality_status"] = _cockpit_quality_for_phase(
+            cockpit, phase, quotes,
+        )
+        if cockpit["phase_quality_status"] != cockpit.get("status"):
+            reasons = set(cockpit.get("degradation_reasons") or [])
+            cockpit["expected_phase_degradations"] = (
+                ["auxiliary_quote_provider_failed_with_complete_fallback"]
+                if reasons == {"optional_quote_provider_degraded"} else
+                ["intraday_market_add_signal_expired_after_close"]
+            )
 
         try:
             cash_fact = self.cash_reader() or {}
@@ -1444,6 +1493,22 @@ class ScheduledSnapshotService:
                     "cash_unknown_blocks_additions_but_not_risk_reduction_preview"
                 ),
             },
+            "decision_boundary": {
+                "status": (
+                    "pricing_only"
+                    if cockpit.get("blocking_dimensions") else "preview_only"
+                ),
+                "blocking_dimensions": [
+                    row.get("dimension")
+                    for row in cockpit.get("blocking_dimensions") or []
+                ],
+                "blocked_actions": sorted({
+                    action
+                    for row in cockpit.get("blocking_dimensions") or []
+                    for action in (row.get("affected_decisions") or [])
+                }),
+                "auto_execution": False,
+            },
             "source_contracts": {
                 "position_truth": {
                     "source": "portfolio_db.action_preview_context",
@@ -1584,6 +1649,10 @@ class ScheduledSnapshotService:
                 "optional_degradations": [
                     name for name in optional_sections
                     if section_status.get(name) not in healthy_states
+                ],
+                "optional_source_degradations": [
+                    row.get("source")
+                    for row in cockpit.get("optional_provider_degradations") or []
                 ],
                 "pending_is_normal": phase == "post_close_pending",
             },
