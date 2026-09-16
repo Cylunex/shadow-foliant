@@ -34,6 +34,11 @@ weekday fallback 不进入这个合同。正式产物日期相对最近确认开
 淘汰；组合风险、持仓复盘和次日计划均绑定同一个价格批次 snapshot ID/as-of。基金仍保留在完整
 持仓报告中，但继续排除在 30 万股票预算和股票组合风险口径之外。
 
+股票现金口径固定为“30 万股票预算减非基金股票市值”。当该预算、行情与风险快照完整时，旧的
+broker/confirmed cash 仅保留为 `non_blocking_metadata`，不得令 `trade_plans` 或总体质量降级。
+若盘中动作未能绑定本次行情批次，动作权威仍标记 `stale_or_missing`，但在风险和定价完整、全程
+preview-only 的前提下作为非阻断退化单独披露。
+
 ## 通知
 
 CLI 默认 dry/no-send。`--send-qq` 只把字段白名单渲染成短报告，并显式调用

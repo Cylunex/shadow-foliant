@@ -27,6 +27,9 @@ MIN_TUNING_SAMPLES = 20
 MIN_TUNING_WEEKS = 4
 CONTEMPORANEOUS_GRACE = timedelta(minutes=15)
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+NOTIFICATION_SLOT_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00$"
+)
 
 
 def _encode(value: Any) -> str:
@@ -556,50 +559,57 @@ class ExternalIndependentResearchService:
         )
 
     def claim_notification(
-        self, *, idempotency_key: str, overlay_id: str, actor_id: str,
+        self, *, idempotency_key: str, overlay_id: str,
+        notification_slot: str, actor_id: str,
     ) -> dict[str, Any]:
-        """Consume the one allowed QQ send before delivery (at-most-once)."""
+        """Consume one QQ send per planned report slot (at-most-once per slot)."""
         if not actor_id:
             raise PermissionError("actor_required")
         key = self._idempotency_key(idempotency_key)
         expected_overlay = str(overlay_id or "").strip()
         if not expected_overlay.startswith("eio_") or len(expected_overlay) != 44:
             raise ValueError("external_overlay_id_invalid")
+        slot = str(notification_slot or "").strip()
+        if not NOTIFICATION_SLOT_PATTERN.fullmatch(slot):
+            raise ValueError("external_notification_slot_invalid")
         conn = self.store.connect()
         try:
             cur = conn.cursor()
             consumed_at = self.clock().isoformat(timespec="seconds")
             cur.execute(
-                """UPDATE external_research_submissions
-                   SET notification_status='consumed',notification_consumed_at=?
-                   WHERE idempotency_key=? AND channel=? AND overlay_id=?
-                     AND actor_id=?
-                     AND notification_status='pending'""",
-                (consumed_at, key, CHANNEL, expected_overlay, actor_id),
+                """SELECT overlay_id,actor_id FROM external_research_submissions
+                   WHERE idempotency_key=? AND channel=?""",
+                (key, CHANNEL),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("external_submission_missing")
+            if str(row[0]) != expected_overlay:
+                raise ValueError("external_submission_overlay_mismatch")
+            if str(row[1]) != actor_id:
+                raise PermissionError("external_submission_actor_mismatch")
+            cur.execute(
+                """INSERT INTO external_research_notification_claims
+                   (idempotency_key,overlay_id,notification_slot,actor_id,consumed_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(idempotency_key,notification_slot) DO NOTHING""",
+                (key, expected_overlay, slot, actor_id, consumed_at),
             )
             claimed = max(0, int(cur.rowcount or 0)) == 1
-            if not claimed:
+            if claimed:
                 cur.execute(
-                    """SELECT overlay_id,notification_status,actor_id
-                       FROM external_research_submissions
+                    """UPDATE external_research_submissions
+                       SET notification_status='consumed',notification_consumed_at=?
                        WHERE idempotency_key=? AND channel=?""",
-                    (key, CHANNEL),
+                    (consumed_at, key, CHANNEL),
                 )
-                row = cur.fetchone()
-                if not row:
-                    raise ValueError("external_submission_missing")
-                if str(row[0]) != expected_overlay:
-                    raise ValueError("external_submission_overlay_mismatch")
-                if str(row[2]) != actor_id:
-                    raise PermissionError("external_submission_actor_mismatch")
-                status = str(row[1])
-            else:
-                status = "consumed"
             conn.commit()
             return {
-                "status": status, "idempotency_key": key,
+                "status": "consumed" if claimed else "duplicate_suppressed",
+                "idempotency_key": key,
                 "overlay_id": expected_overlay, "should_send": claimed,
-                "delivery_semantics": "at_most_once_claim_before_qq",
+                "notification_slot": slot,
+                "delivery_semantics": "at_most_once_per_scheduled_slot_before_qq",
                 "auto_execution": False,
             }
         except Exception:

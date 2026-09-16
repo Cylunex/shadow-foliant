@@ -50,11 +50,18 @@ Then 服务端重算为实际数量，状态为 `evidence_insufficient`，且不
 
 CLI MUST 先提交严格的 `codex-external-independent-v1` bundle，再读取已经包含同一 overlay 的生产
 计划快照。提交 MUST 具有请求哈希绑定的幂等键、服务端 `ranking_locked_at` 和当代
-`decision_as_of`。QQ 通知 MUST 在发送前原子消费该提交的一次性 claim；相同请求重放 MUST NOT
-再次发送。外部 writer MUST NOT 因此获得私人持仓读取权限。
+`decision_as_of`。QQ 通知 MUST 在发送前按交易日和 `10:15 / 11:25 / 14:35 / 20:45` 计划时点
+原子消费 claim；同一 overlay 在同一时点重放 MUST NOT 再次发送，不同时点 MUST 相互独立。
+外部 writer MUST NOT 因此获得私人持仓读取权限。
 
 ### Scenario: 调度器重试同一外部报告
 
-Given 同一幂等键和完全相同的 bundle 已提交并已消费通知 claim
-When 调度器再次提交、读取快照并请求发送
+Given 同一幂等键和完全相同的 bundle 已提交并已消费当前计划时点的通知 claim
+When 调度器在同一计划时点再次提交、读取快照并请求发送
 Then 返回原 overlay，快照 ID 和锁定时间不变，第二次 QQ 被抑制且不生成任何交易动作。
+
+### Scenario: 同一 overlay 到达下一计划时点
+
+Given 同一 overlay 已在 10:15 成功消费通知 claim
+When 调度器在 11:25、14:35 或 20:45 请求发送
+Then 新时点各允许原子消费一次；各时点内部的重试仍被抑制。

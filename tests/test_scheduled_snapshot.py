@@ -360,7 +360,7 @@ def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():
     assert snapshot["trade_plans"]["portfolio_action_guard"]["guarded_count"] == 1
 
 
-def test_intraday_projection_failure_never_labels_persisted_actions_current():
+def test_intraday_projection_failure_is_optional_when_fixed_budget_risk_is_complete():
     old = {
         "selection_run_id": "formal-run",
         "trade_date": NOW.date().isoformat(),
@@ -373,7 +373,15 @@ def test_intraday_projection_failure_never_labels_persisted_actions_current():
     ).read(owner_id="scheduled-agent")["data"]
 
     authority = snapshot["trade_plans"]["holding_actions_authority"]
-    assert snapshot["trade_plans"]["status"] == "degraded"
+    assert snapshot["trade_plans"]["status"] == "complete"
+    assert snapshot["trade_plans"]["status_basis"] == (
+        "fixed_stock_budget_risk_and_pricing_complete"
+    )
+    assert snapshot["trade_plans"]["optional_degradations"] == [{
+        "code": "holding_actions_not_bound_to_current_quotes",
+        "affects_snapshot_quality": False,
+    }]
+    assert snapshot["quality"]["blocking_sections"] == []
     assert authority["status"] == "stale_or_missing"
     assert authority["quote_binding"] == "persisted_reference"
 
@@ -499,6 +507,25 @@ def test_user_declared_stock_budget_supersedes_legacy_cash_fact_without_enabling
     assert cash_policy["stock_budget"]["available_cash_cny"] == 297000
     assert cash_policy["broker_cash_balance"] is False
     assert cash_policy["new_or_add_positions_allowed"] is False
+
+
+def test_missing_legacy_cash_is_non_blocking_when_fixed_budget_is_complete():
+    result = build_service().read(owner_id="scheduled-agent")["data"]
+    plans = result["trade_plans"]
+    cash_policy = plans["cash_policy"]
+    cash_contract = plans["source_contracts"]["cash_balance"]
+
+    assert cash_policy["stock_budget"]["status"] == "complete"
+    assert cash_policy["legacy_cash_fact"] == {
+        "status": "missing",
+        "role": "non_blocking_metadata",
+        "affects_snapshot_quality": False,
+    }
+    assert cash_contract["legacy_confirmed_cash_fact_status"] == "missing"
+    assert cash_contract["legacy_confirmed_cash_fact_role"] == "non_blocking_metadata"
+    assert cash_contract["legacy_confirmed_cash_fact_affects_snapshot_quality"] is False
+    assert plans["status"] == "complete"
+    assert result["quality"]["blocking_sections"] == []
 
 
 def test_missing_wencai_does_not_change_formal_candidates():
@@ -1004,6 +1031,7 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     submission = {"status": "complete", "data": {"overlay": overlay}}
     snapshot = {
         "schema_version": "scheduled-agent-snapshot-v1", "status": "complete",
+        "trading_day": {"date": "2026-09-15", "status": "complete"},
         "external_independent_research": {
             "status": "complete", **overlay,
             "decision_as_of": bundle["decision_as_of"],
@@ -1018,24 +1046,57 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
         events.append(("fetch", None)) or deepcopy(snapshot)
     ))
     monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
-        events.append(("claim", None)) or {"data": {"should_send": True}}, None
+        events.append(("claim", _args[2])) or {"data": {"should_send": True}}, None
     ))
     monkeypatch.setattr(cli, "send_qq", lambda _snapshot: (
         events.append(("qq", None)) or {"requested": True, "sent": True, "channel": "qq"}
     ))
 
-    assert cli.main(["--external-bundle", str(path), "--send-qq"]) == 0
+    assert cli.main([
+        "--external-bundle", str(path), "--send-qq",
+        "--notification-slot", "20:45",
+    ]) == 0
     assert [name for name, _ in events] == ["submit", "fetch", "claim", "qq"]
-    assert json.loads(capsys.readouterr().out)["notification"]["sent"] is True
+    assert events[2][1] == "2026-09-15T20:45+08:00"
+    first_output = json.loads(capsys.readouterr().out)
+    assert first_output["notification"]["sent"] is True
+    assert first_output["notification"]["notification_slot"] == (
+        "2026-09-15T20:45+08:00"
+    )
 
     events.clear()
     monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
         events.append(("claim", None)) or {"data": {"should_send": False}}, None
     ))
-    assert cli.main(["--external-bundle", str(path), "--send-qq"]) == 0
+    assert cli.main([
+        "--external-bundle", str(path), "--send-qq",
+        "--notification-slot", "20:45",
+    ]) == 0
     output = json.loads(capsys.readouterr().out)
     assert [name for name, _ in events] == ["submit", "fetch", "claim"]
     assert output["notification"]["duplicate_suppressed"] is True
+    assert output["notification"]["notification_slot"] == "2026-09-15T20:45+08:00"
+
+
+def test_cli_notification_slot_boundaries_cover_all_four_planned_times():
+    from scripts import foliant_scheduled_snapshot as cli
+
+    snapshot = {"trading_day": {"date": "2026-09-16"}}
+    shanghai = ZoneInfo("Asia/Shanghai")
+    cases = (
+        ((10, 14), None),
+        ((10, 15), "2026-09-16T10:15+08:00"),
+        ((11, 24), "2026-09-16T10:15+08:00"),
+        ((11, 25), "2026-09-16T11:25+08:00"),
+        ((14, 35), "2026-09-16T14:35+08:00"),
+        ((20, 45), "2026-09-16T20:45+08:00"),
+        ((23, 59), "2026-09-16T20:45+08:00"),
+    )
+    for (hour, minute), expected in cases:
+        assert cli.scheduled_notification_slot(
+            snapshot,
+            now=datetime(2026, 9, 16, hour, minute, tzinfo=shanghai),
+        ) == expected
 
 
 def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):

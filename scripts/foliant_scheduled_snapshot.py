@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from datetime import datetime
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -30,6 +32,8 @@ ENDPOINT = "/api/machine/v1/agent/scheduled-snapshot"
 EXTERNAL_ENDPOINT = "/api/machine/v1/agent/external-independent-research"
 EXTERNAL_CLAIM_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-claim"
 MAX_EXTERNAL_BUNDLE_BYTES = 262144
+SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|(?:token|secret|password|cookie)\s*[:=]\s*\S+)"
 )
@@ -224,10 +228,49 @@ def submit_external_bundle(bundle: dict[str, Any]):
     return _external_post(EXTERNAL_ENDPOINT, bundle, "external_research_submit_failed")
 
 
-def claim_external_notification(idempotency_key: str, overlay_id: str):
+def claim_external_notification(
+    idempotency_key: str, overlay_id: str, notification_slot: str,
+):
     return _external_post(EXTERNAL_CLAIM_ENDPOINT, {
-        "idempotency_key": idempotency_key, "overlay_id": overlay_id,
+        "idempotency_key": idempotency_key,
+        "overlay_id": overlay_id,
+        "notification_slot": notification_slot,
     }, "external_notification_claim_failed")
+
+
+def scheduled_notification_slot(
+    snapshot: dict[str, Any], *, scheduled_time: str | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """Return the current planned report slot in Asia/Shanghai.
+
+    Explicit scheduled times are intended for cron definitions. Automatic mode
+    selects the latest due slot, so a delayed retry remains in the same bounded
+    slot until the next planned report time.
+    """
+    current = now or datetime.now(SHANGHAI)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI)
+    current = current.astimezone(SHANGHAI)
+    report_date = str((snapshot.get("trading_day") or {}).get("date") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", report_date):
+        return None
+    target = str(scheduled_time or "").strip()
+    if target:
+        if target not in SCHEDULED_NOTIFICATION_TIMES:
+            return None
+    else:
+        if report_date != current.date().isoformat():
+            return None
+        minute = current.hour * 60 + current.minute
+        due = [
+            value for value in SCHEDULED_NOTIFICATION_TIMES
+            if int(value[:2]) * 60 + int(value[3:]) <= minute
+        ]
+        if not due:
+            return None
+        target = due[-1]
+    return f"{report_date}T{target}+08:00"
 
 
 def _merge_external_submission(snapshot: dict[str, Any], submission: dict[str, Any]):
@@ -356,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one bounded Foliant scheduled snapshot")
     parser.add_argument("--send-qq", action="store_true", help="explicitly send a compact QQ report")
     parser.add_argument(
+        "--notification-slot", choices=SCHEDULED_NOTIFICATION_TIMES,
+        help="planned Asia/Shanghai report time; defaults to the latest due slot",
+    )
+    parser.add_argument(
         "--external-bundle",
         help="strict codex-external-independent-v1 JSON submitted before snapshot retrieval",
     )
@@ -385,20 +432,35 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif submission:
             overlay = (submission.get("data") or {}).get("overlay") or {}
-            claim, failure = claim_external_notification(
-                str(overlay.get("idempotency_key") or ""), str(overlay.get("overlay_id") or ""),
+            claim = None
+            failure = None
+            notification_slot = scheduled_notification_slot(
+                snapshot, scheduled_time=args.notification_slot,
             )
-            if failure:
+            if not notification_slot:
+                snapshot["notification"] = {
+                    "requested": True, "sent": False,
+                    "error_code": "scheduled_notification_slot_unavailable",
+                }
+            else:
+                claim, failure = claim_external_notification(
+                    str(overlay.get("idempotency_key") or ""),
+                    str(overlay.get("overlay_id") or ""),
+                    notification_slot,
+                )
+            if notification_slot and failure:
                 snapshot["notification"] = failure.get("notification") | {
                     "requested": True, "sent": False,
                     "error_code": (failure.get("error") or {}).get("code"),
                 }
-            elif (claim.get("data") or {}).get("should_send"):
+            elif notification_slot and (claim.get("data") or {}).get("should_send"):
                 snapshot["notification"] = send_qq(snapshot)
-            else:
+                snapshot["notification"]["notification_slot"] = notification_slot
+            elif notification_slot:
                 snapshot["notification"] = {
                     "requested": True, "sent": False,
                     "duplicate_suppressed": True, "error_code": None,
+                    "notification_slot": notification_slot,
                 }
         else:
             snapshot["notification"] = send_qq(snapshot)

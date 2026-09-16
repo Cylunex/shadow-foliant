@@ -96,6 +96,13 @@ Given Agent 快照不能证明可用现金，但账户行动预览包含减仓�
 When 生成候选跟踪与组合计划
 Then 新开和加仓保持禁用，减仓替代项仍可见，且所有结果仍为 preview-only。
 
+### Scenario: 固定股票预算完整但旧现金事实缺失
+
+Given 30 万固定股票预算、非基金股票市值、批量行情和风险快照完整
+And 旧 broker/confirmed cash 事实缺失
+When 聚合交易计划和总体质量
+Then 旧现金状态仅作为非阻断元数据保留，`trade_plans` 不得因此降级或进入 blocking sections。
+
 ## Requirement: 安全 CLI 与显式通知
 
 CLI MUST 从仓库外环境或凭据文件取得 Agent 地址与 Bearer，默认不得发送通知。缺少配置、鉴权

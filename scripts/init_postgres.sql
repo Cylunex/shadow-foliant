@@ -897,6 +897,12 @@ CREATE TABLE IF NOT EXISTS external_research_submissions (
     notification_consumed_at TEXT, actor_id TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS external_research_notification_claims (
+    idempotency_key TEXT NOT NULL, overlay_id TEXT NOT NULL,
+    notification_slot TEXT NOT NULL, actor_id TEXT NOT NULL,
+    consumed_at TEXT NOT NULL,
+    PRIMARY KEY(idempotency_key,notification_slot)
+);
 CREATE INDEX IF NOT EXISTS idx_external_evidence_decision
     ON external_research_evidence(channel,decision_as_of);
 CREATE INDEX IF NOT EXISTS idx_external_overlay_latest
@@ -1006,6 +1012,9 @@ VALUES ('14-external-independent-research', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('15-external-report-idempotency', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('16-scheduled-notification-slots', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

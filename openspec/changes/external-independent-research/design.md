@@ -19,8 +19,9 @@
 ```
 
 CLI 入口先以独立 writer token 提交严格 JSON，再以只读 scheduled token 获取已经合并该 overlay 的
-生产快照。提交以 `idempotency_key` 绑定请求哈希和 overlay；通知前原子消费一次 claim，同一 key 的
-重放只返回既有结果且不会再次发送 QQ。writer 与私人持仓 reader 不共享凭据。
+生产快照。提交以 `idempotency_key` 绑定请求哈希和 overlay；通知前按交易日的
+`10:15 / 11:25 / 14:35 / 20:45` 计划时点原子消费 claim。同一 overlay 在同一时点重试不会再次
+发送 QQ，不同时点各自允许一次。writer 与私人持仓 reader 不共享凭据。
 
 ## PIT 与来源隔离
 

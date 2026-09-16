@@ -199,7 +199,7 @@ def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_pa
     } == before_hashes
 
 
-def test_submission_is_idempotent_and_notification_is_claimed_once(tmp_path):
+def test_submission_is_idempotent_and_notification_is_claimed_once_per_planned_slot(tmp_path):
     store, service = _service(tmp_path)
     bundle = _bundle(proposal=False)
     first = service.save(bundle, actor_id="research-agent")
@@ -213,20 +213,30 @@ def test_submission_is_idempotent_and_notification_is_claimed_once(tmp_path):
         "key": bundle["idempotency_key"], "replayed": True,
         "notification_status": "pending",
     }
-    first_claim = service.claim_notification(
-        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
-        actor_id="research-agent",
-    )
-    second_claim = service.claim_notification(
-        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
-        actor_id="research-agent",
-    )
-    assert first_claim["should_send"] is True
-    assert second_claim["should_send"] is False
+    for planned_time in ("10:15", "11:25", "14:35", "20:45"):
+        slot = f"2026-09-15T{planned_time}+08:00"
+        first_claim = service.claim_notification(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot=slot, actor_id="research-agent",
+        )
+        second_claim = service.claim_notification(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot=slot, actor_id="research-agent",
+        )
+        assert first_claim["should_send"] is True
+        assert first_claim["notification_slot"] == slot
+        assert second_claim["should_send"] is False
+        assert second_claim["status"] == "duplicate_suppressed"
     with pytest.raises(PermissionError, match="external_submission_actor_mismatch"):
         service.claim_notification(
             idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot="2026-09-16T10:15+08:00",
             actor_id="other-research-agent",
+        )
+    with pytest.raises(ValueError, match="external_notification_slot_invalid"):
+        service.claim_notification(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot="2026-09-15T12:00+08:00", actor_id="research-agent",
         )
 
     changed = dict(bundle)
@@ -237,6 +247,9 @@ def test_submission_is_idempotent_and_notification_is_claimed_once(tmp_path):
     conn = store.connect()
     try:
         assert conn.execute("SELECT COUNT(*) FROM external_research_submissions").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM external_research_notification_claims"
+        ).fetchone()[0] == 4
         assert conn.execute("SELECT COUNT(*) FROM external_independent_overlays").fetchone()[0] == 1
     finally:
         conn.close()

@@ -1501,17 +1501,50 @@ class ScheduledSnapshotService:
         plan_state = str(plan_projection.get("status") or "complete")
         if plan_projection.get("error_code") or operational_blockers:
             plan_state = "degraded" if plan_state not in {"missing", "stale"} else plan_state
+        risk_snapshot_state = str(
+            (plan_projection.get("risk_snapshot") or {}).get("status") or "missing"
+        )
+        pricing_state = str(quote_quality.get("status") or quote_state)
+        fixed_budget_plan_complete = bool(
+            stock_budget.get("status") == "complete"
+            and available_cash is not None
+            and plan_state == "complete"
+            and not operational_blockers
+            and not plan_projection.get("error_code")
+            and not (plan_projection.get("missing_information") or [])
+            and risk_snapshot_state == "complete"
+            and pricing_state in {"complete", "success"}
+        )
+        intraday_actions_current = intraday_quote_binding == "same_snapshot_quote_batch"
+        if phase == "intraday":
+            trade_plan_state = (
+                plan_state if plan_state in {"missing", "stale"} else
+                "complete" if plan_state == "complete"
+                and (intraday_actions_current or fixed_budget_plan_complete) else
+                "degraded"
+            )
+        else:
+            trade_plan_state = "pending"
         candidate_follow_up = self._candidate_follow_up(
             formal, quote_rows, trade_plans=review_plans,
             stock_budget=stock_budget, phase=phase,
         )
         trade_plans = {
-            "status": (
-                plan_state
-                if phase == "intraday" and plan_state in {"missing", "stale"} else
-                "degraded" if phase == "intraday"
-                and intraday_quote_binding != "same_snapshot_quote_batch" else
-                plan_state if phase == "intraday" else "pending"
+            "status": trade_plan_state,
+            "status_basis": (
+                "current_intraday_actions"
+                if trade_plan_state == "complete" and intraday_actions_current else
+                "fixed_stock_budget_risk_and_pricing_complete"
+                if trade_plan_state == "complete" and fixed_budget_plan_complete else
+                "required_trade_plan_input_incomplete"
+                if trade_plan_state != "pending" else "phase_pending"
+            ),
+            "optional_degradations": (
+                [{
+                    "code": "holding_actions_not_bound_to_current_quotes",
+                    "affects_snapshot_quality": False,
+                }]
+                if phase == "intraday" and not intraday_actions_current else []
             ),
             "phase": phase,
             "formal": formal_plans[:15],
@@ -1570,6 +1603,11 @@ class ScheduledSnapshotService:
                 "affects_snapshot_quality": False,
                 "broker_cash_source": "unavailable",
                 "broker_cash_balance": False,
+                "legacy_cash_fact": {
+                    "status": cash_fact.get("status") or "missing",
+                    "role": "non_blocking_metadata",
+                    "affects_snapshot_quality": False,
+                },
                 "user_declared_total_budget_cny": stock_budget.get("total_budget_cny"),
                 "reason": (
                     "scheduled_preview_never_enables_additions"
@@ -1633,11 +1671,13 @@ class ScheduledSnapshotService:
                     "status": stock_budget.get("status") or "blocked",
                     "broker_cash_balance": False,
                     "legacy_confirmed_cash_fact_status": cash_fact.get("status") or "missing",
+                    "legacy_confirmed_cash_fact_role": "non_blocking_metadata",
+                    "legacy_confirmed_cash_fact_affects_snapshot_quality": False,
                 },
             },
             "preview_only": True,
             "auto_execution": False,
-            "pricing_status": quote_quality.get("status") or quote_state,
+            "pricing_status": pricing_state,
             "pricing_context": quote_quality.get("mode") or "intraday",
             "current_authority": (
                 "intraday_rule_plan" if phase == "intraday" else

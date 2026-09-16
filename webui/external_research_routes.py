@@ -79,6 +79,12 @@ class ExternalNotificationClaimReq(StrictExternalModel):
         str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
     ]
     overlay_id: Annotated[str, StringConstraints(pattern=r"^eio_[0-9a-f]{40}$")]
+    notification_slot: Annotated[
+        str,
+        StringConstraints(
+            pattern=r"^\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00$"
+        ),
+    ]
 
 
 def register_external_research_routes(
@@ -133,6 +139,7 @@ def register_external_research_routes(
                 ExternalIndependentResearchService().claim_notification(
                     idempotency_key=req.idempotency_key,
                     overlay_id=req.overlay_id,
+                    notification_slot=req.notification_slot,
                     actor_id=str(identity.agent_id),
                 )
             )

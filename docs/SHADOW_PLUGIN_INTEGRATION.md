@@ -51,7 +51,8 @@ Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 c
 五组问财参考、真实持仓、正式 `trade_plan`、组合风控行动预览和批量行情。正式候选与问财
 reference 不混算；行情对持仓、正式 TOP15、独立 TOP15 与当前外部 overlay TOP15 的去重并集只
 调用一次批量入口，并按来源报告 coverage/missing symbols。该工具不发送通知、不触发任务、
-不交易；仓库外 CLI 的 `--send-qq` 才会显式调用既有 `notification_router`。
+不交易；仓库外 CLI 的 `--send-qq` 才会显式调用既有 `notification_router`。外部 overlay 的通知
+按交易日 `10:15 / 11:25 / 14:35 / 20:45` 分槽去重：同槽同 overlay 只发一次，跨槽互不抑制。
 
 外部独立研究随同一份 QQ 报告发送时，CLI 使用独立 writer token 和
 `--external-bundle <json>` 先提交严格 schema，再用 scheduled-report 只读 token 读取已合并
