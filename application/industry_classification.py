@@ -1,9 +1,11 @@
-"""Read-only, point-in-time Shenwan stock industry evidence.
+"""Read-only, point-in-time Shenwan industry and optional manual concepts.
 
 The official StockClassifyUse_stock.xls contains stock codes, effective dates,
 six-digit industry codes and update times, but no industry names or themes. An
 operator converts it to UTF-8 CSV without editing the source workbook and sets
 FOLIANT_SW_CLASSIFICATION_CSV to the resulting external file.
+Selected current concept memberships are loaded separately from an external
+FOLIANT_MANUAL_CONCEPTS_JSON file and never backfilled before observation.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from pathlib import Path
 import re
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from application.manual_concepts import classify_manual_concepts
 
 
 HEADERS = ("股票代码", "计入日期", "行业代码", "更新日期")
@@ -127,6 +131,8 @@ def classify_holdings(
         "peer_comparison_status": "blocked", "pruning_status": "blocked",
         "auto_execution": False,
     }
+    themes = classify_manual_concepts(stocks, as_of=as_of)
+    base.update({key: value for key, value in themes.items() if key != "theme_by_symbol"})
     try:
         decision = (datetime.fromisoformat(as_of) if len(as_of) > 10 else
                     datetime.combine(date.fromisoformat(as_of), datetime.max.time()))
@@ -174,7 +180,9 @@ def classify_holdings(
             "industry_name_status": (
                 "l1_only" if code[:2] in SW2021_L1_NAMES else "missing"
             ),
-            "theme_labels": [],
+            "theme_labels": [item["label"] for item in
+                             themes["theme_by_symbol"].get(symbol, [])],
+            "theme_evidence": themes["theme_by_symbol"].get(symbol, []),
         })
     groups: dict[str, list[str]] = {}
     for row in classified:
