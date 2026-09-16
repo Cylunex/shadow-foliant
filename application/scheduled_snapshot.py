@@ -1556,7 +1556,17 @@ class ScheduledSnapshotService:
             "formal_candidate_follow_up": candidate_follow_up,
             "next_premarket_check": self._next_premarket_check(formal, independent=independent),
             "portfolio_risk": plan_projection,
-            "holding_actions": clean_json(intraday.get("holdings") or [])[:100],
+            # After the close these are stale intraday decisions, not the
+            # current holding review. Omit their bulky rows; the dedicated
+            # holdings_review and next_session_plan carry post-close evidence.
+            "holding_actions": (
+                clean_json(intraday.get("holdings") or [])[:100]
+                if phase == "intraday" else []
+            ),
+            "holding_actions_omitted_count": (
+                min(100, len(intraday.get("holdings") or []))
+                if phase != "intraday" else 0
+            ),
             "portfolio_action_guard": clean_json(
                 intraday.get("portfolio_action_guard") or {}
             ),

@@ -140,6 +140,13 @@ def fetch_snapshot() -> dict[str, Any]:
             "agent_response_invalid", "Verify the configured endpoint is the Foliant Agent API.",
             status="degraded",
         )
+    if (isinstance(payload, dict) and payload.get("data") is None
+            and "inline result was truncated" in (payload.get("warnings") or [])):
+        return _failure(
+            "agent_snapshot_truncated",
+            "The protected Agent snapshot exceeded its inline budget; do not notify.",
+            status="degraded",
+        )
     snapshot = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != "scheduled-agent-snapshot-v1":
         return _failure(
@@ -398,6 +405,27 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
 
 
 def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
+    required = (
+        "trading_day", "formal_selection", "holdings", "trade_plans", "quotes",
+        "post_close_review", "holdings_review", "next_session_plan", "as_of", "quality",
+    )
+    if (not isinstance(snapshot, dict)
+            or snapshot.get("schema_version") != "scheduled-agent-snapshot-v1"
+            or snapshot.get("status") not in {"complete", "degraded"}
+            or snapshot.get("error")
+            or any(not isinstance(snapshot.get(key), dict) for key in required)
+            or not (snapshot.get("trading_day") or {}).get("date")
+            or not (snapshot.get("as_of") or {}).get("captured_at")
+            or not (snapshot.get("quality") or {}).get("status")):
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "snapshot_contract_incomplete"}
+    if (snapshot["post_close_review"].get("due")
+            and (snapshot["post_close_review"].get("status") != "complete"
+                 or snapshot["holdings_review"].get("status") != "complete"
+                 or snapshot["next_session_plan"].get("status") != "complete"
+                 or not snapshot["post_close_review"].get("conclusion"))):
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "post_close_review_incomplete"}
     if not os.getenv("QQ_WEBHOOK_URL", "").strip():
         return {"requested": True, "sent": False, "error_code": "qq_webhook_missing",
                 "repair_hint": "Set QQ_WEBHOOK_URL outside the repository."}

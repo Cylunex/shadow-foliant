@@ -24,7 +24,9 @@ def register_scheduled_snapshot_routes(
             identity = request.state.agent_identity
             return agent_result(
                 ScheduledSnapshotService().read(owner_id=str(identity.agent_id)),
-                max_bytes=262144,
+                # Post-close evidence is larger than the intraday view. Keep
+                # this private route bounded while allowing its full contract.
+                max_bytes=393216,
             )
         except Exception as exc:
             return agent_error(exc)

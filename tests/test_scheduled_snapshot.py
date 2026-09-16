@@ -730,6 +730,24 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
             assert snapshot["next_session_plan"]["status"] == "complete"
 
 
+def test_post_close_omits_stale_intraday_holding_actions():
+    evening = NOW.replace(hour=20, minute=46)
+    old = {"data": {
+        "generated_at": NOW.replace(hour=14, minute=30).isoformat(),
+        "holdings": [
+            {"symbol": "000001", "action": "hold", "reason": "旧盘中证据" * 100}
+            for _ in range(100)
+        ],
+    }}
+    snapshot = build_service(
+        clock=lambda: evening, quote_time=evening, intraday_value=old,
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["phase"] == "post_close_review"
+    assert snapshot["trade_plans"]["holding_actions"] == []
+    assert snapshot["trade_plans"]["holding_actions_omitted_count"] == 100
+    assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
+
+
 def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
     evening = NOW.replace(hour=18, minute=23)
 
@@ -901,8 +919,13 @@ def test_route_requires_exact_scheduled_capability():
                    return_value=fake_result) as read:
             allowed = client.get("/api/machine/v1/agent/scheduled-snapshot",
                                  headers={"Authorization": token})
-        assert allowed.status_code == 200
-        read.assert_called_once_with(owner_id="scheduled-agent")
+            assert allowed.status_code == 200
+            read.assert_called_once_with(owner_id="scheduled-agent")
+            fake_result["data"] = {"padding": "x" * 300000}
+            post_close_sized = client.get("/api/machine/v1/agent/scheduled-snapshot",
+                                          headers={"Authorization": token})
+            assert post_close_sized.status_code == 200
+            assert post_close_sized.json()["data"] == fake_result["data"]
 
 
 def test_cli_missing_config_is_structured_and_does_not_call_http(monkeypatch):
@@ -933,12 +956,19 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://private.example.invalid/secret-hook")
     snapshot = selection()
     snapshot.update({
+        "schema_version": "scheduled-agent-snapshot-v1",
         "status": "degraded", "trading_day": {"date": "2026-09-10", "confirmed": True},
+        "as_of": {"captured_at": "2026-09-10T11:30:00+08:00"},
+        "quality": {"status": "degraded"},
         "formal_selection": selection()["data"],
         "wencai_reference": {"ready_groups": 5},
         "holdings": {"count": 2, "status": "complete",
                      "error": "Bearer should-not-appear https://secret.invalid"},
         "trade_plans": {"status": "complete", "portfolio_risk": {"summary": "先观察"}},
+        "quotes": {"status": "degraded"},
+        "post_close_review": {"due": False, "status": "pending"},
+        "holdings_review": {"status": "pending"},
+        "next_session_plan": {"status": "pending"},
     })
     captured = {}
 
@@ -954,6 +984,50 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
     assert "private.example.invalid" not in body
     assert "should-not-appear" not in body
     assert "super-secret-bearer" not in body
+
+
+def test_cli_truncated_snapshot_never_sends_qq(monkeypatch):
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setenv("FOLIANT_AGENT_BASE_URL", "http://127.0.0.1:8601")
+    monkeypatch.setenv("FOLIANT_AGENT_TOKEN", "test-token")
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    response = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"status": "complete", "data": None,
+                      "warnings": ["inline result was truncated"]},
+    )
+    with patch.object(cli.requests, "get", return_value=response):
+        failure = cli.fetch_snapshot()
+    assert failure["error"]["code"] == "agent_snapshot_truncated"
+    with patch.object(notification_router, "send") as send:
+        notification = cli.send_qq(failure)
+    assert notification["sent"] is False
+    assert notification["error_code"] == "snapshot_contract_incomplete"
+    send.assert_not_called()
+
+
+def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    snapshot = {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
+        "trading_day": {"date": "2026-09-16"},
+        "formal_selection": {}, "holdings": {}, "trade_plans": {}, "quotes": {},
+        "post_close_review": {"due": True, "status": "degraded", "conclusion": "不完整"},
+        "holdings_review": {"status": "complete"},
+        "next_session_plan": {"status": "complete"},
+        "as_of": {"captured_at": "2026-09-16T20:45:00+08:00"},
+        "quality": {"status": "degraded"},
+    }
+    with patch.object(notification_router, "send") as send:
+        notification = cli.send_qq(snapshot)
+    assert notification["sent"] is False
+    assert notification["error_code"] == "post_close_review_incomplete"
+    send.assert_not_called()
 
 
 def test_cli_report_appends_due_post_close_conclusion():
@@ -1134,6 +1208,12 @@ def fake_get(*_args, **_kwargs):
         "wencai_reference": {"ready_groups": 0},
         "holdings": {"status": "complete", "count": 2},
         "trade_plans": {"status": "degraded", "portfolio_risk": {}},
+        "quotes": {"status": "degraded"},
+        "post_close_review": {"due": False, "status": "pending"},
+        "holdings_review": {"status": "pending"},
+        "next_session_plan": {"status": "pending"},
+        "as_of": {"captured_at": "2026-09-10T11:30:00+08:00"},
+        "quality": {"status": "degraded"},
     }})
 
 def fake_post(_url, *, json=None, **_kwargs):
