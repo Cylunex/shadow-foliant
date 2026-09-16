@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from application.industry_classification import classify_holdings
+from scripts.foliant_scheduled_snapshot import render_qq_report
 
 
 def _source(tmp_path, monkeypatch, rows):
@@ -32,6 +33,9 @@ def test_current_classification_is_point_in_time_and_excludes_fund(tmp_path, mon
     assert result["excluded_fund_count"] == 1
     assert result["rows"][0]["industry_l3_code"] == "480301"
     assert result["rows"][0]["industry_l1_code"] == "48"
+    assert result["rows"][0]["industry_l1_name"] == "银行"
+    assert result["l1_name_status"] == "complete"
+    assert result["industry_groups"][0]["holding_count"] == 1
     assert result["theme_status"] == "missing"
     assert result["pruning_status"] == "blocked"
     assert result["source"]["row_count"] == 3
@@ -92,3 +96,18 @@ def test_missing_source_is_observational_not_trade_authority(monkeypatch):
     assert result["status"] == "missing"
     assert result["auto_execution"] is False
     assert result["peer_comparison_status"] == "blocked"
+
+
+def test_qq_summary_names_industry_groups_without_sending():
+    _, body = render_qq_report({
+        "trading_day": {"date": "2026-09-16"},
+        "portfolio_industry": {
+            "stock_count": 2, "excluded_fund_count": 1, "coverage": 1,
+            "industry_coverage_gate": True,
+            "industry_groups": [
+                {"industry_l1_name": "银行", "holding_count": 2},
+            ],
+        },
+    })
+    assert "持仓一级行业（前三）：银行2只" in body
+    assert "同行/剪枝 待主题和行情证据" in body

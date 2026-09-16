@@ -26,6 +26,23 @@ MIN_COVERAGE = 0.95
 SOURCE_URL = "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
 _CODE = re.compile(r"^[0-9]{6}$")
 
+# Reconciled from the 31 Shenwan 2021 L1 constituent workbooks supplied on
+# 2026-09-16. Each code/name pair had exact stock+effective-time corroboration
+# in StockClassifyUse_stock.xls; the latest 5,274 constituent memberships had
+# zero L1 disagreements with that history. L2/L3 names are not in those files.
+SW2021_L1_NAMES = {
+    "11": "农林牧渔", "22": "基础化工", "23": "钢铁", "24": "有色金属",
+    "27": "电子", "28": "汽车", "33": "家用电器", "34": "食品饮料",
+    "35": "纺织服饰", "36": "轻工制造", "37": "医药生物",
+    "41": "公用事业", "42": "交通运输", "43": "房地产",
+    "45": "商贸零售", "46": "社会服务", "48": "银行",
+    "49": "非银金融", "51": "综合", "61": "建筑材料",
+    "62": "建筑装饰", "63": "电力设备", "64": "机械设备",
+    "65": "国防军工", "71": "计算机", "72": "传媒",
+    "73": "通信", "74": "煤炭", "75": "石油石化",
+    "76": "环保", "77": "美容护理",
+}
+
 
 def _source() -> tuple[tuple[dict[str, str], ...], dict[str, Any]]:
     configured = os.getenv("FOLIANT_SW_CLASSIFICATION_CSV", "").strip()
@@ -74,6 +91,12 @@ def _load(path: str, size: int, mtime_ns: int) -> tuple[tuple[dict[str, str], ..
     return tuple(rows), {
         "provider": "swsresearch", "source_format": "StockClassifyUse_stock.xls/UTF-8-CSV",
         "source_url": SOURCE_URL,
+        "l1_name_source": "swsresearch-sw2021-31-l1-constituent-workbooks-2026-09-16",
+        "l1_name_source_validation": {
+            "history_csv_sha256": "8f904874e07abd943af6ee23bee773f2ea894d8d1166fcf1b4bbcaff013040d9",
+            "exact_history_joins": 4111, "latest_memberships_reconciled": 5274,
+            "latest_membership_conflicts": 0,
+        },
         "csv_sha256": digest, "row_count": len(rows),
         "observed_at": datetime.fromtimestamp(
             mtime_ns / 1e9, tz=ZoneInfo("Asia/Shanghai")
@@ -99,7 +122,8 @@ def classify_holdings(
         "status": "missing", "as_of": as_of, "stock_count": len(stocks),
         "excluded_fund_count": len(funds), "coverage": None, "rows": [],
         "unknown_symbols": stocks, "conflict_symbols": [],
-        "industry_coverage_gate": False, "theme_status": "missing",
+        "industry_coverage_gate": False, "l1_name_status": "missing",
+        "industry_groups": [], "theme_status": "missing",
         "peer_comparison_status": "blocked", "pruning_status": "blocked",
         "auto_execution": False,
     }
@@ -143,11 +167,24 @@ def classify_holdings(
         code = winner["industry_code"]
         classified.append({
             "symbol": symbol, "industry_l1_code": code[:2],
+            "industry_l1_name": SW2021_L1_NAMES.get(code[:2]),
             "industry_l2_code": code[:4], "industry_l3_code": code,
             "effective_date": latest[:10], "effective_at": latest,
             "source_updated_at": winner["updated_at"],
-            "industry_name_status": "missing", "theme_labels": [],
+            "industry_name_status": (
+                "l1_only" if code[:2] in SW2021_L1_NAMES else "missing"
+            ),
+            "theme_labels": [],
         })
+    groups: dict[str, list[str]] = {}
+    for row in classified:
+        groups.setdefault(row["industry_l1_code"], []).append(row["symbol"])
+    industry_groups = [
+        {"industry_l1_code": code, "industry_l1_name": SW2021_L1_NAMES.get(code),
+         "holding_count": len(symbols), "symbols": symbols}
+        for code, symbols in groups.items()
+    ]
+    industry_groups.sort(key=lambda row: (-row["holding_count"], row["industry_l1_code"]))
     coverage = len(classified) / len(stocks) if stocks else None
     gate = coverage is not None and coverage >= MIN_COVERAGE and not conflicts
     base.update({
@@ -155,6 +192,11 @@ def classify_holdings(
         "coverage": round(coverage, 6) if coverage is not None else None,
         "rows": classified[:100], "unknown_symbols": unknown,
         "conflict_symbols": conflicts, "industry_coverage_gate": gate,
+        "l1_name_status": (
+            "complete" if classified and all(row["industry_l1_name"] for row in classified)
+            else "partial" if classified else "missing"
+        ),
+        "industry_groups": industry_groups,
         "source": source,
     })
     return base

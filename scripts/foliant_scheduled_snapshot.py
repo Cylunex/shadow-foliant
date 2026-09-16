@@ -380,6 +380,14 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         f"快照质量：{snapshot.get('status') or 'degraded'}；"
         f"阶段 {snapshot.get('phase') or 'unknown'}；仅供研究，不自动下单。",
     ])
+    groups = (industry.get("industry_groups") or [])[:3]
+    if groups:
+        labels = [
+            f"{row.get('industry_l1_name') or row.get('industry_l1_code')}"
+            f"{row.get('holding_count')}只"
+            for row in groups
+        ]
+        lines.append("持仓一级行业（前三）：" + "、".join(labels))
     if post_close.get("due"):
         lines.append(f"盘后结论：{post_close.get('conclusion') or '盘后闭环结果不可用。'}")
         lines.append(
