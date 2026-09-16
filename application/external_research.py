@@ -577,8 +577,10 @@ class ExternalIndependentResearchService:
             cur = conn.cursor()
             consumed_at = self.clock().isoformat(timespec="seconds")
             cur.execute(
-                """SELECT overlay_id,actor_id FROM external_research_submissions
-                   WHERE idempotency_key=? AND channel=?""",
+                """SELECT s.overlay_id,s.actor_id,o.decision_as_of
+                   FROM external_research_submissions s
+                   JOIN external_independent_overlays o ON o.overlay_id=s.overlay_id
+                   WHERE s.idempotency_key=? AND s.channel=?""",
                 (key, CHANNEL),
             )
             row = cur.fetchone()
@@ -588,6 +590,8 @@ class ExternalIndependentResearchService:
                 raise ValueError("external_submission_overlay_mismatch")
             if str(row[1]) != actor_id:
                 raise PermissionError("external_submission_actor_mismatch")
+            if slot[:10] != str(row[2] or "")[:10]:
+                raise ValueError("external_notification_slot_date_mismatch")
             cur.execute(
                 """INSERT INTO external_research_notification_claims
                    (idempotency_key,overlay_id,notification_slot,actor_id,consumed_at)

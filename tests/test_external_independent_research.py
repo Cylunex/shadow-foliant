@@ -238,6 +238,11 @@ def test_submission_is_idempotent_and_notification_is_claimed_once_per_planned_s
             idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
             notification_slot="2026-09-15T12:00+08:00", actor_id="research-agent",
         )
+    with pytest.raises(ValueError, match="external_notification_slot_date_mismatch"):
+        service.claim_notification(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot="2026-09-16T10:15+08:00", actor_id="research-agent",
+        )
 
     changed = dict(bundle)
     changed["market_regime"] = "bear"
