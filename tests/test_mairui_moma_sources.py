@@ -234,16 +234,23 @@ class DatahubRoutingTest(unittest.TestCase):
 
         expected = {"600000": {"name": "浦发银行", "price": 10.0}}
         with patch.object(datahub, "_adapter", return_value=Adapter()), \
+                patch.object(datahub, "_quotes_tencent", return_value={}), \
+                patch.object(datahub, "_quotes_eastmoney", return_value={}), \
+                patch.object(datahub, "_fuyao_available", return_value=False), \
                 patch.object(datahub, "_zzshare_available", return_value=False), \
                 patch.object(datahub, "_eltdx_available", return_value=False), \
                 patch.object(datahub, "_tdx_python_available", return_value=False), \
                 patch.object(datahub, "_easy_tdx_available", return_value=False), \
                 patch.object(datahub, "_mairui_available", return_value=True), \
                 patch.object(datahub, "_moma_available", return_value=False), \
-                patch.object(datahub, "_quotes_mairui", return_value=expected), \
+                patch.object(datahub, "_quotes_mairui", return_value=expected) as mairui, \
                 patch.object(datahub, "_name_remember"):
             actual = datahub.quotes.__wrapped__(["600000"])
-        self.assertEqual(actual, expected)
+        mairui.assert_called_once_with(["600000"])
+        self.assertEqual(set(actual), {"600000"})
+        self.assertEqual(actual["600000"]["name"], "浦发银行")
+        self.assertEqual(actual["600000"]["price"], 10.0)
+        self.assertEqual(actual["600000"]["source"], "mairui")
 
     def test_contracts_publish_bounded_family_capabilities(self):
         matrix = contracts()

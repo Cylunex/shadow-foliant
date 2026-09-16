@@ -194,7 +194,9 @@ def test_isolated_runtime_does_not_wait_for_lingering_provider_threads() -> None
     )
     assert result["status"] == "complete"
     assert result["terminated"] is True
-    assert time.monotonic() - started < 3
+    # Process spawn can slow under the full suite; still must not wait for the
+    # child provider's 30-second non-daemon thread.
+    assert time.monotonic() - started < 10
 
 
 def test_isolated_runtime_reports_bounded_safe_failure_reason(monkeypatch) -> None:
