@@ -109,6 +109,36 @@ def _quote(symbol: str, row: Any) -> dict[str, Any]:
     return clean_json(value)
 
 
+def _source_symbols(rows: list[dict[str, Any]]) -> list[str]:
+    return sorted({
+        symbol
+        for row in rows
+        if (symbol := str(row.get("symbol") or row.get("code") or "").strip()).isdigit()
+        and len(symbol) == 6
+    })
+
+
+def _source_quote_coverage(
+    symbols: list[str], quote_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    requested = sorted(set(symbols))
+    available = [
+        symbol for symbol in requested
+        if (quote_by_symbol.get(symbol) or {}).get("price") is not None
+    ]
+    missing = sorted(set(requested) - set(available))
+    return {
+        "status": (
+            "not_applicable" if not requested else
+            "complete" if not missing else "degraded"
+        ),
+        "requested_count": len(requested),
+        "available_count": len(available),
+        "coverage": round(len(available) / len(requested), 6) if requested else None,
+        "missing_symbols": missing,
+    }
+
+
 def _action_plan(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"status": "missing", "preview_only": True}
@@ -1244,7 +1274,18 @@ class ScheduledSnapshotService:
         except Exception:
             capsule = None
 
-        extra = [row.get("symbol") for row in formal.get("formal_top15") or []]
+        quote_sources = {
+            "holdings": _source_symbols(holding_rows),
+            "formal_top15": _source_symbols(formal.get("formal_top15") or []),
+            "independent_top15": _source_symbols(independent.get("top15") or []),
+            "external_overlay_top15": _source_symbols(
+                external_research.get("top15") or []
+                if external_research.get("status") == "complete" else []
+            ),
+        }
+        extra = sorted({
+            symbol for source in quote_sources.values() for symbol in source
+        })
         symbols = account_quote_symbols(capsule or {}, holding_rows, extra_symbols=extra)
         raw_quotes: dict[str, Any] = {}
         quote_state = "complete"
@@ -1286,7 +1327,7 @@ class ScheduledSnapshotService:
             "requested_count": len(symbols),
             "available_count": sum(1 for row in quote_rows if row.get("price") is not None),
             "batch_count": 1 if symbols else 0,
-            "rows": quote_rows[:115],
+            "rows": quote_rows[:150],
             "as_of": max((str(row.get("as_of") or "") for row in quote_rows), default="") or None,
             "missing_by_asset_type": quote_quality.get("missing_by_asset_type") or {},
             "unsupported_asset_symbols": quote_quality.get("unsupported_asset_symbols") or [],
@@ -1295,6 +1336,31 @@ class ScheduledSnapshotService:
             row["symbol"] for row in quote_rows if row.get("price") is None
         ]
         quotes["missing_count"] = len(quotes["missing_symbols"])
+        quote_by_symbol = {row["symbol"]: row for row in quote_rows}
+        quotes["source_coverage"] = {
+            source: _source_quote_coverage(source_symbols, quote_by_symbol)
+            for source, source_symbols in quote_sources.items()
+        }
+        independent_missing = (
+            quotes["source_coverage"]["independent_top15"]["missing_symbols"]
+        )
+        external_missing = (
+            quotes["source_coverage"]["external_overlay_top15"]["missing_symbols"]
+        )
+        external_research["quote_coverage"] = (
+            quotes["source_coverage"]["external_overlay_top15"]
+        )
+        external_research["pricing_guard"] = {
+            "status": "blocked" if independent_missing or external_missing else "research_only",
+            "ranking_preserved": True,
+            "execution_price_available": False,
+            "missing_symbols": sorted(set(independent_missing) | set(external_missing)),
+            "blockers": (
+                ["independent_or_external_quote_coverage_incomplete"]
+                if independent_missing or external_missing else
+                ["external_channel_has_no_execution_price_authority"]
+            ),
+        }
         cockpit["optional_provider_degradations"] = (
             _optional_quote_provider_degradations(cockpit, quotes)
         )

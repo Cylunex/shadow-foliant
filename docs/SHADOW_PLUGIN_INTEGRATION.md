@@ -49,7 +49,8 @@ Foliant，模型只收到有预算的摘要、`shadow://foliant/...` 引用或 c
 
 工具 `foliant.scheduled-report.snapshot` 一次返回双源交易日依据、cockpit、正式 TOP15/TOP5、
 五组问财参考、真实持仓、正式 `trade_plan`、组合风控行动预览和批量行情。正式候选与问财
-reference 不混算，行情对 TOP15 与持仓并集只调用一次批量入口。该工具不发送通知、不触发任务、
+reference 不混算；行情对持仓、正式 TOP15、独立 TOP15 与当前外部 overlay TOP15 的去重并集只
+调用一次批量入口，并按来源报告 coverage/missing symbols。该工具不发送通知、不触发任务、
 不交易；仓库外 CLI 的 `--send-qq` 才会显式调用既有 `notification_router`。
 
 外部独立研究随同一份 QQ 报告发送时，CLI 使用独立 writer token 和

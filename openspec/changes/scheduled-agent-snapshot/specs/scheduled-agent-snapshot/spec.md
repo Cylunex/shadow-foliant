@@ -48,13 +48,21 @@ Then `trading_day.confirmed=false` 且 `is_trading_day=null`。
 
 ## Requirement: 批量行情与持仓一致性
 
-服务 MUST 对正式 TOP15 与持仓证券去重后执行一次批量行情读取。行情期间持仓 watermark 改变时，
+服务 MUST 对真实持仓、正式 TOP15、独立 TOP15 和当前完成的外部 overlay TOP15 去重后执行一次
+批量行情读取，并 MUST 对每个来源输出 coverage 与 missing symbols。行情期间持仓 watermark 改变时，
 持仓风控结果 MUST 标记 stale，不能报告为当前有效计划。
 
 ### Scenario: 十五个候选与三个持仓有重叠
 
 When 生成快照
 Then 行情适配器只收到一次去重后的证券列表，不发生逐只行情调用。
+
+### Scenario: 独立候选不在正式候选或持仓中
+
+Given 独立 TOP15 含正式 TOP15 和真实持仓之外的证券，且其中一只行情缺失
+When 生成计划快照
+Then 唯一批量行情请求 MUST 包含该证券，独立与外部来源 coverage MUST 列出该 missing symbol；
+外部排名仍保留，但 MUST NOT 提供执行价格或自动下单能力。
 
 ### Scenario: 20:45 读取当日收盘快照
 

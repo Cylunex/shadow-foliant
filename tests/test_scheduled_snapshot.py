@@ -35,13 +35,18 @@ class CalendarStore:
 
 def selection(*, day="2026-09-10", market_as_of: str | None = None,
               with_wencai=True, independent_day: str | None = None,
-              with_trade_plans: bool = True):
+              with_trade_plans: bool = True,
+              independent_symbols: list[str] | None = None):
     market_as_of = market_as_of or day
     top15 = [{
         "symbol": f"600{i:03d}", "name": f"候选{i}", "rank": i,
         **({"trade_plan": {"available": True, "action": "hold", "reason": "规则计划"}}
            if with_trade_plans else {}),
     } for i in range(1, 16)]
+    independent_top15 = top15 if independent_symbols is None else [
+        {"symbol": symbol, "name": f"独立{i}", "rank": i, "total_score": 100 - i}
+        for i, symbol in enumerate(independent_symbols, 1)
+    ]
     strategies = {
         name: {"strategy_id": f"wencai-{index}", "strategy_version": "v1",
                "status": "ready", "picks": [{"symbol": f"00000{index}", "name": name}]}
@@ -67,7 +72,7 @@ def selection(*, day="2026-09-10", market_as_of: str | None = None,
                     "weights": {"fundamental_quality": 30, "medium_trend": 25,
                                 "valuation": 20, "flow_liquidity": 15,
                                 "risk_discount": 10},
-                    "top15": top15, "top5": top15[:5],
+                    "top15": independent_top15, "top5": independent_top15[:5],
                     "independence_boundary": "immutable_manifest_inputs_only",
                 },
             },
@@ -128,6 +133,7 @@ def build_service(
         "evidence_snapshot_id": "empty-evidence",
     },
     external_research_reader=lambda: {"status": "missing"},
+    missing_quote_symbols=(),
 ):
     def quotes(symbols):
         if quote_spy is not None:
@@ -135,7 +141,7 @@ def build_service(
         return {symbol: {"name": symbol, "price": 10, "change_pct": 1,
                          "quote_time": (quote_time or NOW).isoformat(), "volume": 1000,
                          "amount_wan": 100, "limit_up": 11, "limit_down": 9}
-                for symbol in symbols}
+                for symbol in symbols if symbol not in set(missing_quote_symbols)}
 
     if intraday_projector is None:
         def intraday_projector(**kwargs):
@@ -234,6 +240,59 @@ def test_external_research_is_optional_current_overlay_and_never_a_price_authori
     assert projected["auto_execution"] is False
     assert result["source_comparison"]["availability"]["external_independent"] is True
     assert result["quality"]["status"] == "complete"
+
+
+def test_quote_batch_unions_holdings_formal_independent_and_external_with_source_coverage():
+    calls = []
+    independent_symbols = [f"601{i:03d}" for i in range(1, 16)]
+    rows = [{
+        "symbol": symbol, "name": f"独立{i}", "rank": i,
+        "base_rank": i, "base_score": 100 - i,
+        "event_adjustment": 0, "risk_veto": False,
+        "final_score": 100 - i, "evidence_ids": [],
+    } for i, symbol in enumerate(independent_symbols, 1)]
+    external = {
+        "status": "ready", "channel": "codex-external-independent-v1",
+        "overlay": {
+            "selection_run_id": "formal-run",
+            "base_strategy_version": "codex-independent-v1",
+            "base_input_snapshot_id": "independent-snapshot",
+            "decision_as_of": NOW.isoformat(), "ranking_locked_at": NOW.isoformat(),
+            "market_regime": "sideways", "top15": rows,
+        },
+    }
+    result = build_service(
+        selection_value=selection(independent_symbols=independent_symbols),
+        external_research_reader=lambda: external,
+        quote_spy=calls,
+        missing_quote_symbols={"601015"},
+    ).read(owner_id="scheduled-agent")["data"]
+
+    expected = {
+        *(f"600{i:03d}" for i in range(1, 16)),
+        *independent_symbols, "000001",
+    }
+    assert len(calls) == 1
+    assert set(calls[0]) == expected
+    assert result["quotes"]["requested_count"] == 31
+    assert {row["symbol"] for row in result["quotes"]["rows"]} == expected
+    coverage = result["quotes"]["source_coverage"]
+    assert coverage["holdings"]["requested_count"] == 2
+    assert coverage["formal_top15"]["coverage"] == 1.0
+    assert coverage["independent_top15"] == {
+        "status": "degraded", "requested_count": 15, "available_count": 14,
+        "coverage": round(14 / 15, 6), "missing_symbols": ["601015"],
+    }
+    assert coverage["external_overlay_top15"]["missing_symbols"] == ["601015"]
+    projected = result["external_independent_research"]
+    assert projected["status"] == "complete"
+    assert len(projected["top15"]) == 15
+    assert projected["pricing_guard"] == {
+        "status": "blocked", "ranking_preserved": True,
+        "execution_price_available": False, "missing_symbols": ["601015"],
+        "blockers": ["independent_or_external_quote_coverage_incomplete"],
+    }
+    assert projected["external_can_create_execution_price"] is False
 
 
 def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():

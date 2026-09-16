@@ -22,7 +22,8 @@ Codex heartbeat / cron CLI
 每个分区都有 `complete | stale | missing | degraded` 状态。配置、鉴权、网络或服务错误在 CLI
 中映射为稳定错误码与修复提示，不回显异常、URL、Token 或响应正文。正式 TOP15/TOP5 只来自
 已发布且 Manifest 完整的 SelectionRun；五组问财保持独立 reference 分区，缺失不会改变正式
-候选。行情一次按“TOP15 ∪ 持仓”批量读取，并为每只证券保留 observation time。
+候选。行情一次按“真实持仓 ∪ 正式 TOP15 ∪ 独立 TOP15 ∪ 当前外部 overlay TOP15”去重后批量
+读取，并为每只证券保留 observation time；每个来源分别输出 coverage 和 missing symbols。
 行时间缺失但批次接收时间可信时，快照保留该 as-of 及来源，不把所有已存价格误标为陈旧。
 独立产物只是同一 PIT manifest 的可复现对照；对照计算保留输入有效性，不把缺失源当作空候选集。
 
