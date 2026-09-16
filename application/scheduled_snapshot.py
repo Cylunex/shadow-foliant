@@ -13,6 +13,7 @@ from application.account_preview import (
     build_account_preview,
 )
 from application.results import clean_json, payload_hash, provenance, tool_result
+from application.industry_classification import classify_holdings
 from application.stock_budget import (
     STOCK_BUDGET_BASIS,
     default_metadata_reader,
@@ -1197,6 +1198,7 @@ class ScheduledSnapshotService:
                     "tuning_proposals": [], "auto_apply": False, "auto_execution": False,
                 },
                 "holdings": {"status": "missing", "rows": []},
+                "portfolio_industry": {"status": "missing", "rows": [], "industry_coverage_gate": False},
                 "trade_plans": {
                     "status": "missing", "formal": [], "portfolio_risk": {},
                     "formal_candidate_follow_up": [], "next_premarket_check": {"status": "missing"},
@@ -1388,6 +1390,9 @@ class ScheduledSnapshotService:
             }
         stock_budget = derive_stock_budget(
             holding_rows, quote_rows, security_metadata,
+        )
+        portfolio_industry = classify_holdings(
+            holding_rows, stock_budget.get("classifications") or {}, as_of=now.isoformat(),
         )
         available_cash = stock_budget.get("available_cash_cny")
         preview_context = context
@@ -1747,6 +1752,7 @@ class ScheduledSnapshotService:
             "wencai_reference": wencai,
             "external_independent_research": external_research,
             "holdings": holdings,
+            "portfolio_industry": portfolio_industry,
             "trade_plans": trade_plans,
             "quotes": quotes,
             "post_close_review": post_close_review,

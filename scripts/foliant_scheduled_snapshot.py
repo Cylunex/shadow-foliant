@@ -319,6 +319,7 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     external = snapshot.get("external_independent_research") or {}
     reference = snapshot.get("wencai_reference") or {}
     holdings = snapshot.get("holdings") or {}
+    industry = snapshot.get("portfolio_industry") or {}
     plans = snapshot.get("trade_plans") or {}
     post_close = snapshot.get("post_close_review") or {}
     proposals = snapshot.get("strategy_adjustment_proposals") or {}
@@ -358,6 +359,12 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
         f"状态 {holdings.get('status') or 'missing'}",
+        (
+            f"申万行业：股票 {industry.get('stock_count', '未知')} 只、"
+            f"基金排除 {industry.get('excluded_fund_count', '未知')} 只；"
+            f"代码覆盖 {float(industry.get('coverage') or 0):.1%}；"
+            f"同行/剪枝 {'待主题和行情证据' if industry.get('industry_coverage_gate') else '覆盖不足，暂停'}"
+        ),
         (
             f"股票预算：¥{float(stock_budget.get('total_budget_cny') or 0):,.0f}；"
             f"股票 {stock_budget.get('stock_holding_count', '未知')} 只/市值 "
