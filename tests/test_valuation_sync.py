@@ -26,6 +26,8 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr('data.valuation_sync.sources.historical', lambda *_: pd.DataFrame())
     monkeypatch.setattr('data.valuation_sync.sources.live', lambda *_: pd.DataFrame())
     monkeypatch.setattr('data.valuation_sync.baostock.valuation_day', lambda *_: pd.DataFrame())
+    # A production credential must not change the fallback set under test.
+    monkeypatch.setattr('data.valuation_sync.fuyao_aicubes.available', lambda: False)
     return ResearchStore(str(tmp_path / 'research.db'), connect_fn=sqlite3.connect)
 
 
