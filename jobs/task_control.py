@@ -996,9 +996,12 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
                 and datetime.now().astimezone().weekday() < 5):
             warn('高仓位模式下尚无今日加仓判断，自动买入已按保守规则关闭',
                  'fresh_market_add_signal_missing')
+            _market_signal = data['portfolio_policy'].get('market_add_signal') or {}
             data['blocking_dimensions'] = [{
                 'dimension': 'fresh_market_add_signal',
-                'status': 'stale_or_missing',
+                'status': ('source_failed' if _market_signal.get('source_failure_code')
+                           else 'stale_or_missing'),
+                'source_failure_code': _market_signal.get('source_failure_code'),
                 'affected_decisions': ['new_positions', 'add_positions'],
                 'decision_boundary': 'pricing_only_no_buy_authorization',
             }]

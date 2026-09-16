@@ -21,7 +21,7 @@ from db_compat import connect as db_connect
 
 
 DEFAULT_PATH = _bootstrap.db_path("research_market.db")
-SCHEMA_VERSION = "16"
+SCHEMA_VERSION = "17"
 
 
 def _json(value) -> str:
@@ -396,7 +396,8 @@ class ResearchStore:
             """CREATE TABLE IF NOT EXISTS external_research_notification_claims (
                 idempotency_key TEXT NOT NULL, overlay_id TEXT NOT NULL,
                 notification_slot TEXT NOT NULL, actor_id TEXT NOT NULL,
-                consumed_at TEXT NOT NULL,
+                consumed_at TEXT NOT NULL, delivery_status TEXT NOT NULL DEFAULT 'claimed',
+                delivery_attempted_at TEXT, delivered_at TEXT, delivery_error_code TEXT,
                 PRIMARY KEY(idempotency_key,notification_slot)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_external_evidence_decision ON external_research_evidence(channel,decision_as_of)",
@@ -577,6 +578,26 @@ class ResearchStore:
             "ON CONFLICT(version) DO NOTHING",
             ("16-scheduled-notification-slots", datetime.now().astimezone().isoformat()),
         )
+        version = "17-notification-delivery-lifecycle"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(
+                cur, "external_research_notification_claims", "delivery_status",
+                "TEXT NOT NULL DEFAULT 'unknown'",
+            )
+            self._add_column(
+                cur, "external_research_notification_claims", "delivery_attempted_at", "TEXT",
+            )
+            self._add_column(
+                cur, "external_research_notification_claims", "delivered_at", "TEXT",
+            )
+            self._add_column(
+                cur, "external_research_notification_claims", "delivery_error_code", "TEXT",
+            )
+            cur.execute(
+                "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                (version, datetime.now().astimezone().isoformat()),
+            )
 
     def _promote_legacy_master(self, cur) -> Optional[str]:
         """Idempotently publish the newest complete V2 master as a V5 snapshot."""

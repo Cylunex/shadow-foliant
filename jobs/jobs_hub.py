@@ -5216,6 +5216,15 @@ def _run_fixed_intraday(label: str, *, holding_overrides: dict = None) -> dict:
     )
 
 
+def _refresh_market_gate(report_slot: str) -> dict:
+    """Each fixed report owns a fresh core-index + A500 breadth snapshot."""
+    from application.market_signal_refresh import refresh_market_add_signal
+
+    return refresh_market_add_signal(
+        report_slot, snapshot_saver=save_indicator_snapshot,
+    )
+
+
 def _intraday_job_log_status(result: dict) -> str:
     """job_runs 的历史枚举不含 degraded；完整质量状态保留在快照和日志详情。"""
     status = str((result or {}).get('status') or 'error')
@@ -5260,6 +5269,7 @@ def task_morning_portfolio():
         return
     started = datetime.now().isoformat()
     try:
+        _add_signal = _refresh_market_gate('10:15')
         scans = _scan_holdings_with_snapshot()
         if not scans:
             intraday = _run_fixed_intraday('10:05')
@@ -5287,23 +5297,8 @@ def task_morning_portfolio():
         lines = [f'## ☀️ 早盘持仓分析 — {datetime.now().strftime("%Y-%m-%d %H:%M")}', _hsum, '']
 
         # 组合级加仓窗口：规则化而非 LLM。小跌忽略；连续大跌不接飞刀；只有非连续的全市场急跌才提示。
-        try:
-            from analysis.market_add_signal import build as _build_add_signal, format_text as _fmt_add_signal
-            _add_signal = _build_add_signal()
-        except Exception as _ae:
-            _add_signal = {'must_add': False, 'level': 'unknown', 'action': 'unknown',
-                           'action_cn': '数据不足·默认持有', 'suggested_position_delta': '不变',
-                           'headline': '⚠️【今日组合动作：数据不足】',
-                           'reason': f'{type(_ae).__name__}；默认保持仓位。'}
-        try:
-            save_indicator_snapshot('_market_add_signal', {
-                **_add_signal, 'date': datetime.now().strftime('%Y-%m-%d'),
-                'updated_at': datetime.now().astimezone().isoformat(),
-            })
-        except Exception as _se:
-            print(f'[morning_portfolio] 组合动作快照保存失败: {_se}')
-        lines.append(_fmt_add_signal(_add_signal) if '_fmt_add_signal' in locals()
-                     else f"{_add_signal['headline']}\n动作：数据不足·默认持有。{_add_signal['reason']}")
+        from analysis.market_add_signal import format_text as _fmt_add_signal
+        lines.append(_fmt_add_signal(_add_signal))
         lines.append('')
 
         # 大盘速览(轻量,新浪源)
@@ -5426,6 +5421,7 @@ def task_afternoon_portfolio():
         return
     started = datetime.now().isoformat()
     try:
+        _refresh_market_gate('14:35')
         import os as _os6
         target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
         from eod_review import run_eod_review
@@ -5465,6 +5461,7 @@ def task_noon_portfolio():
         return
     started = datetime.now().isoformat()
     try:
+        _refresh_market_gate('11:25')
         intraday = _run_fixed_intraday('11:20')
         if intraday.get('data_quality'):
             from jobs.intraday_decision_monitor import format_fixed_summary

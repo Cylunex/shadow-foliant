@@ -40,6 +40,22 @@ def _result(action: str, reason: str, **base) -> Dict:
                 allow_buy=(action in {'strong_buy', 'buy'}), reason=reason)
 
 
+def fail_closed(signal: Optional[Dict], failure_code: str) -> Dict:
+    """Turn an incomplete refresh into an explicit, non-actionable signal."""
+    original = dict(signal or {})
+    reason = str(original.get('reason') or '市场总闸数据源不可用，默认保持仓位。')
+    generated = {
+        'action', 'action_cn', 'action_rank', 'resolved_action', 'action_decision',
+        'suggested_position_delta', 'headline', 'must_add', 'allow_buy', 'reason',
+        'level', 'source_status', 'source_failure_code',
+    }
+    diagnostics = {key: value for key, value in original.items() if key not in generated}
+    return _result(
+        'unknown', reason, **diagnostics, level='unknown', source_status='failed',
+        source_failure_code=str(failure_code or 'market_add_signal_refresh_failed'),
+    )
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -146,7 +162,7 @@ def evaluate(indices: Iterable[dict], previous_returns: Iterable[float],
                    **base, level='hold')
 
 
-def build() -> Dict:
+def build(*, force: bool = False) -> Dict:
     """拉一次实时指数 + 沪深300历史缓存并完成判断；任一异常都保守返回 unknown。"""
     try:
         import datahub
@@ -168,13 +184,19 @@ def build() -> Dict:
                 trend_ratio = float(closes.iloc[-1]) / ma20 if ma20 > 0 else None
         try:
             from analysis.market_breadth import build as _build_breadth
-            breadth = _build_breadth()
+            breadth = _build_breadth(force=force)
         except Exception as exc:
-            breadth = {'available': False, 'reason': f'{type(exc).__name__}'}
+            breadth = {
+                'available': False, 'reason': f'{type(exc).__name__}',
+                'failure_code': 'a500_breadth_refresh_failed',
+            }
         return evaluate(indices, previous_returns, trend_ratio, breadth=breadth)
     except Exception as e:
-        return _result('unknown', f'{type(e).__name__}；数据异常时默认保持仓位。',
-                       level='unknown')
+        return _result(
+            'unknown', f'{type(e).__name__}；数据异常时默认保持仓位。',
+            level='unknown', source_status='failed',
+            source_failure_code='core_indices_refresh_failed',
+        )
 
 
 def format_text(signal: Dict) -> str:

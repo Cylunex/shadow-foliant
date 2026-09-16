@@ -350,12 +350,13 @@ def _build_missing_plans(formal: dict[str, Any], pool: list[dict[str, Any]],
         return
     market_signal = snapshot_loader("_market_add_signal") or {}
     try:
-        from portfolio_policy import is_fresh_market_add_signal
-        if not is_fresh_market_add_signal(market_signal):
+        from portfolio_policy import is_usable_market_add_signal
+        if not is_usable_market_add_signal(market_signal):
             market_signal = {
                 "action": "unknown",
                 "action_cn": "数据不足·默认持有",
-                "reason": "组合动作信号过期，尾盘不以该信号加仓。",
+                "reason": "组合动作信号过期或数据源失败，尾盘不以该信号加仓。",
+                "source_failure_code": market_signal.get("source_failure_code"),
             }
     except Exception:
         market_signal = market_signal if market_signal else {

@@ -31,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 ENDPOINT = "/api/machine/v1/agent/scheduled-snapshot"
 EXTERNAL_ENDPOINT = "/api/machine/v1/agent/external-independent-research"
 EXTERNAL_CLAIM_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-claim"
+EXTERNAL_DELIVERY_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-delivery"
 MAX_EXTERNAL_BUNDLE_BYTES = 262144
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -236,6 +237,23 @@ def claim_external_notification(
         "overlay_id": overlay_id,
         "notification_slot": notification_slot,
     }, "external_notification_claim_failed")
+
+
+def record_external_notification_delivery(
+    idempotency_key: str, overlay_id: str, notification_slot: str,
+    *, sent: bool, error_code: str | None,
+):
+    body: dict[str, Any] = {
+        "idempotency_key": idempotency_key,
+        "overlay_id": overlay_id,
+        "notification_slot": notification_slot,
+        "sent": bool(sent),
+    }
+    if error_code:
+        body["error_code"] = str(error_code)[:100]
+    return _external_post(
+        EXTERNAL_DELIVERY_ENDPOINT, body, "external_notification_delivery_record_failed",
+    )
 
 
 def scheduled_notification_slot(
@@ -454,12 +472,39 @@ def main(argv: list[str] | None = None) -> int:
                     "error_code": (failure.get("error") or {}).get("code"),
                 }
             elif notification_slot and (claim.get("data") or {}).get("should_send"):
-                snapshot["notification"] = send_qq(snapshot)
-                snapshot["notification"]["notification_slot"] = notification_slot
+                claim_data = claim.get("data") or {}
+                notification = send_qq(snapshot)
+                delivery, delivery_failure = record_external_notification_delivery(
+                    str(overlay.get("idempotency_key") or ""),
+                    str(overlay.get("overlay_id") or ""),
+                    notification_slot,
+                    sent=bool(notification.get("sent")),
+                    error_code=notification.get("error_code"),
+                )
+                notification.update({
+                    "notification_slot": notification_slot,
+                    "prior_sent": False,
+                    "delivery_status": (
+                        (delivery.get("data") or {}).get("delivery_status")
+                        if delivery else "record_failed"
+                    ),
+                    "delivery_recorded": delivery_failure is None,
+                })
+                if delivery_failure:
+                    notification["delivery_record_error_code"] = (
+                        (delivery_failure.get("error") or {}).get("code")
+                    )
+                snapshot["notification"] = notification
             elif notification_slot:
+                claim_data = claim.get("data") or {}
                 snapshot["notification"] = {
-                    "requested": True, "sent": False,
-                    "duplicate_suppressed": True, "error_code": None,
+                    "requested": True,
+                    "sent": bool(claim_data.get("prior_sent")),
+                    "prior_sent": bool(claim_data.get("prior_sent")),
+                    "replayed": True,
+                    "delivery_status": claim_data.get("delivery_status") or "unknown",
+                    "delivered_at": claim_data.get("delivered_at"),
+                    "error_code": claim_data.get("delivery_error_code"),
                     "notification_slot": notification_slot,
                 }
         else:
@@ -468,7 +513,6 @@ def main(argv: list[str] | None = None) -> int:
     notification = snapshot.get("notification") or {}
     notification_failed = bool(
         args.send_qq and not notification.get("sent")
-        and not notification.get("duplicate_suppressed")
     )
     return 0 if snapshot.get("status") in {"complete", "degraded"} and not notification_failed else 2
 

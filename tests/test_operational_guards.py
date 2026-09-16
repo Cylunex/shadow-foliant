@@ -72,6 +72,21 @@ class PortfolioPolicyTest(unittest.TestCase):
         self.assertTrue(status['market_add_signal']['stale'])
         self.assertFalse(status['market_add_signal']['fresh'])
 
+    @patch.dict(os.environ, {'PORTFOLIO_POSITION_MODE': 'high'})
+    @patch('portfolio_policy.latest_market_add_signal')
+    def test_high_position_blocks_fresh_but_failed_market_signal(self, get_signal):
+        now = datetime.now(portfolio_policy.SHANGHAI)
+        get_signal.return_value = {
+            'action': 'strong_buy', 'must_add': True,
+            'date': now.date().isoformat(), 'updated_at': now.isoformat(),
+            'source_status': 'failed',
+            'source_failure_code': 'a500_quotes_failed',
+        }
+        status = portfolio_policy.status()
+        self.assertTrue(status['market_add_signal']['fresh'])
+        self.assertFalse(status['market_add_signal']['usable'])
+        self.assertTrue(status['fail_closed'])
+
     def test_invalid_ttl_config_falls_back_to_default(self):
         now = datetime.now(portfolio_policy.SHANGHAI)
         with patch.dict(os.environ, {'MARKET_ADD_SIGNAL_TTL_MINUTES': 'not-an-int'}):

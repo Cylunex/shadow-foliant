@@ -78,6 +78,13 @@ class ExternalNotificationClaimReq(StrictExternalModel):
     idempotency_key: Annotated[
         str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
     ]
+
+
+class ExternalNotificationDeliveryReq(ExternalNotificationClaimReq):
+    sent: bool
+    error_code: Optional[
+        Annotated[str, StringConstraints(min_length=1, max_length=100)]
+    ] = None
     overlay_id: Annotated[str, StringConstraints(pattern=r"^eio_[0-9a-f]{40}$")]
     notification_slot: Annotated[
         str,
@@ -140,6 +147,30 @@ def register_external_research_routes(
                     idempotency_key=req.idempotency_key,
                     overlay_id=req.overlay_id,
                     notification_slot=req.notification_slot,
+                    actor_id=str(identity.agent_id),
+                )
+            )
+        except Exception as exc:
+            return agent_error(exc)
+
+    @app.post(
+        "/api/machine/v1/agent/external-independent-research/notification-delivery",
+        operation_id="record_agent_external_independent_notification_delivery",
+    )
+    def external_independent_notification_delivery(
+        req: ExternalNotificationDeliveryReq, request: Request,
+    ):
+        try:
+            from application.external_research import ExternalIndependentResearchService
+
+            identity = request.state.agent_identity
+            return agent_result(
+                ExternalIndependentResearchService().record_notification_delivery(
+                    idempotency_key=req.idempotency_key,
+                    overlay_id=req.overlay_id,
+                    notification_slot=req.notification_slot,
+                    sent=req.sent,
+                    error_code=req.error_code,
                     actor_id=str(identity.agent_id),
                 )
             )

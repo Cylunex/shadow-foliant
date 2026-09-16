@@ -91,6 +91,16 @@ def is_fresh_market_add_signal(signal: Optional[Dict], *, now: Optional[datetime
     return timedelta(0) <= current - updated_at <= timedelta(minutes=ttl)
 
 
+def is_usable_market_add_signal(signal: Optional[Dict], *, now: Optional[datetime] = None,
+                                ttl_minutes: Optional[int] = None) -> bool:
+    """A fresh timestamp is insufficient when the refresh source explicitly failed."""
+    if not is_fresh_market_add_signal(signal, now=now, ttl_minutes=ttl_minutes):
+        return False
+    if str((signal or {}).get('source_status') or 'success') != 'success':
+        return False
+    return str((signal or {}).get('action') or 'unknown') != 'unknown'
+
+
 def guard(action: str, source_type: str = 'analysis', reason: str = '') -> Dict:
     """高仓位时，自动买入/加仓必须有当天“强力买入”信号，否则降为观察。
 
@@ -103,7 +113,7 @@ def guard(action: str, source_type: str = 'analysis', reason: str = '') -> Dict:
         return result
     add_signal = latest_market_add_signal()
     signal_action = (add_signal or {}).get('action')
-    if (add_signal and (add_signal.get('fresh') or is_fresh_market_add_signal(add_signal))
+    if (add_signal and is_usable_market_add_signal(add_signal)
             and (signal_action == 'strong_buy' or add_signal.get('must_add') is True)):
         result['market_add_signal'] = add_signal
         return result
@@ -119,18 +129,20 @@ def guard(action: str, source_type: str = 'analysis', reason: str = '') -> Dict:
 def status() -> Dict:
     signal = latest_market_add_signal()
     is_fresh = is_fresh_market_add_signal(signal) if signal else False
+    is_usable = is_usable_market_add_signal(signal) if signal else False
     if signal is not None:
         signal = dict(signal)
-        if not is_fresh:
+        if not is_usable:
             signal['action'] = 'unknown'
             signal['action_cn'] = '数据不足·默认持有'
             signal['must_add'] = False
             signal['level'] = 'unknown'
         signal['fresh'] = is_fresh
         signal['stale'] = not is_fresh
+        signal['usable'] = is_usable
     return {
         'position_mode': mode(),
         'buy_gate': 'strong_buy_only' if mode() == 'high' else 'normal',
         'market_add_signal': signal,
-        'fail_closed': mode() == 'high' and not is_fresh,
+        'fail_closed': mode() == 'high' and not is_usable,
     }

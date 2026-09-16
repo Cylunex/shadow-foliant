@@ -27,6 +27,7 @@ def evaluate_quotes(quotes: Dict[str, dict], expected: Optional[int] = None) -> 
         return {
             "available": False, "covered": covered, "expected": expected,
             "coverage": round(coverage, 3), "reason": "有效横截面覆盖不足",
+            "failure_code": "a500_breadth_coverage_insufficient",
         }
     up = sum(1 for x in changes if x > 0)
     down = sum(1 for x in changes if x < 0)
@@ -70,7 +71,10 @@ def build(symbols: Optional[Iterable[str]] = None, force: bool = False) -> Dict[
             codes = []
     codes = list(dict.fromkeys(str(x).zfill(6) for x in codes if x))
     if not codes:
-        return {"available": False, "covered": 0, "reason": "A500 成分缓存未就绪"}
+        return {
+            "available": False, "covered": 0, "reason": "A500 成分缓存未就绪",
+            "failure_code": "a500_constituents_missing",
+        }
     try:
         import datahub
         result = evaluate_quotes(datahub.quotes(codes), expected=len(codes))
@@ -79,4 +83,5 @@ def build(symbols: Optional[Iterable[str]] = None, force: bool = False) -> Dict[
         return result
     except Exception as exc:
         return {"available": False, "covered": 0,
-                "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
+                "reason": f"{type(exc).__name__}: {str(exc)[:80]}",
+                "failure_code": "a500_quotes_failed"}

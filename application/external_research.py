@@ -562,7 +562,7 @@ class ExternalIndependentResearchService:
         self, *, idempotency_key: str, overlay_id: str,
         notification_slot: str, actor_id: str,
     ) -> dict[str, Any]:
-        """Consume one QQ send per planned report slot (at-most-once per slot)."""
+        """Claim one QQ attempt and replay its recorded delivery outcome."""
         if not actor_id:
             raise PermissionError("actor_required")
         key = self._idempotency_key(idempotency_key)
@@ -594,8 +594,9 @@ class ExternalIndependentResearchService:
                 raise ValueError("external_notification_slot_date_mismatch")
             cur.execute(
                 """INSERT INTO external_research_notification_claims
-                   (idempotency_key,overlay_id,notification_slot,actor_id,consumed_at)
-                   VALUES (?,?,?,?,?)
+                   (idempotency_key,overlay_id,notification_slot,actor_id,consumed_at,
+                    delivery_status)
+                   VALUES (?,?,?,?,?,'claimed')
                    ON CONFLICT(idempotency_key,notification_slot) DO NOTHING""",
                 (key, expected_overlay, slot, actor_id, consumed_at),
             )
@@ -607,13 +608,120 @@ class ExternalIndependentResearchService:
                        WHERE idempotency_key=? AND channel=?""",
                     (consumed_at, key, CHANNEL),
                 )
+            cur.execute(
+                """SELECT overlay_id,actor_id,delivery_status,delivery_attempted_at,
+                          delivered_at,delivery_error_code
+                   FROM external_research_notification_claims
+                   WHERE idempotency_key=? AND notification_slot=?""",
+                (key, slot),
+            )
+            claim_row = cur.fetchone()
+            if not claim_row:
+                raise RuntimeError("external_notification_claim_missing")
+            if str(claim_row[0]) != expected_overlay:
+                raise ValueError("external_notification_claim_overlay_mismatch")
+            if str(claim_row[1]) != actor_id:
+                raise PermissionError("external_notification_claim_actor_mismatch")
             conn.commit()
+            delivery_status = str(claim_row[2] or "unknown")
+            prior_sent = delivery_status == "delivered"
+            replay_status = {
+                "delivered": "delivery_replayed",
+                "failed": "delivery_replayed",
+                "claimed": "delivery_pending",
+                "unknown": "delivery_unknown",
+            }.get(delivery_status, "delivery_unknown")
             return {
-                "status": "consumed" if claimed else "duplicate_suppressed",
+                "status": "claimed" if claimed else replay_status,
                 "idempotency_key": key,
                 "overlay_id": expected_overlay, "should_send": claimed,
                 "notification_slot": slot,
+                "prior_sent": prior_sent,
+                "sent": prior_sent,
+                "delivery_status": delivery_status,
+                "delivery_attempted_at": claim_row[3],
+                "delivered_at": claim_row[4],
+                "delivery_error_code": claim_row[5],
                 "delivery_semantics": "at_most_once_per_scheduled_slot_before_qq",
+                "auto_execution": False,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def record_notification_delivery(
+        self, *, idempotency_key: str, overlay_id: str,
+        notification_slot: str, sent: bool, error_code: Optional[str], actor_id: str,
+    ) -> dict[str, Any]:
+        """Persist the outcome of the one claimed QQ attempt for safe replay."""
+        if not actor_id:
+            raise PermissionError("actor_required")
+        key = self._idempotency_key(idempotency_key)
+        expected_overlay = str(overlay_id or "").strip()
+        if not expected_overlay.startswith("eio_") or len(expected_overlay) != 44:
+            raise ValueError("external_overlay_id_invalid")
+        slot = str(notification_slot or "").strip()
+        if not NOTIFICATION_SLOT_PATTERN.fullmatch(slot):
+            raise ValueError("external_notification_slot_invalid")
+        failure_code = str(error_code or "").strip()[:100] or None
+        if not sent and not failure_code:
+            raise ValueError("external_notification_delivery_error_required")
+        attempted_at = self.clock().isoformat(timespec="seconds")
+        delivery_status = "delivered" if sent else "failed"
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT overlay_id,actor_id,delivery_status,delivered_at
+                   FROM external_research_notification_claims
+                   WHERE idempotency_key=? AND notification_slot=?""",
+                (key, slot),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("external_notification_claim_missing")
+            if str(row[0]) != expected_overlay:
+                raise ValueError("external_notification_claim_overlay_mismatch")
+            if str(row[1]) != actor_id:
+                raise PermissionError("external_notification_claim_actor_mismatch")
+            previous_status = str(row[2] or "unknown")
+            if previous_status in {"delivered", "failed"}:
+                if previous_status != delivery_status:
+                    raise ValueError("external_notification_delivery_conflict")
+                conn.commit()
+                return {
+                    "status": "delivery_replayed", "idempotency_key": key,
+                    "overlay_id": expected_overlay, "notification_slot": slot,
+                    "sent": previous_status == "delivered",
+                    "prior_sent": previous_status == "delivered",
+                    "delivery_status": previous_status, "delivered_at": row[3],
+                    "auto_execution": False,
+                }
+            cur.execute(
+                """UPDATE external_research_notification_claims
+                   SET delivery_status=?,delivery_attempted_at=?,delivered_at=?,
+                       delivery_error_code=?
+                   WHERE idempotency_key=? AND notification_slot=?""",
+                (delivery_status, attempted_at, attempted_at if sent else None,
+                 None if sent else failure_code, key, slot),
+            )
+            cur.execute(
+                """UPDATE external_research_submissions
+                   SET notification_status=?,notification_consumed_at=?
+                   WHERE idempotency_key=? AND channel=?""",
+                (delivery_status, attempted_at, key, CHANNEL),
+            )
+            conn.commit()
+            return {
+                "status": "recorded", "idempotency_key": key,
+                "overlay_id": expected_overlay, "notification_slot": slot,
+                "sent": bool(sent), "prior_sent": False,
+                "delivery_status": delivery_status,
+                "delivery_attempted_at": attempted_at,
+                "delivered_at": attempted_at if sent else None,
+                "delivery_error_code": None if sent else failure_code,
                 "auto_execution": False,
             }
         except Exception:

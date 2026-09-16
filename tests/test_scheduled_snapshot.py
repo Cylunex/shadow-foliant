@@ -1051,12 +1051,16 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     monkeypatch.setattr(cli, "send_qq", lambda _snapshot: (
         events.append(("qq", None)) or {"requested": True, "sent": True, "channel": "qq"}
     ))
+    monkeypatch.setattr(cli, "record_external_notification_delivery", lambda *_args, **_kwargs: (
+        events.append(("delivery", _kwargs["sent"])) or
+        {"data": {"delivery_status": "delivered"}}, None
+    ))
 
     assert cli.main([
         "--external-bundle", str(path), "--send-qq",
         "--notification-slot", "20:45",
     ]) == 0
-    assert [name for name, _ in events] == ["submit", "fetch", "claim", "qq"]
+    assert [name for name, _ in events] == ["submit", "fetch", "claim", "qq", "delivery"]
     assert events[2][1] == "2026-09-15T20:45+08:00"
     first_output = json.loads(capsys.readouterr().out)
     assert first_output["notification"]["sent"] is True
@@ -1066,7 +1070,10 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
 
     events.clear()
     monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
-        events.append(("claim", None)) or {"data": {"should_send": False}}, None
+        events.append(("claim", None)) or {"data": {
+            "should_send": False, "prior_sent": True, "delivery_status": "delivered",
+            "delivered_at": "2026-09-15T20:45:02+08:00",
+        }}, None
     ))
     assert cli.main([
         "--external-bundle", str(path), "--send-qq",
@@ -1074,7 +1081,9 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     ]) == 0
     output = json.loads(capsys.readouterr().out)
     assert [name for name, _ in events] == ["submit", "fetch", "claim"]
-    assert output["notification"]["duplicate_suppressed"] is True
+    assert output["notification"]["prior_sent"] is True
+    assert output["notification"]["sent"] is True
+    assert output["notification"]["replayed"] is True
     assert output["notification"]["notification_slot"] == "2026-09-15T20:45+08:00"
 
 

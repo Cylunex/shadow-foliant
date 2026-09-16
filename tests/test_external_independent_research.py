@@ -219,14 +219,22 @@ def test_submission_is_idempotent_and_notification_is_claimed_once_per_planned_s
             idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
             notification_slot=slot, actor_id="research-agent",
         )
+        recorded = service.record_notification_delivery(
+            idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+            notification_slot=slot, sent=True, error_code=None,
+            actor_id="research-agent",
+        )
         second_claim = service.claim_notification(
             idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
             notification_slot=slot, actor_id="research-agent",
         )
         assert first_claim["should_send"] is True
         assert first_claim["notification_slot"] == slot
+        assert recorded["delivery_status"] == "delivered"
         assert second_claim["should_send"] is False
-        assert second_claim["status"] == "duplicate_suppressed"
+        assert second_claim["status"] == "delivery_replayed"
+        assert second_claim["prior_sent"] is True
+        assert second_claim["sent"] is True
     with pytest.raises(PermissionError, match="external_submission_actor_mismatch"):
         service.claim_notification(
             idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
@@ -258,6 +266,43 @@ def test_submission_is_idempotent_and_notification_is_claimed_once_per_planned_s
         assert conn.execute("SELECT COUNT(*) FROM external_independent_overlays").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_notification_replay_distinguishes_unfinished_and_failed_delivery(tmp_path):
+    store, service = _service(tmp_path)
+    bundle = _bundle(proposal=False)
+    overlay_id = service.save(bundle, actor_id="research-agent")["data"]["overlay"]["overlay_id"]
+    unfinished_slot = "2026-09-15T10:15+08:00"
+    service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        notification_slot=unfinished_slot, actor_id="research-agent",
+    )
+    unfinished = service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        notification_slot=unfinished_slot, actor_id="research-agent",
+    )
+    assert unfinished["status"] == "delivery_pending"
+    assert unfinished["prior_sent"] is False
+    assert unfinished["delivery_status"] == "claimed"
+
+    failed_slot = "2026-09-15T11:25+08:00"
+    service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        notification_slot=failed_slot, actor_id="research-agent",
+    )
+    service.record_notification_delivery(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        notification_slot=failed_slot, sent=False, error_code="qq_delivery_failed",
+        actor_id="research-agent",
+    )
+    failed = service.claim_notification(
+        idempotency_key=bundle["idempotency_key"], overlay_id=overlay_id,
+        notification_slot=failed_slot, actor_id="research-agent",
+    )
+    assert failed["status"] == "delivery_replayed"
+    assert failed["prior_sent"] is False
+    assert failed["delivery_status"] == "failed"
+    assert failed["delivery_error_code"] == "qq_delivery_failed"
 
 
 def test_pit_rejects_historical_rank_and_post_decision_evidence_atomically(tmp_path):
@@ -409,6 +454,9 @@ def test_machine_contract_is_strict_and_requires_research_preview_capability():
     ) == 2
     assert access_source.count(
         '("POST", "/api/machine/v1/agent/external-independent-research/notification-claim")'
+    ) == 2
+    assert access_source.count(
+        '("POST", "/api/machine/v1/agent/external-independent-research/notification-delivery")'
     ) == 2
     assert '"foliant.selection.read"' in access_source
     assert '"foliant.selection.preview"' in access_source
