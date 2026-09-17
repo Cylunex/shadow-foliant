@@ -4,17 +4,22 @@ from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi import FastAPI
 from pydantic import ValidationError
 
 from application.external_research import (
     CHANNEL,
     ExternalIndependentResearchService,
 )
+from application.services import ApplicationError
 from data.research_store import ResearchStore
-from webui.external_research_routes import ExternalIndependentBundleReq
+from webui.external_research_routes import (
+    ExternalIndependentBundleReq, register_external_research_routes,
+)
 
 
 NOW = datetime(2026, 9, 15, 13, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -357,6 +362,32 @@ def test_evidence_dedupe_detects_conflicting_revisions(tmp_path):
     later_service = ExternalIndependentResearchService(store=store, clock=lambda: later)
     with pytest.raises(ValueError, match="external_evidence_dedupe_conflict"):
         later_service.save(changed, actor_id="research-agent")
+
+
+def test_route_exposes_safe_dedupe_conflict_code(monkeypatch):
+    app = FastAPI()
+    register_external_research_routes(
+        app, agent_result=lambda value, **_kwargs: value,
+        agent_error=lambda error: error,
+    )
+    route = next(route for route in app.routes
+                 if getattr(route, "path", None) ==
+                 "/api/machine/v1/agent/external-independent-research"
+                 and "POST" in (getattr(route, "methods", None) or set()))
+    monkeypatch.setattr(
+        ExternalIndependentResearchService, "save",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("external_evidence_dedupe_conflict")
+        ),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(
+        agent_identity=SimpleNamespace(agent_id="research-agent"),
+    ))
+    error = route.endpoint(ExternalIndependentBundleReq.model_validate(_bundle()), request)
+    assert isinstance(error, ApplicationError)
+    assert error.code == "external_evidence_dedupe_conflict"
+    assert error.status_code == 409
+    assert "versioned key" in error.message
 
 
 def test_outcomes_cover_all_horizons_and_market_regime(tmp_path):

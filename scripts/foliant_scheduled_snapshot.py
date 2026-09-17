@@ -33,6 +33,17 @@ EXTERNAL_ENDPOINT = "/api/machine/v1/agent/external-independent-research"
 EXTERNAL_CLAIM_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-claim"
 EXTERNAL_DELIVERY_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-delivery"
 MAX_EXTERNAL_BUNDLE_BYTES = 262144
+EXTERNAL_REJECTION_HINTS = {
+    "external_evidence_dedupe_conflict": (
+        "Evidence dedupe_key is immutable. Use a new versioned key for a correction; review the earlier evidence."
+    ),
+    "external_idempotency_key_conflict": (
+        "Use a new submission idempotency_key for changed external research."
+    ),
+    "historical_ranking_backfill_forbidden": (
+        "The decision is outside the contemporaneous window; do not backfill ranking or a past QQ slot."
+    ),
+}
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
@@ -224,6 +235,14 @@ def _external_post(endpoint: str, body: dict[str, Any], failure_code: str):
             "Provision a separate writer with stock.research and foliant.selection.preview.",
         )
     if response.status_code != 200:
+        if response.status_code in {400, 409, 422}:
+            try:
+                error = (response.json() or {}).get("error") or {}
+                code = error.get("code")
+            except (ValueError, AttributeError, TypeError):
+                code = None
+            if isinstance(code, str) and code in EXTERNAL_REJECTION_HINTS:
+                return None, _failure(code, EXTERNAL_REJECTION_HINTS[code], status="degraded")
         return None, _failure(failure_code, "Inspect protected Foliant logs by request time.", status="degraded")
     try:
         payload = response.json()
@@ -318,6 +337,51 @@ def _merge_external_submission(snapshot: dict[str, Any], submission: dict[str, A
     return None
 
 
+def _degrade_external_submission(
+    snapshot: dict[str, Any], failure: dict[str, Any],
+    *, selection_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Preserve the independent report while refusing to present rejected research."""
+    error = failure.get("error") or {}
+    code = str(error.get("code") or "external_research_submit_failed")
+    detail = {
+        "status": "rejected" if code in EXTERNAL_REJECTION_HINTS else "unavailable",
+        "error_code": code,
+        "repair_hint": str(error.get("repair_hint") or "Inspect the external research submission."),
+        "selection_run_id": selection_run_id,
+    }
+    snapshot["external_submission"] = detail
+    if snapshot.get("schema_version") != "scheduled-agent-snapshot-v1" or snapshot.get("error"):
+        return snapshot
+    snapshot["status"] = "degraded"
+    snapshot["external_independent_research"] = {
+        "status": "degraded", "channel": "codex-external-independent-v1",
+        "submission_status": detail["status"], "error_code": code,
+        "top15": [], "top5": [], "evidence": [], "news_watchlist": [],
+        "tuning_proposals": [], "formal_membership_unchanged": True,
+        "human_review_required": True, "auto_apply": False, "auto_execution": False,
+    }
+    quality = snapshot.get("quality")
+    if isinstance(quality, dict):
+        quality["status"] = "degraded"
+        sections = quality.get("sections")
+        if isinstance(sections, dict):
+            sections["external_independent_research"] = "degraded"
+        optional = quality.get("optional_degradations")
+        if isinstance(optional, list) and "external_independent_research" not in optional:
+            optional.append("external_independent_research")
+    comparison = snapshot.get("source_comparison")
+    if isinstance(comparison, dict):
+        comparison["external_top5"] = None
+        availability = comparison.get("availability")
+        if isinstance(availability, dict):
+            availability["external_independent"] = False
+    as_of = snapshot.get("as_of")
+    if isinstance(as_of, dict):
+        as_of["external_independent_research"] = None
+    return snapshot
+
+
 def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     """Render only whitelisted business fields; never interpolate errors or config."""
     day = snapshot.get("trading_day") or {}
@@ -325,6 +389,9 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     independent = snapshot.get("independent_selection") or {}
     external = snapshot.get("external_independent_research") or {}
     reference = snapshot.get("wencai_reference") or {}
+    cockpit = snapshot.get("cockpit") or {}
+    policy = cockpit.get("portfolio_policy") or {}
+    market_signal = policy.get("market_add_signal") or {}
     holdings = snapshot.get("holdings") or {}
     industry = snapshot.get("portfolio_industry") or {}
     plans = snapshot.get("trade_plans") or {}
@@ -362,6 +429,11 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"decision {external.get('decision_as_of') or '不可用'}；"
             f"locked {external.get('ranking_locked_at') or '不可用'}"
         )
+    elif external.get("submission_status") in {"rejected", "unavailable"}:
+        lines.append(
+            "外部独立研究：本次提交未通过，今日外部排序与事件调整未采用；"
+            "以下正式选股、持仓和风控取自可用快照。"
+        )
     lines.extend([
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
@@ -387,6 +459,11 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         f"快照质量：{snapshot.get('status') or 'degraded'}；"
         f"阶段 {snapshot.get('phase') or 'unknown'}；仅供研究，不自动下单。",
     ])
+    if policy.get("fail_closed"):
+        failure_code = str(market_signal.get("source_failure_code") or "")
+        if not re.fullmatch(r"[a-z0-9_]{1,80}", failure_code):
+            failure_code = "数据不完整"
+        lines.append(f"组合买入门：失败关闭（{failure_code}），不依据缺失数据加仓。")
     groups = (industry.get("industry_groups") or [])[:3]
     if groups:
         labels = [
@@ -469,24 +546,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     submission = None
+    external_failure = None
+    bundle = None
     if args.external_bundle:
-        bundle, failure = _load_external_bundle(args.external_bundle)
-        if failure:
-            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-            return 2
-        submission, failure = submit_external_bundle(bundle)
-        if failure:
-            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-            return 2
+        bundle, external_failure = _load_external_bundle(args.external_bundle)
+        if bundle is not None:
+            submission, external_failure = submit_external_bundle(bundle)
     snapshot = fetch_snapshot()
+    if external_failure:
+        snapshot = _degrade_external_submission(
+            snapshot, external_failure,
+            selection_run_id=(bundle or {}).get("selection_run_id"),
+        )
     if submission:
         failure = _merge_external_submission(snapshot, submission)
         if failure:
-            print(json.dumps(_safe(failure), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-            return 2
+            external_failure = failure
+            snapshot = _degrade_external_submission(
+                snapshot, failure, selection_run_id=(bundle or {}).get("selection_run_id"),
+            )
     if args.send_qq:
         external = snapshot.get("external_independent_research") or {}
-        if external.get("status") == "complete" and not submission:
+        if external_failure:
+            snapshot["notification"] = send_qq(snapshot)
+        elif external.get("status") == "complete" and not submission:
             snapshot["notification"] = {
                 "requested": True, "sent": False,
                 "error_code": "external_submission_claim_required",

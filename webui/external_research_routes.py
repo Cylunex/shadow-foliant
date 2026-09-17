@@ -7,6 +7,8 @@ from typing import Annotated, Any, Callable, Literal, Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from application.services import ApplicationError
+
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 Timestamp = Annotated[str, StringConstraints(min_length=20, max_length=64)]
@@ -128,6 +130,26 @@ def register_external_research_routes(
                 ),
                 max_bytes=262144,
             )
+        except ValueError as exc:
+            if str(exc) == "external_evidence_dedupe_conflict":
+                return agent_error(ApplicationError(
+                    "external_evidence_dedupe_conflict",
+                    "evidence dedupe_key is immutable; submit a corrected version with a new versioned key and review the prior evidence",
+                    status_code=409,
+                ))
+            if str(exc) == "external_idempotency_key_conflict":
+                return agent_error(ApplicationError(
+                    "external_idempotency_key_conflict",
+                    "submission idempotency_key already belongs to different content",
+                    status_code=409,
+                ))
+            if str(exc) == "historical_ranking_backfill_forbidden":
+                return agent_error(ApplicationError(
+                    "historical_ranking_backfill_forbidden",
+                    "ranking decision is outside the contemporaneous window; create a fresh decision rather than backfilling a report",
+                    status_code=409,
+                ))
+            return agent_error(exc)
         except Exception as exc:
             return agent_error(exc)
 

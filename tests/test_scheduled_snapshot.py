@@ -1090,6 +1090,100 @@ def test_cli_external_bundle_is_strict_and_rejects_private_fields(tmp_path):
     assert failure["error"]["code"] == "external_bundle_invalid"
 
 
+def test_cli_external_rejection_preserves_degraded_snapshot_and_can_notify(
+    tmp_path, monkeypatch, capsys,
+):
+    from copy import deepcopy
+    from scripts import foliant_scheduled_snapshot as cli
+
+    path = tmp_path / "external.json"
+    bundle = _external_cli_bundle()
+    path.write_text(json.dumps(bundle), encoding="utf-8")
+    original = build_service().read(owner_id="scheduled-agent")["data"]
+    original["external_independent_research"] = {
+        "status": "complete", "top15": [{"symbol": "600001"}],
+        "top5": [{"symbol": "600001"}], "evidence": [{"dedupe_key": "old"}],
+    }
+    original["cockpit"] = {"portfolio_policy": {
+        "fail_closed": True,
+        "market_add_signal": {"source_failure_code": "a500_constituents_missing"},
+    }}
+    events = []
+    failure = cli._failure(
+        "external_evidence_dedupe_conflict",
+        cli.EXTERNAL_REJECTION_HINTS["external_evidence_dedupe_conflict"],
+        status="degraded",
+    )
+    monkeypatch.setattr(cli, "submit_external_bundle", lambda _bundle: (
+        events.append("submit") or None, failure,
+    ))
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
+        events.append("fetch") or deepcopy(original)
+    ))
+    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
+        events.append("claim") or None
+    ))
+    monkeypatch.setattr(cli, "send_qq", lambda snapshot: (
+        events.append("qq") or {"requested": True, "sent": True, "channel": "qq"}
+    ))
+
+    assert cli.main(["--external-bundle", str(path), "--send-qq",
+                     "--notification-slot", "10:15"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert events == ["submit", "fetch", "qq"]
+    assert result["status"] == "degraded"
+    assert result["quality"]["status"] == "degraded"
+    assert result["external_submission"]["error_code"] == "external_evidence_dedupe_conflict"
+    assert result["external_independent_research"]["top5"] == []
+    assert result["external_independent_research"]["status"] == "degraded"
+    assert result["source_comparison"]["availability"]["external_independent"] is False
+    for section in ("formal_selection", "holdings", "trade_plans"):
+        assert result[section] == original[section]
+    assert result["notification"]["sent"] is True
+    assert "本次提交未通过" in cli.render_qq_report(result)[1]
+    assert "a500_constituents_missing" in cli.render_qq_report(result)[1]
+    assert "外部独立：" not in cli.render_qq_report(result)[1]
+
+
+def test_cli_external_rejection_does_not_send_without_snapshot(tmp_path, monkeypatch, capsys):
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    path = tmp_path / "external.json"
+    path.write_text(json.dumps(_external_cli_bundle()), encoding="utf-8")
+    monkeypatch.setattr(cli, "submit_external_bundle", lambda _bundle: (
+        None, cli._failure("external_evidence_dedupe_conflict", "versioned key", status="degraded"),
+    ))
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: cli._failure(
+        "agent_unreachable", "agent unavailable", status="degraded",
+    ))
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    with patch.object(notification_router, "send") as send:
+        assert cli.main(["--external-bundle", str(path), "--send-qq"]) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "agent_unreachable"
+    assert result["external_submission"]["error_code"] == "external_evidence_dedupe_conflict"
+    assert result["notification"]["sent"] is False
+    send.assert_not_called()
+
+
+def test_cli_external_post_preserves_public_rejection_code(monkeypatch):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setenv("FOLIANT_AGENT_BASE_URL", "http://127.0.0.1:8601")
+    monkeypatch.setenv("FOLIANT_EXTERNAL_RESEARCH_TOKEN", "test-writer-token")
+    response = SimpleNamespace(
+        status_code=409,
+        json=lambda: {"error": {"code": "external_evidence_dedupe_conflict",
+                                "message": "private server text"}},
+    )
+    with patch.object(cli.requests, "post", return_value=response):
+        result, failure = cli.submit_external_bundle({"channel": "test"})
+    assert result is None
+    assert failure["error"]["code"] == "external_evidence_dedupe_conflict"
+    assert "private server text" not in str(failure)
+
+
 def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, monkeypatch, capsys):
     from copy import deepcopy
     from scripts import foliant_scheduled_snapshot as cli
