@@ -28,26 +28,36 @@ _ADMISSION = _threading.RLock()
 _inflight = None
 _rejected_until = 0.0
 _rejected_status = None
+_STRATEGY_GROUPS = frozenset(('低价擒牛', '低估值', '主力资金', '小市值', '净利增长'))
+# Each premarket strategy gets one bounded worker and one rejection window. A
+# timed-out worker or HTTP 403 in one group must not skip the other four.
+_group_pools = {}
+_group_inflight = {}
+_group_rejections = {}
+_group_failures = {}
 
 
-def rejection_status():
+def rejection_status(group=None):
     """Only aggregate health facts; never expose query, Cookie or response body."""
     with _ADMISSION:
-        remaining = max(0, int(_rejected_until - _time.monotonic() + 0.999))
-        return {'http_status': _rejected_status if remaining else None,
+        until, status = (_group_rejections.get(group, (0.0, None)) if group else
+                         (_rejected_until, _rejected_status))
+        remaining = max(0, int(until - _time.monotonic() + 0.999))
+        inflight = _group_inflight.get(group) if group else _inflight
+        return {'http_status': status if remaining else None,
                 'retry_after_seconds': remaining,
-                'inflight': bool(_inflight is not None and not _inflight.done())}
+                'inflight': bool(inflight is not None and not inflight.done())}
 
 
-def _check_rejection():
-    state = rejection_status()
+def _check_rejection(group=None):
+    state = rejection_status(group)
     if state['retry_after_seconds']:
         raise PyWencaiRequestRejected(
             f"问财 HTTP {state['http_status']} 冷却中，{state['retry_after_seconds']}s 后重试",
             status_code=state['http_status'], retry_after=state['retry_after_seconds'])
 
 
-def _record_rejection(response):
+def _record_rejection(response, group=None):
     global _rejected_until, _rejected_status
     status = response.status_code
     seconds = {401: 3600, 403: 900, 429: 120}.get(status, 60)
@@ -56,8 +66,11 @@ def _record_rejection(response):
     except (AttributeError, TypeError, ValueError):
         pass
     with _ADMISSION:
-        _rejected_until = _time.monotonic() + seconds
-        _rejected_status = status
+        if group:
+            _group_rejections[group] = (_time.monotonic() + seconds, status)
+        else:
+            _rejected_until = _time.monotonic() + seconds
+            _rejected_status = status
 
 # ⚡ 全源熔断(2026-06-25):问财不走 datahub._route, 故在此自带熔断, 否则问财整体不可达时
 # 每只逐只仍吃满 timeout(collect_factors 焐热 391 只 × 30s) → kline_prefetch/factor_collection
@@ -89,7 +102,8 @@ class _HttpsRequestsProxy:
     def request(self, *args, **kwargs):
         # pywencai swallows transport exceptions and retries internally. Deny
         # those retries before spending another provider admission or HTTP call.
-        _check_rejection()
+        group = getattr(self._state, 'group', None)
+        _check_rejection(group)
         args = list(args)
         if 'url' in kwargs:
             url = kwargs['url']
@@ -102,15 +116,26 @@ class _HttpsRequestsProxy:
                 args[1] = self._HTTPS_PREFIX + url[len(self._HTTP_PREFIX):]
         from data.provider_governor import provider_slot
         if kwargs.get('timeout') is None:
-            kwargs['timeout'] = (5, 15)
+            kwargs['timeout'] = (3, 6) if group else (5, 15)
+        transport_error = None
+        response = None
         with provider_slot('pywencai'):
-            response = self._requests.request(*args, **kwargs)
-            self._state.last_status = getattr(response, 'status_code', None)
-            # Charge every page/retry, not only the outer logical query.
-            if getattr(response, 'status_code', 200) in (401, 403, 429) or getattr(response, 'status_code', 200) >= 500:
-                _record_rejection(response)
-                _check_rejection()
+            if group:
+                try:
+                    response = self._requests.request(*args, **kwargs)
+                except Exception as exc:
+                    # Strategy failures are handled by their own breaker; the
+                    # host-wide quota slot still serializes/charges requests.
+                    transport_error = exc
+            else:
+                response = self._requests.request(*args, **kwargs)
+        if transport_error is not None:
+            raise transport_error
         self._state.last_status = getattr(response, 'status_code', None)
+        # Charge every page/retry, not only the outer logical query.
+        if getattr(response, 'status_code', 200) in (401, 403, 429) or getattr(response, 'status_code', 200) >= 500:
+            _record_rejection(response, group)
+            _check_rejection(group)
         return response
 
     def reset_status(self):
@@ -140,9 +165,10 @@ _pywencai_core.rq = _HTTPS_REQUESTS
 _pywencai_convert.rq = _HTTPS_REQUESTS
 
 
-def _invoke_pywencai(query, loop, kwargs):
+def _invoke_pywencai(query, loop, kwargs, group=None):
     """在 pywencai 吞掉底层异常后，保留明确的 HTTP 拒绝分类。"""
     _HTTPS_REQUESTS.reset_status()
+    _HTTPS_REQUESTS._state.group = group
     try:
         result = pywencai.get(query=query, loop=loop, **kwargs)
     except AttributeError as exc:
@@ -168,20 +194,22 @@ def cookie_configured() -> bool:
     )
 
 
-def breaker_open() -> bool:
+def breaker_open(group=None) -> bool:
     """问财熔断是否生效中(连续失败达阈值且仍在冷却期)。供任务超时通知"具体到问财"。"""
     import time as _t
-    return bool(rejection_status()['retry_after_seconds']) or (
-        _streak_fail >= _BREAK_FAILS and (_t.time() - _last_fail) < _BREAK_COOLDOWN)
+    streak, last = _group_failures.get(group, (0, 0.0)) if group else (_streak_fail, _last_fail)
+    return bool(rejection_status(group)['retry_after_seconds']) or (
+        streak >= _BREAK_FAILS and (_t.time() - last) < _BREAK_COOLDOWN)
 
 
-def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
+def pywencai_get(query: str, timeout: int = 90, loop: bool = True, *, group=None, **kwargs):
     """带硬超时 + 熔断的 pywencai.get 包装。
 
     Args:
         query: 问财查询语句
         timeout: 整体超时(秒), 默认 90s。loop=True 翻多页时给宽点, 单页 30s 够。
         loop: 透传给 pywencai.get, 是否翻全分页
+        group: 五个盘前策略之一，隔离各组拒绝冷却和超时执行槽
         **kwargs: 其他参数透传
 
     Returns:
@@ -192,10 +220,13 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
         其它异常: 与原生 pywencai.get 一致, 上层按原路径处理
     """
     global _streak_fail, _last_fail, _BREAK_LOG_LAST, _inflight
-    _check_rejection()
+    if group is not None and group not in _STRATEGY_GROUPS:
+        raise ValueError('unsupported pywencai group')
+    _check_rejection(group)
     now = _time.time()
+    streak, last = _group_failures.get(group, (0, 0.0)) if group else (_streak_fail, _last_fail)
     # 熔断:连续失败达阈值且仍在冷却期 → 不再 submit, 直接短路(避免逐只吃满 timeout)
-    if _streak_fail >= _BREAK_FAILS and (now - _last_fail) < _BREAK_COOLDOWN:
+    if streak >= _BREAK_FAILS and (now - last) < _BREAK_COOLDOWN:
         if now - _BREAK_LOG_LAST >= _BREAK_LOG_GAP:
             _BREAK_LOG_LAST = now
             print(f'[pywencai] ⚡ 问财连续失败熔断中, {_BREAK_COOLDOWN:.0f}s 内直接短路降级'
@@ -214,20 +245,38 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
     kwargs.setdefault('retry', 2)
     kwargs.setdefault('sleep', 1)
     with _ADMISSION:
-        _check_rejection()
-        if _inflight is not None and not _inflight.done():
+        _check_rejection(group)
+        inflight = _group_inflight.get(group) if group else _inflight
+        if inflight is not None and not inflight.done():
             raise TimeoutError('pywencai 上次请求仍未结束，短路降级')
-        fut = _POOL.submit(_invoke_pywencai, query, loop, kwargs)
-        _inflight = fut
+        if group:
+            pool = _group_pools.get(group)
+            if pool is None:
+                pool = _cf.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix='pywencai-' + str(len(_group_pools)))
+                _group_pools[group] = pool
+        else:
+            pool = _POOL
+        fut = pool.submit(_invoke_pywencai, query, loop, kwargs, group)
+        if group:
+            _group_inflight[group] = fut
+        else:
+            _inflight = fut
     try:
         r = fut.result(timeout=timeout)
-        _streak_fail = 0   # 连通即复位(返回空 df 也算连通, 问财只是无数据)
+        if group:
+            _group_failures[group] = (0, 0.0)
+        else:
+            _streak_fail = 0   # 返回空 df 也算连通
         return r
     except _cf.TimeoutError:
         # 孤儿线程留给底层自然结束/退出; cancel() 多数情况无效(任务已开始), 但不阻塞
         fut.cancel()
-        _streak_fail += 1
-        _last_fail = _time.time()
+        if group:
+            _group_failures[group] = (streak + 1, _time.time())
+        else:
+            _streak_fail += 1
+            _last_fail = _time.time()
         raise TimeoutError(f'pywencai 查询超时 {timeout}s')
     except AttributeError as e:
         # ⚠️ pywencai 0.13.1(2025-05 最新版)bug:wencai.py:185 `params.get('data')` 没校验
@@ -235,13 +284,22 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, **kwargs):
         # 触发条件:超长复杂 query / 同花顺反爬返坏结构。库已升级到最新仍未修。
         # 对策:转 None 视同问财无数据,调用方原本就处理 None(if result is None: continue)。
         if "NoneType" in str(e) and "get" in str(e):
+            if group:
+                _group_failures[group] = (streak + 1, _time.time())
+            else:
+                _streak_fail += 1
+                _last_fail = _time.time()
+            return None
+        if group:
+            _group_failures[group] = (streak + 1, _time.time())
+        else:
             _streak_fail += 1
             _last_fail = _time.time()
-            return None
-        _streak_fail += 1
-        _last_fail = _time.time()
         raise
     except Exception:
-        _streak_fail += 1
-        _last_fail = _time.time()
+        if group:
+            _group_failures[group] = (streak + 1, _time.time())
+        else:
+            _streak_fail += 1
+            _last_fail = _time.time()
         raise

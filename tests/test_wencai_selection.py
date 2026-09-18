@@ -67,6 +67,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["loop"])
         self.assertEqual(get.call_args.kwargs["timeout"], 40)
         self.assertEqual(get.call_args.kwargs["retry"], 1)
+        self.assertEqual(get.call_args.kwargs["group"], "低价擒牛")
 
     def test_selector_returns_unique_canonical_code(self):
         from selection import low_price_bull_selector as module
@@ -101,6 +102,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["loop"])
         self.assertEqual(get.call_args.kwargs["timeout"], 40)
         self.assertEqual(get.call_args.kwargs["retry"], 1)
+        self.assertEqual(get.call_args.kwargs["group"], "小市值")
 
     def test_profit_growth_selector_requests_wencai_once(self):
         from selection import profit_growth_selector as module
@@ -113,6 +115,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["loop"])
         self.assertEqual(get.call_args.kwargs["timeout"], 40)
         self.assertEqual(get.call_args.kwargs["retry"], 1)
+        self.assertEqual(get.call_args.kwargs["group"], "净利增长")
 
     def test_value_selector_requests_wencai_once(self):
         from selection import value_stock_selector as module
@@ -125,6 +128,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["loop"])
         self.assertEqual(get.call_args.kwargs["timeout"], 40)
         self.assertEqual(get.call_args.kwargs["retry"], 1)
+        self.assertEqual(get.call_args.kwargs["group"], "低估值")
 
     def test_main_force_requests_only_first_page(self):
         from selection import main_force_selector as module
@@ -147,6 +151,7 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertFalse(get.call_args.kwargs["loop"])
         self.assertEqual(get.call_args.kwargs["timeout"], 15)
         self.assertEqual(get.call_args.kwargs["retry"], 0)
+        self.assertEqual(get.call_args.kwargs["group"], "主力资金")
         self.assertEqual(get.call_args.args[0], "主力资金净流入排名")
 
     def test_main_force_filters_st_and_star_market_locally(self):

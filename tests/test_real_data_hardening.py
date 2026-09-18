@@ -1,5 +1,5 @@
 """Regression contracts derived from real NAS acceptance failures."""
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import json
 import sqlite3
@@ -142,6 +142,8 @@ def wencai(monkeypatch):
     for name, value in [('_rejected_until', 0), ('_rejected_status', None), ('_inflight', None),
                         ('_streak_fail', 0), ('_last_fail', 0)]:
         monkeypatch.setattr(source, name, value)
+    for name in ('_group_rejections', '_group_inflight', '_group_failures'):
+        monkeypatch.setattr(source, name, {})
     monkeypatch.setattr('data.provider_governor.provider_slot', lambda *_a, **_kw: nullcontext())
     return source
 
@@ -208,6 +210,63 @@ def test_timeout_does_not_queue_another_wencai_worker(wencai, monkeypatch):
     finally:
         release.set()
         wencai._inflight.result(timeout=2)
+
+
+def test_http_rejection_is_scoped_to_premarket_strategy(wencai, monkeypatch):
+    wencai._record_rejection(SimpleNamespace(status_code=403, headers={}), '低价擒牛')
+    with pytest.raises(wencai.PyWencaiRequestRejected) as error:
+        wencai.pywencai_get('first', group='低价擒牛', timeout=.1)
+    assert error.value.status_code == 403
+    assert wencai.rejection_status('低估值')['retry_after_seconds'] == 0
+    monkeypatch.setattr(wencai, '_invoke_pywencai', lambda *_args: 'ready')
+    assert wencai.pywencai_get('second', group='低估值', timeout=1) == 'ready'
+
+
+def test_strategy_403_does_not_open_hostwide_provider_circuit(wencai, monkeypatch):
+    exits = []
+
+    @contextmanager
+    def slot(*_args, **_kwargs):
+        try:
+            yield
+        except Exception:
+            exits.append('error')
+            raise
+        else:
+            exits.append('normal')
+
+    monkeypatch.setattr('data.provider_governor.provider_slot', slot)
+    proxy = wencai._HttpsRequestsProxy(SimpleNamespace(request=Mock(
+        return_value=SimpleNamespace(status_code=403, headers={}))))
+    proxy._state.group = '低价擒牛'
+    with pytest.raises(wencai.PyWencaiRequestRejected):
+        proxy.request('GET', 'https://www.iwencai.com/test')
+    assert exits == ['normal']
+    assert wencai.rejection_status('低价擒牛')['http_status'] == 403
+    assert wencai.rejection_status('低估值')['http_status'] is None
+
+
+def test_timed_out_strategy_does_not_occupy_another_strategy_worker(wencai, monkeypatch):
+    release = threading.Event()
+    entered = threading.Event()
+
+    def isolated(_query, _loop, _kwargs, group=None):
+        if group == '低价擒牛':
+            entered.set()
+            release.wait(2)
+        return group
+
+    monkeypatch.setattr(wencai, '_invoke_pywencai', isolated)
+    try:
+        with pytest.raises(TimeoutError, match='查询超时'):
+            wencai.pywencai_get('first', group='低价擒牛', timeout=.02)
+        assert entered.is_set()
+        assert wencai.pywencai_get('second', group='低估值', timeout=1) == '低估值'
+        with pytest.raises(TimeoutError, match='仍未结束'):
+            wencai.pywencai_get('third', group='低价擒牛', timeout=.02)
+    finally:
+        release.set()
+        wencai._group_inflight['低价擒牛'].result(timeout=2)
 
 
 def test_holdout_missing_docker_is_rejected_before_reading_facts(tmp_path):
