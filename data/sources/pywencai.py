@@ -202,6 +202,8 @@ def cookie_configured() -> bool:
 
 def breaker_open(group=None) -> bool:
     """问财熔断是否生效中(连续失败达阈值且仍在冷却期)。供任务超时通知"具体到问财"。"""
+    if _os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial':
+        return True
     import time as _t
     streak, last = _group_failures.get(group, (0, 0.0)) if group else (_streak_fail, _last_fail)
     return bool(rejection_status(group)['retry_after_seconds']) or (
@@ -226,6 +228,8 @@ def pywencai_get(query: str, timeout: int = 90, loop: bool = True, *, group=None
         其它异常: 与原生 pywencai.get 一致, 上层按原路径处理
     """
     global _streak_fail, _last_fail, _BREAK_LOG_LAST, _inflight
+    if _os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial':
+        raise PyWencaiRequestRejected('legacy pywencai disabled for OpenAPI trial')
     if group is not None and group not in _STRATEGY_GROUPS:
         raise ValueError('unsupported pywencai group')
     _check_rejection(group)

@@ -577,6 +577,22 @@ def test_missing_legacy_cash_is_non_blocking_when_fixed_budget_is_complete():
     assert result["quality"]["blocking_sections"] == []
 
 
+def test_openapi_trial_reference_is_labeled_unverified_in_snapshot():
+    projected = ScheduledSnapshotService._wencai({"data": {"references": {
+        "wencai": {"source_mode": "openapi_trial", "strategies": {
+            "低价擒牛": {"status": "trial_unverified", "picks": [
+                {"symbol": "000001", "name": "样例"},
+            ]},
+        }},
+    }}})
+    assert projected["provider"] == "iwencai_openapi"
+    assert projected["status"] == "trial_unverified"
+    assert projected["ready_groups"] == 0
+    assert projected["trial_data_groups"] == 1
+    assert projected["semantic_equivalence_verified"] is False
+    assert projected["reference_affects_membership"] is False
+
+
 def test_missing_wencai_does_not_change_formal_candidates():
     value = selection(with_wencai=False)
     expected = [row["symbol"] for row in value["data"]["formal_top15"]]

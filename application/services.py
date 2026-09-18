@@ -50,6 +50,45 @@ def normalize_symbol(value: Any) -> str:
     return digits
 
 
+def _openapi_trial_reference(shadow: dict[str, Any] | None) -> dict[str, Any]:
+    """Display-only replacement for the failed legacy reference, never a formal input."""
+    from selection.wencai_query_contract import ORDER
+
+    payload = shadow if isinstance(shadow, dict) else {}
+    groups = {row.get('name'): row for row in (payload.get('groups') or [])
+              if isinstance(row, dict) and row.get('name') in ORDER}
+    strategies = {}
+    for name in ORDER:
+        row = groups.get(name) or {}
+        has_data = bool(row.get('schema_valid') and row.get('picks'))
+        strategies[name] = {
+            'strategy_id': 'iwencai_openapi_trial_' + name,
+            'strategy_version': 'iwencai-openapi-trial-v1',
+            'query_hash': row.get('query_hash'),
+            'status': 'trial_unverified' if has_data else 'failed',
+            'failure_code': 'semantic_unverified' if has_data else
+                            str(row.get('status') or 'shadow_not_available')[:48],
+            'picks': [{'symbol': str(symbol), 'name': '',
+                       'source_labels': ['问财OpenAPI·试运行']}
+                      for symbol in (row.get('picks') or [])[:5]
+                      if isinstance(symbol, str) and re.fullmatch(r'\d{6}', symbol)],
+            'reference_affects_membership': False,
+        }
+    return {
+        'version': 'iwencai-openapi-trial-reference-v1',
+        'provider': 'iwencai_openapi', 'source_mode': 'openapi_trial',
+        'status': 'trial_unverified' if any(
+            row['status'] == 'trial_unverified' for row in strategies.values()) else 'degraded',
+        'trial_reference': True, 'semantic_equivalence_verified': False,
+        'ready_groups': 0,
+        'trial_data_groups': sum(row['status'] == 'trial_unverified'
+                                 for row in strategies.values()),
+        'executed_at': payload.get('sampled_at') or payload.get('executed_at'),
+        'strategies': strategies,
+        'reference_affects_membership': False,
+    }
+
+
 def _bounded_int(value: Any, *, minimum: int, maximum: int, default: int) -> int:
     try:
         parsed = int(value)
@@ -514,19 +553,20 @@ class SelectionRunService:
         final_candidates = decorate(top5)
         from analysis.independent_selector import artifact_payload
         from selection.strategy_cache import artifact_payload as wencai_artifact_payload
+        shadow_reference = next(((artifacts.get(name) or {}).get("payload")
+                                 for name in (
+                                     "iwencai_openapi_shadow_postclose",
+                                     "iwencai_openapi_shadow_afternoon",
+                                     "iwencai_openapi_shadow",
+                                 ) if (artifacts.get(name) or {}).get("payload")), {})
+        trial_mode = os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial'
         references = {
-            "wencai": wencai_artifact_payload(artifacts),
+            "wencai": (_openapi_trial_reference(shadow_reference) if trial_mode else
+                       wencai_artifact_payload(artifacts)),
             "independent": artifact_payload(artifacts),
             "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},
             "miaoxiang_review": (artifacts.get("miaoxiang_review") or {}).get("payload") or {},
-            "iwencai_openapi_shadow": (
-                next(((artifacts.get(name) or {}).get("payload")
-                      for name in (
-                          "iwencai_openapi_shadow_postclose",
-                          "iwencai_openapi_shadow_afternoon",
-                          "iwencai_openapi_shadow",
-                      ) if (artifacts.get(name) or {}).get("payload")), {})
-            ),
+            "iwencai_openapi_shadow": shadow_reference,
         }
         strategy_inputs = {
             "local_strategies": (

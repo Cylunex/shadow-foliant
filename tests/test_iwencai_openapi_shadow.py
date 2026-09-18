@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from analysis.miaoxiang import diagnosis_verdict
 from data.sources import iwencai_openapi as source
+from data.sources import pywencai as legacy_source
 from selection.wencai_query_contract import ORDER, QUERIES
 
 
@@ -52,6 +53,18 @@ def test_missing_key_has_no_network_request(monkeypatch):
     assert session.calls == []
 
 
+def test_trial_switch_blocks_legacy_before_transport(monkeypatch):
+    monkeypatch.setenv('WENCAI_REFERENCE_SOURCE', 'openapi_trial')
+    assert legacy_source.breaker_open()
+    with patch.object(legacy_source, 'pywencai', create=True) as transport:
+        try:
+            legacy_source.pywencai_get('低价擒牛', group='低价擒牛')
+            assert False, 'legacy call must be rejected'
+        except legacy_source.PyWencaiRequestRejected:
+            pass
+        transport.assert_not_called()
+
+
 def test_restricted_env_file_extracts_only_iwencai_key(tmp_path, monkeypatch):
     path = tmp_path / 'keys.env'
     path.write_text('OTHER_KEY=unrelated\nIWENCAI_API_KEY="test-key"\n')
@@ -76,6 +89,10 @@ def test_pagination_schema_provenance_and_bounded_output():
         result = source.run_group('低价擒牛', session=session, key='test-key')
     assert result['status'] == 'semantic_unverified'
     assert result['parsed_conditions_verified'] is False
+    assert result['target_top_n'] == 5
+    assert result['top_n_coverage'] is True
+    assert result['pagination_complete'] is True
+    assert 'query_equivalence_not_audited' in result['failure_reasons']
     assert result['reported_count'] == 22
     assert result['returned_count'] == 22
     assert result['pages_fetched'] == 2
@@ -169,6 +186,43 @@ def test_shadow_comparison_never_promotes_to_formal():
     assert all(row['overlap_top5_count'] == 1 for row in shadow['groups'])
     assert shadow['reference_affects_membership'] is False
     assert shadow['replacement_ready'] is False
+    assert shadow['replacement_status'] == 'entitlement_or_semantic_blocked'
+    assert shadow['valid_semantic_sample_day'] is False
+
+
+def test_rank_ordinal_cannot_substitute_for_raw_amount():
+    rows = [{'股票代码': f'{i:06d}.SZ', '股票简称': '测试',
+             '最新价[20260918]': 10, '归母净利润同比增长率[20260630]': 120,
+             '成交额[20260918]': None, '成交额排名名次[20260918]': i}
+            for i in range(1, 21)]
+    session = Session([Response({'datas': rows, 'code_count': 321})])
+    with patch.object(source, 'MAX_PAGES', 1), \
+         patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
+        result = source.run_group('低价擒牛', session=session, key='test-key')
+    assert result['required_numeric_fields'] is False
+    assert result['sort_verified'] is False
+    amount = result['field_evidence'][2]
+    assert [item['field'] for item in amount['candidates']] == ['成交额[20260918]']
+    assert result['top_n_coverage'] is True
+    assert result['pagination_complete'] is False
+    assert result['status'] == 'semantic_unverified'
+
+
+def test_main_force_top_five_excludes_kcb_without_claiming_net_inflow_equivalence():
+    rows = [{'股票代码': ('688001.SH' if i == 0 else f'{i:06d}.SZ'),
+             '股票简称': '测试', '主力资金流向': 100 - i}
+            for i in range(20)]
+    session = Session([Response({'datas': rows, 'code_count': 5575})])
+    with patch.object(source, 'MAX_PAGES', 1), \
+         patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
+        result = source.run_group('主力资金', session=session, key='test-key')
+    assert result['picks'] == [f'{i:06d}' for i in range(1, 6)]
+    assert result['stock_scope_verified'] is True
+    assert result['scope_rejected_sample_count'] == 1
+    assert result['capital_flow_metric_verified'] is False
+    assert result['sort_field_as_of'] is None
+    assert 'capital_flow_net_inflow_unverified' in result['failure_reasons']
+    assert result['status'] == 'semantic_unverified'
 
 
 def test_miaoxiang_error_dict_is_not_neutral():

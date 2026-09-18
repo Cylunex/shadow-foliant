@@ -13,6 +13,7 @@ from application.services import (
     ResearchRunQueryService,
     RunCoordinator,
     SelectionRunService,
+    _openapi_trial_reference,
 )
 
 
@@ -261,6 +262,51 @@ def test_formal_selection_read_exposes_lanes_and_reference_layers() -> None:
     assert result["data"]["lane_counts"]["core"] == 3
     assert "wencai" in result["data"]["references"]
     assert "miaoxiang" in result["data"]["references"]
+
+
+def test_openapi_trial_reference_is_display_only_and_degrades_without_data():
+    shadow = {"sampled_at": "2026-09-18T14:45:00+08:00", "groups": [
+        {"name": "低价擒牛", "schema_valid": True, "picks": ["000001", "invalid"]},
+        {"name": "低估值", "status": "http_403", "picks": []},
+    ]}
+    trial = _openapi_trial_reference(shadow)
+    assert trial["status"] == "trial_unverified"
+    assert trial["ready_groups"] == 0
+    assert trial["trial_data_groups"] == 1
+    assert trial["semantic_equivalence_verified"] is False
+    assert trial["reference_affects_membership"] is False
+    assert trial["strategies"]["低价擒牛"]["picks"] == [{
+        "symbol": "000001", "name": "", "source_labels": ["问财OpenAPI·试运行"],
+    }]
+    assert trial["strategies"]["低估值"]["status"] == "failed"
+    assert _openapi_trial_reference({})["status"] == "degraded"
+
+
+def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch):
+    class Store:
+        def latest_formal_selection(self):
+            return {
+                "run_id": "selection-1", "selection_date": "2026-09-18",
+                "artifacts": {
+                    "formal_top15": {"payload": [{"code": "600001", "rank": 1}]},
+                    "formal_top5": {"payload": [{"code": "600001", "rank": 1}]},
+                    "wencai_strategy_runs": {"payload": {"strategies": {}}},
+                    "iwencai_openapi_shadow_afternoon": {"payload": {"groups": [
+                        {"name": "低价擒牛", "schema_valid": True,
+                         "picks": ["000001"]},
+                    ]}},
+                },
+            }
+
+    service = SelectionRunService(store=Store())
+    monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "legacy")
+    legacy = service.latest_formal()["data"]
+    monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "openapi_trial")
+    trial = service.latest_formal()["data"]
+    assert trial["formal_top15"] == legacy["formal_top15"]
+    assert trial["formal_top5"] == legacy["formal_top5"]
+    assert legacy["references"]["wencai"].get("source_mode") != "openapi_trial"
+    assert trial["references"]["wencai"]["source_mode"] == "openapi_trial"
 
 
 def test_durable_worker_lease_reclaims_once_then_fails_after_attempt_budget(repository) -> None:

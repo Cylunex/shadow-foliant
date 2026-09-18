@@ -442,7 +442,10 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             "仅对比正式选股与独立量化底座。"
         )
     lines.extend([
-        f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
+        (f"问财 OpenAPI 试运行参考：{reference.get('trial_data_groups') or 0}/5 组有数据；"
+         "语义未核验、非正式输入，不影响正式候选。"
+         if reference.get('source_mode') == 'openapi_trial' else
+         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）"),
         (
             "问财 OpenAPI 影子：独立 Key 未配置，未试跑；不替换旧问财。"
             if openapi_shadow.get('status') == 'credential_missing' else
@@ -451,6 +454,15 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"当日调用 {(openapi_shadow.get('usage') or {}).get('calls_today') if (openapi_shadow.get('usage') or {}).get('calls_today') is not None else '未知'}/"
             f"{(openapi_shadow.get('usage') or {}).get('hard_daily_limit') or 70}；"
             f"状态 {openapi_shadow.get('status') or 'missing'}；不参与正式排名。"
+        ),
+        (
+            '问财切换：entitlement_or_semantic_blocked；原五组等价性未证实，' +
+            ('OpenAPI 仅作试运行参考，不代表原五组等价；正式选股不变。'
+             if reference.get('source_mode') == 'openapi_trial' else
+             '旧源继续作为参考。后续可升级权益、维持降级，或明确重定义策略；'
+             '不会因连续返回名单而认定等价。')
+            if openapi_shadow.get('replacement_status') == 'entitlement_or_semantic_blocked'
+            else '问财切换：语义未核验时不认定为等价。'
         ),
         (
             f"妙想参考：{miaoxiang.get('ready_groups') or 0}/5 组；"

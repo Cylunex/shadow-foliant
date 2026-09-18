@@ -582,6 +582,8 @@ class ScheduledSnapshotService:
             })
         present = sum(1 for row in rows if row["status"] != "missing")
         ready = sum(1 for row in rows if row["status"] == "ready")
+        trial = payload.get("source_mode") == "openapi_trial"
+        trial_data = sum(1 for row in rows if row["status"] == "trial_unverified")
         try:
             import datahub
 
@@ -590,8 +592,12 @@ class ScheduledSnapshotService:
             fuyao = {"configured": False, "enabled": False, "capabilities": {}}
         fuyao_configured = bool(fuyao.get("configured") and fuyao.get("enabled"))
         return {
-            "status": "missing" if present == 0 else "complete" if ready == 5 else "degraded",
-            "provider": "iwencai_reference_adapter",
+            "status": ("trial_unverified" if trial_data else "degraded") if trial else
+                      ("missing" if present == 0 else "complete" if ready == 5 else "degraded"),
+            "provider": "iwencai_openapi" if trial else "iwencai_reference_adapter",
+            "source_mode": "openapi_trial" if trial else "legacy",
+            "trial_data_groups": trial_data if trial else 0,
+            "semantic_equivalence_verified": False if trial else None,
             "availability": "ready" if ready == 5 else "long_term_degraded",
             "reference_only": True,
             "reference_affects_membership": False,
@@ -645,6 +651,8 @@ class ScheduledSnapshotService:
                 'provider': 'iwencai_openapi', 'ready_groups': 0, 'groups': [],
                 'data_groups': 0, 'usage': usage,
                 'reference_only': True, 'replacement_ready': False,
+                'replacement_status': 'entitlement_or_semantic_blocked',
+                'valid_semantic_sample_day': False,
             }
         current = str(payload.get('selection_run_id') or '') == str(formal.get('run_id') or '')
         groups = []
@@ -655,9 +663,14 @@ class ScheduledSnapshotService:
                 'name', 'status', 'query_hash', 'requested_at', 'data_as_of',
                 'pages_fetched', 'reported_count', 'returned_count',
                 'http_status', 'schema_valid', 'chunks_info_present',
-                'condition_count', 'max_conditions_ok', 'parsed_conditions_verified',
+                'condition_count', 'max_conditions_ok', 'parsed_conditions_present',
+                'parsed_conditions_verified', 'local_conditions_verified',
                 'required_numeric_fields', 'sort_verified', 'stock_scope_verified',
-                'sort_field_as_of', 'pagination_complete',
+                'sort_field_as_of', 'pagination_complete', 'as_of_verified',
+                'target_top_n', 'top_n_coverage', 'eligible_top_n_count',
+                'financial_periods_verified', 'capital_flow_metric_verified',
+                'scope_rejected_sample_count', 'field_evidence', 'sort_evidence',
+                'failure_reasons',
                 'legacy_status', 'overlap_top5_count', 'comparison_available',
             )})
         return clean_json({
@@ -666,8 +679,16 @@ class ScheduledSnapshotService:
             'data_groups': int(payload.get('data_groups') or 0) if current else 0,
             'usage': usage,
             'groups': groups, 'as_of': payload.get('executed_at'),
+            'sampled_at': payload.get('sampled_at'),
+            'sampling_slot': str(payload.get('sampling_slot') or '')[:16],
             'reference_only': True, 'reference_affects_membership': False,
             'replacement_ready': False,
+            'replacement_status': 'entitlement_or_semantic_blocked',
+            'valid_semantic_sample_day': False,
+            'required_user_options': [
+                'upgrade_entitlement', 'retain_legacy_reference',
+                'explicitly_authorize_strategy_redefinition',
+            ],
             'replacement_gates': list(payload.get('replacement_gates') or [])[:8],
         })
 
@@ -1309,7 +1330,9 @@ class ScheduledSnapshotService:
                 "independent_selection": {"status": "missing", "top15": [], "top5": []},
                 "wencai_reference": {"status": "missing", "reference_only": True, "strategies": []},
                 "iwencai_openapi_shadow": {"status": "missing", "reference_only": True,
-                                            "replacement_ready": False, "groups": []},
+                                            "replacement_ready": False,
+                                            "replacement_status": "entitlement_or_semantic_blocked",
+                                            "valid_semantic_sample_day": False, "groups": []},
                 "miaoxiang_reference": {"status": "missing", "reference_only": True,
                                          "strategy_comparison": []},
                 "external_independent_research": {

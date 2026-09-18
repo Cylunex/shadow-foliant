@@ -4584,12 +4584,22 @@ def _prefetch_wencai_batch(*, use_cache: bool, log_job: str) -> dict:
     }
 
 
+def _openapi_trial_reference_enabled() -> bool:
+    """Explicit rollback switch; default remains the legacy reference lane."""
+    return os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial'
+
+
 def task_strategy_prefetch():
     """🏦 按固定顺序逐进程隔离预取五组问财参考。"""
     job = 'strategy_prefetch'
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    if _openapi_trial_reference_enabled():
+        _log_run(job, 'skipped', error='legacy_disabled_openapi_trial',
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+        return
     batch = _prefetch_wencai_batch(use_cache=False, log_job=job)
     done, total = batch['available'], len(_WENCAI_REFERENCE_ORDER)
     _log_run(
@@ -4606,6 +4616,11 @@ def task_strategy_prefetch_retry():
     if _skip_if_not_trading(job):
         return
     started = datetime.now().isoformat()
+    if _openapi_trial_reference_enabled():
+        _log_run(job, 'skipped', error='legacy_disabled_openapi_trial',
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+        return
     batch = _prefetch_wencai_batch(use_cache=True, log_job=job)
     done = batch['available']
     _log_run(
@@ -4825,15 +4840,21 @@ def task_unified_selection():
         # 2. 问财继续保留一段时间，仅作外部发现/对照。独立短截止时间结束后，
         #    参考结果附着到已存在的本地 run，不重新计算正式分数。
         wencai_scan_error = ''
-        try:
-            strategy_scan = _call_with_hard_timeout(
-                '问财参考', _run_strategy_scans, timeout=45
-            )
-        except Exception as _wre:
-            wencai_scan_error = f'{type(_wre).__name__}:{str(_wre)[:240]}'
-            print(f'[unified_selection] 问财参考放弃(不影响本地主链): '
-                  f'{type(_wre).__name__}')
+        if _openapi_trial_reference_enabled():
+            # Trial OpenAPI attaches later as a separate, explicitly unverified
+            # reference. Never call or silently reuse the legacy selector here.
             strategy_scan = {'results': {}}
+            wencai_scan_error = 'legacy_disabled_openapi_trial'
+        else:
+            try:
+                strategy_scan = _call_with_hard_timeout(
+                    '问财参考', _run_strategy_scans, timeout=45
+                )
+            except Exception as _wre:
+                wencai_scan_error = f'{type(_wre).__name__}:{str(_wre)[:240]}'
+                print(f'[unified_selection] 问财参考放弃(不影响本地主链): '
+                      f'{type(_wre).__name__}')
+                strategy_scan = {'results': {}}
         wencai_reference = []
         wencai_strategy_runs = {
             'version': 'wencai-reference-v3',
