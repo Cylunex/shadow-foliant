@@ -234,6 +234,8 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert snapshot["strategy_adjustment_proposals"]["guardrails"]["auto_apply"] is False
     assert "note" not in snapshot["holdings"]["rows"][1]
     assert snapshot["independent_selection"]["status"] == "complete"
+    assert snapshot["independent_selection"]["market_as_of_role"] == "selection_input_market_date"
+    assert snapshot["independent_selection"]["selection_session_date"] == "2026-09-10"
     assert len(snapshot["independent_selection"]["top5"]) == 5
     assert snapshot["quality"]["sections"]["independent_selection"] == "complete"
     assert [row["name"] for row in snapshot["wencai_reference"]["strategies"]] == [
@@ -734,6 +736,7 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
     assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == "historical_reference"
     assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
+    assert snapshot["trade_plans"]["status_basis"] == "next_session_plan_complete"
     shared = snapshot["holdings_review"]["pricing_snapshot"]
     assert shared == snapshot["next_session_plan"]["pricing_snapshot"]
     assert shared["snapshot_id"] == risk["pricing_snapshot"]["snapshot_id"]
@@ -812,6 +815,48 @@ def test_post_close_omits_stale_intraday_holding_actions():
     assert snapshot["trade_plans"]["holding_actions"] == []
     assert snapshot["trade_plans"]["holding_actions_omitted_count"] == 100
     assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
+
+
+def test_post_close_missing_plans_are_bounded_and_do_not_gain_price_authority():
+    day = {"date": "2026-09-10", "confirmed": True, "is_trading_day": True}
+    holdings = [{"symbol": "600699", "name": "样例甲", "cost_price": 9},
+                {"symbol": "601919", "name": "样例乙", "cost_price": 9}]
+    quotes = [{"symbol": row["symbol"], "price": 10, "freshness": "closing_current",
+               "as_of": "2026-09-10T16:14:00+08:00"} for row in holdings]
+    kwargs = {"due": True, "trading_day": day, "holdings": holdings,
+              "quote_rows": quotes, "plans": {}, "pricing_snapshot": {}}
+    review = ScheduledSnapshotService._holdings_review(**kwargs)
+    plan = ScheduledSnapshotService._next_session_plan(
+        **kwargs, formal={"formal_top15": []})
+    assert review["status"] == plan["status"] == "degraded"
+    assert review["blocked_count"] == plan["blocked_count"] == 2
+    assert review["unusable_trade_plan_symbols"] == ["600699", "601919"]
+    assert plan["unusable_trade_plan_symbols"] == ["600699", "601919"]
+    assert all(row["action"] == "data_insufficient" and row["stop_loss"] is None
+               for row in review["rows"])
+    assert all(row["status"] == "blocked" and row["buy_zone"] is None
+               for row in plan["rows"])
+    assert all(row["planned_action"] is None for row in plan["rows"])
+
+    unusable = {"600699": {"available": False, "action": "sell",
+                            "stop_loss": 9, "target_price": 11}}
+    review = ScheduledSnapshotService._holdings_review(**(kwargs | {"plans": unusable}))
+    plan = ScheduledSnapshotService._next_session_plan(
+        **(kwargs | {"plans": unusable}), formal={"formal_top15": []})
+    assert review["rows"][0]["blockers"] == ["trade_plan_unavailable"]
+    assert review["rows"][0]["action"] == "data_insufficient"
+    assert review["rows"][0]["stop_loss"] is None
+    assert plan["rows"][0]["planned_action"] is None
+    assert plan["rows"][0]["sell_levels"]["stop_loss"] is None
+
+    snapshot = build_service(
+        clock=lambda: NOW.replace(hour=20, minute=46),
+        quote_time=NOW.replace(hour=16, minute=14),
+        selection_value=selection(with_trade_plans=False),
+        intraday_value={"data": {"selection_run_id": "formal-run", "plans": {}}},
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["trade_plans"]["status_basis"] == "next_session_plan_incomplete"
+    assert snapshot["trade_plans"]["post_close_blocked_count"] > 0
 
 
 def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
@@ -1096,6 +1141,35 @@ def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
     send.assert_not_called()
 
 
+def test_cli_partial_post_close_sends_bounded_warning_without_missing_prices(monkeypatch):
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    snapshot = {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
+        "trading_day": {"date": "2026-09-18", "confirmed": True},
+        "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
+        "holdings": {"status": "complete", "count": 55},
+        "trade_plans": {"status": "degraded", "portfolio_risk": {}},
+        "quotes": {"status": "success"},
+        "post_close_review": {"due": True, "status": "complete", "conclusion": "复盘完成"},
+        "holdings_review": {"status": "degraded", "count": 55, "reviewed_count": 53,
+                            "unusable_trade_plan_symbols": ["600699", "601919"]},
+        "next_session_plan": {"status": "degraded", "count": 69, "ready_count": 67,
+                              "unusable_trade_plan_symbols": ["600699", "601919"]},
+        "as_of": {"captured_at": "2026-09-18T20:45:00+08:00"},
+        "quality": {"status": "degraded"},
+    }
+    with patch.object(notification_router, "send", return_value={"qq": (True, "ok")}) as send:
+        notification = cli.send_qq(snapshot)
+    assert notification["sent"] is True
+    body = send.call_args.args[2]
+    assert "53/55" in body and "67/69" in body
+    assert "600699,601919" in body
+    assert "对应标的暂不给价" in body
+
+
 def test_cli_report_appends_due_post_close_conclusion():
     from scripts import foliant_scheduled_snapshot as cli
 
@@ -1103,7 +1177,8 @@ def test_cli_report_appends_due_post_close_conclusion():
         "status": "complete",
         "trading_day": {"date": "2026-09-10", "confirmed": True},
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
-        "independent_selection": {"status": "missing"},
+        "independent_selection": {"status": "missing", "market_as_of": "2026-09-09",
+                                  "selection_session_date": "2026-09-10"},
         "wencai_reference": {"ready_groups": 5},
         "holdings": {"count": 2, "status": "complete"},
         "trade_plans": {
@@ -1124,6 +1199,7 @@ def test_cli_report_appends_due_post_close_conclusion():
     assert "策略调整：1 项待复核；仅生成建议，不自动应用。" in body
     assert "股票 40 只/市值 ¥184,388" in body
     assert "基金排除 13 只；可用 ¥115,612" in body
+    assert "2026-09-10 选择，PIT 行情输入截至 2026-09-09" in body
 
 
 def _external_cli_bundle():

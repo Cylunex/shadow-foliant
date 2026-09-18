@@ -420,6 +420,12 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         lines.append("独立TOP5：" + ("、".join(labels) or "无候选"))
     else:
         lines.append("独立TOP5：不可用（必要输入不完整）")
+    if independent.get("market_as_of"):
+        lines.append(
+            f"独立量化时点：{independent.get('selection_session_date') or '未知'} 选择，"
+            f"PIT 行情输入截至 {independent.get('market_as_of')}；"
+            "不等同于当日盘后新研究。"
+        )
     if external.get("status") == "complete":
         labels = [
             f"{row.get('name') or row.get('symbol')}({row.get('symbol')})"
@@ -511,6 +517,19 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         lines.append("持仓一级行业（前三）：" + "、".join(labels))
     if post_close.get("due"):
         lines.append(f"盘后结论：{post_close.get('conclusion') or '盘后闭环结果不可用。'}")
+        holding_review = snapshot.get("holdings_review") or {}
+        next_plan = snapshot.get("next_session_plan") or {}
+        missing_plans = sorted(set(
+            (holding_review.get("unusable_trade_plan_symbols") or [])
+            + (next_plan.get("unusable_trade_plan_symbols") or [])
+        ))[:20]
+        lines.append(
+            f"盘后持仓复盘：{holding_review.get('reviewed_count') or 0}/"
+            f"{holding_review.get('count') or 0} 只已核；次日计划 "
+            f"{next_plan.get('ready_count') or 0}/{next_plan.get('count') or 0} 条可用。"
+            + (f"权威计划缺失或不可用：{','.join(missing_plans)}，对应标的暂不给价。"
+               if missing_plans else "")
+        )
         lines.append(
             f"策略调整：{proposals.get('proposal_count') or 0} 项待复核；"
             "仅生成建议，不自动应用。"
@@ -535,8 +554,8 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "error_code": "snapshot_contract_incomplete"}
     if (snapshot["post_close_review"].get("due")
             and (snapshot["post_close_review"].get("status") != "complete"
-                 or snapshot["holdings_review"].get("status") != "complete"
-                 or snapshot["next_session_plan"].get("status") != "complete"
+                 or snapshot["holdings_review"].get("status") not in {"complete", "degraded"}
+                 or snapshot["next_session_plan"].get("status") not in {"complete", "degraded"}
                  or not snapshot["post_close_review"].get("conclusion"))):
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "post_close_review_incomplete"}

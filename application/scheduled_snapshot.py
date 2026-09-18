@@ -759,6 +759,7 @@ class ScheduledSnapshotService:
     def _independent(
         selection_value: dict[str, Any],
         expected_market_as_of: str | None = None,
+        selection_date: str | None = None,
     ) -> dict[str, Any]:
         data = selection_value.get("data") or {}
         payload = ((data.get("references") or {}).get("independent") or {})
@@ -787,6 +788,8 @@ class ScheduledSnapshotService:
             "input_snapshot_id": payload.get("input_snapshot_id"),
             "input_provenance": clean_json(payload.get("input_provenance") or {}),
             "market_as_of": payload.get("market_as_of"),
+            "market_as_of_role": "selection_input_market_date",
+            "selection_session_date": selection_date,
             "expected_market_as_of": expected,
             "weights": clean_json(payload.get("weights") or {}),
             "top15": [_candidate(row) for row in (payload.get("top15") or [])][:15],
@@ -1027,10 +1030,13 @@ class ScheduledSnapshotService:
                 if close_price is not None and cost and cost > 0 else None
             )
             plan = plans.get(symbol) or {}
-            stop = _finite_number(plan.get("stop_loss"))
-            target = _finite_number(plan.get("target_price"))
+            plan_usable = bool(plan and plan.get("available") is not False)
+            stop = _finite_number(plan.get("stop_loss")) if plan_usable else None
+            target = _finite_number(plan.get("target_price")) if plan_usable else None
             if close_price is None:
                 action, reason, state = "data_insufficient", "当日收盘价不可用", "blocked"
+            elif not plan_usable:
+                action, reason, state = "data_insufficient", "权威交易计划不可用，暂不给价", "blocked"
             elif stop is not None and close_price <= stop:
                 action, reason, state = "sell", "收盘价触及计划止损", "reviewed"
             elif target is not None and close_price >= target:
@@ -1044,8 +1050,10 @@ class ScheduledSnapshotService:
             blockers = []
             if close_price is None:
                 blockers.append("closing_quote_unavailable")
-            if not plan or plan.get("available") is False:
+            if not plan:
                 blockers.append("trade_plan_missing")
+            elif plan.get("available") is False:
+                blockers.append("trade_plan_unavailable")
             rows.append(clean_json({
                 "symbol": symbol,
                 "name": holding.get("name"),
@@ -1067,9 +1075,16 @@ class ScheduledSnapshotService:
                 "blockers": blockers,
             }))
         complete = all(row.get("status") == "reviewed" for row in rows)
+        blocked = [row for row in rows if row.get("blockers")]
         return clean_json(base | {
             "status": "complete" if complete else "degraded",
             "count": len(rows),
+            "reviewed_count": len(rows) - len(blocked),
+            "blocked_count": len(blocked),
+            "unusable_trade_plan_symbols": [
+                row["symbol"] for row in blocked
+                if set(row["blockers"]) & {"trade_plan_missing", "trade_plan_unavailable"}
+            ][:20],
             "rows": rows[:100],
             "price_basis": "same_trading_day_close_snapshot",
         })
@@ -1118,19 +1133,22 @@ class ScheduledSnapshotService:
         for symbol, item in items.items():
             candidate = candidates.get(symbol) or {}
             plan = candidate.get("trade_plan") or plans.get(symbol) or {}
+            plan_usable = bool(plan and plan.get("available") is not False)
             quote = quote_by_symbol.get(symbol) or {}
             freshness = str(quote.get("freshness") or "stale_or_missing")
             close_price = (
                 _finite_number(quote.get("price"))
                 if freshness in {"actionable", "closing_current"} else None
             )
-            entry_low = _finite_number(plan.get("entry_low"))
-            entry_high = _finite_number(plan.get("entry_high"))
+            entry_low = _finite_number(plan.get("entry_low")) if plan_usable else None
+            entry_high = _finite_number(plan.get("entry_high")) if plan_usable else None
             blockers = []
             if close_price is None:
                 blockers.append("closing_quote_unavailable")
-            if not plan or plan.get("available") is False:
+            if not plan:
                 blockers.append("trade_plan_missing")
+            elif plan.get("available") is False:
+                blockers.append("trade_plan_unavailable")
             rows.append(clean_json(item | {
                 "status": "blocked" if blockers else "ready",
                 "reference_close": close_price,
@@ -1141,14 +1159,14 @@ class ScheduledSnapshotService:
                     if entry_low is not None and entry_high is not None else None
                 ),
                 "sell_levels": {
-                    "stop_loss": _finite_number(plan.get("stop_loss")),
-                    "first_target": _finite_number(plan.get("target_price")),
-                    "second_target": _finite_number(plan.get("target_price_2")),
+                    "stop_loss": _finite_number(plan.get("stop_loss")) if plan_usable else None,
+                    "first_target": _finite_number(plan.get("target_price")) if plan_usable else None,
+                    "second_target": _finite_number(plan.get("target_price_2")) if plan_usable else None,
                 },
-                "planned_action": plan.get("action") or "hold",
-                "planned_action_cn": plan.get("action_cn") or "不动",
-                "plan_reason": str(plan.get("reason") or "")[:300],
-                "plan_price_basis": plan.get("price_basis"),
+                "planned_action": (plan.get("action") or "hold") if plan_usable else None,
+                "planned_action_cn": (plan.get("action_cn") or "不动") if plan_usable else "待核验",
+                "plan_reason": str(plan.get("reason") or "")[:300] if plan_usable else "",
+                "plan_price_basis": plan.get("price_basis") if plan_usable else None,
                 "blockers": blockers,
             }))
         rows.sort(key=lambda row: (
@@ -1156,9 +1174,16 @@ class ScheduledSnapshotService:
             int(row.get("formal_rank") or 9999), str(row.get("symbol") or ""),
         ))
         complete = bool(rows) and all(row.get("status") == "ready" for row in rows)
+        blocked = [row for row in rows if row.get("blockers")]
         return clean_json(base | {
             "status": "complete" if complete else "degraded" if rows else "missing",
             "count": len(rows),
+            "ready_count": len(rows) - len(blocked),
+            "blocked_count": len(blocked),
+            "unusable_trade_plan_symbols": [
+                row["symbol"] for row in blocked
+                if set(row["blockers"]) & {"trade_plan_missing", "trade_plan_unavailable"}
+            ][:20],
             "rows": rows[:115],
             "price_basis": "same_trading_day_close_plus_persisted_rule_plan",
         })
@@ -1261,7 +1286,8 @@ class ScheduledSnapshotService:
                 continue
             job_name = str(row.get("job_name") or "")
             run_day = str(row.get("started_at") or row.get("finished_at") or "")[:10]
-            if job_name in POST_CLOSE_JOBS and run_day == today and job_name not in latest:
+            if (job_name in (*POST_CLOSE_JOBS, "research_data_sync")
+                    and run_day == today and job_name not in latest):
                 latest[job_name] = _job_run(row)
         jobs = [latest.get(name) or {"job_name": name, "status": "missing"}
                 for name in POST_CLOSE_JOBS]
@@ -1303,6 +1329,9 @@ class ScheduledSnapshotService:
         )
         review = base | {
             "status": status,
+            "research_sync_primary": latest.get("research_data_sync") or {
+                "job_name": "research_data_sync", "status": "missing",
+            },
             "conclusion": conclusion,
             "jobs": jobs,
             "decision_signal_evidence": outcomes,
@@ -1387,6 +1416,7 @@ class ScheduledSnapshotService:
         miaoxiang = self._miaoxiang(selection_value, formal, mx_runs)
         independent = self._independent(
             selection_value, expected_market_as_of=formal.get("market_as_of"),
+            selection_date=formal.get("selection_date"),
         )
         source_comparison = self._source_comparison(
             selection_value, formal, independent, wencai,
@@ -1882,7 +1912,15 @@ class ScheduledSnapshotService:
         post_close_review["source_comparison_status"] = source_comparison.get("status")
         if phase == "post_close_review":
             trade_plans["status"] = next_session_plan.get("status") or "degraded"
+            trade_plans["status_basis"] = (
+                "next_session_plan_complete" if trade_plans["status"] == "complete"
+                else "next_session_plan_incomplete"
+            )
             trade_plans["current_authority"] = "next_session_plan"
+            trade_plans["post_close_blocked_count"] = next_session_plan.get("blocked_count", 0)
+            trade_plans["post_close_unusable_trade_plan_symbols"] = (
+                next_session_plan.get("unusable_trade_plan_symbols") or []
+            )[:20]
 
         section_status = {
             "trading_day": trading_day.get("status"),
