@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Tuple, Optional
 from data.pywencai_safe import pywencai_get
 from selection.data_source_config import _normalize_wencai
+from selection.wencai_query_contract import QUERIES
 import time
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
@@ -48,15 +49,7 @@ class LowPriceBullSelector:
             
             # 该策略含净利增长条件，东财 push2/dataapi 无法表达。直接执行完整问句
             # 一次，避免统一入口失败后立刻重复打同一个问财源并触发全局熔断。
-            query = (
-                "股价<20元，"
-                "净利润增长率(净利润同比增长率)≥100%，"
-                "非st，"
-                "非科创板，"
-                "非创业板，"
-                "沪深A股，"
-                "成交额由小至大排名"
-            )
+            query = QUERIES['低价擒牛']
             print(f"\n查询语句: {query}")
             print(f"正在调用问财接口...")
             

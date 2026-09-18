@@ -389,6 +389,8 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     independent = snapshot.get("independent_selection") or {}
     external = snapshot.get("external_independent_research") or {}
     reference = snapshot.get("wencai_reference") or {}
+    openapi_shadow = snapshot.get("iwencai_openapi_shadow") or {}
+    miaoxiang = snapshot.get("miaoxiang_reference") or {}
     cockpit = snapshot.get("cockpit") or {}
     policy = cockpit.get("portfolio_policy") or {}
     market_signal = policy.get("market_add_signal") or {}
@@ -441,6 +443,24 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         )
     lines.extend([
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
+        (
+            "问财 OpenAPI 影子：独立 Key 未配置，未试跑；不替换旧问财。"
+            if openapi_shadow.get('status') == 'credential_missing' else
+            f"问财 OpenAPI 影子：{openapi_shadow.get('data_groups') or 0}/5 组有数据，"
+            f"{openapi_shadow.get('ready_groups') or 0}/5 组通过完整校验；"
+            f"当日调用 {(openapi_shadow.get('usage') or {}).get('calls_today') if (openapi_shadow.get('usage') or {}).get('calls_today') is not None else '未知'}/"
+            f"{(openapi_shadow.get('usage') or {}).get('hard_daily_limit') or 70}；"
+            f"状态 {openapi_shadow.get('status') or 'missing'}；不参与正式排名。"
+        ),
+        (
+            f"妙想参考：{miaoxiang.get('ready_groups') or 0}/5 组；"
+            f"诊断买入{(miaoxiang.get('diagnosis') or {}).get('buy') or 0}/"
+            f"观望{(miaoxiang.get('diagnosis') or {}).get('watch') or 0}/"
+            f"规避{(miaoxiang.get('diagnosis') or {}).get('avoid') or 0}/"
+            f"失败{(miaoxiang.get('diagnosis') or {}).get('failed') or 0}；"
+            f"{'无分歧，按规则不单独推送' if miaoxiang.get('notification_reason') == 'no_disagreement_no_push' else '仅供对照，不改变正式选股'}；"
+            f"状态 {miaoxiang.get('status') or 'missing'}。"
+        ),
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
         f"状态 {holdings.get('status') or 'missing'}",
         (

@@ -15,6 +15,7 @@ import pickle
 
 # ⭐ 全项目统一从 data.pywencai_safe 调 pywencai, 自带硬超时(防僵尸进程)
 from data.pywencai_safe import pywencai_get
+from selection.wencai_query_contract import QUERIES
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
 try:
@@ -186,7 +187,7 @@ class MainForceStockSelector:
             # 返回 403，但最小主力问句能稳定返回真实净流入/排名/买卖额字段。
             # 主方案因此只表达核心语义；失败时再尝试带日期的区间口径。
             queries = [
-                "主力资金净流入排名",
+                QUERIES['主力资金'],
                 f"{start_date}以来主力资金净流入排名",
             ]
             

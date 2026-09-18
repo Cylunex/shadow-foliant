@@ -519,6 +519,14 @@ class SelectionRunService:
             "independent": artifact_payload(artifacts),
             "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},
             "miaoxiang_review": (artifacts.get("miaoxiang_review") or {}).get("payload") or {},
+            "iwencai_openapi_shadow": (
+                next(((artifacts.get(name) or {}).get("payload")
+                      for name in (
+                          "iwencai_openapi_shadow_postclose",
+                          "iwencai_openapi_shadow_afternoon",
+                          "iwencai_openapi_shadow",
+                      ) if (artifacts.get(name) or {}).get("payload")), {})
+            ),
         }
         strategy_inputs = {
             "local_strategies": (

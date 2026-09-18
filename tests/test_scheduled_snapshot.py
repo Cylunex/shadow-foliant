@@ -85,6 +85,44 @@ def selection(*, day="2026-09-10", market_as_of: str | None = None,
     }
 
 
+def test_miaoxiang_reference_is_visible_without_disagreement_push(monkeypatch):
+    monkeypatch.setenv("EM_API_KEY", "test-key")
+    value = selection()
+    references = value["data"]["references"]
+    references["miaoxiang"] = {
+        "executed_at": NOW.isoformat(),
+        "strategies": {name: {"status": "ready", "picks": []}
+                       for name in ("低价擒牛", "低估值", "主力资金", "小市值", "净利增长")},
+    }
+    references["miaoxiang_review"] = {
+        "executed_at": NOW.isoformat(),
+        "rows": [{"symbol": "600001", "verdict": "⚠️ 观望"} for _ in range(5)],
+    }
+    formal = {"selection_date": NOW.date().isoformat(), "formal_top5": []}
+    result = ScheduledSnapshotService._miaoxiang(value, formal, [])
+    assert result["status"] == "complete"
+    assert result["ready_groups"] == 5
+    assert result["diagnosis"]["watch"] == 5
+    assert result["notification_reason"] == "no_disagreement_no_push"
+    assert result["reference_affects_membership"] is False
+
+
+def test_stale_miaoxiang_review_does_not_count_as_current(monkeypatch):
+    monkeypatch.setenv("EM_API_KEY", "test-key")
+    value = selection()
+    references = value["data"]["references"]
+    references["miaoxiang"] = {"executed_at": NOW.isoformat(), "strategies": {}}
+    references["miaoxiang_review"] = {
+        "executed_at": "2026-09-09T10:30:00+08:00",
+        "rows": [{"symbol": "600001", "verdict": "⚠️ 观望"}],
+    }
+    result = ScheduledSnapshotService._miaoxiang(
+        value, {"selection_date": NOW.date().isoformat(), "formal_top5": []}, [])
+    assert result["status"] == "degraded"
+    assert result["diagnosis"]["watch"] == 0
+    assert result["notification_reason"] == "not_run"
+
+
 def capsule():
     rows = [{"symbol": f"600{i:03d}", "industry": "示例", "themes": ["测试"]}
             for i in range(1, 16)]
@@ -727,7 +765,8 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
         assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == binding
         assert snapshot["trade_plans"]["current_authority"] == authority
         assert snapshot["quality"]["optional_degradations"] == [
-            "wencai_reference", "external_independent_research",
+            "wencai_reference", "iwencai_openapi_shadow", "miaoxiang_reference",
+            "external_independent_research",
         ]
         assert snapshot["trade_plans"]["cash_policy"]["buy_side"]["status"] == "blocked"
         assert snapshot["trade_plans"]["cash_policy"]["sell_side"]["status"] == "available"

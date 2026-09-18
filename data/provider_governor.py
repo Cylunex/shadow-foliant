@@ -29,13 +29,15 @@ PROVIDERS = {
     "tdx": (1, .1, 10000),  # additional shared upstream-family ceiling
     "mairui": (2, .5, 500), "moma": (2, .5, 500),
     "eastmoney": (2, 3., 3000), "ths": (2, 2., 2000),
-    "pywencai": (2, 2., 500), "eastmoney_saas": (2, 3., 500),
+    "pywencai": (2, 2., 500), "iwencai_openapi": (2, 2., 70),
+    "eastmoney_saas": (2, 3., 500),
     "akshare": (3, 3., 2000), "baidu": (3, 2., 1000),
     "cls": (2, 2., 2000), "tickflow": (2, 6., 500),
     "jsl": (3, 3., 500), "easy_tdx": (3, .2, 5000), "mootdx": (3, .2, 5000),
     "default": (3, 2., 1000),
 }
 _HOSTS = (("fuyao.aicubes.cn", "fuyao_aicubes"),
+          ("openapi.iwencai.com", "iwencai_openapi"),
           ("ai-saas", "eastmoney_saas"), ("iwencai", "pywencai"),
           ("eastmoney", "eastmoney"), ("10jqka", "ths"), ("hexin", "ths"),
           ("sinajs", "sina"), ("sina.com", "sina"), ("gtimg", "tencent"),
@@ -173,6 +175,36 @@ def provider_slot(provider: str, *, wait_seconds: float = 10., interval: float =
         finally:
             if locked:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def set_provider_cooldown(provider: str, seconds: float) -> None:
+    """Persist a bounded upstream rejection across scheduled child processes."""
+    if provider not in PROVIDERS:
+        raise ValueError('unknown_provider')
+    duration = max(1., min(3600., float(seconds)))
+    path = _directory() / (hashlib.sha256(provider.encode()).hexdigest()[:16] + '.json')
+    with path.with_suffix('.lock').open('a+', encoding='utf-8') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+            if not isinstance(state, dict):
+                raise SourceBudgetUnavailable(f'{provider}: quota_state_invalid')
+            state['cooldown_until'] = max(
+                float(state.get('cooldown_until') or 0), time.time() + duration,
+            )
+            import tempfile
+            fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.stem, suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as output:
+                    json.dump(state, output, sort_keys=True)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def guarded_session(session, key=None):

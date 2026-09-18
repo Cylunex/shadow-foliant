@@ -89,11 +89,12 @@ _BREAK_LOG_GAP = 60.0
 
 
 class _HttpsRequestsProxy:
-    """仅修正 pywencai 0.13.1 内部遗留的问财 HTTP 地址。"""
+    """修正问财 HTTP 地址，并确保问财请求不继承进程代理。"""
 
     _shadow_iwencai_https_proxy = True
     _HTTP_PREFIX = 'http://www.iwencai.com/'
     _HTTPS_PREFIX = 'https://www.iwencai.com/'
+    _DIRECT_PROXIES = {'http': '', 'https': '', 'all': ''}
 
     def __init__(self, requests_module):
         self._requests = requests_module
@@ -117,6 +118,11 @@ class _HttpsRequestsProxy:
         from data.provider_governor import provider_slot
         if kwargs.get('timeout') is None:
             kwargs['timeout'] = (3, 6) if group else (5, 15)
+        # requests.request() creates a Session with trust_env=True. An empty
+        # mapping is insufficient: requests then fills it from HTTP(S)_PROXY.
+        # Explicit empty entries keep both the host-specific and ALL_PROXY
+        # paths direct, including when other data sources use a process proxy.
+        kwargs['proxies'] = dict(self._DIRECT_PROXIES)
         transport_error = None
         response = None
         with provider_slot('pywencai'):

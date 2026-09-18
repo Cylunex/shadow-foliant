@@ -9,6 +9,7 @@ import logging
 from typing import Tuple, Optional
 from selection.data_source_config import _normalize_wencai
 import pandas as pd
+from selection.wencai_query_contract import QUERIES
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
 try:
@@ -47,14 +48,7 @@ class ProfitGrowthSelector:
 
             # 财务增长条件和“深圳 A 股”范围无法由 push2/dataapi 完整表达；
             # 直接执行精确问句一次，避免统一入口退化成沪深全市场并重复请求问财。
-            query = (
-                "净利润增长率(净利润同比增长率)≥10%，"
-                "非科创板，"
-                "非创业板，"
-                "非ST，"
-                "深圳A股，"
-                "成交额由小至大排名"
-            )
+            query = QUERIES['净利增长']
             
             self.logger.info(f"开始执行净利增长选股，查询条件: {query}")
             

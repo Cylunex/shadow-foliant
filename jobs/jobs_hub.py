@@ -1715,6 +1715,10 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
                                          # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
+    'iwencai_openapi_shadow_premarket': 240,
+    'iwencai_openapi_shadow':    240,
+    'iwencai_openapi_shadow_afternoon': 240,
+    'iwencai_openapi_shadow_postclose': 240,
     'sector_rotation':           900,    # 📈 题材轮动雷达:智策多 agent LLM 分析,给 15 分钟
     'overnight_strategy':        2400,   # 隔夜大批 AI 分析
     'announcement_scan':         1500,   # 三合一(解禁+公告+研报,2026-06-24),含多次 LLM
@@ -4614,6 +4618,168 @@ def task_strategy_prefetch_retry():
     )
 
 
+def _iwencai_shadow_group_to_file(name: str, filename: str) -> None:
+    """Child process persists only bounded diagnostics, never a credential."""
+    import json as _json
+    import os as _os
+    from data.sources.iwencai_openapi import run_group
+
+    result = run_group(name)
+    fd = _os.open(filename, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
+    with _os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        _json.dump(result, handle, ensure_ascii=False)
+
+
+def _iwencai_shadow_isolated(old_reference: dict) -> dict:
+    import json as _json
+    import os as _os
+    import tempfile as _tempfile
+    from data.sources.iwencai_openapi import run_shadow
+    from jobs.isolated_runtime import run_isolated_task
+
+    with _tempfile.TemporaryDirectory(prefix='iwencai-shadow-') as directory:
+        def group_runner(name):
+            filename = _os.path.join(directory, str(len(_os.listdir(directory))) + '.json')
+            isolated = run_isolated_task(
+                'iwencai_openapi:' + name, _iwencai_shadow_group_to_file,
+                (name, filename), {}, timeout_seconds=35, cancel_grace_seconds=1,
+            )
+            if isolated.get('status') != 'complete':
+                return {'name': name, 'status': (
+                    'timeout' if isolated.get('status') == 'timeout' else 'isolated_error'),
+                    'picks': [], 'pages_fetched': 0, 'schema_valid': False,
+                    'data_as_of': None}
+            try:
+                with open(filename, encoding='utf-8') as handle:
+                    return _json.load(handle)
+            except (OSError, ValueError):
+                return {'name': name, 'status': 'result_unavailable', 'picks': [],
+                        'pages_fetched': 0, 'schema_valid': False, 'data_as_of': None}
+
+        return run_shadow(old_reference, group_runner=group_runner)
+
+
+def _iwencai_shadow_premarket_path():
+    """Private date-scoped cache; only bounded diagnostics, never the API key."""
+    from pathlib import Path
+    from _bootstrap import DB_DIR
+
+    root = Path(os.getenv('FOLIANT_RUNTIME_DATA_DIR') or DB_DIR).expanduser().resolve()
+    directory = root / 'iwencai_openapi_shadow'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory / (datetime.now(_RUN_TIMEZONE).date().isoformat() + '-premarket.json')
+
+
+def task_iwencai_openapi_shadow_premarket():
+    """Sample before legacy prefetch; never waits for or changes formal selection."""
+    job = 'iwencai_openapi_shadow_premarket'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    try:
+        from data.sources.iwencai_openapi import configured_key
+        if not configured_key():
+            _log_run(job, 'skipped', error='credential_missing', started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return
+        path = _iwencai_shadow_premarket_path()
+        if path.exists():
+            _log_run(job, 'skipped', error='same_day_shadow_cached', started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return
+        result = _iwencai_shadow_isolated({})
+        result['sampling_slot'] = 'premarket'
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(result, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=f'{type(exc).__name__}:shadow_failed',
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+
+
+def _iwencai_shadow_attach(slot: str):
+    """Append diagnostic artifact to formal run; no ranking or notification side effect."""
+    job = ('iwencai_openapi_shadow' if slot == 'premarket' else
+           'iwencai_openapi_shadow_' + slot)
+    if _skip_if_not_trading(job):
+        return
+    if slot == 'premarket' and not _wait_task_dependency(job, 'unified_selection'):
+        now_iso = datetime.now(_RUN_TIMEZONE).isoformat()
+        _log_run(job, 'skipped', error='dependency unified_selection not ready',
+                 started_at=now_iso, finished_at=now_iso, notify=False)
+        return
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    try:
+        from data.research_store import ResearchStore
+        store = ResearchStore(ensure_schema=False)
+        formal = store.latest_formal_selection() or {}
+        if str(formal.get('selection_date') or '') != datetime.now(_RUN_TIMEZONE).date().isoformat():
+            _log_run(job, 'skipped', error='formal_selection_not_current',
+                     started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                     notify=False)
+            return
+        artifacts = formal.get('artifacts') or {}
+        artifact_type = ('iwencai_openapi_shadow' if slot == 'premarket' else
+                         'iwencai_openapi_shadow_' + slot)
+        if artifact_type in artifacts:
+            _log_run(job, 'skipped', error='same_run_shadow_cached',
+                     started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                     notify=False)
+            return
+        old = (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
+        from data.sources.iwencai_openapi import configured_key, run_shadow
+        cached = None
+        if slot == 'premarket':
+            path = _iwencai_shadow_premarket_path()
+            if path.exists():
+                with path.open(encoding='utf-8') as handle:
+                    cached = json.load(handle)
+                if (cached.get('sampling_slot') != 'premarket' or
+                        str(cached.get('executed_at') or '')[:10] !=
+                        datetime.now(_RUN_TIMEZONE).date().isoformat() or
+                        len(cached.get('groups') or []) != 5):
+                    raise ValueError('invalid_premarket_cache')
+        if cached:
+            rows = {row['name']: row for row in cached['groups']}
+            result = run_shadow(old, group_runner=lambda name: dict(rows[name]))
+            result['sampled_at'] = cached['executed_at']
+        else:
+            result = (_iwencai_shadow_isolated(old) if configured_key() else
+                      run_shadow(old, key=''))
+            result['sampled_at'] = result['executed_at']
+        result['sampling_slot'] = slot
+        result['selection_run_id'] = str(formal.get('run_id') or '')
+        result['selection_date'] = str(formal.get('selection_date') or '')
+        store.save_selection_artifact(formal['run_id'], artifact_type, result)
+        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=f'{type(exc).__name__}:shadow_failed',
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+
+
+def task_iwencai_openapi_shadow():
+    _iwencai_shadow_attach('premarket')
+
+
+def task_iwencai_openapi_shadow_afternoon():
+    _iwencai_shadow_attach('afternoon')
+
+
+def task_iwencai_openapi_shadow_postclose():
+    _iwencai_shadow_attach('postclose')
+
+
 def task_unified_selection():
     """本地 PIT/五策略/技术基因组产出 TOP15；外部源只作参考。"""
     job = 'unified_selection'
@@ -5771,32 +5937,30 @@ def task_mx_selection_review():
                 f'{type(strategy_error).__name__}: {str(strategy_error)[:120]}'
             )
 
-        from analysis.miaoxiang import stock_diagnosis
+        from analysis.miaoxiang import diagnosis_verdict, stock_diagnosis
         try:
             name_map = datahub.stock_names(top_list)
         except Exception:
             name_map = {}
 
-        agree, watch, avoid, detail, review_rows = [], [], [], [], []
+        agree, watch, avoid, failed, detail, review_rows = [], [], [], [], [], []
         for code in top_list:
             nm = name_map.get(code) or code
             try:
                 result = stock_diagnosis(code)
-                low = str(result).lower()
-                if 'buy' in low:
-                    verdict, bucket = '✅ 买入', agree
-                elif 'sell' in low:
-                    verdict, bucket = '❌ 规避', avoid
-                else:
-                    verdict, bucket = '⚠️ 观望', watch
+                verdict, content = diagnosis_verdict(result)
+                if verdict == '诊断失败':
+                    raise ValueError('miaoxiang_diagnosis_empty')
+                bucket = agree if verdict == '✅ 买入' else avoid if verdict == '❌ 规避' else watch
                 bucket.append(f'{nm} {code}')
                 detail.append(f'{nm} {code}: {verdict}')
                 review_rows.append({
                     'symbol': code, 'name': nm, 'verdict': verdict,
-                    'summary': str(result)[:500], 'reference_affects_membership': False,
+                    'summary': content[:500], 'reference_affects_membership': False,
                 })
             except Exception:
                 detail.append(f'{nm} {code}: ⚠️ 诊断失败')
+                failed.append(code)
                 review_rows.append({
                     'symbol': code, 'name': nm, 'verdict': '诊断失败',
                     'reference_affects_membership': False,
@@ -5840,7 +6004,7 @@ def task_mx_selection_review():
                 head += f'\n⚠️ 与综合选股分歧({len(avoid)} 只妙想判规避):' + '、'.join(avoid) + '\n'
             _push_daily('🔍 妙想第二意见', head + '\n' + '\n'.join(detail))
         _log_run(job, 'success',
-                 error=f'买入{len(agree)}/观望{len(watch)}/规避{len(avoid)}'
+                 error=f'买入{len(agree)}/观望{len(watch)}/规避{len(avoid)}/失败{len(failed)}'
                        f'/妙想策略{sum(1 for row in mx_strategy_runs["strategies"].values() if row.get("status") == "ready")}/5'
                        + ('(分歧已推)' if avoid else '(一致,未推)'),
                  started_at=started, finished_at=datetime.now().isoformat())
@@ -6261,6 +6425,7 @@ def register_default_jobs():
     hub.register('morning_strategy',            '09:00', task_morning_strategy)
     # 基金盘前合并(2026-06-27):fund_dca_reminder(08:55)+fund_valuation_signal(09:05)→ 一条 fund_premarket
     hub.register('fund_premarket',              '08:55', task_fund_premarket)
+    hub.register('iwencai_openapi_shadow_premarket', '09:05', task_iwencai_openapi_shadow_premarket)
 
     # ---- 09:45 整合选股 ----
     hub.register('strategy_prefetch',           '09:15', task_strategy_prefetch)  # 盘前预取 5 条问财外部参考
@@ -6270,6 +6435,9 @@ def register_default_jobs():
     hub.register('morning_portfolio',           '10:05', task_morning_portfolio)
     hub.register('intraday_decision_monitor',   'every:20:minutes', task_intraday_decision_monitor)
     hub.register('mx_selection_review',         '10:30', task_mx_selection_review)
+    hub.register('iwencai_openapi_shadow',      '10:40', task_iwencai_openapi_shadow)
+    hub.register('iwencai_openapi_shadow_afternoon', '14:45', task_iwencai_openapi_shadow_afternoon)
+    hub.register('iwencai_openapi_shadow_postclose', '16:30', task_iwencai_openapi_shadow_postclose)
     hub.register('noon_portfolio',              '11:20', task_noon_portfolio)
 
     # ---- 🟡 盘中 ----

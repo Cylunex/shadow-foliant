@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Tuple, Optional
 from data.pywencai_safe import pywencai_get
+from selection.wencai_query_contract import QUERIES
 from selection.data_source_config import _normalize_wencai
 import time
 
@@ -57,16 +58,7 @@ class ValueStockSelector:
             print(f"目标: 筛选前{top_n}只股票")
 
             # 股息率/负债率等条件只有问财能够完整表达，直接执行完整问句一次。
-            query = (
-                "市盈率小于等于20，"
-                "市净率小于等于1.5，"
-                "股息率大于等于1%，"
-                "资产负债率小于等于30%，"
-                "非st，"
-                "非科创板，"
-                "非创业板，"
-                "按流通市值由小到大排名"
-            )
+            query = QUERIES['低估值']
 
             print(f"\n查询语句: {query}")
             print(f"正在调用问财接口...")

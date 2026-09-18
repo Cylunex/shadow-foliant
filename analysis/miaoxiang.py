@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 from urllib import request as _req, error as _err
 
 BASE = "https://ai-saas.eastmoney.com/proxy/"
@@ -45,6 +46,24 @@ def _api_key() -> str:
 def available() -> bool:
     """是否已配置 EM_API_KEY。妙想为可选源,未配置时各入口优雅降级(不发请求)。"""
     return bool(_api_key())
+
+
+def diagnosis_verdict(result: object) -> tuple[str, str]:
+    """Classify only a successful content field; never treat an API error as neutral."""
+    if not isinstance(result, dict) or result.get('error'):
+        return '诊断失败', ''
+    content = str(result.get('content') or '').strip()
+    if not content or content == '(无内容返回)':
+        return '诊断失败', ''
+    lower = content.lower()
+    if re.search(r'\bsell\b', lower) or '卖出' in content or '规避' in content:
+        return '❌ 规避', content
+    if ('不建议买入' in content or '暂不买入' in content or '勿买入' in content or
+            '避免买入' in content):
+        return '⚠️ 观望', content
+    if re.search(r'\bbuy\b', lower) or '买入' in content:
+        return '✅ 买入', content
+    return '⚠️ 观望', content
 
 
 def _extract(raw):

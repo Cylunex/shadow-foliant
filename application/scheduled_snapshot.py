@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
+import os
 import re
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -623,6 +624,117 @@ class ScheduledSnapshotService:
         }
 
     @staticmethod
+    def _iwencai_openapi_shadow(selection_value: dict[str, Any], formal: dict[str, Any]) -> dict[str, Any]:
+        payload = (((selection_value.get('data') or {}).get('references') or {})
+                   .get('iwencai_openapi_shadow') or {})
+        configured = bool(os.getenv('IWENCAI_API_KEY', '').strip()
+                          or os.getenv('IWENCAI_API_KEY_FILE', '').strip())
+        try:
+            from data.provider_governor import budget_snapshot
+            budget = (budget_snapshot() or {}).get('iwencai_openapi') or {}
+            usage = {
+                'calls_today': budget.get('count'),
+                'hard_daily_limit': budget.get('configured_daily_limit'),
+                'status': budget.get('status'),
+            }
+        except Exception:
+            usage = {'calls_today': None, 'hard_daily_limit': 70, 'status': 'unavailable'}
+        if not isinstance(payload, dict) or not payload:
+            return {
+                'status': 'pending' if configured else 'credential_missing',
+                'provider': 'iwencai_openapi', 'ready_groups': 0, 'groups': [],
+                'data_groups': 0, 'usage': usage,
+                'reference_only': True, 'replacement_ready': False,
+            }
+        current = str(payload.get('selection_run_id') or '') == str(formal.get('run_id') or '')
+        groups = []
+        for raw in (payload.get('groups') or [])[:5]:
+            if not isinstance(raw, dict):
+                continue
+            groups.append({key: raw.get(key) for key in (
+                'name', 'status', 'query_hash', 'requested_at', 'data_as_of',
+                'pages_fetched', 'reported_count', 'returned_count',
+                'http_status', 'schema_valid', 'chunks_info_present',
+                'condition_count', 'max_conditions_ok', 'parsed_conditions_verified',
+                'required_numeric_fields', 'sort_verified', 'stock_scope_verified',
+                'sort_field_as_of', 'pagination_complete',
+                'legacy_status', 'overlap_top5_count', 'comparison_available',
+            )})
+        return clean_json({
+            'status': str(payload.get('status') or 'missing') if current else 'stale',
+            'provider': 'iwencai_openapi', 'ready_groups': int(payload.get('ready_groups') or 0) if current else 0,
+            'data_groups': int(payload.get('data_groups') or 0) if current else 0,
+            'usage': usage,
+            'groups': groups, 'as_of': payload.get('executed_at'),
+            'reference_only': True, 'reference_affects_membership': False,
+            'replacement_ready': False,
+            'replacement_gates': list(payload.get('replacement_gates') or [])[:8],
+        })
+
+    @staticmethod
+    def _miaoxiang(selection_value: dict[str, Any], formal: dict[str, Any],
+                   job_runs: list[dict[str, Any]]) -> dict[str, Any]:
+        references = ((selection_value.get('data') or {}).get('references') or {})
+        payload = references.get('miaoxiang') or {}
+        review = references.get('miaoxiang_review') or {}
+        configured = bool(os.getenv('EM_API_KEY', '').strip())
+        latest = next((row for row in job_runs if isinstance(row, dict)
+                       and row.get('job_name') == 'mx_selection_review'), {})
+        strategies = payload.get('strategies') or {}
+        date = str(formal.get('selection_date') or '')
+        review_current = bool(date and str(review.get('executed_at') or '')[:10] == date)
+        rows = (review.get('rows') or []) if review_current else []
+        counts = {'buy': 0, 'watch': 0, 'avoid': 0, 'failed': 0}
+        for row in rows[:5]:
+            if not isinstance(row, dict):
+                continue
+            verdict = str(row.get('verdict') or '')
+            summary = str(row.get('summary') or '').lstrip()
+            if verdict == '✅ 买入':
+                counts['buy'] += 1
+            elif verdict == '❌ 规避':
+                counts['avoid'] += 1
+            elif verdict == '诊断失败' or (verdict == '⚠️ 观望' and
+                    (summary.startswith("{'error':") or summary.startswith('{"error":'))):
+                counts['failed'] += 1
+            elif verdict == '⚠️ 观望':
+                counts['watch'] += 1
+        current = bool(date and str(payload.get('executed_at') or '')[:10] == date)
+        ready = sum(row.get('status') == 'ready' for row in strategies.values()
+                    if isinstance(row, dict))
+        formal_symbols = {str(row.get('symbol') or '') for row in formal.get('formal_top5') or []}
+        overlaps = [{
+            'name': str(name)[:40],
+            'status': str(row.get('status') or 'missing')[:32],
+            'count': len(row.get('picks') or []),
+            'formal_top5_overlap_count': len(formal_symbols & {
+                str(pick.get('symbol') or '') for pick in (row.get('picks') or [])
+                if isinstance(pick, dict)
+            }),
+        } for name, row in list(strategies.items())[:5] if isinstance(row, dict)]
+        status = ('credential_missing' if not configured else
+                  'missing' if not payload else
+                  'stale' if not current else
+                  'degraded' if payload.get('error') or ready < 5 or not review_current or counts['failed'] else
+                  'complete')
+        return clean_json({
+            'status': status, 'provider': 'eastmoney_miaoxiang',
+            'job_status': str(latest.get('status') or 'missing')[:32],
+            'as_of': payload.get('executed_at') if current else None,
+            'ready_groups': ready if current else 0, 'expected_groups': 5,
+            'diagnosis': counts if current else {'buy': 0, 'watch': 0, 'avoid': 0, 'failed': 0},
+            'notification_policy': 'disagreement_only',
+            'notification_reason': (
+                'not_run' if not current or not review_current else
+                'diagnosis_failed' if counts['failed'] else
+                'disagreement_triggered' if counts['avoid'] else
+                'no_disagreement_no_push'
+            ),
+            'strategy_comparison': overlaps if current else [],
+            'reference_only': True, 'reference_affects_membership': False,
+        })
+
+    @staticmethod
     def _independent(
         selection_value: dict[str, Any],
         expected_market_as_of: str | None = None,
@@ -1196,6 +1308,10 @@ class ScheduledSnapshotService:
                 "formal_selection": {"status": "missing", "formal_top15": [], "formal_top5": []},
                 "independent_selection": {"status": "missing", "top15": [], "top5": []},
                 "wencai_reference": {"status": "missing", "reference_only": True, "strategies": []},
+                "iwencai_openapi_shadow": {"status": "missing", "reference_only": True,
+                                            "replacement_ready": False, "groups": []},
+                "miaoxiang_reference": {"status": "missing", "reference_only": True,
+                                         "strategy_comparison": []},
                 "external_independent_research": {
                     "status": "missing", "channel": "codex-external-independent-v1",
                     "top15": [], "top5": [], "news_watchlist": [],
@@ -1240,6 +1356,12 @@ class ScheduledSnapshotService:
             selection_value = {"status": "missing", "data": None, "warnings": []}
         formal = self._formal(selection_value, trading_day)
         wencai = self._wencai(selection_value)
+        openapi_shadow = self._iwencai_openapi_shadow(selection_value, formal)
+        try:
+            mx_runs = self.job_runs_reader(limit=200) or []
+        except Exception:
+            mx_runs = []
+        miaoxiang = self._miaoxiang(selection_value, formal, mx_runs)
         independent = self._independent(
             selection_value, expected_market_as_of=formal.get("market_as_of"),
         )
@@ -1745,6 +1867,8 @@ class ScheduledSnapshotService:
             "formal_selection": formal.get("status"),
             "independent_selection": independent.get("status"),
             "wencai_reference": wencai.get("status"),
+            "iwencai_openapi_shadow": openapi_shadow.get("status"),
+            "miaoxiang_reference": miaoxiang.get("status"),
             "external_independent_research": external_research.get("status"),
             "holdings": holdings.get("status"),
             "trade_plans": trade_plans.get("status"),
@@ -1755,7 +1879,10 @@ class ScheduledSnapshotService:
             "source_comparison": source_comparison.get("status"),
             "strategy_adjustment_proposals": adjustment_proposals.get("status"),
         }
-        optional_sections = ("wencai_reference", "external_independent_research")
+        optional_sections = (
+            "wencai_reference", "iwencai_openapi_shadow", "miaoxiang_reference",
+            "external_independent_research",
+        )
         pending_allowed = {
             "post_close_review", "holdings_review", "next_session_plan",
             "strategy_adjustment_proposals",
@@ -1780,6 +1907,8 @@ class ScheduledSnapshotService:
             "formal_selection": formal,
             "independent_selection": independent,
             "wencai_reference": wencai,
+            "iwencai_openapi_shadow": openapi_shadow,
+            "miaoxiang_reference": miaoxiang,
             "external_independent_research": external_research,
             "holdings": holdings,
             "portfolio_industry": portfolio_industry,
@@ -1796,6 +1925,8 @@ class ScheduledSnapshotService:
                 "formal_selection": formal.get("selection_date"),
                 "independent_selection": independent.get("market_as_of"),
                 "wencai": wencai.get("as_of"),
+                "iwencai_openapi_shadow": openapi_shadow.get("as_of"),
+                "miaoxiang": miaoxiang.get("as_of"),
                 "external_independent_research": external_research.get("decision_as_of"),
                 "holdings": holdings.get("as_of"),
                 "quotes": quotes.get("as_of"),

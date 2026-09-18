@@ -334,6 +334,23 @@ class WencaiCookieTests(unittest.TestCase):
 
 
 class WencaiHttpsCompatibilityTests(unittest.TestCase):
+    def test_wencai_requests_bypass_environment_and_explicit_proxies(self):
+        from data.sources import pywencai as source
+
+        with patch.dict(os.environ, {
+            "HTTP_PROXY": "http://proxy.invalid:8080",
+            "HTTPS_PROXY": "http://proxy.invalid:8080",
+            "ALL_PROXY": "socks5://proxy.invalid:1080",
+        }), patch.object(source._HTTPS_REQUESTS._requests, "request") as request:
+            request.return_value.status_code = 200
+            source._HTTPS_REQUESTS.request(
+                "GET", "https://www.iwencai.com/test",
+                proxies={"https": "http://proxy.invalid:8080"},
+            )
+
+        self.assertEqual(request.call_args.kwargs["proxies"],
+                         {"http": "", "https": "", "all": ""})
+
     def test_rewrites_only_iwencai_http_url(self):
         from data.sources import pywencai as source
 

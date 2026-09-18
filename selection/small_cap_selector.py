@@ -9,6 +9,7 @@ import logging
 from typing import Tuple, Optional
 from selection.data_source_config import _normalize_wencai
 import pandas as pd
+from selection.wencai_query_contract import QUERIES
 
 # ⭐ _throttle 兼容(rate_limiter 可能在子进程中不可用)
 try:
@@ -48,16 +49,7 @@ class SmallCapSelector:
             from data.pywencai_safe import pywencai_get
             
             # push2/dataapi 不具备营收/净利增长字段；直接执行完整问句一次。
-            query = (
-                "总市值≤50亿，"
-                "营收增长率≥10%，"
-                "净利润增长率(净利润同比增长率)≥100%，"
-                "沪深A股，"
-                "非ST，"
-                "非创业板，"
-                "非科创板，"
-                "总市值由小至大排名"
-            )
+            query = QUERIES['小市值']
             
             self.logger.info(f"开始执行小市值策略选股，查询条件: {query}")
             
