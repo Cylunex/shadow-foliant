@@ -810,7 +810,7 @@ class ScheduledSnapshotService:
             and overlay.get("base_strategy_version") == independent.get("strategy_version")
             and overlay.get("base_input_snapshot_id") == independent.get("input_snapshot_id")
         )
-        external_top15 = [_candidate(row) | {
+        historical_top15 = [_candidate(row) | {
             "base_rank": row.get("base_rank"),
             "base_score": row.get("base_score"),
             "event_adjustment": row.get("event_adjustment"),
@@ -818,6 +818,9 @@ class ScheduledSnapshotService:
             "final_score": row.get("final_score"),
             "evidence_ids": list(row.get("evidence_ids") or [])[:100],
         } for row in (overlay.get("top15") or [])][:15]
+        # Keep only provenance for a stale overlay. Its rankings and overlaps
+        # must not be consumable as today's independent research conclusion.
+        external_top15 = historical_top15 if current else []
         formal_top5 = {str(row.get("symbol") or "") for row in formal.get("formal_top5") or []}
         independent_top5 = {
             str(row.get("symbol") or "") for row in independent.get("top5") or []
@@ -832,7 +835,7 @@ class ScheduledSnapshotService:
             "formal_external_top5": sorted(formal_top5 & external_top5),
             "independent_external_top5": sorted(independent_top5 & external_top5),
             "wencai_external_top5": sorted(wencai_top & external_top5) if wencai_top else None,
-        }
+        } if current else None
         return clean_json({
             "status": "complete" if current else "stale" if overlay else "missing",
             "channel": raw.get("channel") or "codex-external-independent-v1",
@@ -842,12 +845,13 @@ class ScheduledSnapshotService:
             "selection_run_id": overlay.get("selection_run_id"),
             "decision_as_of": overlay.get("decision_as_of"),
             "ranking_locked_at": overlay.get("ranking_locked_at"),
-            "market_regime": overlay.get("market_regime"),
+            "market_regime": overlay.get("market_regime") if current else None,
+            "historical_top15_count": len(historical_top15) if not current else 0,
             "top15": external_top15,
             "top5": external_top15[:5],
-            "evidence": list(raw.get("evidence") or [])[:100],
-            "news_watchlist": list(raw.get("news_watchlist") or [])[:100],
-            "tuning_proposals": list(raw.get("tuning_proposals") or [])[:50],
+            "evidence": list(raw.get("evidence") or [])[:100] if current else [],
+            "news_watchlist": list(raw.get("news_watchlist") or [])[:100] if current else [],
+            "tuning_proposals": list(raw.get("tuning_proposals") or [])[:50] if current else [],
             "outcomes": raw.get("outcomes") or {"buckets": []},
             "comparison": comparison,
             "identity_boundary": overlay.get("identity_boundary"),
@@ -1252,7 +1256,15 @@ class ScheduledSnapshotService:
         source_comparison["availability"]["external_independent"] = (
             external_research.get("status") == "complete"
         )
-        source_comparison["external_top5"] = external_research.get("comparison")
+        if not source_comparison["availability"]["external_independent"]:
+            unavailable = source_comparison.get("unavailable_sources") or []
+            if "external_independent" not in unavailable:
+                unavailable.append("external_independent")
+            source_comparison["unavailable_sources"] = unavailable
+        source_comparison["external_top5"] = (
+            external_research.get("comparison")
+            if external_research.get("status") == "complete" else None
+        )
 
         try:
             context = self.context_reader() or {"holdings": [], "watermark": ""}
@@ -1352,12 +1364,20 @@ class ScheduledSnapshotService:
         external_research["quote_coverage"] = (
             quotes["source_coverage"]["external_overlay_top15"]
         )
+        external_current = external_research.get("status") == "complete"
         external_research["pricing_guard"] = {
-            "status": "blocked" if independent_missing or external_missing else "research_only",
-            "ranking_preserved": True,
+            "status": (
+                "not_applicable" if not external_current else
+                "blocked" if independent_missing or external_missing else "research_only"
+            ),
+            "ranking_preserved": external_current,
             "execution_price_available": False,
-            "missing_symbols": sorted(set(independent_missing) | set(external_missing)),
+            "missing_symbols": (
+                sorted(set(independent_missing) | set(external_missing))
+                if external_current else []
+            ),
             "blockers": (
+                ["external_overlay_not_current"] if not external_current else
                 ["independent_or_external_quote_coverage_incomplete"]
                 if independent_missing or external_missing else
                 ["external_channel_has_no_execution_price_authority"]

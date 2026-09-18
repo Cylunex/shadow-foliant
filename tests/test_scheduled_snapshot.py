@@ -296,21 +296,32 @@ def test_quote_batch_unions_holdings_formal_independent_and_external_with_source
 
 
 def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():
+    rows = [{"symbol": f"600{i:03d}", "name": f"过期{i}", "rank": i}
+            for i in range(1, 16)]
     external = {
         "status": "ready", "channel": "codex-external-independent-v1",
         "overlay": {
             "selection_run_id": "formal-run",
             "base_strategy_version": "codex-independent-v1",
             "base_input_snapshot_id": "different-snapshot",
-            "decision_as_of": NOW.isoformat(), "top15": [],
+            "decision_as_of": NOW.isoformat(), "top15": rows,
         },
     }
     result = build_service(external_research_reader=lambda: external).read(
         owner_id="scheduled-agent"
     )["data"]
     assert result["external_independent_research"]["status"] == "stale"
+    assert result["external_independent_research"]["historical_top15_count"] == 15
+    assert result["external_independent_research"]["top15"] == []
+    assert result["external_independent_research"]["top5"] == []
+    assert result["external_independent_research"]["comparison"] is None
+    assert result["external_independent_research"]["pricing_guard"]["ranking_preserved"] is False
+    assert result["source_comparison"]["external_top5"] is None
+    assert "external_independent" in result["source_comparison"]["unavailable_sources"]
     assert result["quality"]["status"] == "complete"
     assert "external_independent_research" in result["quality"]["optional_degradations"]
+    from scripts import foliant_scheduled_snapshot as cli
+    assert "旧排名不参与判断" in cli.render_qq_report(result)[1]
 
 
 def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():

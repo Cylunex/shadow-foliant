@@ -434,6 +434,11 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             "外部独立研究：本次提交未通过，今日外部排序与事件调整未采用；"
             "以下正式选股、持仓和风控取自可用快照。"
         )
+    elif external.get("status") in {"stale", "missing", "degraded"}:
+        lines.append(
+            "外部独立研究：今日不可用或已过期，旧排名不参与判断；"
+            "仅对比正式选股与独立量化底座。"
+        )
     lines.extend([
         f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）",
         f"真实持仓：{holdings.get('count') if holdings.get('count') is not None else '未知'} 只；"
