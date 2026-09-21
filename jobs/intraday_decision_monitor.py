@@ -47,6 +47,26 @@ def _reason_family(reason: Any) -> str:
     return "other"
 
 
+def _previous_requested_action(row: dict[str, Any]) -> str:
+    """Recover the strongest upstream risk request before portfolio guards.
+
+    A portfolio cap may turn ``sell`` into ``reduce`` or ``hold`` for the
+    displayed snapshot.  Feeding that guarded action back into the transition
+    limiter makes an unchanged sell request look like a fresh multi-level jump
+    on the next poll.  Keep the cap as the final action, but compare temporal
+    transitions against the original/proposed request recorded by the guard.
+    """
+    guard = row.get("action_guard") if isinstance(row, dict) else {}
+    guard = guard if isinstance(guard, dict) else {}
+    candidates = [
+        str((row or {}).get("action") or "hold"),
+        str(guard.get("original_action") or ""),
+        str(guard.get("proposed_action") or ""),
+    ]
+    valid = [action for action in candidates if action in ACTION_RANK]
+    return max(valid or ["hold"], key=lambda action: ACTION_RANK[action])
+
+
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         return min(maximum, max(minimum, int(os.getenv(name, str(default)))))
@@ -723,8 +743,9 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         if is_holding and quote.get("price_actionable") and not row_fail_closed:
             prior = previous_holdings.get(symbol) or {}
             prior_action = str(prior.get("action") or "hold")
+            prior_requested_action = _previous_requested_action(prior)
             proposed_action = str(decision.get("action") or "hold")
-            prior_rank = ACTION_RANK.get(prior_action, 0)
+            prior_rank = ACTION_RANK.get(prior_requested_action, 0)
             proposed_rank = ACTION_RANK.get(proposed_action, 0)
             source = str(decision.get("source") or decision.get("decision_source") or base_source)
             family = _reason_family(decision.get("reason"))
@@ -756,6 +777,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
                         **prior_guard, "changed": True,
                         "transition_reasons": transition_reasons,
                         "previous_action": prior_action,
+                        "previous_requested_action": prior_requested_action,
                         "proposed_action": proposed_action,
                     }
             decision = _apply_current_action_limit(decision, current_action_state)

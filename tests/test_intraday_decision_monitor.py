@@ -375,6 +375,48 @@ def test_portfolio_guard_override_beats_ordinary_holding_advice():
     assert holding["action_guard"]["changed"] is True
 
 
+def test_guarded_previous_sell_does_not_become_a_fake_multilevel_upgrade():
+    now = datetime(2026, 9, 10, 14, 35, tzinfo=TZ)
+    previous = {
+        "trade_date": now.date().isoformat(),
+        "selection_run_id": "formal-run-1",
+        "plans": _plans(),
+        "holdings": [{
+            "symbol": "000001", "action": "hold",
+            "action_guard": {
+                "changed": True,
+                "original_action": "sell",
+                "current_limit_reasons": ["portfolio_action_count_limit"],
+            },
+        }],
+    }
+    result = monitor.run_cycle(
+        now=now,
+        formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [
+            {"code": "000001", "quantity": 100, "cost_price": 10},
+        ],
+        quote_loader=lambda codes: {
+            code: {"price": 10, "change_pct": 0,
+                   "quote_time": now.strftime("%Y%m%d%H%M%S")}
+            for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None,
+        notify_changes=False,
+        holding_overrides={"000001": {
+            "action": "sell", "reason": "持续风险仍满足卖出条件",
+            "decision_source": "formal_signal",
+        }},
+    )
+
+    holding = result["holdings"][0]
+    assert monitor._previous_requested_action(previous["holdings"][0]) == "sell"
+    assert holding["action"] == "sell"
+    assert holding["reason"] == "持续风险仍满足卖出条件"
+    assert "transition_reasons" not in holding.get("action_guard", {})
+
+
 def test_same_reason_action_upgrades_are_bounded_and_versioned():
     now = datetime(2026, 9, 10, 14, 30, tzinfo=TZ)
     holding_codes = [f"00000{i}" for i in range(1, 6)]
