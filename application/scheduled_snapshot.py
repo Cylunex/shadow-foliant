@@ -1134,8 +1134,6 @@ class ScheduledSnapshotService:
         ]
         missing_pairs = [name for name in expected_pairs if name not in pairs]
         missing_components = []
-        if not all(availability.values()):
-            missing_components.append("required_sources")
         if missing_pairs:
             missing_components.append("pairwise_comparisons")
         if all(availability.values()) and not triple:
