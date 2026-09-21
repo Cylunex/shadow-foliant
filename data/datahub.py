@@ -819,6 +819,22 @@ def stock_names(codes: List[str]) -> Dict[str, str]:
     return out
 
 
+def cached_stock_names(codes: List[str]) -> Dict[str, str]:
+    """Resolve names from persistent caches only; never performs a provider call."""
+    norm = [_norm_code(c) for c in (codes or []) if c]
+    if not norm:
+        return {}
+    master = _name_map()
+    security_master = _cache_get(_SECURITY_MASTER_KEY, _SECURITY_MASTER_TTL)
+    if isinstance(security_master, dict):
+        master.update({str(k): str(v) for k, v in security_master.items() if k and v})
+    return {
+        code: str(master[code]).strip()[:40] for code in norm
+        if code in master and str(master[code]).strip()
+        and not str(master[code]).strip().isdigit()
+    }
+
+
 def stock_name(code: str) -> str:
     """单只中文名;解析不到返回 ''(调用方自行决定是否回退成代码)。"""
     return stock_names([code]).get(_norm_code(code), "")

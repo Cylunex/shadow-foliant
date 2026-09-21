@@ -266,18 +266,25 @@ def test_formal_selection_read_exposes_lanes_and_reference_layers() -> None:
 
 def test_openapi_trial_reference_is_display_only_and_degrades_without_data():
     shadow = {"sampled_at": "2026-09-18T14:45:00+08:00", "groups": [
-        {"name": "低价擒牛", "schema_valid": True, "picks": ["000001", "invalid"]},
+        {"name": "低价擒牛", "schema_valid": True, "picks": ["000001", "000002", "invalid"],
+         "pick_details": [{"symbol": "000001", "name": "平安银行"}],
+         "requested_at": "2026-09-18T14:44:55+08:00", "data_as_of": "20260918"},
         {"name": "低估值", "status": "http_403", "picks": []},
     ]}
-    trial = _openapi_trial_reference(shadow)
+    trial = _openapi_trial_reference(shadow, cached_names={"000002": "万科A"})
     assert trial["status"] == "trial_unverified"
     assert trial["ready_groups"] == 0
     assert trial["trial_data_groups"] == 1
     assert trial["semantic_equivalence_verified"] is False
     assert trial["reference_affects_membership"] is False
-    assert trial["strategies"]["低价擒牛"]["picks"] == [{
-        "symbol": "000001", "name": "", "source_labels": ["问财OpenAPI·试运行"],
-    }]
+    strategy = trial["strategies"]["低价擒牛"]
+    assert strategy["picks"] == [
+        {"symbol": "000001", "name": "平安银行", "source_labels": ["问财OpenAPI·试运行"]},
+        {"symbol": "000002", "name": "万科A", "source_labels": ["问财OpenAPI·试运行"]},
+    ]
+    assert strategy["started_at"] == "2026-09-18T14:44:55+08:00"
+    assert strategy["finished_at"] == "2026-09-18T14:45:00+08:00"
+    assert strategy["result_as_of"] == "20260918"
     assert trial["strategies"]["低估值"]["status"] == "failed"
     assert _openapi_trial_reference({})["status"] == "degraded"
 
@@ -299,6 +306,7 @@ def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch)
             }
 
     service = SelectionRunService(store=Store())
+    monkeypatch.setattr("data.datahub.cached_stock_names", lambda _symbols: {"000001": "平安银行"})
     monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "legacy")
     legacy = service.latest_formal()["data"]
     monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "openapi_trial")
@@ -307,6 +315,7 @@ def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch)
     assert trial["formal_top5"] == legacy["formal_top5"]
     assert legacy["references"]["wencai"].get("source_mode") != "openapi_trial"
     assert trial["references"]["wencai"]["source_mode"] == "openapi_trial"
+    assert trial["references"]["wencai"]["strategies"]["低价擒牛"]["picks"][0]["name"] == "平安银行"
 
 
 def test_durable_worker_lease_reclaims_once_then_fails_after_attempt_budget(repository) -> None:

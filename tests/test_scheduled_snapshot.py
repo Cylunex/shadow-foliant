@@ -595,6 +595,26 @@ def test_openapi_trial_reference_is_labeled_unverified_in_snapshot():
     assert projected["reference_affects_membership"] is False
 
 
+def test_authorized_openapi_shadow_does_not_request_approval_again(monkeypatch):
+    monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "openapi_trial")
+    value = {"data": {"references": {"iwencai_openapi_shadow": {
+        "selection_run_id": "formal-run", "status": "degraded",
+        "replacement_gates": ["two_full_trading_days", "query_conditions_verified"],
+        "groups": [{"name": "低价擒牛", "status": "semantic_unverified",
+                    "picks": ["000001"],
+                    "pick_details": [{"symbol": "000001", "name": "平安银行"}]}],
+    }}}}
+    projected = ScheduledSnapshotService._iwencai_openapi_shadow(
+        value, {"run_id": "formal-run"},
+    )
+    assert projected["reference_mode"] == "openapi_trial"
+    assert projected["trial_authorized"] is True
+    assert projected["replacement_status"] == "trial_active_semantic_unverified"
+    assert projected["required_user_options"] == []
+    assert projected["replacement_gates"] == ["query_conditions_verified"]
+    assert projected["groups"][0]["pick_details"][0]["name"] == "平安银行"
+
+
 def test_missing_wencai_does_not_change_formal_candidates():
     value = selection(with_wencai=False)
     expected = [row["symbol"] for row in value["data"]["formal_top15"]]
@@ -1072,7 +1092,12 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
         "as_of": {"captured_at": "2026-09-10T11:30:00+08:00"},
         "quality": {"status": "degraded"},
         "formal_selection": selection()["data"],
-        "wencai_reference": {"ready_groups": 5},
+        "wencai_reference": {"ready_groups": 0, "source_mode": "openapi_trial",
+                              "trial_data_groups": 5},
+        "iwencai_openapi_shadow": {
+            "status": "degraded", "data_groups": 5, "ready_groups": 0,
+            "replacement_status": "trial_active_semantic_unverified",
+        },
         "holdings": {"count": 2, "status": "complete",
                      "error": "Bearer should-not-appear https://secret.invalid"},
         "trade_plans": {"status": "complete", "portfolio_risk": {"summary": "先观察"}},
@@ -1179,7 +1204,12 @@ def test_cli_report_appends_due_post_close_conclusion():
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
         "independent_selection": {"status": "missing", "market_as_of": "2026-09-09",
                                   "selection_session_date": "2026-09-10"},
-        "wencai_reference": {"ready_groups": 5},
+        "wencai_reference": {"ready_groups": 0, "source_mode": "openapi_trial",
+                              "trial_data_groups": 5},
+        "iwencai_openapi_shadow": {
+            "status": "degraded", "data_groups": 5, "ready_groups": 0,
+            "replacement_status": "trial_active_semantic_unverified",
+        },
         "holdings": {"count": 2, "status": "complete"},
         "trade_plans": {
             "status": "complete", "portfolio_risk": {"summary": "继续观察"},
@@ -1200,6 +1230,9 @@ def test_cli_report_appends_due_post_close_conclusion():
     assert "股票 40 只/市值 ¥184,388" in body
     assert "基金排除 13 只；可用 ¥115,612" in body
     assert "2026-09-10 选择，PIT 行情输入截至 2026-09-09" in body
+    assert "OpenAPI 试运行参考已授权并启用" in body
+    assert "无需再次审批" in body
+    assert "entitlement_or_semantic_blocked" not in body
 
 
 def _external_cli_bundle():

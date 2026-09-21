@@ -81,6 +81,12 @@ def _symbol(row: dict) -> str:
     return match.group(1) if match else ''
 
 
+def _stock_name(row: dict) -> str:
+    value = next((row.get(key) for key in _NAME_FIELD if row.get(key)), '')
+    name = str(value).strip()
+    return name[:40] if name and not name.isdigit() else ''
+
+
 def _eligible_main_force_row(row: dict) -> bool:
     code = str(next((row.get(key) for key in _CODE_FIELD if row.get(key)), '')).upper()
     name = str(next((row.get(key) for key in _NAME_FIELD if row.get(key)), ''))
@@ -341,12 +347,23 @@ def run_group(name: str, *, session=None, key: str | None = None) -> dict:
         reasons.append('capital_flow_net_inflow_unverified')
     if not top_n_coverage:
         reasons.append('top_n_coverage_insufficient')
+    pick_details = []
+    seen_picks = set()
+    for row in selected_rows:
+        symbol = _symbol(row)
+        if not symbol or symbol in seen_picks:
+            continue
+        seen_picks.add(symbol)
+        pick_details.append({'symbol': symbol, 'name': _stock_name(row)})
+        if len(pick_details) >= 5:
+            break
     base.update(
         status='complete' if len(rows) >= (total or 0) else 'partial',
         schema_valid=bool(rows == [] and total == 0 or symbols),
         data_as_of=max(dates) if dates else None,
         reported_count=total, returned_count=len(rows),
-        picks=[_symbol(row) for row in selected_rows[:5] if _symbol(row)],
+        picks=[row['symbol'] for row in pick_details],
+        pick_details=pick_details,
         target_top_n=target, top_n_coverage=top_n_coverage,
         failure_reasons=reasons,
         pagination_complete=len(rows) >= (total or 0),
@@ -384,6 +401,7 @@ def run_shadow(old_reference: dict | None = None, *, session=None,
         row['observed_overlap_top5_count'] = len(old_symbols & new_symbols) if observed else None
         row['comparison_available'] = comparable
         groups.append(row)
+    trial_active = os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial'
     return {
         'version': 'iwencai-openapi-shadow-v1',
         'provider': 'iwencai_openapi', 'skill_id': SKILL_ID,
@@ -395,15 +413,21 @@ def run_shadow(old_reference: dict | None = None, *, session=None,
         'data_groups': sum(bool(g.get('schema_valid') and g.get('returned_count')) for g in groups),
         'reference_only': True, 'reference_affects_membership': False,
         'replacement_ready': False,
-        'replacement_status': 'entitlement_or_semantic_blocked',
+        'reference_mode': 'openapi_trial' if trial_active else 'shadow_validation',
+        'trial_authorized': trial_active,
+        'replacement_status': ('trial_active_semantic_unverified' if trial_active else
+                               'entitlement_or_semantic_blocked'),
         'valid_semantic_sample_day': False,
-        'required_user_options': [
+        'required_user_options': [] if trial_active else [
             'upgrade_entitlement', 'retain_legacy_reference',
             'explicitly_authorize_strategy_redefinition',
         ],
-        'replacement_gates': [
+        'replacement_gates': ([
+            'query_conditions_verified', 'field_entitlement_verified',
+            'current_data_as_of', 'known_cost_and_limits',
+        ] if trial_active else [
             'valid_credentials', 'all_five_groups_complete', 'current_data_as_of',
             'two_full_trading_days', 'query_conditions_verified',
             'field_entitlement_verified', 'known_cost_and_limits',
-        ],
+        ]),
     }

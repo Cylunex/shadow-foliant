@@ -635,6 +635,14 @@ class ScheduledSnapshotService:
                    .get('iwencai_openapi_shadow') or {})
         configured = bool(os.getenv('IWENCAI_API_KEY', '').strip()
                           or os.getenv('IWENCAI_API_KEY_FILE', '').strip())
+        trial_active = (
+            os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower()
+            == 'openapi_trial'
+        )
+        replacement_status = (
+            'trial_active_semantic_unverified' if trial_active else
+            'entitlement_or_semantic_blocked'
+        )
         try:
             from data.provider_governor import budget_snapshot
             budget = (budget_snapshot() or {}).get('iwencai_openapi') or {}
@@ -651,8 +659,14 @@ class ScheduledSnapshotService:
                 'provider': 'iwencai_openapi', 'ready_groups': 0, 'groups': [],
                 'data_groups': 0, 'usage': usage,
                 'reference_only': True, 'replacement_ready': False,
-                'replacement_status': 'entitlement_or_semantic_blocked',
+                'reference_mode': 'openapi_trial' if trial_active else 'shadow_validation',
+                'trial_authorized': trial_active,
+                'replacement_status': replacement_status,
                 'valid_semantic_sample_day': False,
+                'required_user_options': [] if trial_active else [
+                    'upgrade_entitlement', 'retain_legacy_reference',
+                    'explicitly_authorize_strategy_redefinition',
+                ],
             }
         current = str(payload.get('selection_run_id') or '') == str(formal.get('run_id') or '')
         groups = []
@@ -671,6 +685,7 @@ class ScheduledSnapshotService:
                 'financial_periods_verified', 'capital_flow_metric_verified',
                 'scope_rejected_sample_count', 'field_evidence', 'sort_evidence',
                 'failure_reasons',
+                'pick_details',
                 'legacy_status', 'overlap_top5_count', 'comparison_available',
             )})
         return clean_json({
@@ -683,13 +698,19 @@ class ScheduledSnapshotService:
             'sampling_slot': str(payload.get('sampling_slot') or '')[:16],
             'reference_only': True, 'reference_affects_membership': False,
             'replacement_ready': False,
-            'replacement_status': 'entitlement_or_semantic_blocked',
+            'reference_mode': 'openapi_trial' if trial_active else 'shadow_validation',
+            'trial_authorized': trial_active,
+            'replacement_status': replacement_status,
             'valid_semantic_sample_day': False,
-            'required_user_options': [
+            'required_user_options': [] if trial_active else [
                 'upgrade_entitlement', 'retain_legacy_reference',
                 'explicitly_authorize_strategy_redefinition',
             ],
-            'replacement_gates': list(payload.get('replacement_gates') or [])[:8],
+            'replacement_gates': (
+                [gate for gate in (payload.get('replacement_gates') or [])
+                 if gate != 'two_full_trading_days'][:8]
+                if trial_active else list(payload.get('replacement_gates') or [])[:8]
+            ),
         })
 
     @staticmethod
@@ -1360,7 +1381,12 @@ class ScheduledSnapshotService:
                 "wencai_reference": {"status": "missing", "reference_only": True, "strategies": []},
                 "iwencai_openapi_shadow": {"status": "missing", "reference_only": True,
                                             "replacement_ready": False,
-                                            "replacement_status": "entitlement_or_semantic_blocked",
+                                            "replacement_status": (
+                                                "trial_active_semantic_unverified"
+                                                if os.getenv("WENCAI_REFERENCE_SOURCE", "legacy").strip().lower()
+                                                == "openapi_trial" else
+                                                "entitlement_or_semantic_blocked"
+                                            ),
                                             "valid_semantic_sample_day": False, "groups": []},
                 "miaoxiang_reference": {"status": "missing", "reference_only": True,
                                          "strategy_comparison": []},

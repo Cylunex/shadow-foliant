@@ -98,6 +98,9 @@ def test_pagination_schema_provenance_and_bounded_output():
     assert result['pages_fetched'] == 2
     assert result['data_as_of'] == '20260918'
     assert result['picks'] == [f'{i:06d}' for i in range(1, 6)]
+    assert result['pick_details'] == [
+        {'symbol': f'{i:06d}', 'name': '测试'} for i in range(1, 6)
+    ]
     assert [call[1]['json']['page'] for call in session.calls] == ['1', '2']
     assert all(call[0] == source.URL for call in session.calls)
     assert all(call[1]['headers']['X-Claw-Skill-Id'] == source.SKILL_ID
@@ -177,7 +180,8 @@ def test_premarket_sampling_cache_is_reused_after_formal_selection(tmp_path, mon
     assert saved[0][2]['groups'][0]['comparison_available'] is False
 
 
-def test_shadow_comparison_never_promotes_to_formal():
+def test_shadow_comparison_never_promotes_to_formal(monkeypatch):
+    monkeypatch.delenv('WENCAI_REFERENCE_SOURCE', raising=False)
     old = {'strategies': {name: {'status': 'ready', 'picks': [{'symbol': '000001'}]}
                           for name in ORDER}}
     shadow = source.run_shadow(old, group_runner=lambda name: {
@@ -187,7 +191,23 @@ def test_shadow_comparison_never_promotes_to_formal():
     assert shadow['reference_affects_membership'] is False
     assert shadow['replacement_ready'] is False
     assert shadow['replacement_status'] == 'entitlement_or_semantic_blocked'
+    assert shadow['trial_authorized'] is False
+    assert 'two_full_trading_days' in shadow['replacement_gates']
     assert shadow['valid_semantic_sample_day'] is False
+
+
+def test_authorized_trial_removes_old_approval_and_two_day_gate(monkeypatch):
+    monkeypatch.setenv('WENCAI_REFERENCE_SOURCE', 'openapi_trial')
+    shadow = source.run_shadow(group_runner=lambda name: {
+        'name': name, 'status': 'semantic_unverified', 'picks': ['000001'],
+        'schema_valid': True, 'returned_count': 1,
+    })
+    assert shadow['reference_mode'] == 'openapi_trial'
+    assert shadow['trial_authorized'] is True
+    assert shadow['replacement_status'] == 'trial_active_semantic_unverified'
+    assert shadow['required_user_options'] == []
+    assert 'two_full_trading_days' not in shadow['replacement_gates']
+    assert shadow['replacement_ready'] is False
 
 
 def test_rank_ordinal_cannot_substitute_for_raw_amount():

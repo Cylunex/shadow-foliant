@@ -50,17 +50,24 @@ def normalize_symbol(value: Any) -> str:
     return digits
 
 
-def _openapi_trial_reference(shadow: dict[str, Any] | None) -> dict[str, Any]:
+def _openapi_trial_reference(
+    shadow: dict[str, Any] | None, *, cached_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Display-only replacement for the failed legacy reference, never a formal input."""
     from selection.wencai_query_contract import ORDER
 
     payload = shadow if isinstance(shadow, dict) else {}
     groups = {row.get('name'): row for row in (payload.get('groups') or [])
               if isinstance(row, dict) and row.get('name') in ORDER}
+    cached_names = cached_names or {}
     strategies = {}
     for name in ORDER:
         row = groups.get(name) or {}
         has_data = bool(row.get('schema_valid') and row.get('picks'))
+        provider_names = {
+            str(item.get('symbol') or ''): str(item.get('name') or '').strip()
+            for item in (row.get('pick_details') or []) if isinstance(item, dict)
+        }
         strategies[name] = {
             'strategy_id': 'iwencai_openapi_trial_' + name,
             'strategy_version': 'iwencai-openapi-trial-v1',
@@ -68,7 +75,13 @@ def _openapi_trial_reference(shadow: dict[str, Any] | None) -> dict[str, Any]:
             'status': 'trial_unverified' if has_data else 'failed',
             'failure_code': 'semantic_unverified' if has_data else
                             str(row.get('status') or 'shadow_not_available')[:48],
-            'picks': [{'symbol': str(symbol), 'name': '',
+            'started_at': row.get('requested_at'),
+            'finished_at': row.get('finished_at') or payload.get('sampled_at')
+                           or payload.get('executed_at'),
+            'result_as_of': row.get('data_as_of'),
+            'picks': [{'symbol': str(symbol),
+                       'name': provider_names.get(str(symbol))
+                               or cached_names.get(str(symbol), ''),
                        'source_labels': ['问财OpenAPI·试运行']}
                       for symbol in (row.get('picks') or [])[:5]
                       if isinstance(symbol, str) and re.fullmatch(r'\d{6}', symbol)],
@@ -560,8 +573,22 @@ class SelectionRunService:
                                      "iwencai_openapi_shadow",
                                  ) if (artifacts.get(name) or {}).get("payload")), {})
         trial_mode = os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial'
+        cached_names = {}
+        if trial_mode:
+            symbols = [
+                str(symbol) for row in (shadow_reference.get('groups') or [])
+                if isinstance(row, dict) for symbol in (row.get('picks') or [])
+                if isinstance(symbol, str) and re.fullmatch(r'\d{6}', symbol)
+            ]
+            try:
+                from data import datahub
+                cached_names = datahub.cached_stock_names(symbols)
+            except Exception:
+                cached_names = {}
         references = {
-            "wencai": (_openapi_trial_reference(shadow_reference) if trial_mode else
+            "wencai": (_openapi_trial_reference(
+                shadow_reference, cached_names=cached_names,
+            ) if trial_mode else
                        wencai_artifact_payload(artifacts)),
             "independent": artifact_payload(artifacts),
             "miaoxiang": (artifacts.get("miaoxiang_strategy_runs") or {}).get("payload") or {},

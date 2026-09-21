@@ -462,9 +462,10 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"状态 {openapi_shadow.get('status') or 'missing'}；不参与正式排名。"
         ),
         (
-            '问财切换：entitlement_or_semantic_blocked；原五组等价性未证实，' +
-            ('OpenAPI 仅作试运行参考，不代表原五组等价；正式选股不变。'
-             if reference.get('source_mode') == 'openapi_trial' else
+            '问财切换：OpenAPI 试运行参考已授权并启用；'
+            '原五组语义等价性仍未证实，正式选股不变，无需再次审批。'
+            if reference.get('source_mode') == 'openapi_trial' else
+            ('问财切换：entitlement_or_semantic_blocked；原五组等价性未证实，' +
              '旧源继续作为参考。后续可升级权益、维持降级，或明确重定义策略；'
              '不会因连续返回名单而认定等价。')
             if openapi_shadow.get('replacement_status') == 'entitlement_or_semantic_blocked'
