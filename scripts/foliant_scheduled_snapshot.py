@@ -449,21 +449,27 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         )
     lines.extend([
         (f"问财 OpenAPI 试运行参考：{reference.get('trial_data_groups') or 0}/5 组有数据；"
-         "语义未核验、非正式输入，不影响正式候选。"
+         + (f"{reference.get('semantic_verified_groups') or 0}/5 组语义核验通过；"
+            if reference.get('semantic_equivalence_verified') else
+            "语义尚未全部核验；")
+         + "非正式输入，不影响正式候选。"
          if reference.get('source_mode') == 'openapi_trial' else
          f"问财参考：{reference.get('ready_groups') or 0}/5 组可用（仅参考，不影响正式候选）"),
         (
             "问财 OpenAPI 影子：独立 Key 未配置，未试跑；不替换旧问财。"
             if openapi_shadow.get('status') == 'credential_missing' else
             f"问财 OpenAPI 影子：{openapi_shadow.get('data_groups') or 0}/5 组有数据，"
-            f"{openapi_shadow.get('ready_groups') or 0}/5 组通过完整校验；"
+            f"{openapi_shadow.get('semantic_verified_groups') or 0}/5 组通过语义与排名校验；"
             f"当日调用 {(openapi_shadow.get('usage') or {}).get('calls_today') if (openapi_shadow.get('usage') or {}).get('calls_today') is not None else '未知'}/"
             f"{(openapi_shadow.get('usage') or {}).get('hard_daily_limit') or 70}；"
             f"状态 {openapi_shadow.get('status') or 'missing'}；不参与正式排名。"
         ),
         (
-            '问财切换：OpenAPI 试运行参考已授权并启用；'
-            '原五组语义等价性仍未证实，正式选股不变，无需再次审批。'
+            ('问财切换：OpenAPI 试运行参考已授权并启用；五组语义与排名核验通过，'
+             '仍仅作参考，正式选股不变，无需再次审批。'
+             if reference.get('semantic_equivalence_verified') else
+             '问财切换：OpenAPI 试运行参考已授权并启用；'
+             '原五组语义等价性仍未全部证实，正式选股不变，无需再次审批。')
             if reference.get('source_mode') == 'openapi_trial' else
             ('问财切换：entitlement_or_semantic_blocked；原五组等价性未证实，' +
              '旧源继续作为参考。后续可升级权益、维持降级，或明确重定义策略；'

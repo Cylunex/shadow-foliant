@@ -581,9 +581,11 @@ class ScheduledSnapshotService:
                 "picks": picks[:15],
             })
         present = sum(1 for row in rows if row["status"] != "missing")
-        ready = sum(1 for row in rows if row["status"] == "ready")
+        ready = sum(1 for row in rows if row["status"] in {"ready", "trial_verified"})
         trial = payload.get("source_mode") == "openapi_trial"
-        trial_data = sum(1 for row in rows if row["status"] == "trial_unverified")
+        trial_data = sum(1 for row in rows
+                         if row["status"] in {"trial_verified", "trial_unverified"})
+        trial_verified = sum(1 for row in rows if row["status"] == "trial_verified")
         try:
             import datahub
 
@@ -592,12 +594,17 @@ class ScheduledSnapshotService:
             fuyao = {"configured": False, "enabled": False, "capabilities": {}}
         fuyao_configured = bool(fuyao.get("configured") and fuyao.get("enabled"))
         return {
-            "status": ("trial_unverified" if trial_data else "degraded") if trial else
-                      ("missing" if present == 0 else "complete" if ready == 5 else "degraded"),
+            "status": (("trial_verified" if trial_verified == 5 else
+                        "trial_partially_verified" if trial_verified else
+                        "trial_unverified" if trial_data else "degraded") if trial else
+                       ("missing" if present == 0 else "complete" if ready == 5 else "degraded")),
             "provider": "iwencai_openapi" if trial else "iwencai_reference_adapter",
             "source_mode": "openapi_trial" if trial else "legacy",
             "trial_data_groups": trial_data if trial else 0,
-            "semantic_equivalence_verified": False if trial else None,
+            "semantic_verified_groups": trial_verified if trial else None,
+            "semantic_equivalence_verified": (
+                bool(payload.get("semantic_equivalence_verified")) if trial else None
+            ),
             "availability": "ready" if ready == 5 else "long_term_degraded",
             "reference_only": True,
             "reference_affects_membership": False,
@@ -683,25 +690,39 @@ class ScheduledSnapshotService:
                 'sort_field_as_of', 'pagination_complete', 'as_of_verified',
                 'target_top_n', 'top_n_coverage', 'eligible_top_n_count',
                 'financial_periods_verified', 'capital_flow_metric_verified',
-                'scope_rejected_sample_count', 'field_evidence', 'sort_evidence',
-                'failure_reasons',
+                'financial_period_evidence', 'threshold_conditions_verified',
+                'condition_evidence', 'query_contract_verified',
+                'ranking_verified', 'semantic_verified', 'verification_stage',
+                'scope_rejected_sample_count', 'scope_rejection_counts',
+                'field_evidence', 'sort_evidence', 'failure_reasons', 'audit_warnings',
                 'pick_details',
                 'legacy_status', 'overlap_top5_count', 'comparison_available',
             )})
+        semantic_verified_groups = (
+            int(payload.get('semantic_verified_groups') or 0) if current else 0
+        )
+        semantic_verified = semantic_verified_groups == len(EXPECTED_WENCAI_STRATEGIES)
+        effective_replacement_status = (
+            str(payload.get('replacement_status') or '') if current else ''
+        ) or replacement_status
         return clean_json({
             'status': str(payload.get('status') or 'missing') if current else 'stale',
             'provider': 'iwencai_openapi', 'ready_groups': int(payload.get('ready_groups') or 0) if current else 0,
+            'semantic_verified_groups': semantic_verified_groups,
             'data_groups': int(payload.get('data_groups') or 0) if current else 0,
             'usage': usage,
             'groups': groups, 'as_of': payload.get('executed_at'),
             'sampled_at': payload.get('sampled_at'),
             'sampling_slot': str(payload.get('sampling_slot') or '')[:16],
             'reference_only': True, 'reference_affects_membership': False,
-            'replacement_ready': False,
+            'replacement_ready': bool(current and payload.get('replacement_ready')
+                                      and semantic_verified),
             'reference_mode': 'openapi_trial' if trial_active else 'shadow_validation',
             'trial_authorized': trial_active,
-            'replacement_status': replacement_status,
-            'valid_semantic_sample_day': False,
+            'replacement_status': effective_replacement_status,
+            'valid_semantic_sample_day': bool(
+                current and payload.get('valid_semantic_sample_day') and semantic_verified
+            ),
             'required_user_options': [] if trial_active else [
                 'upgrade_entitlement', 'retain_legacy_reference',
                 'explicitly_authorize_strategy_redefinition',

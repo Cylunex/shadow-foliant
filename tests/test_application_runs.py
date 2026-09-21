@@ -289,6 +289,22 @@ def test_openapi_trial_reference_is_display_only_and_degrades_without_data():
     assert _openapi_trial_reference({})["status"] == "degraded"
 
 
+def test_openapi_trial_reference_reports_all_semantic_groups_verified():
+    shadow = {"groups": [
+        {"name": name, "status": "complete", "semantic_verified": True,
+         "schema_valid": True, "picks": ["000001"]}
+        for name in ("低价擒牛", "低估值", "主力资金", "小市值", "净利增长")
+    ]}
+    trial = _openapi_trial_reference(shadow)
+    assert trial["status"] == "trial_verified"
+    assert trial["ready_groups"] == 5
+    assert trial["semantic_verified_groups"] == 5
+    assert trial["semantic_equivalence_verified"] is True
+    assert all(row["status"] == "trial_verified"
+               for row in trial["strategies"].values())
+    assert trial["reference_affects_membership"] is False
+
+
 def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch):
     class Store:
         def latest_formal_selection(self):

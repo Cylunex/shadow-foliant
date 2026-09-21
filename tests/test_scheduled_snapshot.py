@@ -615,6 +615,29 @@ def test_authorized_openapi_shadow_does_not_request_approval_again(monkeypatch):
     assert projected["groups"][0]["pick_details"][0]["name"] == "平安银行"
 
 
+def test_authorized_openapi_shadow_projects_verified_state(monkeypatch):
+    monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "openapi_trial")
+    value = {"data": {"references": {"iwencai_openapi_shadow": {
+        "selection_run_id": "formal-run", "status": "complete",
+        "semantic_verified_groups": 5, "ready_groups": 5, "data_groups": 5,
+        "replacement_ready": True, "valid_semantic_sample_day": True,
+        "replacement_status": "trial_active_semantic_verified",
+        "replacement_gates": [],
+        "groups": [{"name": "低价擒牛", "status": "complete",
+                    "semantic_verified": True, "ranking_verified": True,
+                    "verification_stage": "ranking_verified"}],
+    }}}}
+    projected = ScheduledSnapshotService._iwencai_openapi_shadow(
+        value, {"run_id": "formal-run"},
+    )
+    assert projected["semantic_verified_groups"] == 5
+    assert projected["replacement_ready"] is True
+    assert projected["valid_semantic_sample_day"] is True
+    assert projected["replacement_status"] == "trial_active_semantic_verified"
+    assert projected["replacement_gates"] == []
+    assert projected["groups"][0]["ranking_verified"] is True
+
+
 def test_missing_wencai_does_not_change_formal_candidates():
     value = selection(with_wencai=False)
     expected = [row["symbol"] for row in value["data"]["formal_top15"]]

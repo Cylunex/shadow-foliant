@@ -40,8 +40,9 @@ class Session:
 
 def test_exact_queries_and_fixed_order():
     assert ORDER == ('低价擒牛', '低估值', '主力资金', '小市值', '净利增长')
-    assert QUERIES['主力资金'] == '主力资金净流入排名'
-    assert QUERIES['低价擒牛'].endswith('成交额由小至大排名')
+    assert '上一交易日主力资金净流入额由大到小排名' in QUERIES['主力资金']
+    assert '显示上一交易日主力资金净流入额' in QUERIES['主力资金']
+    assert '显示最新价、归母净利润同比增长率、成交额' in QUERIES['低价擒牛']
 
 
 def test_missing_key_has_no_network_request(monkeypatch):
@@ -92,7 +93,8 @@ def test_pagination_schema_provenance_and_bounded_output():
     assert result['target_top_n'] == 5
     assert result['top_n_coverage'] is True
     assert result['pagination_complete'] is True
-    assert 'query_equivalence_not_audited' in result['failure_reasons']
+    assert 'required_metric_missing_or_ambiguous' in result['failure_reasons']
+    assert 'provider_condition_parse_receipt_unavailable' in result['audit_warnings']
     assert result['reported_count'] == 22
     assert result['returned_count'] == 22
     assert result['pages_fetched'] == 2
@@ -210,6 +212,21 @@ def test_authorized_trial_removes_old_approval_and_two_day_gate(monkeypatch):
     assert shadow['replacement_ready'] is False
 
 
+def test_authorized_trial_reports_five_locally_verified_groups(monkeypatch):
+    monkeypatch.setenv('WENCAI_REFERENCE_SOURCE', 'openapi_trial')
+    shadow = source.run_shadow(group_runner=lambda name: {
+        'name': name, 'status': 'complete', 'semantic_verified': True,
+        'picks': ['000001'], 'schema_valid': True, 'returned_count': 20,
+    })
+    assert shadow['status'] == 'complete'
+    assert shadow['ready_groups'] == 5
+    assert shadow['semantic_verified_groups'] == 5
+    assert shadow['valid_semantic_sample_day'] is True
+    assert shadow['replacement_ready'] is True
+    assert shadow['replacement_status'] == 'trial_active_semantic_verified'
+    assert shadow['replacement_gates'] == []
+
+
 def test_rank_ordinal_cannot_substitute_for_raw_amount():
     rows = [{'股票代码': f'{i:06d}.SZ', '股票简称': '测试',
              '最新价[20260918]': 10, '归母净利润同比增长率[20260630]': 120,
@@ -237,12 +254,65 @@ def test_main_force_top_five_excludes_kcb_without_claiming_net_inflow_equivalenc
          patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
         result = source.run_group('主力资金', session=session, key='test-key')
     assert result['picks'] == [f'{i:06d}' for i in range(1, 6)]
-    assert result['stock_scope_verified'] is True
+    assert result['stock_scope_verified'] is False
     assert result['scope_rejected_sample_count'] == 1
     assert result['capital_flow_metric_verified'] is False
     assert result['sort_field_as_of'] is None
     assert 'capital_flow_net_inflow_unverified' in result['failure_reasons']
     assert result['status'] == 'semantic_unverified'
+
+
+def test_all_five_groups_can_be_locally_semantic_and_ranking_verified():
+    source_note = '最新净利润来源于2026-08-20公告的2026年中报的定期报告。'
+    revenue_note = '最新营业收入来源于2026-08-20公告的2026年中报的定期报告。'
+    fixtures = {
+        '低价擒牛': [
+            {'股票代码': f'60{i:04d}.SH', '股票简称': '测试',
+             '收盘价[20260921]': 10.0, '归母净利润同比增长率': 120.0,
+             '成交额[20260921]': float(i + 1), '净利润来源说明': source_note}
+            for i in range(20)
+        ],
+        '低估值': [
+            {'股票代码': f'60{i:04d}.SH', '股票简称': '测试',
+             '最新市盈率ttm': 10.0, '最新市净率': 1.0,
+             '年度股息率[20251231]': 2.0, '资产负债率[20260630]': 20.0,
+             '流通市值[20260921]': float(i + 1)}
+            for i in range(20)
+        ],
+        '主力资金': [
+            {'股票代码': f'60{i:04d}.SH', '股票简称': '测试',
+             '主力资金流向[20260918]': float(100 - i)}
+            for i in range(20)
+        ],
+        '小市值': [
+            {'股票代码': f'60{i:04d}.SH', '股票简称': '测试',
+             '总市值[20260921]': float(1_000_000_000 + i),
+             '营业收入同比增长率': 20.0, '归母净利润同比增长率': 120.0,
+             '营业收入来源说明': revenue_note, '净利润来源说明': source_note}
+            for i in range(20)
+        ],
+        '净利增长': [
+            {'股票代码': f'00{i:04d}.SZ', '股票简称': '测试',
+             '归母净利润同比增长率': 20.0,
+             '成交额[20260921]': float(i + 1), '净利润来源说明': source_note}
+            for i in range(20)
+        ],
+    }
+    results = []
+    for name in ORDER:
+        session = Session([Response({'datas': fixtures[name], 'code_count': 20,
+                                     'chunks_info': {}})])
+        with patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
+            results.append(source.run_group(name, session=session, key='test-key'))
+
+    assert [row['status'] for row in results] == ['complete'] * 5
+    assert all(row['local_conditions_verified'] for row in results)
+    assert all(row['ranking_verified'] for row in results)
+    assert all(row['semantic_verified'] for row in results)
+    assert all(row['failure_reasons'] == [] for row in results)
+    assert [row['data_as_of'] for row in results] == [
+        '20260921', '20260921', '20260918', '20260921', '20260921',
+    ]
 
 
 def test_miaoxiang_error_dict_is_not_neutral():

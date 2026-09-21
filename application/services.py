@@ -64,6 +64,7 @@ def _openapi_trial_reference(
     for name in ORDER:
         row = groups.get(name) or {}
         has_data = bool(row.get('schema_valid') and row.get('picks'))
+        semantic_ok = bool(row.get('status') == 'complete' and row.get('semantic_verified'))
         provider_names = {
             str(item.get('symbol') or ''): str(item.get('name') or '').strip()
             for item in (row.get('pick_details') or []) if isinstance(item, dict)
@@ -72,8 +73,9 @@ def _openapi_trial_reference(
             'strategy_id': 'iwencai_openapi_trial_' + name,
             'strategy_version': 'iwencai-openapi-trial-v1',
             'query_hash': row.get('query_hash'),
-            'status': 'trial_unverified' if has_data else 'failed',
-            'failure_code': 'semantic_unverified' if has_data else
+            'status': 'trial_verified' if semantic_ok else
+                      'trial_unverified' if has_data else 'failed',
+            'failure_code': None if semantic_ok else 'semantic_unverified' if has_data else
                             str(row.get('status') or 'shadow_not_available')[:48],
             'started_at': row.get('requested_at'),
             'finished_at': row.get('finished_at') or payload.get('sampled_at')
@@ -87,15 +89,20 @@ def _openapi_trial_reference(
                       if isinstance(symbol, str) and re.fullmatch(r'\d{6}', symbol)],
             'reference_affects_membership': False,
         }
+    verified_groups = sum(row['status'] == 'trial_verified' for row in strategies.values())
+    data_groups = sum(row['status'] in {'trial_verified', 'trial_unverified'}
+                      for row in strategies.values())
     return {
         'version': 'iwencai-openapi-trial-reference-v1',
         'provider': 'iwencai_openapi', 'source_mode': 'openapi_trial',
-        'status': 'trial_unverified' if any(
-            row['status'] == 'trial_unverified' for row in strategies.values()) else 'degraded',
-        'trial_reference': True, 'semantic_equivalence_verified': False,
-        'ready_groups': 0,
-        'trial_data_groups': sum(row['status'] == 'trial_unverified'
-                                 for row in strategies.values()),
+        'status': ('trial_verified' if verified_groups == len(ORDER) else
+                   'trial_partially_verified' if verified_groups else
+                   'trial_unverified' if data_groups else 'degraded'),
+        'trial_reference': True,
+        'semantic_equivalence_verified': verified_groups == len(ORDER),
+        'ready_groups': verified_groups,
+        'semantic_verified_groups': verified_groups,
+        'trial_data_groups': data_groups,
         'executed_at': payload.get('sampled_at') or payload.get('executed_at'),
         'strategies': strategies,
         'reference_affects_membership': False,
