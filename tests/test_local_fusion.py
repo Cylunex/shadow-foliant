@@ -201,6 +201,10 @@ class SelectionOutcomeTest(unittest.TestCase):
             self.assertEqual(row["strategy_id"], "local_value_v2")
             self.assertEqual(row["sample_size"], 1)
             self.assertEqual(row["avg_return_pct"], 25.0)
+            self.assertEqual(row["median_return_pct"], 25.0)
+            self.assertIsNone(row["win_loss_ratio"])
+            self.assertIsNone(row["benchmark_excess_pct"])
+            self.assertEqual(row["benchmark_sample_size"], 0)
 
 
 if __name__ == "__main__":

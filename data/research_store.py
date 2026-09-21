@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from statistics import median
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 import uuid
 
@@ -2806,21 +2807,24 @@ class ResearchStore:
             cur.execute(
                 """SELECT n.strategy_id,n.lane,o.return_pct,o.max_drawdown_pct,
                           n.created_at,n.symbol,n.strategy_version,o.metric_version,o.mae_pct,
-                          o.entry_date,o.exit_date
+                          o.entry_date,o.exit_date,o.benchmark_return_pct
                    FROM selection_candidate_nominations n
                    JOIN selection_candidate_outcomes o ON o.nomination_id=n.nomination_id
                    WHERE o.horizon_days=? AND o.outcome_status='matured' AND n.created_at>=?""",
                 (max(1, int(horizon_days)), since),
             )
             buckets: Dict[str, dict] = {}
-            for strategy_id, lane, ret, drawdown, created_at, symbol, strategy_version, metric_version, mae, entry_date, exit_date in cur.fetchall():
+            for strategy_id, lane, ret, drawdown, created_at, symbol, strategy_version, metric_version, mae, entry_date, exit_date, benchmark_ret in cur.fetchall():
                 bucket = buckets.setdefault((str(strategy_id), str(strategy_version), str(metric_version)), {
                     "strategy_id": str(strategy_id), "lane": str(lane), "returns": [],
                     "strategy_version": str(strategy_version), "metric_version": str(metric_version),
-                    "drawdowns": [], "maes": [], "dates": set(), "symbols": set(), "intervals": set(),
+                    "drawdowns": [], "maes": [], "benchmark_excess": [],
+                    "dates": set(), "symbols": set(), "intervals": set(),
                 })
                 if ret is not None:
                     bucket["returns"].append(float(ret))
+                    if benchmark_ret is not None:
+                        bucket["benchmark_excess"].append(float(ret) - float(benchmark_ret))
                 if drawdown is not None and metric_version == "signal-price-v2":
                     bucket["drawdowns"].append(float(drawdown))
                 elif drawdown is not None:
@@ -2834,6 +2838,7 @@ class ResearchStore:
             for bucket in buckets.values():
                 returns = bucket.pop("returns")
                 drawdowns = bucket.pop("drawdowns")
+                benchmark_excess = bucket.pop("benchmark_excess")
                 dates = bucket.pop("dates")
                 symbols = bucket.pop("symbols")
                 maes = bucket.pop("maes")
@@ -2851,6 +2856,23 @@ class ResearchStore:
                     "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 2)
                     if returns else None,
                     "avg_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
+                    "median_return_pct": round(float(median(returns)), 4) if returns else None,
+                    "win_loss_ratio": (
+                        round(
+                            (sum(value for value in returns if value > 0)
+                             / sum(value > 0 for value in returns))
+                            / abs(sum(value for value in returns if value < 0)
+                                  / sum(value < 0 for value in returns)),
+                            4,
+                        )
+                        if any(value > 0 for value in returns)
+                        and any(value < 0 for value in returns) else None
+                    ),
+                    "benchmark_excess_pct": (
+                        round(sum(benchmark_excess) / len(benchmark_excess), 4)
+                        if benchmark_excess else None
+                    ),
+                    "benchmark_sample_size": len(benchmark_excess),
                     "worst_drawdown_pct": round(min(drawdowns), 4) if drawdowns else None,
                     "worst_mae_pct": round(min(maes), 4) if maes else None,
                 })

@@ -31,6 +31,11 @@ POST_CLOSE_JOBS = (
     "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
     "research_data_sync_retry",
 )
+REQUIRED_STRATEGY_HORIZONS = (1, 3, 5, 10, 20)
+REQUIRED_STRATEGY_METRICS = (
+    "median_return_pct", "win_loss_ratio", "benchmark_excess_pct",
+)
+REQUIRED_COMPARISON_SOURCES = ("formal", "independent", "wencai")
 MIN_STRATEGY_FEEDBACK_SAMPLES = 30
 MIN_PERFORMANCE_FACTOR_DEVIATION = 0.05
 MAX_STRATEGY_MULTIPLIER_STEP = 0.05
@@ -80,7 +85,7 @@ def _trade_plan(row: Any) -> dict[str, Any]:
     allowed = (
         "available", "action", "action_cn", "market_action", "entry_low", "entry_high",
         "stop_loss", "target_price", "target_price_2", "current_price", "plan_as_of",
-        "price_basis", "horizon", "horizon_cn", "risk_reward_ratio",
+        "price_basis", "plan_generated_at", "horizon", "horizon_cn", "risk_reward_ratio",
         "suggested_position_pct", "blockers",
     )
     return clean_json({key: row.get(key) for key in allowed if key in row})
@@ -159,6 +164,44 @@ def _finite_number(value: Any) -> float | None:
         return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _plan_rebuild_evidence(plan: dict[str, Any], session_date: str) -> dict[str, Any]:
+    """Separate plan generation time from its underlying daily-bar date."""
+    generated_at = plan.get("plan_generated_at") or plan.get("_snapshot_generated_at")
+    generated = _parse_datetime(generated_at)
+    generated_after_close = bool(
+        generated
+        and generated.date().isoformat() == session_date
+        and (generated.hour, generated.minute) >= (15, 0)
+    )
+    input_as_of = str(plan.get("plan_as_of") or "")[:10] or None
+    input_current = bool(input_as_of and input_as_of == session_date)
+    blockers = []
+    if generated is None:
+        blockers.append("trade_plan_generation_time_missing")
+    elif not generated_after_close:
+        blockers.append("trade_plan_not_rebuilt_after_close")
+    if not input_current:
+        blockers.append("trade_plan_input_market_date_not_current")
+    return {
+        "status": "current_close_rebuild" if not blockers else "historical_reference",
+        "plan_generated_at": generated_at,
+        "plan_input_market_as_of": input_as_of,
+        "generated_after_close": generated_after_close,
+        "input_includes_session_close": input_current,
+        "blockers": blockers,
+    }
 
 
 def _job_run(row: Any) -> dict[str, Any]:
@@ -297,26 +340,102 @@ def _outcome_evidence(value: Any) -> dict[str, Any]:
 
 
 def _strategy_evidence(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {"status": "missing", "strategies": []}
+    values = value if isinstance(value, list) else [value]
+    values = [item for item in values if isinstance(item, dict)]
+    if not values:
+        return {
+            "status": "missing", "strategies": [], "horizons": [],
+            "required_horizons_days": list(REQUIRED_STRATEGY_HORIZONS),
+            "missing_horizons_days": list(REQUIRED_STRATEGY_HORIZONS),
+            "required_metrics": list(REQUIRED_STRATEGY_METRICS),
+            "required_sources": list(REQUIRED_COMPARISON_SOURCES),
+        }
     allowed = (
         "strategy_id", "lane", "strategy_version", "metric_version", "sample_size",
         "independent_dates", "nonoverlapping_price_intervals", "effective_samples",
         "promotion_blocker", "symbol_count", "win_rate_pct", "avg_return_pct",
-        "worst_drawdown_pct", "worst_mae_pct",
+        "median_return_pct", "win_loss_ratio", "benchmark_excess_pct",
+        "benchmark_sample_size", "worst_drawdown_pct", "worst_mae_pct",
     )
-    strategies = [
-        clean_json({key: row.get(key) for key in allowed if key in row})
-        for row in (value.get("strategies") or [])[:100]
-        if isinstance(row, dict)
+    horizons = []
+    all_strategies = []
+    available_horizons = []
+    metric_gaps: dict[str, list[str]] = {}
+    effective_samples = 0
+    for index, item in enumerate(values):
+        requested_horizon = item.get("_requested_horizon_days")
+        try:
+            horizon = int(requested_horizon or item.get("horizon_days") or 0)
+        except (TypeError, ValueError):
+            horizon = 0
+        strategies = [
+            clean_json({key: row.get(key) for key in allowed if key in row})
+            for row in (item.get("strategies") or [])[:100]
+            if isinstance(row, dict)
+        ]
+        for row in strategies:
+            row["horizon_days"] = horizon or None
+            effective_samples += int(row.get("effective_samples") or 0)
+        if horizon in REQUIRED_STRATEGY_HORIZONS and strategies:
+            available_horizons.append(horizon)
+        missing_metrics = sorted({
+            metric for row in strategies for metric in REQUIRED_STRATEGY_METRICS
+            if row.get(metric) is None
+        })
+        if missing_metrics:
+            metric_gaps[str(horizon or index)] = missing_metrics
+        horizons.append(clean_json({
+            "horizon_days": horizon or None,
+            "status": "complete" if strategies and not missing_metrics else "degraded",
+            "strategy_count": len(strategies),
+            "missing_metrics": missing_metrics,
+            "strategies": strategies,
+        }))
+        all_strategies.extend(strategies)
+    primary = next(
+        (item for item in values if int(item.get("_requested_horizon_days")
+                                        or item.get("horizon_days") or 0) == 5),
+        values[0],
+    )
+    comparison = primary.get("portfolio_comparison") or {}
+    supplied_sources = set(primary.get("source_outcomes") or {})
+    missing_sources = [
+        source for source in REQUIRED_COMPARISON_SOURCES if source not in supplied_sources
     ]
-    comparison = value.get("portfolio_comparison") or {}
+    missing_horizons = sorted(set(REQUIRED_STRATEGY_HORIZONS) - set(available_horizons))
+    missing_components = []
+    if missing_horizons:
+        missing_components.append("required_horizons")
+    if metric_gaps:
+        missing_components.append("required_metrics")
+    if missing_sources:
+        missing_components.append("three_source_outcome_strata")
+    if effective_samples == 0:
+        missing_components.append("independent_effective_samples")
+    status = "complete" if not missing_components else "degraded"
     return clean_json({
-        "status": "complete",
-        "horizon_days": value.get("horizon_days"),
-        "lookback_days": value.get("lookback_days"),
-        "evidence_snapshot_id": value.get("evidence_snapshot_id"),
-        "strategies": strategies,
+        "status": status,
+        "horizon_days": 5,
+        "lookback_days": primary.get("lookback_days"),
+        "evidence_snapshot_id": payload_hash({
+            "snapshots": [item.get("evidence_snapshot_id") for item in values],
+            "required_horizons": REQUIRED_STRATEGY_HORIZONS,
+        }),
+        "strategies": [row for row in all_strategies if row.get("horizon_days") == 5],
+        "horizons": horizons,
+        "required_horizons_days": list(REQUIRED_STRATEGY_HORIZONS),
+        "available_horizons_days": sorted(set(available_horizons)),
+        "missing_horizons_days": missing_horizons,
+        "required_metrics": list(REQUIRED_STRATEGY_METRICS),
+        "missing_metrics_by_horizon": metric_gaps,
+        "required_sources": list(REQUIRED_COMPARISON_SOURCES),
+        "available_source_outcomes": sorted(supplied_sources),
+        "missing_source_outcomes": missing_sources,
+        "effective_samples": effective_samples,
+        "missing_components": missing_components,
+        "completeness_semantics": (
+            "job_success_does_not_imply_statistical_completeness"
+        ),
         "portfolio_comparison": {
             "matured_runs": comparison.get("matured_runs"),
             "avg_satellite_marginal_pct": comparison.get("avg_satellite_marginal_pct"),
@@ -958,19 +1077,85 @@ class ScheduledSnapshotService:
             "formal_wencai": ("formal", "wencai"),
             "independent_wencai": ("independent", "wencai"),
         }
-        raw_pairs = raw.get("pairwise") or {}
-        pairs = {
-            name: clean_json(raw_pairs.get(name) or {})
-            for name, required in pair_dependencies.items()
-            if all(availability[source] for source in required) and raw_pairs.get(name)
+        source_sets = {
+            "formal": {
+                str(row.get("symbol") or "") for row in formal.get("formal_top15") or []
+                if row.get("symbol")
+            },
+            "independent": {
+                str(row.get("symbol") or "") for row in independent.get("top15") or []
+                if row.get("symbol")
+            },
+            "wencai": {
+                str(row.get("symbol") or "")
+                for group in wencai.get("strategies") or []
+                for row in group.get("picks") or [] if row.get("symbol")
+            },
         }
+        for source in REQUIRED_COMPARISON_SOURCES:
+            availability[source] = bool(availability[source] and source_sets[source])
+
+        def computed_pair(left_name: str, right_name: str) -> dict[str, Any]:
+            left, right = source_sets[left_name], source_sets[right_name]
+            return {
+                "intersection": sorted(left & right),
+                f"{left_name}_only": sorted(left - right),
+                f"{right_name}_only": sorted(right - left),
+            }
+
+        raw_pairs = raw.get("pairwise") or {}
+        pairs = {}
+        origins = {}
+        for name, required in pair_dependencies.items():
+            if not all(availability[source] for source in required):
+                continue
+            if raw_pairs.get(name):
+                pairs[name] = clean_json(raw_pairs[name])
+                origins[name] = "selection_artifact"
+            else:
+                pairs[name] = computed_pair(*required)
+                origins[name] = "scheduled_snapshot_same_payload"
+        triple = raw.get("triple") if all(availability.values()) else None
+        triple_origin = "selection_artifact" if triple else None
+        if all(availability.values()) and not triple:
+            formal_set = source_sets["formal"]
+            independent_set = source_sets["independent"]
+            wencai_set = source_sets["wencai"]
+            triple = {
+                "intersection": sorted(formal_set & independent_set & wencai_set),
+                "formal_only": sorted(formal_set - independent_set - wencai_set),
+                "independent_only": sorted(independent_set - formal_set - wencai_set),
+                "wencai_only": sorted(wencai_set - formal_set - independent_set),
+            }
+            triple_origin = "scheduled_snapshot_same_payload"
+        expected_pairs = [
+            name for name, required in pair_dependencies.items()
+            if all(availability[source] for source in required)
+        ]
+        missing_pairs = [name for name in expected_pairs if name not in pairs]
+        missing_components = []
+        if not all(availability.values()):
+            missing_components.append("required_sources")
+        if missing_pairs:
+            missing_components.append("pairwise_comparisons")
+        if all(availability.values()) and not triple:
+            missing_components.append("triple_comparison")
         return clean_json({
-            "status": "complete" if availability["formal"] else "degraded",
+            "status": "complete" if not missing_components else "degraded",
             "selection_date": formal.get("selection_date"),
             "availability": availability,
             "unavailable_sources": [name for name, ready in availability.items() if not ready],
             "pairwise": pairs,
-            "triple": raw.get("triple") if all(availability.values()) else None,
+            "triple": triple,
+            "coverage": {
+                "expected_pairwise": expected_pairs,
+                "available_pairwise": sorted(pairs),
+                "missing_pairwise": missing_pairs,
+                "triple_required": all(availability.values()),
+                "triple_available": bool(triple),
+                "component_origins": origins | ({"triple": triple_origin} if triple_origin else {}),
+                "missing_components": missing_components,
+            },
             "reference_only": True,
             "formal_membership_unchanged": True,
         })
@@ -1176,6 +1361,7 @@ class ScheduledSnapshotService:
             candidate = candidates.get(symbol) or {}
             plan = candidate.get("trade_plan") or plans.get(symbol) or {}
             plan_usable = bool(plan and plan.get("available") is not False)
+            rebuild = _plan_rebuild_evidence(plan, str(trading_day.get("date") or ""))
             quote = quote_by_symbol.get(symbol) or {}
             freshness = str(quote.get("freshness") or "stale_or_missing")
             close_price = (
@@ -1191,6 +1377,8 @@ class ScheduledSnapshotService:
                 blockers.append("trade_plan_missing")
             elif plan.get("available") is False:
                 blockers.append("trade_plan_unavailable")
+            elif rebuild.get("status") != "current_close_rebuild":
+                blockers.extend(rebuild.get("blockers") or [])
             rows.append(clean_json(item | {
                 "status": "blocked" if blockers else "ready",
                 "reference_close": close_price,
@@ -1209,6 +1397,15 @@ class ScheduledSnapshotService:
                 "planned_action_cn": (plan.get("action_cn") or "不动") if plan_usable else "待核验",
                 "plan_reason": str(plan.get("reason") or "")[:300] if plan_usable else "",
                 "plan_price_basis": plan.get("price_basis") if plan_usable else None,
+                "plan_generated_at": rebuild.get("plan_generated_at") if plan_usable else None,
+                "plan_input_market_as_of": (
+                    rebuild.get("plan_input_market_as_of") if plan_usable else None
+                ),
+                "plan_rebuild_status": rebuild.get("status") if plan_usable else "missing",
+                "plan_authority": (
+                    "next_session_reference" if rebuild.get("status") == "current_close_rebuild"
+                    else "historical_reference"
+                ) if plan_usable else "none",
                 "blockers": blockers,
             }))
         rows.sort(key=lambda row: (
@@ -1217,17 +1414,34 @@ class ScheduledSnapshotService:
         ))
         complete = bool(rows) and all(row.get("status") == "ready" for row in rows)
         blocked = [row for row in rows if row.get("blockers")]
+        not_rebuilt = [
+            row for row in rows if row.get("plan_rebuild_status") == "historical_reference"
+        ]
+        rebuilt = [
+            row for row in rows if row.get("plan_rebuild_status") == "current_close_rebuild"
+        ]
         return clean_json(base | {
             "status": "complete" if complete else "degraded" if rows else "missing",
             "count": len(rows),
             "ready_count": len(rows) - len(blocked),
             "blocked_count": len(blocked),
+            "current_close_rebuilt_count": len(rebuilt),
+            "historical_reference_count": len(not_rebuilt),
+            "not_rebuilt_trade_plan_symbols": [row["symbol"] for row in not_rebuilt][:20],
             "unusable_trade_plan_symbols": [
                 row["symbol"] for row in blocked
-                if set(row["blockers"]) & {"trade_plan_missing", "trade_plan_unavailable"}
+                if set(row["blockers"]) & {
+                    "trade_plan_missing", "trade_plan_unavailable",
+                    "trade_plan_generation_time_missing",
+                    "trade_plan_not_rebuilt_after_close",
+                    "trade_plan_input_market_date_not_current",
+                }
             ][:20],
             "rows": rows[:115],
             "price_basis": "same_trading_day_close_plus_persisted_rule_plan",
+            "readiness_semantics": (
+                "ready_requires_plan_generated_after_close_from_same_session_daily_input"
+            ),
         })
 
     @staticmethod
@@ -1343,9 +1557,19 @@ class ScheduledSnapshotService:
         except Exception:
             outcomes = {"status": "missing", "dimension": "source_type", "buckets": []}
         try:
-            strategies = _strategy_evidence(
-                self.strategy_evidence_reader(horizon_days=5, lookback_days=180)
-            )
+            strategy_values = []
+            for horizon in REQUIRED_STRATEGY_HORIZONS:
+                try:
+                    value = self.strategy_evidence_reader(
+                        horizon_days=horizon, lookback_days=180,
+                    )
+                except Exception:
+                    value = {"status": "missing", "strategies": []}
+                if isinstance(value, dict):
+                    value = dict(value)
+                    value["_requested_horizon_days"] = horizon
+                strategy_values.append(value)
+            strategies = _strategy_evidence(strategy_values)
         except Exception:
             strategies = {"status": "missing", "strategies": []}
         proposals = self._adjustment_proposals(outcomes, strategies)
@@ -1725,7 +1949,9 @@ class ScheduledSnapshotService:
         )
         persisted_plans = (intraday.get("plans") or {}) if plan_run_matches else {}
         review_plans = {
-            str(symbol): dict(plan) for symbol, plan in persisted_plans.items()
+            str(symbol): (dict(plan) | {
+                "_snapshot_generated_at": intraday.get("generated_at"),
+            }) for symbol, plan in persisted_plans.items()
             if isinstance(plan, dict)
         }
         for candidate in formal.get("formal_top15") or []:

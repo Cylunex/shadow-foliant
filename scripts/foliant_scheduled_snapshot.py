@@ -444,7 +444,7 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         )
     elif external.get("status") in {"stale", "missing", "degraded"}:
         lines.append(
-            "外部独立研究：今日不可用或已过期，旧排名不参与判断；"
+            "外部独立研究：今日不可用或已过期，旧排名和个股事件加分不参与判断；"
             "仅对比正式选股与独立量化底座。"
         )
     lines.extend([
@@ -526,6 +526,7 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
         lines.append(f"盘后结论：{post_close.get('conclusion') or '盘后闭环结果不可用。'}")
         holding_review = snapshot.get("holdings_review") or {}
         next_plan = snapshot.get("next_session_plan") or {}
+        strategy_evidence = post_close.get("selection_strategy_evidence") or {}
         missing_plans = sorted(set(
             (holding_review.get("unusable_trade_plan_symbols") or [])
             + (next_plan.get("unusable_trade_plan_symbols") or [])
@@ -534,9 +535,18 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"盘后持仓复盘：{holding_review.get('reviewed_count') or 0}/"
             f"{holding_review.get('count') or 0} 只已核；次日计划 "
             f"{next_plan.get('ready_count') or 0}/{next_plan.get('count') or 0} 条可用。"
-            + (f"权威计划缺失或不可用：{','.join(missing_plans)}，对应标的暂不给价。"
+            + (f"权威计划缺失、不可用或未按当日收盘重建：{','.join(missing_plans)}，"
+               "对应标的旧阈值仅作历史参考。"
                if missing_plans else "")
         )
+        if strategy_evidence.get("status") != "complete":
+            lines.append(
+                "策略统计：完整性降级；缺窗口 "
+                f"{','.join(map(str, strategy_evidence.get('missing_horizons_days') or [])) or '无'}；"
+                "缺来源 "
+                f"{','.join(strategy_evidence.get('missing_source_outcomes') or []) or '无'}；"
+                "作业成功不代表统计完整。"
+            )
         lines.append(
             f"策略调整：{proposals.get('proposal_count') or 0} 项待复核；"
             "仅生成建议，不自动应用。"
@@ -560,7 +570,7 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "snapshot_contract_incomplete"}
     if (snapshot["post_close_review"].get("due")
-            and (snapshot["post_close_review"].get("status") != "complete"
+            and (snapshot["post_close_review"].get("status") not in {"complete", "degraded"}
                  or snapshot["holdings_review"].get("status") not in {"complete", "degraded"}
                  or snapshot["next_session_plan"].get("status") not in {"complete", "degraded"}
                  or not snapshot["post_close_review"].get("conclusion"))):

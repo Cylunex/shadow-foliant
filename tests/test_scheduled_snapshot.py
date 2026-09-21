@@ -40,7 +40,10 @@ def selection(*, day="2026-09-10", market_as_of: str | None = None,
     market_as_of = market_as_of or day
     top15 = [{
         "symbol": f"600{i:03d}", "name": f"候选{i}", "rank": i,
-        **({"trade_plan": {"available": True, "action": "hold", "reason": "规则计划"}}
+        **({"trade_plan": {
+            "available": True, "action": "hold", "reason": "规则计划",
+            "plan_as_of": day, "plan_generated_at": f"{day}T20:45:00+08:00",
+        }}
            if with_trade_plans else {}),
     } for i in range(1, 16)]
     independent_top15 = top15 if independent_symbols is None else [
@@ -165,10 +168,16 @@ def build_service(
         "sources": [{"source": "test_security_master"}],
         "errors": [],
     },
-    strategy_evidence_reader=lambda **_kwargs: {
-        "horizon_days": 5, "lookback_days": 180, "strategies": [],
-        "portfolio_comparison": {"matured_runs": 0, "avg_satellite_marginal_pct": None},
-        "evidence_snapshot_id": "empty-evidence",
+    strategy_evidence_reader=lambda **kwargs: {
+        "horizon_days": kwargs.get("horizon_days"), "lookback_days": 180,
+        "strategies": [{
+            "strategy_id": "fixture", "lane": "core", "sample_size": 30,
+            "effective_samples": 30, "median_return_pct": 1.2,
+            "win_loss_ratio": 1.4, "benchmark_excess_pct": 0.3,
+        }],
+        "source_outcomes": {"formal": {}, "independent": {}, "wencai": {}},
+        "portfolio_comparison": {"matured_runs": 1, "avg_satellite_marginal_pct": 0.1},
+        "evidence_snapshot_id": f"fixture-{kwargs.get('horizon_days')}",
     },
     external_research_reader=lambda: {"status": "missing"},
     missing_quote_symbols=(),
@@ -241,6 +250,33 @@ def test_snapshot_batches_top15_and_holdings_once_and_keeps_as_of():
     assert [row["name"] for row in snapshot["wencai_reference"]["strategies"]] == [
         "低价擒牛", "低估值", "主力资金", "小市值", "净利增长",
     ]
+
+
+def test_source_comparison_computes_missing_wencai_pairs_from_same_payload():
+    value = selection()
+    formal = ScheduledSnapshotService._formal(
+        value,
+        {"latest_confirmed_open_date": "2026-09-10"},
+    )
+    independent = ScheduledSnapshotService._independent(
+        value, expected_market_as_of="2026-09-10", selection_date="2026-09-10",
+    )
+    wencai = ScheduledSnapshotService._wencai(value)
+
+    result = ScheduledSnapshotService._source_comparison(
+        value, formal, independent, wencai,
+    )
+
+    assert result["status"] == "complete"
+    assert sorted(result["pairwise"]) == [
+        "formal_independent", "formal_wencai", "independent_wencai",
+    ]
+    assert result["triple"] is not None
+    assert result["coverage"]["missing_pairwise"] == []
+    assert result["coverage"]["triple_available"] is True
+    assert result["coverage"]["component_origins"]["formal_wencai"] == (
+        "scheduled_snapshot_same_payload"
+    )
 
 
 def test_external_research_is_optional_current_overlay_and_never_a_price_authority():
@@ -361,7 +397,7 @@ def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():
     assert result["quality"]["status"] == "complete"
     assert "external_independent_research" in result["quality"]["optional_degradations"]
     from scripts import foliant_scheduled_snapshot as cli
-    assert "旧排名不参与判断" in cli.render_qq_report(result)[1]
+    assert "旧排名和个股事件加分不参与判断" in cli.render_qq_report(result)[1]
 
 
 def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():
@@ -714,7 +750,14 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
 
     assert outcome_calls == [{"dimension": "source_type", "days": 180,
                               "ensure_tables": False}]
-    assert snapshot["post_close_review"]["status"] == "complete"
+    assert snapshot["post_close_review"]["status"] == "degraded"
+    strategy_stats = snapshot["post_close_review"]["selection_strategy_evidence"]
+    assert strategy_stats["available_horizons_days"] == [1, 3, 5, 10, 20]
+    assert strategy_stats["missing_source_outcomes"] == [
+        "formal", "independent", "wencai",
+    ]
+    assert strategy_stats["effective_samples"] == 0
+    assert "required_metrics" in strategy_stats["missing_components"]
     outcomes_job = next(row for row in snapshot["post_close_review"]["jobs"]
                         if row["job_name"] == "eod_outcomes")
     assert outcomes_job["metrics"]["signals_evaluated"] == 40
@@ -742,7 +785,8 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
         "available": True, "action": "hold", "action_cn": "不动",
         "entry_low": 9.8, "entry_high": 10.1,
         "stop_loss": 9.2, "target_price": 11.5,
-        "price_basis": "persisted-rule-plan",
+        "price_basis": "persisted-rule-plan", "plan_as_of": "2026-09-10",
+        "plan_generated_at": "2026-09-10T20:45:00+08:00",
     }
     snapshot = build_service(
         clock=lambda: evening,
@@ -799,6 +843,8 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
     holding_plan = {
         "available": True, "action": "hold", "action_cn": "不动",
         "stop_loss": 9, "target_price": 12, "price_basis": "persisted-rule-plan",
+        "plan_as_of": "2026-09-10",
+        "plan_generated_at": "2026-09-10T20:45:00+08:00",
     }
     intraday = {"data": {
         "selection_run_id": "formal-run", "generated_at": "2026-09-10T14:49:00+08:00",
@@ -900,6 +946,41 @@ def test_post_close_missing_plans_are_bounded_and_do_not_gain_price_authority():
     ).read(owner_id="scheduled-agent")["data"]
     assert snapshot["trade_plans"]["status_basis"] == "next_session_plan_incomplete"
     assert snapshot["trade_plans"]["post_close_blocked_count"] > 0
+
+
+def test_next_session_plan_does_not_label_intraday_prior_session_plan_ready():
+    day = {"date": "2026-09-21", "confirmed": True, "is_trading_day": True}
+    plan = {
+        "available": True, "action": "hold", "entry_low": 7.1, "entry_high": 7.3,
+        "stop_loss": 6.8, "target_price": 8.1,
+        "plan_as_of": "2026-09-18",
+        "_snapshot_generated_at": "2026-09-21T14:35:00+08:00",
+        "price_basis": "formal_manifest_qfq日线截至2026-09-18",
+    }
+    result = ScheduledSnapshotService._next_session_plan(
+        due=True, trading_day=day,
+        formal={"formal_top15": []},
+        holdings=[{"symbol": "601665", "name": "齐鲁银行"}],
+        quote_rows=[{
+            "symbol": "601665", "price": 7.38, "freshness": "closing_current",
+            "as_of": "2026-09-21T15:00:00+08:00",
+        }],
+        plans={"601665": plan}, pricing_snapshot={},
+    )
+
+    assert result["status"] == "degraded"
+    assert result["ready_count"] == 0
+    assert result["historical_reference_count"] == 1
+    row = result["rows"][0]
+    assert row["status"] == "blocked"
+    assert row["plan_generated_at"] == "2026-09-21T14:35:00+08:00"
+    assert row["plan_input_market_as_of"] == "2026-09-18"
+    assert row["plan_rebuild_status"] == "historical_reference"
+    assert row["plan_authority"] == "historical_reference"
+    assert row["blockers"] == [
+        "trade_plan_not_rebuilt_after_close",
+        "trade_plan_input_market_date_not_current",
+    ]
 
 
 def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
@@ -1176,7 +1257,7 @@ def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
         "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
         "trading_day": {"date": "2026-09-16"},
         "formal_selection": {}, "holdings": {}, "trade_plans": {}, "quotes": {},
-        "post_close_review": {"due": True, "status": "degraded", "conclusion": "不完整"},
+        "post_close_review": {"due": True, "status": "missing", "conclusion": "不完整"},
         "holdings_review": {"status": "complete"},
         "next_session_plan": {"status": "complete"},
         "as_of": {"captured_at": "2026-09-16T20:45:00+08:00"},
@@ -1201,7 +1282,7 @@ def test_cli_partial_post_close_sends_bounded_warning_without_missing_prices(mon
         "holdings": {"status": "complete", "count": 55},
         "trade_plans": {"status": "degraded", "portfolio_risk": {}},
         "quotes": {"status": "success"},
-        "post_close_review": {"due": True, "status": "complete", "conclusion": "复盘完成"},
+        "post_close_review": {"due": True, "status": "degraded", "conclusion": "复盘统计不完整"},
         "holdings_review": {"status": "degraded", "count": 55, "reviewed_count": 53,
                             "unusable_trade_plan_symbols": ["600699", "601919"]},
         "next_session_plan": {"status": "degraded", "count": 69, "ready_count": 67,
@@ -1215,7 +1296,7 @@ def test_cli_partial_post_close_sends_bounded_warning_without_missing_prices(mon
     body = send.call_args.args[2]
     assert "53/55" in body and "67/69" in body
     assert "600699,601919" in body
-    assert "对应标的暂不给价" in body
+    assert "对应标的旧阈值仅作历史参考" in body
 
 
 def test_cli_report_appends_due_post_close_conclusion():
