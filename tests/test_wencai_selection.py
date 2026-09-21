@@ -4,8 +4,15 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from selection.data_source_config import _normalize_wencai
+
+
+@pytest.fixture(autouse=True)
+def _legacy_wencai_mode(monkeypatch):
+    """Legacy transport tests must not inherit the production trial switch."""
+    monkeypatch.setenv("WENCAI_REFERENCE_SOURCE", "legacy")
 
 
 class WencaiNormalizationTests(unittest.TestCase):
@@ -152,7 +159,8 @@ class WencaiSelectorRequestTests(unittest.TestCase):
         self.assertEqual(get.call_args.kwargs["timeout"], 15)
         self.assertEqual(get.call_args.kwargs["retry"], 0)
         self.assertEqual(get.call_args.kwargs["group"], "主力资金")
-        self.assertEqual(get.call_args.args[0], "主力资金净流入排名")
+        from selection.wencai_query_contract import QUERIES
+        self.assertEqual(get.call_args.args[0], QUERIES["主力资金"])
 
     def test_main_force_filters_st_and_star_market_locally(self):
         from selection import main_force_selector as module

@@ -139,6 +139,7 @@ def test_decision_loop_quality_reader_uses_cached_artifact_only():
 @pytest.fixture
 def wencai(monkeypatch):
     from data.sources import pywencai as source
+    monkeypatch.setenv('WENCAI_REFERENCE_SOURCE', 'legacy')
     for name, value in [('_rejected_until', 0), ('_rejected_status', None), ('_inflight', None),
                         ('_streak_fail', 0), ('_last_fail', 0)]:
         monkeypatch.setattr(source, name, value)
