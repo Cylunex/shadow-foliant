@@ -4719,7 +4719,7 @@ def task_iwencai_openapi_shadow_premarket():
                  notify=False)
 
 
-def _iwencai_shadow_attach(slot: str):
+def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
     """Append diagnostic artifact to formal run; no ranking or notification side effect."""
     job = ('iwencai_openapi_shadow' if slot == 'premarket' else
            'iwencai_openapi_shadow_' + slot)
@@ -4761,6 +4761,12 @@ def _iwencai_shadow_attach(slot: str):
                         datetime.now(_RUN_TIMEZONE).date().isoformat() or
                         len(cached.get('groups') or []) != 5):
                     raise ValueError('invalid_premarket_cache')
+            elif cache_only:
+                _log_run(job, 'skipped', error='premarket_cache_not_available',
+                         started_at=started,
+                         finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                         notify=False)
+                return
         if cached:
             rows = {row['name']: row for row in cached['groups']}
             result = run_shadow(old, group_runner=lambda name: dict(rows[name]))
@@ -5344,6 +5350,15 @@ def task_unified_selection():
                  + (f' rec_fail={_rf}' if _rf else ''))
         _log_run(job, 'success', error=_note,
                  started_at=started, finished_at=datetime.now().isoformat())
+        if _openapi_trial_reference_enabled():
+            # The 09:05 sample is already on disk. Attach it as soon as the
+            # formal run exists, without another provider call or a 10:40 gap.
+            # The scheduled 10:40 task remains a retry if this append fails.
+            try:
+                _iwencai_shadow_attach('premarket', cache_only=True)
+            except Exception as shadow_error:
+                print('[unified_selection] 问财盘前缓存附着失败(不影响正式选股): '
+                      f'{type(shadow_error).__name__}', flush=True)
 
     except Exception as e:
         # Propagate formal-chain failure so scheduler output/job_runs can never

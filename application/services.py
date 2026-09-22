@@ -57,6 +57,7 @@ def _openapi_trial_reference(
     from selection.wencai_query_contract import ORDER
 
     payload = shadow if isinstance(shadow, dict) else {}
+    awaiting_artifact = not payload
     groups = {row.get('name'): row for row in (payload.get('groups') or [])
               if isinstance(row, dict) and row.get('name') in ORDER}
     cached_names = cached_names or {}
@@ -73,9 +74,11 @@ def _openapi_trial_reference(
             'strategy_id': 'iwencai_openapi_trial_' + name,
             'strategy_version': 'iwencai-openapi-trial-v1',
             'query_hash': row.get('query_hash'),
-            'status': 'trial_verified' if semantic_ok else
+            'status': 'pending' if awaiting_artifact else
+                      'trial_verified' if semantic_ok else
                       'trial_unverified' if has_data else 'failed',
             'failure_code': None if semantic_ok else 'semantic_unverified' if has_data else
+                            'awaiting_daily_shadow_artifact' if awaiting_artifact else
                             str(row.get('status') or 'shadow_not_available')[:48],
             'started_at': row.get('requested_at'),
             'finished_at': row.get('finished_at') or payload.get('sampled_at')
@@ -95,9 +98,13 @@ def _openapi_trial_reference(
     return {
         'version': 'iwencai-openapi-trial-reference-v1',
         'provider': 'iwencai_openapi', 'source_mode': 'openapi_trial',
-        'status': ('trial_verified' if verified_groups == len(ORDER) else
+        'status': ('pending' if awaiting_artifact else
+                   'trial_verified' if verified_groups == len(ORDER) else
                    'trial_partially_verified' if verified_groups else
                    'trial_unverified' if data_groups else 'degraded'),
+        'availability_reason': (
+            'awaiting_daily_shadow_artifact' if awaiting_artifact else None
+        ),
         'trial_reference': True,
         'semantic_equivalence_verified': verified_groups == len(ORDER),
         'ready_groups': verified_groups,

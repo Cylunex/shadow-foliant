@@ -182,6 +182,41 @@ def test_premarket_sampling_cache_is_reused_after_formal_selection(tmp_path, mon
     assert saved[0][2]['groups'][0]['comparison_available'] is False
 
 
+def test_cache_only_attach_never_calls_provider_when_premarket_file_missing(
+    tmp_path, monkeypatch,
+):
+    from jobs import jobs_hub as hub
+    from data import research_store
+
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    logs = []
+
+    class Store:
+        def __init__(self, **_kwargs):
+            pass
+
+        def latest_formal_selection(self):
+            return {'run_id': 'formal-1', 'selection_date': today, 'artifacts': {}}
+
+        def save_selection_artifact(self, *_args):
+            raise AssertionError('cache-only attach must not save without cache')
+
+    monkeypatch.setattr(hub, '_skip_if_not_trading', lambda _job: False)
+    monkeypatch.setattr(hub, '_wait_task_dependency', lambda *_args: True)
+    monkeypatch.setattr(hub, '_log_run', lambda _job, status, **kwargs:
+                        logs.append((status, kwargs.get('error'))))
+    monkeypatch.setattr(hub, '_iwencai_shadow_premarket_path',
+                        lambda: tmp_path / 'missing.json')
+    monkeypatch.setattr(hub, '_iwencai_shadow_isolated',
+                        lambda _old: (_ for _ in ()).throw(
+                            AssertionError('provider must not be called')))
+    monkeypatch.setattr(research_store, 'ResearchStore', Store)
+
+    hub._iwencai_shadow_attach('premarket', cache_only=True)
+
+    assert logs == [('skipped', 'premarket_cache_not_available')]
+
+
 def test_shadow_comparison_never_promotes_to_formal(monkeypatch):
     monkeypatch.delenv('WENCAI_REFERENCE_SOURCE', raising=False)
     old = {'strategies': {name: {'status': 'ready', 'picks': [{'symbol': '000001'}]}

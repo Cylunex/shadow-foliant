@@ -286,7 +286,12 @@ def test_openapi_trial_reference_is_display_only_and_degrades_without_data():
     assert strategy["finished_at"] == "2026-09-18T14:45:00+08:00"
     assert strategy["result_as_of"] == "20260918"
     assert trial["strategies"]["低估值"]["status"] == "failed"
-    assert _openapi_trial_reference({})["status"] == "degraded"
+    pending = _openapi_trial_reference({})
+    assert pending["status"] == "pending"
+    assert pending["availability_reason"] == "awaiting_daily_shadow_artifact"
+    assert all(row["status"] == "pending" for row in pending["strategies"].values())
+    assert all(row["failure_code"] == "awaiting_daily_shadow_artifact"
+               for row in pending["strategies"].values())
 
 
 def test_openapi_trial_reference_reports_all_semantic_groups_verified():
@@ -303,6 +308,23 @@ def test_openapi_trial_reference_reports_all_semantic_groups_verified():
     assert all(row["status"] == "trial_verified"
                for row in trial["strategies"].values())
     assert trial["reference_affects_membership"] is False
+
+
+def test_openapi_trial_reference_preserves_partial_daily_semantic_verification():
+    names = ("低价擒牛", "低估值", "主力资金", "小市值", "净利增长")
+    shadow = {"sampled_at": "2026-09-22T09:05:28+08:00", "groups": [
+        {"name": name, "status": "complete" if name != "小市值" else
+         "semantic_unverified", "semantic_verified": name != "小市值",
+         "schema_valid": True, "picks": ["000001"]}
+        for name in names
+    ]}
+    trial = _openapi_trial_reference(shadow)
+
+    assert trial["status"] == "trial_partially_verified"
+    assert trial["trial_data_groups"] == 5
+    assert trial["semantic_verified_groups"] == 4
+    assert trial["strategies"]["小市值"]["status"] == "trial_unverified"
+    assert trial["strategies"]["小市值"]["failure_code"] == "semantic_unverified"
 
 
 def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch):

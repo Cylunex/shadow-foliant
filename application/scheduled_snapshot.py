@@ -705,6 +705,7 @@ class ScheduledSnapshotService:
         trial_data = sum(1 for row in rows
                          if row["status"] in {"trial_verified", "trial_unverified"})
         trial_verified = sum(1 for row in rows if row["status"] == "trial_verified")
+        trial_pending = trial and payload.get("status") == "pending"
         try:
             import datahub
 
@@ -713,7 +714,8 @@ class ScheduledSnapshotService:
             fuyao = {"configured": False, "enabled": False, "capabilities": {}}
         fuyao_configured = bool(fuyao.get("configured") and fuyao.get("enabled"))
         return {
-            "status": (("trial_verified" if trial_verified == 5 else
+            "status": (("pending" if trial_pending else
+                        "trial_verified" if trial_verified == 5 else
                         "trial_partially_verified" if trial_verified else
                         "trial_unverified" if trial_data else "degraded") if trial else
                        ("missing" if present == 0 else "complete" if ready == 5 else "degraded")),
@@ -724,6 +726,7 @@ class ScheduledSnapshotService:
             "semantic_equivalence_verified": (
                 bool(payload.get("semantic_equivalence_verified")) if trial else None
             ),
+            "availability_reason": payload.get("availability_reason") if trial else None,
             "availability": "ready" if ready == 5 else "long_term_degraded",
             "reference_only": True,
             "reference_affects_membership": False,
@@ -855,15 +858,20 @@ class ScheduledSnapshotService:
 
     @staticmethod
     def _miaoxiang(selection_value: dict[str, Any], formal: dict[str, Any],
-                   job_runs: list[dict[str, Any]]) -> dict[str, Any]:
+                   job_runs: list[dict[str, Any]], *, now: datetime | None = None) -> dict[str, Any]:
         references = ((selection_value.get('data') or {}).get('references') or {})
         payload = references.get('miaoxiang') or {}
         review = references.get('miaoxiang_review') or {}
         configured = bool(os.getenv('EM_API_KEY', '').strip())
-        latest = next((row for row in job_runs if isinstance(row, dict)
-                       and row.get('job_name') == 'mx_selection_review'), {})
         strategies = payload.get('strategies') or {}
         date = str(formal.get('selection_date') or '')
+        latest = next((row for row in job_runs if isinstance(row, dict)
+                       and row.get('job_name') == 'mx_selection_review'
+                       and str(row.get('started_at') or '')[:10] == date), {})
+        before_scheduled_run = bool(
+            now and now.date().isoformat() == date
+            and (now.hour, now.minute) < (10, 30)
+        )
         review_current = bool(date and str(review.get('executed_at') or '')[:10] == date)
         rows = (review.get('rows') or []) if review_current else []
         counts = {'buy': 0, 'watch': 0, 'avoid': 0, 'failed': 0}
@@ -895,18 +903,21 @@ class ScheduledSnapshotService:
             }),
         } for name, row in list(strategies.items())[:5] if isinstance(row, dict)]
         status = ('credential_missing' if not configured else
+                  'pending' if before_scheduled_run and not current else
                   'missing' if not payload else
                   'stale' if not current else
                   'degraded' if payload.get('error') or ready < 5 or not review_current or counts['failed'] else
                   'complete')
         return clean_json({
             'status': status, 'provider': 'eastmoney_miaoxiang',
-            'job_status': str(latest.get('status') or 'missing')[:32],
+            'job_status': str(latest.get('status') or 'not_run_today')[:32],
+            'scheduled_after': '10:30 Asia/Shanghai',
             'as_of': payload.get('executed_at') if current else None,
             'ready_groups': ready if current else 0, 'expected_groups': 5,
             'diagnosis': counts if current else {'buy': 0, 'watch': 0, 'avoid': 0, 'failed': 0},
             'notification_policy': 'disagreement_only',
             'notification_reason': (
+                'awaiting_scheduled_run' if before_scheduled_run and not current else
                 'not_run' if not current or not review_current else
                 'diagnosis_failed' if counts['failed'] else
                 'disagreement_triggered' if counts['avoid'] else
@@ -1682,7 +1693,7 @@ class ScheduledSnapshotService:
             mx_runs = self.job_runs_reader(limit=200) or []
         except Exception:
             mx_runs = []
-        miaoxiang = self._miaoxiang(selection_value, formal, mx_runs)
+        miaoxiang = self._miaoxiang(selection_value, formal, mx_runs, now=now)
         independent = self._independent(
             selection_value, expected_market_as_of=formal.get("market_as_of"),
             selection_date=formal.get("selection_date"),

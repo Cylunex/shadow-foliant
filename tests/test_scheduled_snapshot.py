@@ -126,6 +126,21 @@ def test_stale_miaoxiang_review_does_not_count_as_current(monkeypatch):
     assert result["notification_reason"] == "not_run"
 
 
+def test_miaoxiang_before_1030_is_pending_and_ignores_yesterday_success(monkeypatch):
+    monkeypatch.setenv("EM_API_KEY", "test-key")
+    value = selection()
+    result = ScheduledSnapshotService._miaoxiang(
+        value,
+        {"selection_date": "2026-09-10", "formal_top5": []},
+        [{"job_name": "mx_selection_review", "status": "success",
+          "started_at": "2026-09-09T10:31:00+08:00"}],
+        now=NOW.replace(hour=10, minute=16),
+    )
+    assert result["status"] == "pending"
+    assert result["job_status"] == "not_run_today"
+    assert result["notification_reason"] == "awaiting_scheduled_run"
+
+
 def capsule():
     rows = [{"symbol": f"600{i:03d}", "industry": "示例", "themes": ["测试"]}
             for i in range(1, 16)]
@@ -629,6 +644,18 @@ def test_openapi_trial_reference_is_labeled_unverified_in_snapshot():
     assert projected["trial_data_groups"] == 1
     assert projected["semantic_equivalence_verified"] is False
     assert projected["reference_affects_membership"] is False
+
+
+def test_openapi_trial_awaiting_artifact_is_pending_not_semantic_failure():
+    from application.services import _openapi_trial_reference
+
+    value = {"data": {"references": {"wencai": _openapi_trial_reference({})}}}
+    projected = ScheduledSnapshotService._wencai(value)
+
+    assert projected["status"] == "pending"
+    assert projected["availability_reason"] == "awaiting_daily_shadow_artifact"
+    assert projected["trial_data_groups"] == 0
+    assert projected["semantic_verified_groups"] == 0
 
 
 def test_authorized_openapi_shadow_does_not_request_approval_again(monkeypatch):
