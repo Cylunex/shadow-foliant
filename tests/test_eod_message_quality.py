@@ -47,6 +47,8 @@ class EodMessageQualityTests(unittest.TestCase):
         self.assertEqual([row["action"] for row in guarded],
                          ["sell", "sell", "reduce", "reduce", "hold"])
         self.assertTrue(guarded[-1]["action_guard"]["changed"])
+        self.assertEqual(guarded[-1]["original_action"], "sell")
+        self.assertEqual(guarded[-1]["original_reason"], "risk")
         self.assertNotIn("position_value", guarded[0])
 
     def test_portfolio_guard_caps_trigger_concentration_and_turnover(self):
@@ -104,6 +106,15 @@ class EodMessageQualityTests(unittest.TestCase):
         self.assertIn('另外 3 只暂不展开', text)
         self.assertNotIn('尾盘强势', text)
         self.assertEqual(sum(f'{i}.' in text for i in range(1, 9)), 5)
+
+    def test_guarded_hold_keeps_original_trigger_in_fallback_message(self):
+        text = _format([{
+            'code': '603271', 'name': '永杰新材', 'action': 'hold',
+            'original_action': 'reduce', 'original_reason': '触及第一目标39.79',
+            'action_guard': {'changed': True}, 'exit_score': 50,
+        }], 1, 20, False)
+        self.assertIn('原始触发减仓(触及第一目标39.79)→最终不动', text)
+        self.assertIn('保护不代表风险解除', text)
 
     def test_post_close_outcome_no_longer_pushes_holding_targets(self):
         source = inspect.getsource(ai_recommendation_monitor.check_all_active)

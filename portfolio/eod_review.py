@@ -54,6 +54,8 @@ def _apply_portfolio_action_guard(
     for raw in items:
         item = dict(raw)
         original = str(item.get("action") or "hold")
+        original_reason = str(item.get("reason") or "")
+        original_source = str(item.get("decision_source") or "formal_signal")
         action = original
         trigger = str(item.get("category") or "unknown")
         guard_reasons = []
@@ -95,6 +97,8 @@ def _apply_portfolio_action_guard(
         if action != original:
             guarded_count += 1
             item["original_action"] = original
+            item["original_reason"] = original_reason[:300]
+            item["original_source"] = original_source
             item["action"] = action
             labels = {
                 "same_trigger_concentration_limit": "同类触发过于集中",
@@ -110,6 +114,8 @@ def _apply_portfolio_action_guard(
         item["action_guard"] = {
             "changed": action != original,
             "reasons": guard_reasons,
+            **({"original_action": original, "original_reason": original_reason[:300]}
+               if action != original else {}),
         }
         item["reason_version"] = ACTION_REASON_VERSION
         item.pop("position_value", None)
@@ -332,6 +338,22 @@ def _format(items, n, target, over) -> str:
         hidden = action_n - len(act)
         if hidden > 0:
             lines.append(f"另外 {hidden} 只暂不展开，需要时让 Agent 查完整明细。")
+    guarded = [item for item in items if (item.get('action_guard') or {}).get('changed')]
+    if guarded:
+        labels = {'sell': '卖出', 'reduce': '减仓', 'hold': '不动', 'add': '加仓'}
+        lines.append(f"保护调整 {len(guarded)} 只（原触发未作废，保护不代表风险解除）：")
+        for item in guarded[:5]:
+            original = str(item.get('original_action') or
+                           (item.get('action_guard') or {}).get('original_action') or 'hold')
+            original_reason = str(item.get('original_reason') or
+                                  (item.get('action_guard') or {}).get('original_reason') or '')
+            lines.append(
+                f"{item.get('name') or item.get('code')}: 原始触发{labels.get(original, original)}"
+                f"({_plain_reason({'reason': original_reason})})→最终"
+                f"{labels.get(item.get('action'), item.get('action'))}"
+            )
+        if len(guarded) > 5:
+            lines.append(f"其余 {len(guarded) - 5} 只见完整明细。")
     return '\n'.join(lines)
 
 

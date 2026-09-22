@@ -5100,8 +5100,9 @@ def task_unified_selection():
             print(f'[unified_selection] 红蓝对抗放弃(不影响选股): {type(_de).__name__}: {str(_de)[:60]}')
 
         # 输出（Markdown 表格,含红蓝/来源列;💼=已持仓）
-        body = f'## 🎯 综合选股 TOP {len(top_list)}\n'
+        body = f'## 🎯 量化排名 TOP {len(top_list)}\n'
         body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
+        body += '榜单仅表示当期量化排序，不是买入推荐；已持仓请以当期持仓风控动作和价格计划为准。\n'
         data_note = _selection_data_note(local_result.get('metadata') or {})
         body += data_note
         # 结论先行(2026-07-02):红蓝复核结果放最上面,不用滚到表格底部才知道几只可买
@@ -5694,6 +5695,9 @@ def task_afternoon_portfolio():
                 'holding_pnl_pct': item.get('pnl'),
                 'decision_source': item.get('decision_source') or 'formal_signal',
                 'action_guard': item.get('action_guard') or {},
+                'original_action': item.get('original_action'),
+                'original_reason': item.get('original_reason'),
+                'original_source': item.get('original_source'),
                 'reason_version': item.get('reason_version') or 'portfolio-action-reason-v2',
             }
             for item in (res.get('items') or []) if item.get('code')

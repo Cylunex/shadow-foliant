@@ -417,6 +417,86 @@ def test_guarded_previous_sell_does_not_become_a_fake_multilevel_upgrade():
     assert "transition_reasons" not in holding.get("action_guard", {})
 
 
+def test_transition_guard_reports_original_trigger_and_final_action():
+    now = datetime(2026, 9, 10, 14, 30, tzinfo=TZ)
+    previous = {
+        'trade_date': now.date().isoformat(), 'selection_run_id': 'formal-run-1',
+        'plans': _plans(), 'holdings': [{'symbol': '000001', 'action': 'hold'}],
+    }
+    result = monitor.run_cycle(
+        now=now, formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [{'code': '000001', 'name': '徐工机械',
+                                  'quantity': 100, 'cost_price': 10}],
+        quote_loader=lambda codes: {
+            code: {'price': 10, 'change_pct': 0,
+                   'quote_time': now.strftime('%Y%m%d%H%M%S')} for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None, notify_changes=False,
+        holding_overrides={'000001': {'action': 'sell', 'reason': '技术破位待退出',
+                                      'decision_source': 'formal_signal'}},
+    )
+    holding = result['holdings'][0]
+    assert holding['requested_action'] == 'sell'
+    assert holding['requested_reason'] == '技术破位待退出'
+    assert holding['action'] == 'reduce'
+    assert holding['action_guard']['original_reason'] == '技术破位待退出'
+    summary = monitor.format_fixed_summary(result, '14:30')
+    assert '原始触发卖出(技术破位待退出)→最终减仓' in summary
+    assert '原触发未作废，保护不代表风险解除' in summary
+
+
+def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkeypatch):
+    now = datetime(2026, 9, 10, 14, 30, tzinfo=TZ)
+    plans = _plans()
+    plans['000002'] = dict(plans['000001'])
+    previous = {'trade_date': now.date().isoformat(),
+                'selection_run_id': 'formal-run-1', 'plans': plans}
+    monkeypatch.setenv('INTRADAY_MAX_SAME_REASON_ACTIONS', '1')
+    result = monitor.run_cycle(
+        now=now, formal_loader=lambda: _formal(),
+        holdings_loader=lambda: [
+            {'code': '000001', 'name': '止盈甲', 'quantity': 100, 'cost_price': 10},
+            {'code': '000002', 'name': '永杰新材', 'quantity': 100, 'cost_price': 10},
+        ],
+        quote_loader=lambda codes: {
+            code: {'price': 13, 'change_pct': 0,
+                   'quote_time': now.strftime('%Y%m%d%H%M%S')} for code in codes
+        },
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None, notify_changes=False,
+    )
+    holding = result['holdings'][1]
+    assert monitor._reason_family(holding['requested_reason']) == 'take_profit'
+    assert holding['requested_action'] == 'reduce'
+    assert holding['action'] == 'hold'
+    assert holding['action_guard']['reason_family'] == 'take_profit'
+    summary = monitor.format_fixed_summary(result, '14:30')
+    assert '永杰新材' in summary
+    assert '原始触发减仓(当前价触及 trade_plan 第一目标 12.00)→最终不动' in summary
+    assert '原触发未作废，保护不代表风险解除' in summary
+
+
+def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
+    qilu = {'symbol': '601665', 'name': '齐鲁银行',
+            'sources': ['holding', 'formal_top15_watch'],
+            'formal_rank': 8, 'action': 'reduce', 'action_cn': '减仓',
+            'requested_action': 'reduce', 'requested_reason': '跌破20日均线(6.98)',
+            'reason': '跌破20日均线(6.98)', 'price': 6.82,
+            'price_actionable': True, 'stop_loss': 6.74, 'target_price': 7.08}
+    text = monitor.format_fixed_summary({
+        'data_quality': {'status': 'success', 'valid': 1, 'requested': 1,
+                         'coverage': 1, 'plan_available': 1, 'plan_requested': 1},
+        'holdings': [qilu], 'formal_top5': [], 'formal_top15_watch': [qilu],
+    }, '14:30')
+    assert '齐鲁银行' in text and '最终减仓(跌破20日均线(6.98))' in text
+    assert '候选 齐鲁银行' not in text
+    assert '量化候选（排名非买入指令）' in text
+    _, alert = monitor.format_alert({'trigger_type': 'action_escalation', 'item': qilu}, {})
+    assert '最终减仓' in alert
+    assert '买入区' not in alert
+
+
 def test_same_reason_action_upgrades_are_bounded_and_versioned():
     now = datetime(2026, 9, 10, 14, 30, tzinfo=TZ)
     holding_codes = [f"00000{i}" for i in range(1, 6)]

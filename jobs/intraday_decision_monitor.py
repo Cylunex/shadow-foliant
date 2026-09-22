@@ -39,6 +39,7 @@ def _reason_family(reason: Any) -> str:
     text = str(reason or "")
     for marker, family in (
         ("止损", "stop_loss"), ("止盈", "take_profit"),
+        ("第一目标", "take_profit"),
         ("组合级保护", "portfolio_guard"), ("风险", "technical_risk"),
         ("均线", "technical_risk"), ("数据", "data_quality"),
     ):
@@ -60,6 +61,7 @@ def _previous_requested_action(row: dict[str, Any]) -> str:
     guard = guard if isinstance(guard, dict) else {}
     candidates = [
         str((row or {}).get("action") or "hold"),
+        str((row or {}).get("requested_action") or ""),
         str(guard.get("original_action") or ""),
         str(guard.get("proposed_action") or ""),
     ]
@@ -91,7 +93,8 @@ def _apply_current_action_limit(
         state["hard_risk_count"] += 1
         return decision
 
-    family = _reason_family(decision.get("reason"))
+    prior_guard = dict(decision.get("action_guard") or {})
+    family = _reason_family(prior_guard.get("original_reason") or decision.get("reason"))
     reasons: list[str] = []
     guarded_action = action
     if state["reason_counts"].get(family, 0) >= state["max_same_reason"]:
@@ -112,8 +115,7 @@ def _apply_current_action_limit(
         return decision
 
     state["guarded_count"] += 1
-    prior_guard = dict(decision.get("action_guard") or {})
-    original_reason = str(decision.get("reason") or "")
+    original_reason = str(prior_guard.get("original_reason") or decision.get("reason") or "")
     decision["action"] = guarded_action
     decision["action_cn"] = {
         "hold": "不动", "reduce": "减仓", "sell": "卖出",
@@ -527,7 +529,21 @@ def _row_price(row: dict[str, Any], key: str) -> str:
     return _fmt_price(row.get(key))
 
 
-def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+def _holding_action_summary(row: dict[str, Any]) -> str:
+    labels = {"hold": "不动", "reduce": "减仓", "sell": "卖出",
+              "add": "加仓", "data_insufficient": "数据不足"}
+    final = str(row.get("action") or "hold")
+    requested = str(row.get("requested_action") or final)
+    trigger = str(row.get("requested_reason") or row.get("reason") or "")[:100]
+    final_reason = str(row.get("reason") or "")[:100]
+    if requested != final:
+        return (f"原始触发{labels.get(requested, requested)}({trigger})→"
+                f"最终{labels.get(final, final)}({final_reason})；原触发未作废，保护不代表风险解除")
+    return f"最终{labels.get(final, final)}({final_reason})"
+
+
+def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, Any],
+                  decision: dict[str, Any], requested: dict[str, Any]) -> dict[str, Any]:
     return {
         **item,
         **quote,
@@ -535,6 +551,10 @@ def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, A
         "action_cn": decision.get("action_cn"),
         "reason": decision.get("reason"),
         "decision_source": decision.get("source") or decision.get("decision_source"),
+        "requested_action": requested.get("action"),
+        "requested_action_cn": requested.get("action_cn"),
+        "requested_reason": str(requested.get("reason") or "")[:300],
+        "requested_source": requested.get("source") or requested.get("decision_source"),
         "action_guard": decision.get("action_guard") or {},
         "reason_version": decision.get("reason_version") or ACTION_REASON_VERSION,
         "holding_pnl_pct": decision.get("holding_pnl_pct"),
@@ -562,24 +582,36 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
     ]
     holdings = snapshot.get("holdings") or []
     candidates = (snapshot.get("formal_top5") or []) + (snapshot.get("formal_top15_watch") or [])
-    lines.append(f"持仓 {len(holdings)} 只（完整覆盖见 intraday_decision_snapshot）")
-    shown_h = sorted(holdings, key=lambda x: -ACTION_RANK.get(str(x.get("action")), -1))[:2]
+    guarded_count = sum(
+        row.get("requested_action") and row.get("requested_action") != row.get("action")
+        for row in holdings
+    )
+    lines.append(
+        f"持仓 {len(holdings)} 只｜保护调整{guarded_count}只（原始风险仍须关注；完整覆盖见 intraday_decision_snapshot）"
+    )
+    shown_h = sorted(holdings, key=lambda row: (
+        -max(ACTION_RANK.get(str(row.get("action")), -1),
+             ACTION_RANK.get(str(row.get("requested_action")), -1)),
+        -ACTION_RANK.get(str(row.get("action")), -1),
+    ))[:2]
     for row in shown_h:
         lines.append(
             f"持仓 {row.get('name') or row['symbol']}({_code(row['symbol'])}) 当前{_row_price(row, 'price')}｜"
-            f"{row.get('action_cn')}｜卖出/止损{_row_price(row, 'stop_loss')}｜"
+            f"{_holding_action_summary(row)}｜卖出/止损{_row_price(row, 'stop_loss')}｜"
             f"止盈{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
         )
     independent = snapshot.get("independent_selection") or {}
     independent_label = (str(len(independent.get("top5") or []))
                          if independent.get("status") == "ready" else "不可用")
     lines.append(
-        f"正式候选 TOP5 {len(snapshot.get('formal_top5') or [])} / "
+        f"量化候选（排名非买入指令）TOP5 {len(snapshot.get('formal_top5') or [])} / "
         f"观察 {len(snapshot.get('formal_top15_watch') or [])}｜独立TOP5 {independent_label}"
     )
-    shown_c = (snapshot.get("formal_top5") or [])[:2]
+    shown_c = [row for row in (snapshot.get("formal_top5") or [])
+               if "holding" not in (row.get("sources") or [])][:2]
     if not shown_c:
-        shown_c = candidates[:2]
+        shown_c = [row for row in candidates
+                   if "holding" not in (row.get("sources") or [])][:2]
     for row in shown_c:
         entry = (f"¥{row['entry_low']:.2f}-{row['entry_high']:.2f}"
                  if row.get("entry_low") is not None and row.get("entry_high") is not None else "暂不给价")
@@ -614,11 +646,13 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
             "无效项已失败关闭：本轮不据此给明确买卖价"
         )
     row = event.get("item") or {}
+    is_holding = "holding" in (row.get("sources") or [])
     entry = (f"¥{row['entry_low']:.2f}-{row['entry_high']:.2f}"
              if row.get("entry_low") is not None and row.get("entry_high") is not None else "暂不给价")
     body = [
         f"{row.get('name') or row.get('symbol')}({row.get('symbol')}) 当前{_fmt_price(row.get('price'))}",
-        f"动作：{row.get('action_cn')}｜买入区{entry}",
+        (f"动作：{_holding_action_summary(row)}" if is_holding else
+         f"动作：{row.get('action_cn')}｜买入区{entry}"),
         f"止损：{_fmt_price(row.get('stop_loss'))}｜第一目标：{_fmt_price(row.get('target_price'))}",
         f"依据：{row.get('reason') or row.get('price_basis')}",
         f"数据时点：{row.get('quote_as_of') or '未知'}",
@@ -739,6 +773,17 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         else:
             decision = base_decision
             decision["decision_source"] = base_source
+        requested = dict(decision)
+        if (is_holding and isinstance(override, dict)
+                and str(decision.get("source") or decision.get("decision_source"))
+                == "portfolio_action_guard"
+                and override.get("original_action") in ACTION_RANK):
+            requested["action"] = override["original_action"]
+            requested["action_cn"] = {
+                "hold": "不动", "reduce": "减仓", "sell": "卖出", "add": "加仓",
+            }.get(override["original_action"], "不动")
+            requested["reason"] = override.get("original_reason") or requested.get("reason")
+            requested["source"] = override.get("original_source") or "formal_signal"
         decision["reason_version"] = ACTION_REASON_VERSION
         if is_holding and quote.get("price_actionable") and not row_fail_closed:
             prior = previous_holdings.get(symbol) or {}
@@ -752,6 +797,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
             transition_reasons = []
             guarded_action = proposed_action
             if prior and source != "hard_risk" and proposed_rank > prior_rank:
+                proposed_reason = str(decision.get("reason") or "")
                 if proposed_rank - prior_rank > 1:
                     guarded_action = "reduce"
                     transition_reasons.append("multi_level_action_jump")
@@ -779,9 +825,10 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
                         "previous_action": prior_action,
                         "previous_requested_action": prior_requested_action,
                         "proposed_action": proposed_action,
+                        "original_reason": str(prior_guard.get("original_reason") or proposed_reason)[:300],
                     }
             decision = _apply_current_action_limit(decision, current_action_state)
-        row = _decision_row(item, quote, plan, decision)
+        row = _decision_row(item, quote, plan, decision, requested)
         decisions[symbol] = row
         actionable = bool(quote.get("price_actionable")) and not fail_closed
         price = quote.get("price")
