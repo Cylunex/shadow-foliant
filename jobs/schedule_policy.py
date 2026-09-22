@@ -33,6 +33,7 @@ MARKET_DATA_TIMES = {
     'eod_outcomes': '18:50',
     # 给最长 45 分钟的预热留出窗口；未完成时继续由依赖队列等待。
     'daily_backtest': '19:30',
+    'closing_trade_plans': '20:20',
 }
 
 # 夜间任务按硬超时预算后仍应在 23:30 前结束；24:00 是绝对上限。

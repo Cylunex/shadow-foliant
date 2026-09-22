@@ -136,6 +136,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '数据', 'default': True,
         'description': '18:00复权因子就绪且PIT同步优先完成后，全量预拉持仓+监测+选股指数成分的raw/qfq日线到共享缓存；不使用尚未完成的收盘批次',
     },
+    'closing_trade_plans': {
+        'cn': '次日规则计划',
+        'schedule': f"{MARKET_DATA_TIMES['closing_trade_plans']} 每交易日",
+        'category': '核心', 'default': True, 'core': True,
+        'depends_on': ['kline_prefetch'],
+        'description': '只读已预热的当日收盘前复权日线，重算持仓与正式候选的次日参考计划；缺失逐股降级，不请求外部数据、不发送通知',
+    },
     'portfolio_indicator_snapshot': {
         'cn': '📸 持仓指标快照',
         'schedule': f"{MARKET_DATA_TIMES['portfolio_indicator_snapshot']} 起，K线缓存预热完成后",

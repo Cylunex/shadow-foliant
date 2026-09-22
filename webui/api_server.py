@@ -2037,7 +2037,10 @@ def portfolio_trade_records(code: str = "", ttype: str = "", days: int = 30):
         clause = " AND ".join(where) if where else "TRUE"
         cur.execute(f"""
             SELECT id, stock_code, stock_name, trade_type, price, quantity, amount,
-                   pos_quantity, pos_cost_price, source, note, trade_time,
+                   pos_quantity, pos_cost_price, source, note,
+                   trade_time AT TIME ZONE
+                     CASE WHEN extra->>'trade_time_basis'='asia_shanghai_v1'
+                          THEN 'Asia/Shanghai' ELSE current_setting('TIMEZONE') END,
                    commission, profit_loss
             FROM trade_records
             WHERE {clause}

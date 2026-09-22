@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -105,11 +106,21 @@ def _field_candidates(row: dict, aliases: tuple[str, ...]) -> list[str]:
     """Never treat a ranking's ordinal/base as the underlying financial metric."""
     matched = [str(field) for field in row
                if any(alias.casefold() in str(field).casefold() for alias in aliases)
-               and not any(word in str(field) for word in ('排名', '名次', '基数'))]
+               and not any(word in str(field) for word in ('排名', '名次', '基数'))
+               and not any(word in str(field) and not any(word in alias for alias in aliases)
+                           for word in ('同比', '环比', '增长率', '占比', '变化率'))]
     exact = [field for field in matched
              if _DATE_FIELD.sub('', field).strip().casefold()
              in {alias.casefold() for alias in aliases}]
     return exact or matched
+
+
+def _numeric(value) -> bool:
+    try:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value))
+    except OverflowError:
+        return False
 
 
 def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | None, dict]:
@@ -119,8 +130,7 @@ def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | N
     for field in candidates[:6]:
         match = _DATE_FIELD.search(field)
         numeric = [float(row[field]) for row in sample
-                   if isinstance(row.get(field), (int, float))
-                   and not isinstance(row.get(field), bool)]
+                   if _numeric(row.get(field))]
         details.append({
             'field': field[:80],
             'numeric_rows': len(numeric),
@@ -130,8 +140,7 @@ def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | N
             'numeric_max': max(numeric) if numeric else None,
         })
     full_numeric = [field for field in candidates[:6]
-                    if all(isinstance(row.get(field), (int, float))
-                           and not isinstance(row.get(field), bool) for row in sample)]
+                    if all(_numeric(row.get(field)) for row in sample)]
     selected = full_numeric[0] if len(full_numeric) == 1 else None
     return selected, {
         'aliases': list(aliases)[:3], 'candidates': details,
@@ -145,7 +154,8 @@ def _scope_rejections(name: str, row: dict) -> list[str]:
     stock_name = str(next((row.get(key) for key in _NAME_FIELD if row.get(key)), ''))
     symbol = _symbol(row)
     reasons = []
-    if not symbol or not code.endswith(('.SH', '.SZ')):
+    if not ((code.endswith('.SH') and symbol.startswith(('600', '601', '603', '605', '688', '689')))
+            or (code.endswith('.SZ') and symbol.startswith(('000', '001', '002', '003', '300', '301')))):
         reasons.append('not_shenzhen_or_shanghai_a_share')
     if not stock_name:
         reasons.append('stock_name_missing')
@@ -177,7 +187,7 @@ def _threshold_checks(name: str, sample: list[dict],
         field = selected_fields[field_index] if field_index < len(selected_fields) else None
         values = [row.get(field) for row in sample] if field else []
         numeric = [float(value) for value in values
-                   if isinstance(value, (int, float)) and not isinstance(value, bool)]
+                   if _numeric(value)]
         matched = sum(operators[operator](value, threshold) for value in numeric)
         passed = bool(sample and len(numeric) == len(sample) and matched == len(sample))
         verified &= passed
@@ -250,7 +260,8 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
     rejections = [_scope_rejections(name, row) for row in sample]
     eligible = [not reasons for reasons in rejections]
     target = _TARGET_TOP_N[name]
-    scope_verified = bool(len(eligible) >= target and all(eligible))
+    scope_verified = bool(len(eligible) >= target and all(eligible)
+                          and len({_symbol(row) for row in sample}) == len(sample))
     date_match = _DATE_FIELD.search(sort_field or '')
     financial_periods, financial_evidence = _financial_period_checks(
         name, sample, field_evidence,
@@ -264,7 +275,11 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
         (sort_field and any(term in sort_field for term in ('主力资金净流入', '主力资金流向'))
          and date_match and '主力资金净流入额' in query)
     )
-    as_of_verified = bool(date_match)
+    try:
+        datetime.strptime(date_match.group(1) if date_match else '', '%Y%m%d')
+        as_of_verified = True
+    except ValueError:
+        as_of_verified = False
     local_conditions = bool(
         query_contract and required and threshold_conditions and scope_verified
         and financial_periods and capital_flow_metric and as_of_verified
@@ -433,7 +448,7 @@ def run_group(name: str, *, session=None, key: str | None = None) -> dict:
     checks = _semantic_checks(name, rows, query)
     target = _TARGET_TOP_N[name]
     selected_rows = [row for row in rows if _eligible_row(name, row)]
-    top_n_coverage = len(selected_rows) >= min(total or 0, target)
+    top_n_coverage = len({_symbol(row) for row in selected_rows[:PAGE_LIMIT]}) >= min(total or 0, target)
     ranking_verified = bool(
         checks['local_conditions_verified'] and checks['sort_verified']
         and top_n_coverage

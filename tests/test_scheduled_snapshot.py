@@ -195,6 +195,7 @@ def build_service(
         "evidence_snapshot_id": f"fixture-{kwargs.get('horizon_days')}",
     },
     external_research_reader=lambda: {"status": "missing"},
+    closing_plan_reader=lambda: {},
     missing_quote_symbols=(),
 ):
     def quotes(symbols):
@@ -228,6 +229,7 @@ def build_service(
         context_reader=context_reader,
         capsule_reader=capsule,
         intraday_reader=lambda: intraday_value or {},
+        closing_plan_reader=closing_plan_reader,
         intraday_projector=intraday_projector,
         quote_loader=quotes,
         job_runs_reader=job_runs_reader,
@@ -1021,9 +1023,40 @@ def test_next_session_plan_does_not_label_intraday_prior_session_plan_ready():
     assert row["plan_rebuild_status"] == "historical_reference"
     assert row["plan_authority"] == "historical_reference"
     assert row["blockers"] == [
-        "trade_plan_not_rebuilt_after_close",
+        "trade_plan_generation_time_missing",
         "trade_plan_input_market_date_not_current",
     ]
+
+
+def test_closing_plans_override_old_candidates_only_for_next_session():
+    evening = NOW.replace(hour=20, minute=46)
+    value = selection()
+    for row in value['data']['formal_top15']:
+        row['trade_plan']['plan_generated_at'] = NOW.isoformat()
+    old_plan = {'available': True, 'action': 'hold', 'stop_loss': 9., 'target_price': 11.,
+                'plan_as_of': '2026-09-09', 'plan_generated_at': NOW.isoformat()}
+    new_plan = dict(old_plan, plan_as_of='2026-09-10',
+                    plan_generated_at=evening.isoformat(), stop_loss=9.5)
+    closing = {'schema_version': 'closing-trade-plans-v1', 'trade_date': '2026-09-10',
+               'selection_run_id': 'formal-run', 'plans': {'000001': new_plan, '600001': new_plan}}
+    service = build_service(
+        selection_value=value, clock=lambda: evening, quote_time=evening.replace(hour=15),
+        intraday_value={'data': {'selection_run_id': 'formal-run', 'trade_date': '2026-09-10',
+                                'plans': {'000001': old_plan}}},
+        closing_plan_reader=lambda: closing,
+    )
+    snapshot = service.read(owner_id='scheduled-agent')['data']
+    next_plan = snapshot['next_session_plan']
+    rows = {row['symbol']: row for row in next_plan['rows']}
+    assert next_plan['closing_plan_binding'] == 'same_session_and_selection'
+    assert rows['000001']['status'] == rows['600001']['status'] == 'ready'
+    assert rows['600001']['sell_levels']['stop_loss'] == 9.5
+    reviews = {row['symbol']: row for row in snapshot['holdings_review']['rows']}
+    assert reviews['000001']['stop_loss'] == 9.
+    closing['selection_run_id'] = 'different-formal-run'
+    snapshot = service.read(owner_id='scheduled-agent')['data']
+    assert snapshot['next_session_plan']['closing_plan_binding'] == 'missing_or_mismatched'
+    assert snapshot['next_session_plan']['ready_count'] == 0
 
 
 def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():

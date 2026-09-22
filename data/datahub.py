@@ -1384,7 +1384,8 @@ def _tushare_available() -> bool:
 
 
 def _tag_kline(df: pd.DataFrame, source: str, *, stale: bool = False,
-               cache_age_days: float = 0.0, interval: str = '1d') -> pd.DataFrame:
+               cache_age_days: float = 0.0, interval: str = '1d',
+               cache_written_at: float | None = None) -> pd.DataFrame:
     """把来源/新鲜度附在 DataFrame.attrs，不改变既有列和索引契约。"""
     if isinstance(df, pd.DataFrame):
         actual_source = df.attrs.get('datahub_route_source') if source == 'live' else None
@@ -1394,6 +1395,10 @@ def _tag_kline(df: pd.DataFrame, source: str, *, stale: bool = False,
             'datahub_cache_age_days': round(float(cache_age_days or 0), 2),
             'datahub_interval': interval,
         })
+        if cache_written_at is not None:
+            df.attrs['datahub_cache_written_at'] = cache_written_at
+        else:
+            df.attrs.pop('datahub_cache_written_at', None)
     return df
 
 
@@ -1435,10 +1440,13 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
         try:
             if (_os.path.isfile(cache_f)
                     and (_time.time() - _os.path.getmtime(cache_f)) < _kline_ttl(interval)):
-                df = pd.read_pickle(cache_f)
+                with open(cache_f, 'rb') as cached_file:
+                    df = pd.read_pickle(cached_file)
+                    written_at = _os.fstat(cached_file.fileno()).st_mtime
                 if isinstance(df, pd.DataFrame) and not df.empty:
-                    age = (_time.time() - _os.path.getmtime(cache_f)) / 86400
-                    return _tag_kline(df, 'fresh_cache', cache_age_days=age, interval=interval)
+                    age = (_time.time() - written_at) / 86400
+                    return _tag_kline(df, 'fresh_cache', cache_age_days=age, interval=interval,
+                                      cache_written_at=written_at)
         except Exception:
             pass
 
@@ -1447,14 +1455,17 @@ def kline(code: str, period: str = "1y", interval: str = "1d", use_cache: bool =
             return pd.DataFrame()
         try:
             if _os.path.isfile(cache_f):
-                cached = pd.read_pickle(cache_f)
+                with open(cache_f, 'rb') as cached_file:
+                    cached = pd.read_pickle(cached_file)
+                    written_at = _os.fstat(cached_file.fileno()).st_mtime
                 if isinstance(cached, pd.DataFrame) and not cached.empty:
-                    age_seconds = _time.time() - _os.path.getmtime(cache_f)
+                    age_seconds = _time.time() - written_at
                     age = age_seconds / 86400
                     stale = age_seconds >= _kline_ttl(interval)
                     return _tag_kline(
                         cached, 'stale_cache' if stale else 'fresh_cache',
                         stale=stale, cache_age_days=age, interval=interval,
+                        cache_written_at=written_at,
                     )
         except Exception:
             pass

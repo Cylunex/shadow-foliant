@@ -29,11 +29,17 @@ Shadow Foliant 是面向个人投资研究的股票、基金与市场分析工�
 
 ## 本地开发
 
+使用 Python 3.11 或 3.12（本地默认 3.12）；旧 Python 3.9 环境不适用于当前项目。
 按 `.env.example` 准备被忽略的本地配置后，使用项目 Python 环境运行 WebUI、任务中心或测试。
 任何行情账号、模型凭据、数据库连接和通知 Token 都不得写入仓库。
+先安装由 Shadow Platform 构建的 `0.8.0` SDK wheel，再安装项目依赖与测试工具。
+`SHADOW_PLATFORM_WHEEL` 指向开发者准备的本地 wheel 文件。
 
 ```bash
-pytest
+python3.12 -m venv .test-venv
+.test-venv/bin/python -m pip install "$SHADOW_PLATFORM_WHEEL"
+.test-venv/bin/python -m pip install -r requirements.txt 'pytest>=8,<10'
+.test-venv/bin/python -m pytest -q
 ```
 
 ## 文档
@@ -46,6 +52,8 @@ pytest
 [研究可靠性与持仓学习](docs/RESEARCH_RELIABILITY.md)。
 历史冻结、就绪检查和降级边界见
 [真实数据运行加固](docs/REAL_DATA_HARDENING.md)。
+近两周执行复盘、修复内容与验收范围见
+[运行闭环检查（2026-09-22）](docs/OPERATIONS_AUDIT_2026-09-22.md)。
 
 > 本项目仅用于个人研究与信息管理，不构成投资建议。
 

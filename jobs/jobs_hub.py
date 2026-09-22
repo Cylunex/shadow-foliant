@@ -1146,6 +1146,25 @@ def task_strategy_policy_weekly():
                  finished_at=datetime.now().isoformat(), notify=False)
 
 
+def task_closing_trade_plans():
+    """Prepare next-session plans from local closing bars without notifications."""
+    job = 'closing_trade_plans'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from jobs.closing_trade_plans import refresh_closing_plans
+        result = refresh_closing_plans()
+        status = result.get('status')
+        _log_run(job, 'success' if status == 'complete' else 'skipped' if status == 'skipped' else 'error',
+                 error=f"closing_plans={status} available={result.get('available_count', 0)} "
+                       f"requested={result.get('requested_count', 0)}",
+                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=f'closing_plan_error={type(exc).__name__}',
+                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+
+
 def task_eod_outcomes():
     """🎯 盘后后验合并(18:50 起)—— 推荐池、信号与外部独立研究后验:
     收盘 K线焐热后,①推荐池收盘价回填胜率(check_all_active,喂 ai_eval_weekly；只记账不发持仓止盈止损)
@@ -1727,6 +1746,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'unified_selection':         1800,   # 本地多赛道选股 + 正式TOP5红蓝参考
     'morning_portfolio':         900,
     'intraday_decision_monitor': 180,
+    'closing_trade_plans':       180,
     'afternoon_portfolio':       900,
     'portfolio_indicator_snapshot': 1200,
     'selection_debate':          900,
@@ -6556,6 +6576,7 @@ def register_default_jobs():
     hub.register('daily_market_snapshot',       '16:48', task_daily_market_snapshot)
     # A 合并(2026-06-26):eod_outcomes = 原 ai_rec_check(16:35 推荐池回填)+ decision_signal_outcomes(信号后验)
     hub.register('eod_outcomes', MARKET_DATA_TIMES['eod_outcomes'], task_eod_outcomes)
+    hub.register('closing_trade_plans', MARKET_DATA_TIMES['closing_trade_plans'], task_closing_trade_plans)
     hub.register('dragon_tiger_archive',        '18:30', task_dragon_tiger_archive)     # 龙虎榜晚间才出全量
     hub.register('announcement_scan',           '18:35', task_announcement_scan)        # 公告/研报/解禁三合一
 

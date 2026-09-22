@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 import io
 import json
+import pytest
 from unittest.mock import patch
 
 from analysis.miaoxiang import diagnosis_verdict
@@ -118,6 +119,43 @@ def test_exact_market_cap_field_excludes_market_cap_growth():
     field, evidence = source._field_evidence(rows, ('总市值',))
     assert field == '总市值[20260921]'
     assert evidence['ambiguous_numeric_fields'] is False
+
+
+def test_market_cap_growth_alone_cannot_prove_absolute_market_cap():
+    field, _ = source._field_evidence([{'总市值同比增长率[20260921]': 12.0}], ('总市值',))
+    assert field is None
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf'), True, 10 ** 400])
+def test_nonfinite_or_boolean_metric_is_not_numeric_evidence(value):
+    field, evidence = source._field_evidence([{'成交额[20260921]': value}], ('成交额',))
+    assert field is None
+    assert evidence['candidates'][0]['numeric_rows'] == 0
+
+
+@pytest.mark.parametrize('code', ['900001.SH', '200001.SZ', '510300.SH', '600001.SZ', '000001.SH'])
+def test_exchange_suffix_alone_cannot_prove_a_share_scope(code):
+    assert 'not_shenzhen_or_shanghai_a_share' in source._scope_rejections(
+        '主力资金', {'股票代码': code, '股票简称': '测试'})
+
+
+def test_duplicate_rows_cannot_prove_top_n_coverage():
+    rows = [{'股票代码': '600001.SH', '股票简称': '测试',
+             '主力资金流向[20260921]': 100.0}] * 20
+    session = Session([Response({'datas': rows, 'code_count': 20})])
+    with patch.object(source, 'provider_slot', return_value=nullcontext()):
+        result = source.run_group('主力资金', session=session, key='test-key')
+    assert result['semantic_verified'] is False
+    assert result['top_n_coverage'] is False
+    assert result['stock_scope_verified'] is False
+
+
+def test_invalid_calendar_date_is_not_verified():
+    rows = [{'股票代码': f'600{i:03d}.SH', '股票简称': '测试',
+             '主力资金流向[20260931]': 100.0 - i} for i in range(20)]
+    result = source._semantic_checks('主力资金', rows, QUERIES['主力资金'])
+    assert result['as_of_verified'] is False
+    assert result['local_conditions_verified'] is False
 
 
 def test_error_body_is_not_treated_as_empty_result():

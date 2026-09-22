@@ -9,6 +9,7 @@
 
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -407,6 +408,11 @@ class PortfolioDBPG:
         amount = t.get('amount') or t.get('金额')
         amount = float(amount) if amount not in (None, '') else round(qty * price, 2)
         tt = t.get('trade_time') or t.get('成交时间') or t.get('日期') or t.get('date')
+        from portfolio.trade_import_service import normalize_trade_time, TRADE_TIME_BASIS
+        try:
+            tt = normalize_trade_time(tt)
+        except (TypeError, ValueError, OverflowError):
+            return None
         extra = {}
         for cn, en in (('note', 'note'), ('commission', 'commission'), ('tax', 'tax'),
                        ('备注', 'note'), ('佣金', 'commission'), ('印花税', 'tax'),
@@ -424,6 +430,7 @@ class PortfolioDBPG:
             if t.get(cn) not in (None, '') and en not in extra:
                 extra[en] = t.get(cn)
         extra['source'] = t.get('source') or 'import_trades'
+        extra['trade_time_basis'] = TRADE_TIME_BASIS
         return {'code': code, 'name': name, 'ttype': ttype, 'qty': qty,
                 'price': price, 'amount': amount, 'tt': (str(tt) if tt else None), 'extra': extra}
 
@@ -459,13 +466,14 @@ class PortfolioDBPG:
                            VALUES {values_sql}
                          )
                          SELECT DISTINCT t.stock_code,
-                           to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
-                                   'YYYY-MM-DD HH24:MI:SS'),
+                           w.wall_time,
                            t.trade_type,t.quantity,round(t.price::numeric,4)
                          FROM trade_records t JOIN wanted w
                            ON t.stock_code=w.stock_code AND t.trade_type=w.trade_type
                           AND t.quantity=w.quantity AND round(t.price::numeric,4)=w.price
-                          AND to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
+                          AND to_char(t.trade_time AT TIME ZONE
+                                      CASE WHEN t.extra->>'trade_time_basis'='asia_shanghai_v1'
+                                           THEN 'Asia/Shanghai' ELSE current_setting('TIMEZONE') END,
                                       'YYYY-MM-DD HH24:MI:SS')=w.wall_time
                          WHERE t.external_fingerprint IS NULL""",
                     tuple(params),
@@ -867,7 +875,12 @@ class PortfolioDBPG:
                     'created_at', 'source', 'commission', 'tax', 'order_id',
                     'broker_execution_id', 'account_ref', 'import_batch_id',
                     'external_fingerprint', 'position_effect']
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            for row in rows:
+                if ((row.get('extra') or {}).get('trade_time_basis') == 'asia_shanghai_v1'
+                        and isinstance(row.get('trade_time'), datetime)):
+                    row['trade_time'] = row['trade_time'].astimezone(ZoneInfo('Asia/Shanghai'))
+            return rows
         finally:
             cur.close()
             conn.close()

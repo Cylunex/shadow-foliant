@@ -11,11 +11,25 @@ import math
 import hashlib
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _BUY = {'买入', '买', 'buy', 'b', '申购', '加仓'}
 _SELL = {'卖出', '卖', 'sell', 's', '赎回', '减仓'}
+TRADE_TIME_BASIS = 'asia_shanghai_v1'
+
+
+def normalize_trade_time(value: Any) -> Optional[str]:
+    """A-share wall times are Shanghai times; explicit offsets describe instants."""
+    text = _clean_text(value)
+    if not text:
+        return None
+    dt = datetime.fromisoformat(text.replace('/', '-').replace('Z', '+00:00'))
+    zone = ZoneInfo('Asia/Shanghai')
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=zone)
+    return dt.astimezone(zone).isoformat(timespec='seconds')
 
 
 def _clean_text(value: Any) -> str:
@@ -62,9 +76,7 @@ def _time_key(value: Any) -> str:
         return ''
     normalized = text.replace('/', '-').replace('T', ' ')
     try:
-        dt = datetime.fromisoformat(normalized.replace('Z', '+00:00'))
-        # 兼容历史 PG 口径：用户输入的北京时间被 ::timestamptz 按数据库会话时区落库，
-        # 但列表/API 一直展示原始时分秒；幂等键也必须比较“墙上时间”，不能二次换区。
+        dt = datetime.fromisoformat(normalize_trade_time(normalized))
         return dt.strftime('%Y-%m-%d %H:%M:%S')
     except (TypeError, ValueError):
         return normalized[:19]
@@ -157,9 +169,22 @@ def trade_execution_key(row: Dict[str, Any]) -> str:
     return 'fp:' + hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 
-def _legacy_dedupe_key(row: Dict[str, Any]) -> Tuple[str, str, str, int, float]:
+def _legacy_dedupe_key(row: Dict[str, Any], *, stored: bool = False) -> Tuple[str, str, str, int, float]:
+    value = row.get('trade_time') or row.get('成交时间')
+    extra = row.get('extra') or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except ValueError:
+            extra = {}
+    # Untagged legacy rows retain their old display-time comparison. Never
+    # reinterpret or rewrite historical records as part of a new import.
+    legacy_wall_time = stored and not row.get('external_fingerprint') and not (
+        row.get('trade_time_basis') or (extra.get('trade_time_basis') if isinstance(extra, dict) else None)
+    )
+    wall_time = _clean_text(value).replace('T', ' ')[:19] if legacy_wall_time else _time_key(value)
     return (_code(row.get('code') or row.get('stock_code')),
-            _time_key(row.get('trade_time') or row.get('成交时间')),
+            wall_time,
             _trade_type(row.get('trade_type') or row.get('交易类型') or row.get('方向')),
             int(_number(row.get('quantity') or row.get('成交量') or row.get('数量')) or 0),
             round(float(_number(row.get('price') or row.get('成交价') or row.get('价格')) or 0), 4))
@@ -277,6 +302,11 @@ def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
         qty_num = _number(_pick(row, 'quantity', '成交量', '数量', 'qty'))
         ttype = _trade_type(_pick(row, 'trade_type', '交易类型', '方向', 'direction'))
         trade_time = _clean_text(_pick(row, 'trade_time', '成交时间', '日期', 'date'))
+        try:
+            trade_time = normalize_trade_time(trade_time)
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f'第 {idx} 行成交时间无效，请使用完整日期和时间')
+            continue
         if not name and not code:
             errors.append(f'第 {idx} 行缺少股票名称或代码')
         if price is None or price <= 0:
@@ -297,7 +327,7 @@ def prepare_trades(rows: Optional[List[Dict[str, Any]]] = None, table: str = '',
         staged.append({
             '_row': idx, 'code': code, 'name': name, 'trade_type': ttype,
             'quantity': int(qty_num), 'price': round(float(price), 4),
-            'trade_time': trade_time or None, '_input': row,
+            'trade_time': trade_time, 'trade_time_basis': TRADE_TIME_BASIS, '_input': row,
         })
 
     resolved_external: Dict[str, str] = {}
@@ -472,8 +502,9 @@ def import_trade_records(rows: Optional[List[Dict[str, Any]]] = None, table: str
         else:
             try:
                 old_rows = portfolio_db.get_trades(None, 10000) or []
-                existing = {trade_execution_key(row) for row in old_rows}
-                existing.update(_legacy_dedupe_key(row) for row in old_rows)
+                existing = {row.get('external_fingerprint') or trade_execution_key(row) for row in old_rows}
+                existing.update(_legacy_dedupe_key(row, stored=True) for row in old_rows
+                                if not row.get('external_fingerprint'))
             except Exception:
                 existing = set()
         unique_rows = []

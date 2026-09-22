@@ -180,15 +180,18 @@ def _plan_rebuild_evidence(plan: dict[str, Any], session_date: str) -> dict[str,
     """Separate plan generation time from its underlying daily-bar date."""
     generated_at = plan.get("plan_generated_at") or plan.get("_snapshot_generated_at")
     generated = _parse_datetime(generated_at)
+    if generated is not None:
+        zone = ZoneInfo("Asia/Shanghai")
+        generated = generated.replace(tzinfo=zone) if generated.tzinfo is None else generated.astimezone(zone)
     generated_after_close = bool(
-        generated
+        plan.get("plan_generated_at") and generated
         and generated.date().isoformat() == session_date
         and (generated.hour, generated.minute) >= (15, 0)
     )
     input_as_of = str(plan.get("plan_as_of") or "")[:10] or None
     input_current = bool(input_as_of and input_as_of == session_date)
     blockers = []
-    if generated is None:
+    if generated is None or not plan.get("plan_generated_at"):
         blockers.append("trade_plan_generation_time_missing")
     elif not generated_after_close:
         blockers.append("trade_plan_not_rebuilt_after_close")
@@ -231,6 +234,7 @@ def _job_run(row: Any) -> dict[str, Any]:
             ("recommendation_outcome_failed", "rec_err="),
             ("decision_signal_outcome_failed", "signal_err="),
             ("decision_loop_failed", "decision_loop_err="),
+            ("external_research_outcome_failed", "external_err="),
         )
         if marker in detail
     ]
@@ -244,6 +248,10 @@ def _job_run(row: Any) -> dict[str, Any]:
     decision_loop = re.search(r"\bdecision_loop=([a-zA-Z0-9_-]+)", detail)
     if decision_loop:
         metrics["decision_loop_status"] = decision_loop.group(1)[:40]
+        if decision_loop.group(1) not in {"complete", "success"}:
+            partial_failures.append("decision_loop_incomplete")
+            if status == "success":
+                status = "degraded"
     return clean_json({
         "job_name": row.get("job_name"),
         "status": status,
@@ -455,6 +463,7 @@ class ScheduledSnapshotService:
         context_reader: Callable[[], dict[str, Any]] | None = None,
         capsule_reader: Callable[[], dict[str, Any] | None] | None = None,
         intraday_reader: Callable[[], dict[str, Any]] | None = None,
+        closing_plan_reader: Callable[[], dict[str, Any]] | None = None,
         intraday_projector: Callable[..., dict[str, Any]] | None = None,
         external_research_reader: Callable[[], dict[str, Any]] | None = None,
         quote_loader: Callable[[list[str]], dict[str, Any]] | None = None,
@@ -471,6 +480,7 @@ class ScheduledSnapshotService:
         self.context_reader = context_reader
         self.capsule_reader = capsule_reader
         self.intraday_reader = intraday_reader
+        self.closing_plan_reader = closing_plan_reader
         self.intraday_projector = intraday_projector
         self.external_research_reader = external_research_reader
         self.quote_loader = quote_loader
@@ -548,6 +558,10 @@ class ScheduledSnapshotService:
             from jobs.intraday_decision_monitor import latest_snapshot
 
             self.intraday_reader = latest_snapshot
+        if self.closing_plan_reader is None:
+            from jobs.closing_trade_plans import latest_snapshot as closing_snapshot
+
+            self.closing_plan_reader = closing_snapshot
         if self.external_research_reader is None:
             from application.external_research import ExternalIndependentResearchService
 
@@ -1387,7 +1401,12 @@ class ScheduledSnapshotService:
         rows = []
         for symbol, item in items.items():
             candidate = candidates.get(symbol) or {}
-            plan = candidate.get("trade_plan") or plans.get(symbol) or {}
+            candidates_for_plan = [plans.get(symbol) or {}, candidate.get("trade_plan") or {}]
+            plan = next((item for item in candidates_for_plan
+                         if item.get("available") is True and _plan_rebuild_evidence(
+                             item, str(trading_day.get("date") or "")
+                         )["status"] == "current_close_rebuild"), None)
+            plan = plan or candidate.get("trade_plan") or plans.get(symbol) or {}
             plan_usable = bool(plan and plan.get("available") is not False)
             rebuild = _plan_rebuild_evidence(plan, str(trading_day.get("date") or ""))
             quote = quote_by_symbol.get(symbol) or {}
@@ -1696,6 +1715,8 @@ class ScheduledSnapshotService:
             )
 
         now = self.clock()
+        zone = ZoneInfo("Asia/Shanghai")
+        now = now.replace(tzinfo=zone) if now.tzinfo is None else now.astimezone(zone)
         today = now.date().isoformat()
         trading_day = self._trading_day(today)
         phase = _report_phase(now, trading_day)
@@ -2203,11 +2224,30 @@ class ScheduledSnapshotService:
             quote_rows=quote_rows, plans=review_plans,
             pricing_snapshot=closing_pricing_snapshot,
         )
+        next_plans = dict(review_plans)
+        closing_binding = "not_due"
+        if review_due:
+            try:
+                closing = self.closing_plan_reader() or {}
+            except Exception:
+                closing = {}
+            if not isinstance(closing, dict):
+                closing = {}
+            closing_binding = "missing_or_mismatched"
+            if (closing.get("schema_version") == "closing-trade-plans-v1"
+                    and closing.get("trade_date") == today
+                    and formal.get("run_id")
+                    and isinstance(closing.get("plans"), dict)
+                    and closing.get("selection_run_id") == formal["run_id"]):
+                next_plans.update({symbol: plan for symbol, plan in (closing.get("plans") or {}).items()
+                                   if isinstance(plan, dict)})
+                closing_binding = "same_session_and_selection"
         next_session_plan = self._next_session_plan(
             due=review_due, trading_day=trading_day, formal=formal,
-            holdings=holding_rows, quote_rows=quote_rows, plans=review_plans,
+            holdings=holding_rows, quote_rows=quote_rows, plans=next_plans,
             pricing_snapshot=closing_pricing_snapshot,
         )
+        next_session_plan["closing_plan_binding"] = closing_binding
         post_close_review["holdings_review_status"] = holdings_review.get("status")
         post_close_review["next_session_plan_status"] = next_session_plan.get("status")
         post_close_review["source_comparison_status"] = source_comparison.get("status")

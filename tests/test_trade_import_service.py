@@ -4,6 +4,7 @@ from unittest.mock import patch
 import _bootstrap  # noqa: F401  保持与 MCP 入口相同的扁平模块路径
 from portfolio.trade_import_service import (
     import_trade_records, parse_markdown_table, prepare_trades, preview_position_effects,
+    trade_execution_key,
 )
 from portfolio.portfolio_db_pg import PortfolioDBPG
 
@@ -29,6 +30,41 @@ class _FakePortfolioDB:
 
 
 class TradeImportServiceTests(unittest.TestCase):
+    def test_trade_time_normalizes_offsets_and_naive_shanghai_before_storage(self):
+        base = {'code': '600519', 'name': '测试', 'trade_type': '买入',
+                'quantity': 100, 'price': 10}
+        normalized = []
+        for value in ('2026-09-18 10:30:00', '2026-09-18T10:30:00+08:00',
+                      '2026-09-18T02:30:00Z'):
+            result = prepare_trades([dict(base, trade_time=value)], portfolio_db=_FakePortfolioDB())
+            self.assertEqual(result['errors'], [])
+            row = result['rows'][0]
+            self.assertEqual(row['trade_time'], '2026-09-18T10:30:00+08:00')
+            self.assertEqual(PortfolioDBPG()._normalize_trade(row)['tt'], row['trade_time'])
+            normalized.append(row['external_fingerprint'])
+        self.assertEqual(len(set(normalized)), 1)
+        self.assertNotEqual(trade_execution_key(dict(base, trade_time='2026-09-18T10:30:00Z')),
+                            trade_execution_key(dict(base, trade_time='2026-09-18T10:30:00+08:00')))
+
+    def test_round_trip_utc_trade_is_deduplicated_without_changing_historical_rows(self):
+        base = {'code': '600519', 'name': '测试', 'trade_type': '买入',
+                'quantity': 100, 'price': 10, 'trade_time': '2026-09-18 10:30:00'}
+        prepared = prepare_trades([base], portfolio_db=_FakePortfolioDB())['rows'][0]
+        stored = dict(prepared, trade_time='2026-09-18T02:30:00+00:00')
+        db = _FakePortfolioDB(trades=[stored])
+        result = import_trade_records([base], portfolio_db=db)
+        self.assertEqual(result['status'], 'noop')
+        self.assertEqual(db.trades, [stored])
+
+    def test_invalid_trade_time_blocks_batch_before_write(self):
+        db = _FakePortfolioDB()
+        row = {'code': '600519', 'name': '测试', 'trade_type': '买入',
+               'quantity': 100, 'price': 10, 'trade_time': '2026-09-31 10:30:00'}
+        result = import_trade_records([row], portfolio_db=db)
+        self.assertEqual(result['status'], 'needs_input')
+        self.assertEqual(db.imported_rows, [])
+        self.assertIsNone(PortfolioDBPG()._normalize_trade(row))
+
     def test_parses_markdown_table_and_strips_bold_name(self):
         table = """| 成交时间 | 股票名称 | 成交价 | 成交量 | 成交额 | 交易类型 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
