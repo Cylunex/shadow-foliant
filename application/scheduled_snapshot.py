@@ -679,6 +679,7 @@ class ScheduledSnapshotService:
     @staticmethod
     def _wencai(selection_value: dict[str, Any]) -> dict[str, Any]:
         payload = (((selection_value.get("data") or {}).get("references") or {}).get("wencai") or {})
+        selection_date = str((selection_value.get('data') or {}).get('selection_date') or '').replace('-', '')
         strategies = payload.get("strategies") or {}
         rows = []
         for name in EXPECTED_WENCAI_STRATEGIES:
@@ -696,6 +697,15 @@ class ScheduledSnapshotService:
                 "cache_key": raw.get("cache_key"),
                 "cache_age_seconds": raw.get("cache_age_seconds"),
                 "result_as_of": raw.get("result_as_of"),
+                "result_as_of_role": (
+                    'previous_trading_day_reference'
+                    if str(raw.get('result_as_of') or '').replace('-', '')[:8] < selection_date
+                    and str(raw.get('result_as_of') or '').replace('-', '')[:8].isdigit()
+                    and len(selection_date) == 8 else
+                    'current_trading_day_reference'
+                    if str(raw.get('result_as_of') or '').replace('-', '')[:8] == selection_date
+                    and len(selection_date) == 8 else None
+                ),
                 "circuit_scope": raw.get("circuit_scope"),
                 "picks": picks[:15],
             })
@@ -798,11 +808,12 @@ class ScheduledSnapshotService:
                 ],
             }
         current = str(payload.get('selection_run_id') or '') == str(formal.get('run_id') or '')
+        selection_date = str(formal.get('selection_date') or '').replace('-', '')
         groups = []
         for raw in (payload.get('groups') or [])[:5]:
             if not isinstance(raw, dict):
                 continue
-            groups.append({key: raw.get(key) for key in (
+            projected = {key: raw.get(key) for key in (
                 'name', 'status', 'query_hash', 'requested_at', 'data_as_of',
                 'pages_fetched', 'reported_count', 'returned_count',
                 'http_status', 'schema_valid', 'chunks_info_present',
@@ -819,7 +830,15 @@ class ScheduledSnapshotService:
                 'field_evidence', 'sort_evidence', 'failure_reasons', 'audit_warnings',
                 'pick_details',
                 'legacy_status', 'overlap_top5_count', 'comparison_available',
-            )})
+            )}
+            data_as_of = str(raw.get('data_as_of') or '').replace('-', '')[:8]
+            projected['data_as_of_role'] = (
+                'previous_trading_day_reference' if data_as_of.isdigit()
+                and len(selection_date) == 8 and data_as_of < selection_date else
+                'current_trading_day_reference' if data_as_of == selection_date
+                and len(selection_date) == 8 else None
+            )
+            groups.append(projected)
         semantic_verified_groups = (
             int(payload.get('semantic_verified_groups') or 0) if current else 0
         )

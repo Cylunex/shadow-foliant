@@ -584,6 +584,7 @@ class SelectionRunService:
                                  for name in (
                                      "iwencai_openapi_shadow_postclose",
                                      "iwencai_openapi_shadow_afternoon",
+                                     "iwencai_openapi_shadow_open_retry",
                                      "iwencai_openapi_shadow",
                                  ) if (artifacts.get(name) or {}).get("payload")), {})
         trial_mode = os.getenv('WENCAI_REFERENCE_SOURCE', 'legacy').strip().lower() == 'openapi_trial'

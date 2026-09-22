@@ -701,6 +701,22 @@ def test_authorized_openapi_shadow_projects_verified_state(monkeypatch):
     assert projected["groups"][0]["ranking_verified"] is True
 
 
+def test_openapi_as_of_is_labeled_as_previous_day_reference():
+    value = {'data': {'selection_date': '2026-09-22', 'references': {
+        'wencai': {'source_mode': 'openapi_trial', 'strategies': {
+            '低价擒牛': {'status': 'trial_verified', 'result_as_of': '20260921'},
+        }},
+        'iwencai_openapi_shadow': {'selection_run_id': 'formal-run',
+            'groups': [{'name': '低价擒牛', 'data_as_of': '20260921'}]},
+    }}}
+    reference = ScheduledSnapshotService._wencai(value)
+    shadow = ScheduledSnapshotService._iwencai_openapi_shadow(
+        value, {'run_id': 'formal-run', 'selection_date': '2026-09-22'},
+    )
+    assert reference['strategies'][0]['result_as_of_role'] == 'previous_trading_day_reference'
+    assert shadow['groups'][0]['data_as_of_role'] == 'previous_trading_day_reference'
+
+
 def test_missing_wencai_does_not_change_formal_candidates():
     value = selection(with_wencai=False)
     expected = [row["symbol"] for row in value["data"]["formal_top15"]]

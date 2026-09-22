@@ -103,9 +103,13 @@ def _stock_name(row: dict) -> str:
 
 def _field_candidates(row: dict, aliases: tuple[str, ...]) -> list[str]:
     """Never treat a ranking's ordinal/base as the underlying financial metric."""
-    return [str(field) for field in row
-            if any(alias.casefold() in str(field).casefold() for alias in aliases)
-            and not any(word in str(field) for word in ('排名', '名次', '基数'))]
+    matched = [str(field) for field in row
+               if any(alias.casefold() in str(field).casefold() for alias in aliases)
+               and not any(word in str(field) for word in ('排名', '名次', '基数'))]
+    exact = [field for field in matched
+             if _DATE_FIELD.sub('', field).strip().casefold()
+             in {alias.casefold() for alias in aliases}]
+    return exact or matched
 
 
 def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | None, dict]:

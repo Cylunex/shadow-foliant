@@ -4645,7 +4645,7 @@ def _iwencai_shadow_group_to_file(name: str, filename: str) -> None:
         _json.dump(result, handle, ensure_ascii=False)
 
 
-def _iwencai_shadow_isolated(old_reference: dict) -> dict:
+def _iwencai_shadow_isolated(old_reference: dict, *, cached_verified=None) -> dict:
     import json as _json
     import os as _os
     import tempfile as _tempfile
@@ -4654,6 +4654,8 @@ def _iwencai_shadow_isolated(old_reference: dict) -> dict:
 
     with _tempfile.TemporaryDirectory(prefix='iwencai-shadow-') as directory:
         def group_runner(name):
+            if name in (cached_verified or {}):
+                return dict(cached_verified[name])
             filename = _os.path.join(directory, str(len(_os.listdir(directory))) + '.json')
             isolated = run_isolated_task(
                 'iwencai_openapi:' + name, _iwencai_shadow_group_to_file,
@@ -4790,7 +4792,62 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
 
 
 def task_iwencai_openapi_shadow():
-    _iwencai_shadow_attach('premarket')
+    _iwencai_shadow_open_retry()
+
+
+def _iwencai_shadow_open_retry():
+    """At 10:40 retry only unverified premarket groups, preserving verified evidence."""
+    job = 'iwencai_openapi_shadow'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    try:
+        from data.research_store import ResearchStore
+        from data.sources.iwencai_openapi import configured_key
+
+        store = ResearchStore(ensure_schema=False)
+        formal = store.latest_formal_selection() or {}
+        if str(formal.get('selection_date') or '') != datetime.now(_RUN_TIMEZONE).date().isoformat():
+            _iwencai_shadow_attach('premarket')
+            return
+        artifacts = formal.get('artifacts') or {}
+        premarket = (artifacts.get('iwencai_openapi_shadow') or {}).get('payload') or {}
+        if not premarket:
+            _iwencai_shadow_attach('premarket')
+            return
+        if 'iwencai_openapi_shadow_open_retry' in artifacts:
+            _log_run(job, 'skipped', error='same_run_retry_cached', started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return
+        rows = {row.get('name'): row for row in (premarket.get('groups') or [])
+                if isinstance(row, dict)}
+        verified = {name: row for name, row in rows.items()
+                    if row.get('semantic_verified')}
+        retry_names = [name for name in ('低价擒牛', '低估值', '主力资金', '小市值', '净利增长')
+                       if name in rows and name not in verified]
+        if not retry_names or not configured_key():
+            _log_run(job, 'skipped', error=('all_groups_verified' if not retry_names
+                                           else 'credential_missing'), started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return
+        old = (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
+        result = _iwencai_shadow_isolated(old, cached_verified=verified)
+        result['sampled_at'] = result['executed_at']
+        result['base_sampled_at'] = premarket.get('sampled_at')
+        result['sampling_slot'] = 'open_retry'
+        result['retry_group_names'] = retry_names
+        result['selection_run_id'] = str(formal.get('run_id') or '')
+        result['selection_date'] = str(formal.get('selection_date') or '')
+        store.save_selection_artifact(formal['run_id'],
+                                      'iwencai_openapi_shadow_open_retry', result)
+        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=f'{type(exc).__name__}:shadow_retry_failed',
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                 notify=False)
 
 
 def task_iwencai_openapi_shadow_afternoon():

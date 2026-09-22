@@ -356,6 +356,26 @@ def test_formal_selection_reference_switch_does_not_change_rankings(monkeypatch)
     assert trial["references"]["wencai"]["strategies"]["低价擒牛"]["picks"][0]["name"] == "平安银行"
 
 
+def test_formal_selection_prefers_open_retry_over_premarket(monkeypatch):
+    class Store:
+        def latest_formal_selection(self):
+            return {
+                'run_id': 'selection-1', 'selection_date': '2026-09-22',
+                'artifacts': {
+                    'iwencai_openapi_shadow': {'payload': {
+                        'sampling_slot': 'premarket', 'groups': [],
+                    }},
+                    'iwencai_openapi_shadow_open_retry': {'payload': {
+                        'sampling_slot': 'open_retry', 'groups': [],
+                    }},
+                },
+            }
+
+    monkeypatch.setenv('WENCAI_REFERENCE_SOURCE', 'openapi_trial')
+    result = SelectionRunService(store=Store()).latest_formal()
+    assert result['data']['references']['iwencai_openapi_shadow']['sampling_slot'] == 'open_retry'
+
+
 def test_durable_worker_lease_reclaims_once_then_fails_after_attempt_budget(repository) -> None:
     created = repository.create_or_get(
         actor_id="agent-owner", capability="foliant.selection.preview",

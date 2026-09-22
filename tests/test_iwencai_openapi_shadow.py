@@ -112,6 +112,14 @@ def test_pagination_schema_provenance_and_bounded_output():
                for call in session.calls)
 
 
+def test_exact_market_cap_field_excludes_market_cap_growth():
+    rows = [{'总市值[20260921]': 1_000_000_000,
+             '总市值同比增长率[20260921]': 12.0}]
+    field, evidence = source._field_evidence(rows, ('总市值',))
+    assert field == '总市值[20260921]'
+    assert evidence['ambiguous_numeric_fields'] is False
+
+
 def test_error_body_is_not_treated_as_empty_result():
     session = Session([Response({'code': 401, 'message': 'unauthorized'})])
     with patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
@@ -180,6 +188,62 @@ def test_premarket_sampling_cache_is_reused_after_formal_selection(tmp_path, mon
     assert saved[0][2]['reference_affects_membership'] is False
     assert saved[0][2]['groups'][0]['observed_overlap_top5_count'] == 1
     assert saved[0][2]['groups'][0]['comparison_available'] is False
+
+
+def test_open_retry_only_resamples_unverified_group(monkeypatch):
+    from jobs import jobs_hub as hub
+    from data import research_store
+
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    original = {name: {'name': name, 'status': 'complete',
+                       'semantic_verified': True, 'schema_valid': True,
+                       'returned_count': 20, 'picks': ['000001'],
+                       'data_as_of': '20260921'} for name in ORDER}
+    original['小市值'] = {**original['小市值'], 'status': 'semantic_unverified',
+                        'semantic_verified': False}
+    artifacts = {'iwencai_openapi_shadow': {'payload': {
+        'sampled_at': today + 'T09:05:00+08:00',
+        'groups': list(original.values()),
+    }}}
+    saved = []
+    sampled = []
+
+    class Store:
+        def __init__(self, **_kwargs):
+            pass
+
+        def latest_formal_selection(self):
+            return {'run_id': 'formal-1', 'selection_date': today,
+                    'artifacts': artifacts}
+
+        def save_selection_artifact(self, run_id, artifact_type, payload):
+            saved.append((run_id, artifact_type, payload))
+            artifacts[artifact_type] = {'payload': payload}
+
+    def fake_isolated(_old, *, cached_verified):
+        sampled.extend(name for name in ORDER if name not in cached_verified)
+        return source.run_shadow(group_runner=lambda name: (
+            dict(cached_verified[name]) if name in cached_verified else
+            {**original[name], 'status': 'complete', 'semantic_verified': True,
+             'data_as_of': today.replace('-', '')}
+        ))
+
+    monkeypatch.setattr(hub, '_skip_if_not_trading', lambda _job: False)
+    monkeypatch.setattr(hub, '_log_run', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hub, '_iwencai_shadow_isolated', fake_isolated)
+    monkeypatch.setattr(source, 'configured_key', lambda: 'present')
+    monkeypatch.setattr(research_store, 'ResearchStore', Store)
+
+    hub.task_iwencai_openapi_shadow()
+    hub.task_iwencai_openapi_shadow()
+
+    assert sampled == ['小市值']
+    assert len(saved) == 1
+    assert saved[0][1] == 'iwencai_openapi_shadow_open_retry'
+    assert saved[0][2]['retry_group_names'] == ['小市值']
+    assert saved[0][2]['semantic_verified_groups'] == 5
+    assert saved[0][2]['groups'][0]['data_as_of'] == '20260921'
+    assert saved[0][2]['groups'][3]['data_as_of'] == today.replace('-', '')
 
 
 def test_cache_only_attach_never_calls_provider_when_premarket_file_missing(
