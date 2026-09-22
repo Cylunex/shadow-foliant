@@ -190,6 +190,19 @@ def _plan_rebuild_evidence(plan: dict[str, Any], session_date: str) -> dict[str,
     )
     input_as_of = str(plan.get("plan_as_of") or "")[:10] or None
     input_current = bool(input_as_of and input_as_of == session_date)
+    cached_at = _parse_datetime(plan.get("input_cached_at"))
+    if cached_at is not None:
+        zone = ZoneInfo("Asia/Shanghai")
+        cached_at = (cached_at.replace(tzinfo=zone) if cached_at.tzinfo is None
+                     else cached_at.astimezone(zone))
+    cache_after_close = bool(cached_at and cached_at.date().isoformat() == session_date
+                             and (cached_at.hour, cached_at.minute) >= (15, 0)
+                             and generated and cached_at <= generated)
+    close_input_proven = bool(
+        plan.get("price_basis") == "post_close_cached_qfq"
+        and cache_after_close and isinstance(plan.get("input_hash"), str)
+        and len(plan["input_hash"]) == 64
+    )
     blockers = []
     if generated is None or not plan.get("plan_generated_at"):
         blockers.append("trade_plan_generation_time_missing")
@@ -197,12 +210,15 @@ def _plan_rebuild_evidence(plan: dict[str, Any], session_date: str) -> dict[str,
         blockers.append("trade_plan_not_rebuilt_after_close")
     if not input_current:
         blockers.append("trade_plan_input_market_date_not_current")
+    if input_current and not close_input_proven:
+        blockers.append("trade_plan_input_provenance_missing")
     return {
         "status": "current_close_rebuild" if not blockers else "historical_reference",
         "plan_generated_at": generated_at,
         "plan_input_market_as_of": input_as_of,
         "generated_after_close": generated_after_close,
         "input_includes_session_close": input_current,
+        "close_input_proven": close_input_proven,
         "blockers": blockers,
     }
 
@@ -1312,7 +1328,9 @@ class ScheduledSnapshotService:
                 if close_price is not None and cost and cost > 0 else None
             )
             plan = plans.get(symbol) or {}
-            plan_usable = bool(plan and plan.get("available") is not False)
+            rebuild = _plan_rebuild_evidence(plan, str(trading_day.get("date") or ""))
+            plan_usable = bool(plan and plan.get("available") is not False
+                               and rebuild["status"] == "current_close_rebuild")
             stop = _finite_number(plan.get("stop_loss")) if plan_usable else None
             target = _finite_number(plan.get("target_price")) if plan_usable else None
             if close_price is None:
@@ -1336,6 +1354,10 @@ class ScheduledSnapshotService:
                 blockers.append("trade_plan_missing")
             elif plan.get("available") is False:
                 blockers.append("trade_plan_unavailable")
+                blockers.extend(code for code in plan.get("blockers") or []
+                                if isinstance(code, str) and code.startswith("closing_"))
+            elif rebuild["status"] != "current_close_rebuild":
+                blockers.extend(rebuild["blockers"])
             rows.append(clean_json({
                 "symbol": symbol,
                 "name": holding.get("name"),
@@ -1365,7 +1387,13 @@ class ScheduledSnapshotService:
             "blocked_count": len(blocked),
             "unusable_trade_plan_symbols": [
                 row["symbol"] for row in blocked
-                if set(row["blockers"]) & {"trade_plan_missing", "trade_plan_unavailable"}
+                if set(row["blockers"]) & {
+                    "trade_plan_missing", "trade_plan_unavailable",
+                    "trade_plan_generation_time_missing",
+                    "trade_plan_not_rebuilt_after_close",
+                    "trade_plan_input_market_date_not_current",
+                    "trade_plan_input_provenance_missing",
+                }
             ][:20],
             "rows": rows[:100],
             "price_basis": "same_trading_day_close_snapshot",
@@ -1437,6 +1465,8 @@ class ScheduledSnapshotService:
                 blockers.append("trade_plan_missing")
             elif plan.get("available") is False:
                 blockers.append("trade_plan_unavailable")
+                blockers.extend(code for code in plan.get("blockers") or []
+                                if isinstance(code, str) and code.startswith("closing_"))
             elif rebuild.get("status") != "current_close_rebuild":
                 blockers.extend(rebuild.get("blockers") or [])
             rows.append(clean_json(item | {
@@ -1495,6 +1525,7 @@ class ScheduledSnapshotService:
                     "trade_plan_generation_time_missing",
                     "trade_plan_not_rebuilt_after_close",
                     "trade_plan_input_market_date_not_current",
+                    "trade_plan_input_provenance_missing",
                 }
             ][:20],
             "rows": rows[:115],
@@ -2232,11 +2263,6 @@ class ScheduledSnapshotService:
 
         post_close_review, adjustment_proposals = self._post_close_review(now, trading_day)
         review_due = bool(post_close_review.get("due"))
-        holdings_review = self._holdings_review(
-            due=review_due, trading_day=trading_day, holdings=holding_rows,
-            quote_rows=quote_rows, plans=review_plans,
-            pricing_snapshot=closing_pricing_snapshot,
-        )
         next_plans = dict(review_plans)
         closing_binding = "not_due"
         if review_due:
@@ -2255,6 +2281,28 @@ class ScheduledSnapshotService:
                 next_plans.update({symbol: plan for symbol, plan in (closing.get("plans") or {}).items()
                                    if isinstance(plan, dict)})
                 closing_binding = "same_session_and_selection"
+                # Positions recorded after the 20:20 batch are absent from its
+                # immutable pool. Rebuild only those positions from local cached
+                # bars; the builder rejects prior-day bars and pre-close caches.
+                missing_holdings = [row for row in holding_rows
+                                    if str(row.get("symbol") or row.get("code") or "")
+                                    not in closing["plans"]]
+                if missing_holdings:
+                    try:
+                        from jobs.closing_trade_plans import build_closing_plans
+                        late = build_closing_plans(
+                            formal={"run_id": formal["run_id"], "selection_date": today},
+                            holdings=missing_holdings, now=now,
+                            budget_seconds=10,
+                        )
+                        next_plans.update(late.get("plans") or {})
+                    except Exception:
+                        pass
+        holdings_review = self._holdings_review(
+            due=review_due, trading_day=trading_day, holdings=holding_rows,
+            quote_rows=quote_rows, plans=next_plans,
+            pricing_snapshot=closing_pricing_snapshot,
+        )
         next_session_plan = self._next_session_plan(
             due=review_due, trading_day=trading_day, formal=formal,
             holdings=holding_rows, quote_rows=quote_rows, plans=next_plans,

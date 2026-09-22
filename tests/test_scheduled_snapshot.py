@@ -19,6 +19,12 @@ NOW = datetime(2026, 9, 10, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def close_evidence(day: str) -> dict:
+    return {"price_basis": "post_close_cached_qfq",
+            "input_cached_at": f"{day}T18:00:00+08:00",
+            "input_hash": "a" * 64}
+
+
 class CalendarStore:
     def __init__(self, *, ready=True, coverage="2026-09-10", latest="2026-09-10"):
         self.value = {
@@ -43,6 +49,7 @@ def selection(*, day="2026-09-10", market_as_of: str | None = None,
         **({"trade_plan": {
             "available": True, "action": "hold", "reason": "规则计划",
             "plan_as_of": day, "plan_generated_at": f"{day}T20:45:00+08:00",
+            **close_evidence(day),
         }}
            if with_trade_plans else {}),
     } for i in range(1, 16)]
@@ -830,7 +837,7 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
         "available": True, "action": "hold", "action_cn": "不动",
         "entry_low": 9.8, "entry_high": 10.1,
         "stop_loss": 9.2, "target_price": 11.5,
-        "price_basis": "persisted-rule-plan", "plan_as_of": "2026-09-10",
+        **close_evidence("2026-09-10"), "plan_as_of": "2026-09-10",
         "plan_generated_at": "2026-09-10T20:45:00+08:00",
     }
     snapshot = build_service(
@@ -887,7 +894,7 @@ def test_four_report_phases_keep_expected_authority_and_pending_semantics():
     ]
     holding_plan = {
         "available": True, "action": "hold", "action_cn": "不动",
-        "stop_loss": 9, "target_price": 12, "price_basis": "persisted-rule-plan",
+        "stop_loss": 9, "target_price": 12, **close_evidence("2026-09-10"),
         "plan_as_of": "2026-09-10",
         "plan_generated_at": "2026-09-10T20:45:00+08:00",
     }
@@ -1028,7 +1035,7 @@ def test_next_session_plan_does_not_label_intraday_prior_session_plan_ready():
     ]
 
 
-def test_closing_plans_override_old_candidates_only_for_next_session():
+def test_closing_plans_override_old_holding_and_candidate_plans():
     evening = NOW.replace(hour=20, minute=46)
     value = selection()
     for row in value['data']['formal_top15']:
@@ -1036,7 +1043,8 @@ def test_closing_plans_override_old_candidates_only_for_next_session():
     old_plan = {'available': True, 'action': 'hold', 'stop_loss': 9., 'target_price': 11.,
                 'plan_as_of': '2026-09-09', 'plan_generated_at': NOW.isoformat()}
     new_plan = dict(old_plan, plan_as_of='2026-09-10',
-                    plan_generated_at=evening.isoformat(), stop_loss=9.5)
+                    plan_generated_at=evening.isoformat(), stop_loss=9.5,
+                    **close_evidence('2026-09-10'))
     closing = {'schema_version': 'closing-trade-plans-v1', 'trade_date': '2026-09-10',
                'selection_run_id': 'formal-run', 'plans': {'000001': new_plan, '600001': new_plan}}
     service = build_service(
@@ -1052,11 +1060,66 @@ def test_closing_plans_override_old_candidates_only_for_next_session():
     assert rows['000001']['status'] == rows['600001']['status'] == 'ready'
     assert rows['600001']['sell_levels']['stop_loss'] == 9.5
     reviews = {row['symbol']: row for row in snapshot['holdings_review']['rows']}
-    assert reviews['000001']['stop_loss'] == 9.
+    assert reviews['000001']['stop_loss'] == 9.5
     closing['selection_run_id'] = 'different-formal-run'
     snapshot = service.read(owner_id='scheduled-agent')['data']
     assert snapshot['next_session_plan']['closing_plan_binding'] == 'missing_or_mismatched'
     assert snapshot['next_session_plan']['ready_count'] == 0
+
+
+def test_late_holding_is_rebuilt_from_current_cached_close(monkeypatch):
+    from jobs import closing_trade_plans
+    evening = NOW.replace(hour=20, minute=46)
+    current = {
+        'available': True, 'action': 'hold', 'stop_loss': 9.5,
+        'plan_as_of': '2026-09-10', 'plan_generated_at': evening.isoformat(),
+        **close_evidence('2026-09-10'),
+    }
+    closing = {'schema_version': 'closing-trade-plans-v1', 'trade_date': '2026-09-10',
+               'selection_run_id': 'formal-run', 'plans': {'600001': current}}
+    calls = []
+
+    def rebuild(**kwargs):
+        calls.append(kwargs)
+        return {'plans': {'000001': dict(current, stop_loss=8.8)}}
+
+    monkeypatch.setattr(closing_trade_plans, 'build_closing_plans', rebuild)
+    snapshot = build_service(
+        clock=lambda: evening, quote_time=evening.replace(hour=15),
+        closing_plan_reader=lambda: closing,
+    ).read(owner_id='scheduled-agent')['data']
+    assert len(calls) == 1
+    assert [row['symbol'] for row in calls[0]['holdings']] == ['000001']
+    assert calls[0]['budget_seconds'] == 10
+    reviews = {row['symbol']: row for row in snapshot['holdings_review']['rows']}
+    assert reviews['000001']['status'] == 'reviewed'
+    assert reviews['000001']['stop_loss'] == 8.8
+    rows = {row['symbol']: row for row in snapshot['next_session_plan']['rows']}
+    assert rows['000001']['status'] == 'ready'
+
+
+def test_late_holding_stays_blocked_when_cached_close_is_unavailable(monkeypatch):
+    from jobs import closing_trade_plans
+    evening = NOW.replace(hour=20, minute=46)
+    closing = {'schema_version': 'closing-trade-plans-v1', 'trade_date': '2026-09-10',
+               'selection_run_id': 'formal-run', 'plans': {}}
+    monkeypatch.setattr(closing_trade_plans, 'build_closing_plans', lambda **_kwargs: {
+        'plans': {'000001': {'available': False, 'blockers': ['closing_daily_bars_not_current']}}
+    })
+    snapshot = build_service(
+        clock=lambda: evening, quote_time=evening.replace(hour=15),
+        closing_plan_reader=lambda: closing,
+    ).read(owner_id='scheduled-agent')['data']
+    review = next(row for row in snapshot['holdings_review']['rows']
+                  if row['symbol'] == '000001')
+    assert review['status'] == 'degraded'
+    assert review['stop_loss'] is None
+    assert review['blockers'] == ['trade_plan_unavailable', 'closing_daily_bars_not_current']
+    plan = next(row for row in snapshot['next_session_plan']['rows']
+                if row['symbol'] == '000001')
+    assert plan['status'] == 'blocked'
+    assert plan['sell_levels']['stop_loss'] is None
+    assert plan['blockers'] == ['trade_plan_unavailable', 'closing_daily_bars_not_current']
 
 
 def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():

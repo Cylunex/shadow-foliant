@@ -134,7 +134,25 @@ def test_snapshot_refresh_time_is_not_plan_generation_evidence():
     plan = {'plan_as_of': '2026-09-22', '_snapshot_generated_at': NOW.isoformat()}
     assert _plan_rebuild_evidence(plan, '2026-09-22')['status'] == 'historical_reference'
     plan['plan_generated_at'] = NOW.astimezone(timezone.utc).isoformat()
+    assert _plan_rebuild_evidence(plan, '2026-09-22')['blockers'] == [
+        'trade_plan_input_provenance_missing']
+    plan.update(price_basis='post_close_cached_qfq',
+                input_cached_at=NOW.replace(hour=18).isoformat(), input_hash='a' * 64)
     assert _plan_rebuild_evidence(plan, '2026-09-22')['status'] == 'current_close_rebuild'
+
+
+@pytest.mark.parametrize('cached_at', [
+    '2026-09-22T14:59:00+08:00',
+    '2026-09-21T18:00:00+08:00',
+    '2026-09-22T20:21:00+08:00',
+])
+def test_post_close_plan_rejects_unproven_cache_time(cached_at):
+    plan = {'available': True, 'plan_as_of': '2026-09-22',
+            'plan_generated_at': NOW.isoformat(),
+            'price_basis': 'post_close_cached_qfq',
+            'input_cached_at': cached_at, 'input_hash': 'a' * 64}
+    assert _plan_rebuild_evidence(plan, '2026-09-22')['blockers'] == [
+        'trade_plan_input_provenance_missing']
 
 
 @pytest.mark.parametrize('detail,code', [
@@ -162,3 +180,9 @@ def test_closing_job_registered_and_persisted_without_notifications(monkeypatch)
     hub.task_closing_trade_plans()
     assert events[0][0] == ('closing_trade_plans', 'success')
     assert events[0][1]['notify'] is False
+
+
+def test_only_current_formal_candidates_join_prefetch_pool():
+    from jobs.jobs_hub import _today_formal_prefetch_symbols
+    assert _today_formal_prefetch_symbols(formal(), '2026-09-22') == ['600001']
+    assert _today_formal_prefetch_symbols(formal(), '2026-09-23') == []

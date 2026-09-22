@@ -134,7 +134,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'cn': '📥 K线缓存预热',
         'schedule': f"{MARKET_DATA_TIMES['kline_prefetch']} 每交易日(复权数据就绪后)",
         'category': '数据', 'default': True,
-        'description': '18:00复权因子就绪且PIT同步优先完成后，全量预拉持仓+监测+选股指数成分的raw/qfq日线到共享缓存；不使用尚未完成的收盘批次',
+        'description': '18:00复权因子就绪且PIT同步优先完成后，全量预拉持仓+监测+当日正式候选+选股指数成分的raw/qfq日线到共享缓存；不使用尚未完成的收盘批次',
     },
     'closing_trade_plans': {
         'cn': '次日规则计划',

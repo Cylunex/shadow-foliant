@@ -4135,9 +4135,16 @@ def task_weekly_db_cleanup():
                  finished_at=datetime.now().isoformat())
 
 
+def _today_formal_prefetch_symbols(formal, day):
+    if str((formal or {}).get('selection_date') or '')[:10] != day:
+        return []
+    from jobs.intraday_decision_monitor import build_monitor_pool
+    return [row['symbol'] for row in build_monitor_pool(formal, [])]
+
+
 def task_kline_prefetch():
     """📥 盘后预热 K线缓存(开关 kline_prefetch,默认开)。
-    全量预拉 持仓 + 监测 + 沪深300成分 的日线写入共享磁盘缓存(db/kline_cache),
+    全量预拉 持仓 + 监测 + 当日正式候选 + 指数成分 的日线写入共享磁盘缓存(db/kline_cache),
     在 BaoStock 日线和复权因子完成后刷新，让回测 / 因子IC / 晨报 / 持仓守卫
     命中暖缓存(0ms),避免逐只冷拉外部源。
     实测主源每次返回的是已按当日复权因子重算的完整序列 → 全量拉即天然无复权漂移,
@@ -4170,6 +4177,17 @@ def task_kline_prefetch():
                 _add(s.get('symbol') if isinstance(s, dict) else getattr(s, 'symbol', None))
         except Exception as e:
             print(f'[kline_prefetch] 监测加载失败: {e}')
+        # 正式候选可能不在持仓、监测或指数成分里。收盘计划也依赖
+        # 同一份 qfq 缓存，须在大范围指数预热之前优先覆盖它们。
+        try:
+            from data.research_store import ResearchStore
+            formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+            for symbol in _today_formal_prefetch_symbols(
+                formal, datetime.now().strftime('%Y-%m-%d')
+            ):
+                _add(symbol)
+        except Exception as e:
+            print(f'[kline_prefetch] 正式候选加载失败: {type(e).__name__}')
         # 3) 选股池指数成分(默认中证A500,随 config.SELECTION_INDEX_UNIVERSE)——焐这些票的K线,
         #    保证次日早盘多因子对新 universe 的因子读取是暖的(A500 含 300 外的中盘龙头需预焐)
         try:
