@@ -108,31 +108,15 @@ def _load(path: str, size: int, mtime_ns: int) -> tuple[tuple[dict[str, str], ..
     }
 
 
-def classify_holdings(
-    holdings: list[dict[str, Any]], asset_types: dict[str, str], *, as_of: str,
-) -> dict[str, Any]:
-    """Return bounded account evidence; never infer labels from stock names."""
-    stocks = sorted({
-        str(row.get("symbol") or row.get("code") or "").zfill(6)
-        for row in holdings
-        if asset_types.get(str(row.get("symbol") or row.get("code") or "").zfill(6)) == "stock"
-    })
-    funds = sorted({
-        str(row.get("symbol") or row.get("code") or "").zfill(6)
-        for row in holdings
-        if asset_types.get(str(row.get("symbol") or row.get("code") or "").zfill(6)) == "fund_or_etf_or_lof"
-    })
+def classify_symbols(symbols: list[str], *, as_of: str) -> dict[str, Any]:
+    """Classify the entire supplied universe; display limits belong to the caller."""
+    stocks = sorted(set(symbols))
     base: dict[str, Any] = {
         "status": "missing", "as_of": as_of, "stock_count": len(stocks),
-        "excluded_fund_count": len(funds), "coverage": None, "rows": [],
-        "unknown_symbols": stocks, "conflict_symbols": [],
-        "industry_coverage_gate": False, "l1_name_status": "missing",
-        "industry_groups": [], "theme_status": "missing",
-        "peer_comparison_status": "blocked", "pruning_status": "blocked",
-        "auto_execution": False,
+        "coverage": None, "rows": [], "unknown_symbols": stocks,
+        "conflict_symbols": [], "industry_coverage_gate": False,
+        "l1_name_status": "missing", "industry_groups": [],
     }
-    themes = classify_manual_concepts(stocks, as_of=as_of)
-    base.update({key: value for key, value in themes.items() if key != "theme_by_symbol"})
     try:
         decision = (datetime.fromisoformat(as_of) if len(as_of) > 10 else
                     datetime.combine(date.fromisoformat(as_of), datetime.max.time()))
@@ -180,9 +164,6 @@ def classify_holdings(
             "industry_name_status": (
                 "l1_only" if code[:2] in SW2021_L1_NAMES else "missing"
             ),
-            "theme_labels": [item["label"] for item in
-                             themes["theme_by_symbol"].get(symbol, [])],
-            "theme_evidence": themes["theme_by_symbol"].get(symbol, []),
         })
     groups: dict[str, list[str]] = {}
     for row in classified:
@@ -198,7 +179,7 @@ def classify_holdings(
     base.update({
         "status": "complete" if gate else "degraded",
         "coverage": round(coverage, 6) if coverage is not None else None,
-        "rows": classified[:100], "unknown_symbols": unknown,
+        "rows": classified, "unknown_symbols": unknown,
         "conflict_symbols": conflicts, "industry_coverage_gate": gate,
         "l1_name_status": (
             "complete" if classified and all(row["industry_l1_name"] for row in classified)
@@ -207,4 +188,39 @@ def classify_holdings(
         "industry_groups": industry_groups,
         "source": source,
     })
+    return base
+
+
+def classify_holdings(
+    holdings: list[dict[str, Any]], asset_types: dict[str, str], *, as_of: str,
+) -> dict[str, Any]:
+    """Return bounded account evidence; never infer labels from stock names."""
+    stocks = sorted({
+        str(row.get("symbol") or row.get("code") or "").zfill(6)
+        for row in holdings
+        if asset_types.get(str(row.get("symbol") or row.get("code") or "").zfill(6)) == "stock"
+    })
+    funds = sorted({
+        str(row.get("symbol") or row.get("code") or "").zfill(6)
+        for row in holdings
+        if asset_types.get(str(row.get("symbol") or row.get("code") or "").zfill(6)) == "fund_or_etf_or_lof"
+    })
+    base: dict[str, Any] = {
+        "status": "missing", "as_of": as_of, "stock_count": len(stocks),
+        "excluded_fund_count": len(funds), "coverage": None, "rows": [],
+        "unknown_symbols": stocks, "conflict_symbols": [],
+        "industry_coverage_gate": False, "l1_name_status": "missing",
+        "industry_groups": [], "theme_status": "missing",
+        "peer_comparison_status": "blocked", "pruning_status": "blocked",
+        "auto_execution": False,
+    }
+    themes = classify_manual_concepts(stocks, as_of=as_of)
+    base.update({key: value for key, value in themes.items() if key != "theme_by_symbol"})
+    classification = classify_symbols(stocks, as_of=as_of)
+    base.update(classification)
+    for row in base["rows"]:
+        evidence = themes["theme_by_symbol"].get(row["symbol"], [])
+        row["theme_labels"] = [item["label"] for item in evidence]
+        row["theme_evidence"] = evidence
+    base["rows"] = base["rows"][:100]
     return base

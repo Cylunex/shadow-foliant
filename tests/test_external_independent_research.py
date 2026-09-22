@@ -35,7 +35,7 @@ def _store(tmp_path):
     )
 
 
-def _seed_formal(store):
+def _seed_formal(store, *, strategy_version="codex-independent-v1"):
     metadata = {
         "snapshot_id": "independent-input-snapshot",
         "policy_hash": "formal-policy-hash",
@@ -86,7 +86,7 @@ def _seed_formal(store):
     store.save_selection_artifact(RUN_ID, "independent_selection", {
         "status": "ready",
         "strategy_id": "codex-independent",
-        "strategy_version": "codex-independent-v1",
+        "strategy_version": strategy_version,
         "strategy_hash": "independent-strategy-hash",
         "input_snapshot_id": "independent-input-snapshot",
         "market_as_of": "2026-09-14",
@@ -148,14 +148,15 @@ def _bundle(*, decision=NOW, with_evidence=True, proposal=True):
     }
 
 
-def _service(tmp_path):
+def _service(tmp_path, *, strategy_version="codex-independent-v1"):
     store = _store(tmp_path)
-    _seed_formal(store)
+    _seed_formal(store, strategy_version=strategy_version)
     return store, ExternalIndependentResearchService(store=store, clock=lambda: NOW)
 
 
-def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_path):
-    store, service = _service(tmp_path)
+@pytest.mark.parametrize("strategy_version", ["codex-independent-v1", "codex-independent-v2"])
+def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_path, strategy_version):
+    store, service = _service(tmp_path, strategy_version=strategy_version)
     before = store.formal_selection(RUN_ID)
     before_hashes = {
         name: value["payload_hash"] for name, value in before["artifacts"].items()
@@ -176,7 +177,7 @@ def test_contract_saves_bounded_overlay_without_mutating_formal_artifacts(tmp_pa
     latest = service.latest_data()
 
     assert result["status"] == "complete"
-    assert data["overlay"]["base_strategy_version"] == "codex-independent-v1"
+    assert data["overlay"]["base_strategy_version"] == strategy_version
     assert data["overlay"]["idempotency_key"] == bundle["idempotency_key"]
     assert {row["symbol"] for row in data["overlay"]["top15"]} == set(BASE_SYMBOLS)
     assert data["overlay"]["top5"][0]["symbol"] == BASE_SYMBOLS[0]

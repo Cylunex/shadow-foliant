@@ -829,13 +829,19 @@ class ResearchStore:
         return rows
 
     def publish_security_master(self, df: pd.DataFrame, *, minimum_rows: int,
-                                validate_change: bool = True) -> dict:
+                                validate_change: bool = True,
+                                universe_scope: str = "lifecycle") -> dict:
         """Stage, validate, and atomically publish one immutable master snapshot."""
+        if universe_scope not in {"lifecycle", "current_listed"}:
+            raise ValueError("unsupported_universe_scope")
         provenance = (df.attrs.get("provenance", {}) if df is not None else {})
         snapshot_id = uuid.uuid4().hex
         snapshot_date = _iso_date(provenance.get("as_of") or date.today().isoformat())
         retrieved_at = provenance.get("retrieved_at") or datetime.now().astimezone().isoformat()
         rows = self._security_rows(df, snapshot_id)
+        from data.selection_quality import classified_mask
+        industry_coverage = (float(classified_mask(pd.Series([row[6] for row in rows])).mean())
+                             if rows else 0.0)
         exchange_counts: Dict[str, int] = {}
         for row in rows:
             exchange = str(row[4] or "unknown").strip().upper() or "unknown"
@@ -844,7 +850,7 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT snapshot_id,observed_count,exchange_counts
+                """SELECT snapshot_id,observed_count,exchange_counts,detail
                    FROM research_master_snapshot_runs
                    WHERE published_at IS NOT NULL AND snapshot_date<=?
                    ORDER BY snapshot_date DESC,published_at DESC LIMIT 1""",
@@ -857,17 +863,37 @@ class ResearchStore:
                 reasons.append("absolute_count_below_minimum")
             lifecycle_complete = (df.attrs.get("lifecycle_complete")
                                   if df is not None else None)
-            if lifecycle_complete is False:
+            if lifecycle_complete is False and universe_scope == "lifecycle":
                 reasons.append("lifecycle_statuses_incomplete")
+            if universe_scope == "current_listed":
+                statuses = {str(row[7] or "") for row in rows}
+                if ("L" not in statuses or not statuses <= {"L", "P"}
+                        or "L" not in df.attrs.get("available_list_statuses", [])):
+                    reasons.append("current_listed_membership_unverified")
             if len({row[1] for row in rows}) != len(rows):
                 reasons.append("duplicate_symbols")
             if validate_change and previous:
                 previous_count = int(previous[1] or 0)
-                if previous_count and abs(len(rows) - previous_count) / previous_count > 0.20:
-                    reasons.append("total_count_change_exceeds_20pct")
                 previous_exchanges = json.loads(previous[2] or "{}")
+                comparable_rows = rows
+                previous_scope = json.loads(previous[3] or "{}").get("universe_scope", "lifecycle")
+                if previous_scope != universe_scope:
+                    # Scope changes must compare like-for-like current membership,
+                    # not interpret omitted historical delistings as a provider drop.
+                    cur.execute("SELECT exchange,COUNT(*) FROM research_security_master_rows "
+                                "WHERE snapshot_id=? AND list_status IN ('L','P') GROUP BY exchange",
+                                (previous_id,))
+                    previous_exchanges = {str(exchange): int(count) for exchange, count in cur.fetchall()}
+                    previous_count = sum(previous_exchanges.values())
+                    comparable_rows = [row for row in rows if row[7] in {'L', 'P'}]
+                comparable_exchanges: Dict[str, int] = {}
+                for row in comparable_rows:
+                    exchange = str(row[4] or "unknown").strip().upper() or "unknown"
+                    comparable_exchanges[exchange] = comparable_exchanges.get(exchange, 0) + 1
+                if previous_count and abs(len(comparable_rows) - previous_count) / previous_count > 0.20:
+                    reasons.append("total_count_change_exceeds_20pct")
                 for exchange, old_count in previous_exchanges.items():
-                    if int(old_count or 0) >= 50 and exchange_counts.get(exchange, 0) < int(old_count) * 0.70:
+                    if int(old_count or 0) >= 50 and comparable_exchanges.get(exchange, 0) < int(old_count) * 0.70:
                         reasons.append(f"exchange_drop:{exchange}")
             quality = "ok" if not reasons else "incomplete"
             cur.execute(
@@ -887,6 +913,10 @@ class ResearchStore:
                          (df.attrs.get("available_list_statuses") if df is not None else []) or []
                      ),
                      "lifecycle_complete": lifecycle_complete,
+                     "universe_scope": universe_scope,
+                     "industry_coverage": industry_coverage,
+                     "industry_classification": (df.attrs.get("industry_classification", {})
+                                                 if df is not None else {}),
                  })),
             )
             cur.executemany(
@@ -910,6 +940,10 @@ class ResearchStore:
             "rows": len(rows), "quality_status": quality,
             "published": quality == "ok", "exchange_counts": exchange_counts,
             "reasons": reasons,
+            "universe_scope": universe_scope,
+            "industry_coverage": industry_coverage,
+            "industry_classification": (df.attrs.get("industry_classification", {})
+                                        if df is not None else {}),
         }
 
     def upsert_securities(self, df: pd.DataFrame) -> int:
@@ -1590,7 +1624,7 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT snapshot_id,snapshot_date FROM research_master_snapshot_runs
+                """SELECT snapshot_id,snapshot_date,detail FROM research_master_snapshot_runs
                    WHERE snapshot_date<=? AND quality_status='ok' AND published_at IS NOT NULL
                      AND (? IS NULL OR published_at<=?)
                    ORDER BY snapshot_date DESC,published_at DESC LIMIT 1""",
@@ -1611,6 +1645,9 @@ class ResearchStore:
             frame = self._frame(cur)
             frame.attrs["snapshot_id"] = snapshot_id
             frame.attrs["snapshot_date"] = snapshot_date
+            detail = json.loads(row[2] or "{}")
+            frame.attrs["universe_scope"] = detail.get("universe_scope", "lifecycle")
+            frame.attrs["industry_classification"] = detail.get("industry_classification", {})
             return frame
         finally:
             conn.close()
@@ -1628,13 +1665,25 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT snapshot_id,snapshot_date FROM research_master_snapshot_runs
+                """SELECT snapshot_id,snapshot_date,detail FROM research_master_snapshot_runs
                    WHERE quality_status='ok' AND published_at IS NOT NULL
                    ORDER BY snapshot_date DESC,published_at DESC LIMIT 1"""
             )
             row = cur.fetchone()
             snapshot_id = str(row[0]) if row and row[0] else None
             snapshot_date = str(row[1]) if row and row[1] else None
+            if row and json.loads(row[2] or "{}").get("universe_scope") == "current_listed":
+                # Fresh current membership cannot reconstruct delisted history.
+                # Read an explicitly different lifecycle snapshot instead.
+                cur.execute(
+                    """SELECT snapshot_id,snapshot_date,detail FROM research_master_snapshot_runs
+                       WHERE quality_status='ok' AND published_at IS NOT NULL
+                       ORDER BY snapshot_date DESC,published_at DESC"""
+                )
+                row = next((item for item in cur.fetchall()
+                            if json.loads(item[2] or "{}").get("universe_scope") != "current_listed"), None)
+                snapshot_id = str(row[0]) if row else None
+                snapshot_date = str(row[1]) if row else None
             if not snapshot_id:
                 return pd.DataFrame()
             cur.execute(
@@ -2051,6 +2100,18 @@ class ResearchStore:
             )
             frame = self._frame(cur)
             frame.attrs["snapshot_id"] = manifest["universe_snapshot_id"]
+            cur.execute(
+                "SELECT snapshot_date,detail FROM research_master_snapshot_runs WHERE snapshot_id=?",
+                (manifest["universe_snapshot_id"],),
+            )
+            snapshot = cur.fetchone()
+            if snapshot:
+                detail = json.loads(snapshot[1] or "{}")
+                frame.attrs.update(
+                    snapshot_date=str(snapshot[0]),
+                    universe_scope=detail.get("universe_scope", "lifecycle"),
+                    industry_classification=detail.get("industry_classification", {}),
+                )
             return frame
         finally:
             conn.close()

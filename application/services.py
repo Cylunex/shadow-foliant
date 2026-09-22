@@ -542,7 +542,8 @@ class SelectionRunService:
         run_id = str(latest.get("run_id"))
         metadata = latest.get("metadata") or {}
         context = metadata.get("decision_context") or {}
-        warnings = []
+        from data.selection_quality import quality_warnings
+        warnings = quality_warnings(metadata)
         artifacts = latest.get("artifacts") or {}
         if not artifacts.get("formal_top15") or not artifacts.get("formal_top5"):
             warnings.append("formal selection artifacts are incomplete")
@@ -627,6 +628,9 @@ class SelectionRunService:
             "formal_top5": final_candidates,
             "final_candidates": final_candidates,
             "lane_counts": metadata.get("lane_counts") or {},
+            "input_quality": metadata.get("input_quality") or {
+                "industry_coverage": metadata.get("industry_coverage"),
+            },
             "strategy_inputs": strategy_inputs,
             "references": references,
             "selection_comparison": compare_selection_lanes(

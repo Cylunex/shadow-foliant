@@ -57,6 +57,7 @@ class FusionPolicy:
     genome_prefilter_n: int = 250
     genome_min_lane_score: float = 45.0
     max_per_industry: int = 5
+    max_top5_per_industry: int = 5
     max_pairwise_correlation: float = 0.90
     strategy_priority: Mapping[str, float] = field(default_factory=lambda: {
         "主力资金": 1.0,
@@ -67,7 +68,10 @@ class FusionPolicy:
     })
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        if self.max_top5_per_industry == 5:
+            value.pop("max_top5_per_industry")
+        return value
 
     @property
     def policy_hash(self) -> str:
@@ -355,12 +359,20 @@ class LocalFusionComposer:
         selected: List[dict] = []
         used: set[str] = set()
 
+        def industry_allowed(item: dict) -> bool:
+            industry = str(item.get("industry") or "").strip()
+            if not industry or industry == "未分类":
+                return self.policy.max_top5_per_industry >= self.policy.top5_size
+            return sum(str(row.get("industry") or "").strip() == industry
+                       for row in selected) < self.policy.max_top5_per_industry
+
         def take(lane: str, count: int) -> None:
             for item in ranked:
                 if count <= 0 or len(selected) >= self.policy.top5_size:
                     break
                 symbol = str(item.get("symbol") or "")
-                if symbol in used or str(item.get("assigned_lane") or "core") != lane:
+                if (symbol in used or str(item.get("assigned_lane") or "core") != lane
+                        or not industry_allowed(item)):
                     continue
                 selected.append(dict(item))
                 used.add(symbol)
@@ -378,7 +390,7 @@ class LocalFusionComposer:
                 break
             symbol = str(item.get("symbol") or "")
             lane = str(item.get("assigned_lane") or "core")
-            if symbol in used:
+            if symbol in used or not industry_allowed(item):
                 continue
             cap = lane_caps.get(lane)
             if cap is not None and sum(

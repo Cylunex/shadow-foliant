@@ -95,7 +95,9 @@ def test_legacy_policy_keeps_exact_date_semantics_and_hash():
     import json
     from analysis.local_stock_selector import SelectionPolicy
     old = asdict(SelectionPolicy())
-    old.pop("max_valuation_lag")
+    for added in ("max_valuation_lag", "industry_controls_version", "min_industry_coverage",
+                  "max_master_age_days", "max_top5_per_industry"):
+        old.pop(added)
     policy = SelectionPolicy(**old)
     assert policy.max_valuation_lag == 0
     assert policy.as_dict() == old

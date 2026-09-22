@@ -92,8 +92,9 @@ class ExternalIndependentResearchService:
         if not formal:
             raise ValueError("formal_selection_run_missing")
         independent = independent_artifact_payload(formal.get("artifacts") or {})
+        from analysis.independent_selector import SUPPORTED_STRATEGY_VERSIONS
         if (independent.get("status") != "ready"
-                or independent.get("strategy_version") != "codex-independent-v1"):
+                or independent.get("strategy_version") not in SUPPORTED_STRATEGY_VERSIONS):
             raise ValueError("independent_base_not_ready")
         rows = independent.get("top15") or []
         if len(rows) != 15:
@@ -539,7 +540,7 @@ class ExternalIndependentResearchService:
                 "notification_status": "pending",
             },
             "guardrails": {
-                "membership_source": "codex-independent-v1 exact top15",
+                "membership_source": f"{independent['strategy_version']} exact top15",
                 "event_adjustment_bounds": [MIN_EVENT_ADJUSTMENT, MAX_EVENT_ADJUSTMENT],
                 "external_can_publish_formal_selection": False,
                 "external_can_create_execution_price": False,

@@ -191,13 +191,32 @@ class ResearchSynchronizer:
     def __init__(self, store: Optional[ResearchStore] = None):
         self.store = store or ResearchStore()
 
+    def repair_master_if_missing(self, selection_date: str) -> dict:
+        from data.selection_quality import input_quality
+        from analysis.local_stock_selector import SelectionPolicy
+        policy = SelectionPolicy.from_env()
+        universe = self.store.load_universe(selection_date)
+        quality = input_quality(universe, selection_date,
+                                min_industry_coverage=policy.min_industry_coverage,
+                                max_master_age_days=policy.max_master_age_days)
+        if quality["ready"]:
+            return {"repaired": False, "input_quality": quality}
+        result = self.sync_master()
+        quality = input_quality(self.store.load_universe(selection_date), selection_date,
+                                min_industry_coverage=policy.min_industry_coverage,
+                                max_master_age_days=policy.max_master_age_days)
+        return {"repaired": bool(result.get("published")), **result, "input_quality": quality}
+
     def sync_master(self) -> dict:
         as_of = date.today().isoformat()
         run_id = self.store.start_sync("zzshare", "security_master", as_of)
         try:
             frame = zzshare.get_security_master()
+            from data.security_master import prepare_master
+            frame = prepare_master(frame)
             published = self.store.publish_security_master(
-                frame, minimum_rows=int(os.getenv("RESEARCH_MIN_UNIVERSE_ROWS", "3000"))
+                frame, minimum_rows=int(os.getenv("RESEARCH_MIN_UNIVERSE_ROWS", "3000")),
+                universe_scope=frame.attrs.get("universe_scope", "lifecycle"),
             )
             rows = int(published["rows"])
             quality = str(published["quality_status"])
@@ -209,6 +228,8 @@ class ResearchSynchronizer:
                     "published": published["published"],
                     "reasons": published["reasons"],
                     "exchange_counts": published["exchange_counts"],
+                    "universe_scope": published["universe_scope"],
+                    "industry_classification": frame.attrs.get("industry_classification", {}),
                 },
             )
             return published

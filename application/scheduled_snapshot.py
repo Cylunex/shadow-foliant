@@ -70,7 +70,7 @@ def _candidate(row: Any) -> dict[str, Any]:
     allowed = (
         "symbol", "code", "name", "rank", "score", "total_score", "final_score",
         "assigned_lane", "source_labels", "technical_state", "trade_plan",
-        "score_components", "tradeability", "data_quality",
+        "score_components", "tradeability", "data_quality", "industry",
     )
     value = {key: row.get(key) for key in allowed if key in row}
     symbol = str(value.get("symbol") or value.get("code") or "")
@@ -238,6 +238,18 @@ def _job_run(row: Any) -> dict[str, Any]:
         )
         if marker in detail
     ]
+    master_quality = re.search(r"\bmaster_quality=([a-zA-Z0-9_-]+)", detail)
+    industry_coverage = re.search(r"\bindustry_coverage=([0-9.]+)%", detail)
+    if master_quality:
+        metrics["master_quality"] = master_quality.group(1)
+        if master_quality.group(1) != "ok":
+            partial_failures.append("security_master_incomplete")
+    if industry_coverage:
+        metrics["industry_coverage"] = float(industry_coverage.group(1)) / 100
+        if metrics["industry_coverage"] < .90:
+            partial_failures.append("industry_coverage_insufficient")
+    if "partial:" in detail and not partial_failures:
+        partial_failures.append("required_input_incomplete")
     if partial_failures and status == "success":
         status = "degraded"
     completion_semantics = "required_success"
@@ -688,6 +700,7 @@ class ScheduledSnapshotService:
             "formal_top5": top5[:5],
             "as_of": value.get("provenance") or {},
             "warnings": [str(item)[:300] for item in warnings[:10]],
+            "input_quality": data.get("input_quality") or {},
         }
 
     @staticmethod

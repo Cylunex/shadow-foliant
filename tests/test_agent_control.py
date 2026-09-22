@@ -207,7 +207,7 @@ class ScheduledDependencyTests(unittest.TestCase):
     def test_research_sync_treats_late_valuation_as_expected_degradation(self):
         syncer = mock.MagicMock()
         syncer.sync_master.return_value = {
-            'rows': 5570, 'quality_status': 'incomplete',
+            'rows': 5570, 'quality_status': 'ok', 'industry_coverage': 1.0,
         }
         syncer.sync_day.return_value = {
             'quality_status': 'incomplete',
@@ -235,6 +235,7 @@ class ScheduledDependencyTests(unittest.TestCase):
 
     def test_research_sync_retry_skips_when_today_is_complete(self):
         syncer = mock.MagicMock()
+        syncer.repair_master_if_missing.return_value = {'repaired': False}
         syncer.store.completed_sync.return_value = True
         with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
                 mock.patch('data.research_sync.ResearchSynchronizer',

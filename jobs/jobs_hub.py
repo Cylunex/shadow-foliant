@@ -3716,6 +3716,8 @@ def _research_sync_detail(result, master):
         f"valuation_fields={result.get('valuation_field_coverage') or {}} "
         f"master={master.get('rows', 0)} "
         f"master_quality={master.get('quality_status') or 'unknown'} "
+        f"master_scope={master.get('universe_scope') or 'legacy'} "
+        f"industry_coverage={float(master.get('industry_coverage') or 0):.1%} "
         f"fund_flow={result.get('fund_flow_rows', 0)}(optional) "
         f"calendar={result.get('calendar_quality_status') or 'unknown'}"
     )
@@ -3776,11 +3778,15 @@ def _research_repair_detail(trade_date, result):
 
 
 def _selection_data_note(metadata):
-    if not metadata.get('data_degraded'):
-        return ''
-    return (f"⚠️ 估值晚到：行情 {metadata.get('market_as_of')}，"
-            f"使用 {metadata.get('valuation_as_of')} 估值"
-            f"（晚 {metadata.get('valuation_stale_trading_days')} 个交易日）\n")
+    from data.selection_quality import quality_warnings
+    notes = quality_warnings(metadata)
+    if metadata.get('valuation_status') == 'lagged' or (
+            metadata.get('data_degraded') and metadata.get('valuation_stale_trading_days')):
+        notes = [note for note in notes if note != "选股输入存在降级，请核对数据日期与覆盖"]
+        notes.append(f"估值晚到：行情 {metadata.get('market_as_of')}，"
+                     f"使用 {metadata.get('valuation_as_of')} 估值"
+                     f"（晚 {metadata.get('valuation_stale_trading_days')} 个交易日）")
+    return ('⚠️ ' + '；'.join(notes) + '\n') if notes else ''
 
 
 def _preopen_research_context(syncer, selection_date=None):
@@ -3800,6 +3806,9 @@ def _preopen_research_context(syncer, selection_date=None):
     # through the selection day so same-day readers can prove whether today is
     # open, while the PIT market boundary remains ``context.market_cutoff``.
     syncer.refresh_calendar_for_day(selected)
+    master_repair = syncer.repair_master_if_missing(selected)
+    if master_repair.get('input_quality', {}).get('ready') is False:
+        raise RuntimeError('stage=security_master input quality gate failed')
     effective_market_date = syncer.store.expected_market_as_of(
         context.market_cutoff, inclusive=True
     )
@@ -3828,6 +3837,8 @@ def task_research_data_sync():
         refresh_quality(syncer.store)
         stage = 'quality_gate'
         detail = _research_sync_detail(result, master)
+        master_incomplete = (master.get('quality_status') != 'ok'
+                             or float(master.get('industry_coverage') or 0) < .90)
         if result.get('quality_status') == 'ok':
             try:
                 stage = 'selection_outcomes'
@@ -3837,13 +3848,18 @@ def task_research_data_sync():
             except Exception as outcome_error:
                 detail += f" outcome_error={type(outcome_error).__name__}"
                 raise RuntimeError(f'{stage} quality gate failed: {detail}') from outcome_error
-            _log_run(job, 'success', error=detail,
-                     started_at=started, finished_at=datetime.now().isoformat())
+            # job_runs uses success/error/skipped; preserve partial details
+            # without writing an unsupported enum value and losing the record.
+            _log_run(job, 'error' if master_incomplete else 'success',
+                     error=('partial: ' if master_incomplete else '') + detail,
+                     started_at=started, finished_at=datetime.now().isoformat(),
+                     notify=not master_incomplete)
             return
         if _valuation_release_pending(result):
             _log_run(
-                job, 'success',
-                error=f'degraded: valuation_source_not_ready; {detail}; retry=20:05',
+                job, 'error' if master_incomplete else 'success',
+                error=('partial: security_master_unavailable; ' if master_incomplete else '')
+                      + f'degraded: valuation_source_not_ready; {detail}; retry=20:05',
                 started_at=started, finished_at=datetime.now().isoformat(), notify=False,
             )
             return
@@ -3863,10 +3879,15 @@ def task_research_data_sync_retry():
     from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
     syncer = ResearchSynchronizer()
     today = datetime.now().strftime('%Y-%m-%d')
+    master_repair = syncer.repair_master_if_missing(today)
+    master_unready = master_repair.get('input_quality', {}).get('ready') is False
     if syncer.store.completed_sync('daily_market', today):
         from jobs.decision_loop_jobs import refresh_quality
         refresh_quality(syncer.store)
-        _log_run(job, 'skipped', error='daily_market already complete',
+        _log_run(job, 'error' if master_unready else (
+                     'success' if master_repair.get('repaired') else 'skipped'),
+                 error=('partial: security_master_unavailable; ' if master_unready else '')
+                       + 'daily_market already complete; master_repaired=' + str(bool(master_repair.get('repaired'))),
                  started_at=started, finished_at=datetime.now().isoformat())
         return
     try:
@@ -3876,7 +3897,9 @@ def task_research_data_sync_retry():
             today, exc.result, next_retry='next_trading_day_08:35'
         )
         _log_run(
-            job, 'skipped', error=f'source_unavailable: {detail}',
+            job, 'error' if master_unready else 'skipped',
+            error=('partial: security_master_unavailable; ' if master_unready else '')
+                  + f'source_unavailable: {detail}',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
         _notify_data_unavailable(job, detail, source='valuation/multi-source')
@@ -3887,8 +3910,9 @@ def task_research_data_sync_retry():
             f'{str(exc)[:320]}'
         ) from exc
     _log_run(
-        job, 'success',
-        error=_research_repair_detail(today, result),
+        job, 'error' if master_unready else 'success',
+        error=('partial: security_master_unavailable; ' if master_unready else '')
+              + _research_repair_detail(today, result),
         started_at=started, finished_at=datetime.now().isoformat(),
     )
     from jobs.decision_loop_jobs import refresh_quality

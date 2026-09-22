@@ -267,6 +267,8 @@ def finalize_local_selection(rows: Iterable[Dict[str, Any]], limit: int = 5) -> 
                 else "local_fusion_policy" if is_fusion else "local_pit_snapshot"
             ),
             "assigned_lane": assigned_lane,
+            **({"industry": source.get("industry")}
+               if source.get("industry_controls_version") else {}),
             "primary_strategy": source.get("primary_strategy") or "local_pit_v4",
             "primary_strategy_name": strategy_name,
             "lane_rank": int(source.get("lane_rank") or source.get("rank") or 9999),

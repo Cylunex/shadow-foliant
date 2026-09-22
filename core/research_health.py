@@ -10,6 +10,7 @@ import pandas as pd
 from core.decision_context import A_SHARE_TIMEZONE, DecisionContext
 from data.research_store import ResearchStore
 from data.research_readiness import resolve_valuation
+from data.selection_quality import input_quality
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -49,6 +50,11 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         context.universe_cutoff, cutoff_at=context.decision_at
     )
     universe_count = int(len(universe.drop_duplicates("symbol"))) if not universe.empty else 0
+    master_quality = input_quality(
+        universe, context.universe_cutoff,
+        min_industry_coverage=policy.min_industry_coverage,
+        max_master_age_days=policy.max_master_age_days,
+    )
 
     conn = store.connect()
     try:
@@ -127,6 +133,8 @@ def snapshot(*, store: Optional[ResearchStore] = None,
     last_sync = ({"as_of": str(sync_row[0]), "status": str(sync_row[1]),
                   "quality_status": str(sync_row[2])} if sync_row else None)
     checks = {
+        "industry_coverage": master_quality["industry_ready"],
+        "master_fresh": master_quality["master_ready"],
         "calendar_consensus": bool(calendar.get("ready") and expected),
         "market_fresh": bool(expected and actual == expected),
         "market_coverage": usable_coverage >= policy.min_warehouse_coverage,
@@ -165,7 +173,8 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         "valuation_coverage": round(valuation_coverage, 6),
         "valuation_status": valuation_state["status"],
         "valuation_stale_trading_days": valuation_state["valuation_stale_trading_days"],
-        "data_degraded": valuation_state["status"] == "lagged",
+        "data_degraded": valuation_state["status"] == "lagged" or not master_quality["ready"],
+        "input_quality": master_quality,
         "data_complete": all(
             value for key, value in checks.items() if key != "formal_selection"
         ) and all(ingestion_checks.values()),

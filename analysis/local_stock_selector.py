@@ -20,6 +20,7 @@ import pandas as pd
 
 from data.research_store import ResearchStore
 from data.research_readiness import resolve_valuation, valuation_lag_budget
+from data.selection_quality import classified_mask, input_quality
 from core.decision_context import DecisionContext, dependency_lock_hash
 from analysis.selection_feature_catalog import (
     CATALOG_VERSION,
@@ -152,6 +153,11 @@ class SelectionPolicy:
     min_financial_universe_coverage: float = 0.70
     min_stock_fundamental_metrics: int = 4
     min_valuation_coverage: float = 0.70
+    # Absent fields in old manifests retain the original replay policy.
+    industry_controls_version: str = "legacy"
+    min_industry_coverage: float = 0.0
+    max_master_age_days: int = 0
+    max_top5_per_industry: int = 5
     # Old manifests without this field replay with their original exact-date gate.
     max_valuation_lag: int = 0
     min_listing_trading_days: int = 70
@@ -177,6 +183,12 @@ class SelectionPolicy:
     def from_env(cls) -> "SelectionPolicy":
         base = cls()
         return cls(
+            industry_controls_version="classified-v1",
+            min_industry_coverage=max(.90, min(1.0, float(
+                os.getenv("LOCAL_SELECTION_MIN_INDUSTRY_COVERAGE", ".90")))),
+            max_master_age_days=max(1, min(7, int(
+                os.getenv("LOCAL_SELECTION_MAX_MASTER_AGE_DAYS", "7")))),
+            max_top5_per_industry=2,
             fundamental_top_n=max(20, int(os.getenv("LOCAL_SELECTION_FUNDAMENTAL_TOP_N", "200"))),
             technical_top_n=max(10, int(os.getenv("LOCAL_SELECTION_TECHNICAL_TOP_N", "50"))),
             diversified_top_n=max(5, int(os.getenv("LOCAL_SELECTION_DIVERSIFIED_TOP_N", "20"))),
@@ -257,6 +269,10 @@ class SelectionPolicy:
         # by replaying a manifest written before the optional lag field existed.
         if not self.max_valuation_lag:
             policy.pop("max_valuation_lag")
+        if self.industry_controls_version == "legacy":
+            for key in ("industry_controls_version", "min_industry_coverage",
+                        "max_master_age_days", "max_top5_per_industry"):
+                policy.pop(key)
         return policy
 
     @property
@@ -356,6 +372,18 @@ class LocalStockSelector:
                 metadata={**pit, "decision_context": context.as_dict()},
             )
         pit_universe_count = int(len(universe.drop_duplicates("symbol")))
+        master_quality = input_quality(
+            universe, context.universe_cutoff,
+            min_industry_coverage=self.policy.min_industry_coverage,
+            max_master_age_days=self.policy.max_master_age_days,
+        )
+        if not master_quality["ready"]:
+            return self._failed(
+                selection_date, "security master stale or industry coverage insufficient",
+                pit_universe_count, reference, persist,
+                metadata={**pit, "input_quality": master_quality,
+                          "data_degraded": True, "decision_context": context.as_dict()},
+            )
 
         panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
         panel = panel.dropna(subset=["trade_date", "symbol", "close"])
@@ -491,6 +519,8 @@ class LocalStockSelector:
             "net_assets_positive", pd.Series(False, index=frame.index)
         ).fillna(False).astype(bool)
         frame = frame[qualified & non_negative_equity].copy()
+        if self.policy.industry_controls_version != "legacy":
+            frame = frame[classified_mask(frame["industry"])].copy()
 
         # Every local producer consumes the exact same fail-closed eligible PIT frame.
         eligible_scored = self._score_technical(frame)
@@ -596,6 +626,7 @@ class LocalStockSelector:
             genome_prefilter_n=self.policy.genome_prefilter_n,
             genome_min_lane_score=self.policy.genome_min_lane_score,
             max_per_industry=self.policy.max_per_industry,
+            max_top5_per_industry=self.policy.max_top5_per_industry,
             max_pairwise_correlation=self.policy.max_pairwise_correlation,
             strategy_priority={
                 "主力资金": self.policy.priority_main_force,
@@ -636,6 +667,9 @@ class LocalStockSelector:
                     "scope": "same_pit_and_genome_snapshot; changed_producer_parameters_recomputed"}
         candidates = fusion["top15"]
         formal_top5_candidates = fusion["top5"]
+        if self.policy.industry_controls_version != "legacy":
+            for row in candidates + formal_top5_candidates:
+                row["industry_controls_version"] = self.policy.industry_controls_version
         comparison = self._comparison(candidates, reference)
         industry_values = frame["industry"].fillna("").astype(str).str.strip()
         industry_coverage = float(
@@ -706,6 +740,7 @@ class LocalStockSelector:
                 "financial_coverage": round(financial_coverage, 6),
                 "valuation_status": valuation_state["status"],
                 "data_degraded": valuation_state["status"] == "lagged",
+                "input_quality": master_quality,
                 "financial_as_of": pit.get("financial_pit_end_date"),
                 "data_cutoff": cutoff,
                 "decision_context": context.as_dict(),

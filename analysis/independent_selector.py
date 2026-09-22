@@ -15,13 +15,16 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy, _percentile
+from analysis.local_stock_selector import LocalStockSelector, SelectionPolicy, _percentile, _industry_percentile
+from data.selection_quality import classified_mask
 from core.decision_context import DecisionContext
 from data.research_store import ResearchStore
 
 
 STRATEGY_ID = "codex-independent"
 STRATEGY_VERSION = "codex-independent-v1"
+INDUSTRY_STRATEGY_VERSION = "codex-independent-v2"
+SUPPORTED_STRATEGY_VERSIONS = {STRATEGY_VERSION, INDUSTRY_STRATEGY_VERSION}
 ARTIFACT_TYPE = "independent_selection"
 REPAIR_ARTIFACT_TYPE = "independent_selection_repair"
 EXPECTED_WENCAI_STRATEGIES = {
@@ -39,6 +42,10 @@ class IndependentPolicy:
     risk_discount: int = 10
     minimum_history_days: int = 70
     minimum_average_amount_20: float = 20_000_000.0
+    industry_neutral: bool = False
+    max_per_industry: int = 15
+    max_top5_per_industry: int = 5
+    minimum_industry_peers: int = 5
     required_fields: tuple[str, ...] = (
         "roe", "net_profit_growth_pct", "debt_ratio", "cash_quality",
         "ret_60", "ma60_slope", "persistence_60", "pe_ttm", "pb",
@@ -48,6 +55,10 @@ class IndependentPolicy:
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
+        if (self.version == STRATEGY_VERSION and not self.industry_neutral
+                and self.max_per_industry == 15 and self.max_top5_per_industry == 5):
+            for key in ("industry_neutral", "max_per_industry", "max_top5_per_industry", "minimum_industry_peers"):
+                value.pop(key)
         value["required_fields"] = list(self.required_fields)
         value["component_weights"] = {
             "fundamental_quality": self.fundamental_quality,
@@ -242,25 +253,38 @@ def _prepare_frame(store: ResearchStore, manifest_id: str,
 def _score(frame: pd.DataFrame, policy: IndependentPolicy) -> tuple[pd.DataFrame, dict[str, int]]:
     work = frame.copy()
     for field in policy.required_fields:
-        work[field] = pd.to_numeric(work.get(field), errors="coerce")
+        work[field] = pd.to_numeric(
+            work.get(field, pd.Series(np.nan, index=work.index)), errors="coerce"
+        )
+        if policy.industry_neutral:
+            work[field] = work[field].replace([np.inf, -np.inf], np.nan)
     missing_counts = {
         field: int(work[field].isna().sum()) for field in policy.required_fields
     }
     complete = work[list(policy.required_fields)].notna().all(axis=1)
+    if policy.industry_neutral:
+        complete &= classified_mask(work.get("industry", pd.Series("", index=work.index)))
     work = work[complete].copy()
+    if policy.industry_neutral and not work.empty:
+        peers = work.groupby("industry")["symbol"].transform("size")
+        work = work[peers >= policy.minimum_industry_peers].copy()
     if work.empty:
         return work, missing_counts
 
+    def comparable(values, *, higher_is_better=True):
+        return (_industry_percentile(values, work["industry"], higher_is_better=higher_is_better)
+                if policy.industry_neutral else _percentile(values, higher_is_better=higher_is_better))
+
     ranks = {
-        "roe": _percentile(work["roe"]),
-        "growth": _percentile(work["net_profit_growth_pct"]),
-        "debt": _percentile(work["debt_ratio"], higher_is_better=False),
-        "cash": _percentile(work["cash_quality"]),
+        "roe": comparable(work["roe"]),
+        "growth": comparable(work["net_profit_growth_pct"]),
+        "debt": comparable(work["debt_ratio"], higher_is_better=False),
+        "cash": comparable(work["cash_quality"]),
         "return": _percentile(work["ret_60"]),
         "slope": _percentile(work["ma60_slope"]),
         "persistence": _percentile(work["persistence_60"]),
-        "pe": _percentile(work["pe_ttm"].where(work["pe_ttm"] > 0), higher_is_better=False),
-        "pb": _percentile(work["pb"].where(work["pb"] > 0), higher_is_better=False),
+        "pe": comparable(work["pe_ttm"].where(work["pe_ttm"] > 0), higher_is_better=False),
+        "pb": comparable(work["pb"].where(work["pb"] > 0), higher_is_better=False),
         "amount": _percentile(np.log1p(work["average_amount_20"].clip(lower=0))),
         "volume": _percentile(work["volume_20_vs_60"]),
         "amount_trend": _percentile(work["amount_20_vs_60"]),
@@ -311,8 +335,12 @@ def build(manifest_id: str, *, store: ResearchStore | None = None,
           policy: IndependentPolicy | None = None) -> dict[str, Any]:
     """Build an independent result from immutable manifest inputs only."""
     store = store or ResearchStore(ensure_schema=False)
-    policy = policy or IndependentPolicy()
     manifest = store.load_selection_manifest(manifest_id)
+    if policy is None:
+        policy = (IndependentPolicy(version=INDUSTRY_STRATEGY_VERSION, industry_neutral=True,
+                                    max_per_industry=3, max_top5_per_industry=1)
+                  if (manifest or {}).get("policy", {}).get("industry_controls_version") == "classified-v1"
+                  else IndependentPolicy())
     if not manifest:
         return {"status": "unavailable", "reason": "manifest_missing",
                 "strategy_version": policy.version, "strategy_hash": policy.policy_hash,
@@ -331,7 +359,27 @@ def build(manifest_id: str, *, store: ResearchStore | None = None,
             "eligible_complete_count": int(len(scored)), "missing_by_field": missing_counts,
             "top15": [], "top5": [],
         }
-    rows = [_row(row, rank) for rank, (_, row) in enumerate(scored.head(15).iterrows(), 1)]
+    selected = []
+    industry_counts: dict[str, int] = {}
+    for _, row in scored.iterrows():
+        industry = str(row.get("industry") or "")
+        if industry_counts.get(industry, 0) >= policy.max_per_industry:
+            continue
+        selected.append(row)
+        industry_counts[industry] = industry_counts.get(industry, 0) + 1
+        if len(selected) == 15:
+            break
+    if len(selected) < 15:
+        return {"status": "unavailable", "reason": "fewer_than_15_diversified_rows",
+                "strategy_version": policy.version, "strategy_hash": policy.policy_hash,
+                "manifest_id": manifest_id, "top15": [], "top5": []}
+    rows = [_row(row, rank) for rank, row in enumerate(selected, 1)]
+    top5 = []
+    for row in rows:
+        if sum(item["industry"] == row["industry"] for item in top5) < policy.max_top5_per_industry:
+            top5.append({**row, "rank": len(top5) + 1})
+        if len(top5) == 5:
+            break
     snapshot_seed = {
         "strategy_version": policy.version, "strategy_hash": policy.policy_hash,
         "manifest_id": manifest_id, "market_as_of": evidence["market_as_of"],
@@ -363,7 +411,12 @@ def build(manifest_id: str, *, store: ResearchStore | None = None,
         "hard_gate_count": evidence["hard_gate_count"],
         "eligible_complete_count": int(len(scored)),
         "missing_by_field": missing_counts,
-        "top15": rows, "top5": rows[:5],
+        "top15": rows, "top5": top5,
+        **({"industry_policy": {"neutral": policy.industry_neutral,
+                            "max_top15_per_industry": policy.max_per_industry,
+                            "max_top5_per_industry": policy.max_top5_per_industry,
+                            "minimum_industry_peers": policy.minimum_industry_peers}}
+           if policy.industry_neutral else {}),
         "independence_boundary": (
             "immutable_manifest_inputs_only; formal_and_wencai_membership_rank_score_not_read"
         ),
