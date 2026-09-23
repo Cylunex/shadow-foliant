@@ -2071,6 +2071,7 @@ class ScheduledSnapshotService:
                 trading_day.get("latest_confirmed_open_date") or today
             ),
             history_loader=self.peer_history_loader,
+            allow_prior_close=phase in {"intraday", "post_close_pending"},
         )
         available_cash = stock_budget.get("available_cash_cny")
         preview_context = context

@@ -35,6 +35,7 @@ PEER_HORIZONS = (20, 60)
 MIN_PEER_HISTORY_ROWS = max(PEER_HORIZONS) + 1
 MIN_COMPARABLE_PEERS = 2
 MIN_PRUNING_PEERS = 3
+MAX_PRIOR_CLOSE_CALENDAR_LAG_DAYS = 10
 SOURCE_URL = "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
 _CODE = re.compile(r"^[0-9]{6}$")
 
@@ -201,6 +202,7 @@ def classify_symbols(symbols: list[str], *, as_of: str) -> dict[str, Any]:
 
 def _history_metric(
     symbol: str, frame: Any, *, expected_market_date: str,
+    allow_prior_close: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Validate one cache-only qfq series and derive multi-horizon returns."""
     if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -229,7 +231,13 @@ def _history_metric(
             or (values <= 0).any()):
         return None, "peer_history_values_invalid"
     market_as_of = values.index[-1].date().isoformat()
-    if market_as_of != expected_market_date:
+    lag_days = (date.fromisoformat(expected_market_date)
+                - date.fromisoformat(market_as_of)).days
+    if lag_days < 0:
+        return None, "peer_history_after_expected_date"
+    if lag_days and (
+        not allow_prior_close or lag_days > MAX_PRIOR_CLOSE_CALENDAR_LAG_DAYS
+    ):
         return None, "peer_history_not_current"
     returns = {
         f"return_{horizon}d_pct": round(
@@ -240,6 +248,10 @@ def _history_metric(
     trace = {
         "symbol": symbol,
         "market_as_of": market_as_of,
+        "market_date_status": (
+            "current" if lag_days == 0 else "prior_close_reference"
+        ),
+        "market_date_lag_days": lag_days,
         "history_rows": len(values),
         **returns,
         "input_hash": hashlib.sha256(json.dumps({
@@ -324,7 +336,7 @@ def _rank_group(
 def _peer_comparison(
     *, stocks: list[str], classification: dict[str, Any], themes: dict[str, Any],
     expected_market_date: str, history_loader: Callable[[str], Any] | None,
-    stock_names: dict[str, str],
+    stock_names: dict[str, str], allow_prior_close: bool,
 ) -> dict[str, Any]:
     methodology = {
         "version": "cache-only-multi-horizon-v1",
@@ -334,6 +346,8 @@ def _peer_comparison(
         "single_day_return_used": False,
         "minimum_comparable_peers": MIN_COMPARABLE_PEERS,
         "minimum_pruning_peers": MIN_PRUNING_PEERS,
+        "prior_close_reference_allowed": allow_prior_close,
+        "maximum_prior_close_calendar_lag_days": MAX_PRIOR_CLOSE_CALENDAR_LAG_DAYS,
         "pruning_observation_conditions": [
             "same_group_has_at_least_3_comparable_holdings",
             "relative_strength_ranks_in_bottom_third",
@@ -374,6 +388,7 @@ def _peer_comparison(
                 metric, failure = _history_metric(
                     symbol, history_loader(symbol),
                     expected_market_date=expected_market_date,
+                    allow_prior_close=allow_prior_close,
                 )
             except Exception:
                 metric, failure = None, "peer_history_load_failed"
@@ -407,13 +422,20 @@ def _peer_comparison(
         row["symbol"] for group in industry_groups for row in group["rows"]
     }
     missing_multi_member = sorted(set(multi_member_symbols) - comparable_industry_symbols)
+    lagging_industry_symbols = sorted({
+        row["symbol"] for group in industry_groups for row in group["rows"]
+        if int(row.get("market_date_lag_days") or 0) > 0
+    })
     available = bool(industry_groups) and classification.get("industry_coverage_gate") is True
     status = (
-        "complete" if available and not missing_multi_member else
+        "complete" if available and not missing_multi_member
+        and not lagging_industry_symbols else
         "partial" if available else "blocked"
     )
     if missing_multi_member:
         blockers.append("peer_history_coverage_incomplete")
+    if lagging_industry_symbols:
+        blockers.append("peer_history_prior_close_reference")
     observations = []
     for group in industry_groups:
         count = group["comparable_count"]
@@ -449,6 +471,8 @@ def _peer_comparison(
                     observation["name"] = row["name"]
                 observations.append(observation)
     failure_categories = []
+    if status != "complete" and lagging_industry_symbols:
+        failure_categories.append("data_lag")
     if (status != "complete" and requested_history_symbols
             and (failures or history_loader is None)):
         failure_categories.append("data_gap")
@@ -482,6 +506,10 @@ def _peer_comparison(
             "multi_member_industry_stock_count": len(multi_member_symbols),
             "comparable_industry_stock_count": len(comparable_industry_symbols),
             "missing_multi_member_symbols": missing_multi_member[:100],
+            "prior_close_reference_symbols": lagging_industry_symbols[:100],
+            "market_as_of_dates": sorted({
+                row["market_as_of"] for group in industry_groups for row in group["rows"]
+            }),
             "failure_by_symbol": {
                 symbol: failures[symbol] for symbol in sorted(failures)[:100]
             },
@@ -495,6 +523,7 @@ def classify_holdings(
     holdings: list[dict[str, Any]], asset_types: dict[str, str], *, as_of: str,
     expected_market_date: str | None = None,
     history_loader: Callable[[str], Any] | None = None,
+    allow_prior_close: bool = False,
 ) -> dict[str, Any]:
     """Return bounded account evidence; never infer labels from stock names."""
     stocks = sorted({
@@ -535,5 +564,6 @@ def classify_holdings(
         stocks=stocks, classification=classification, themes=themes,
         expected_market_date=expected_market_date or as_of[:10],
         history_loader=history_loader, stock_names=stock_names,
+        allow_prior_close=allow_prior_close,
     ))
     return base

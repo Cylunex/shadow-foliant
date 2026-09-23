@@ -245,7 +245,7 @@ def test_peer_comparison_distinguishes_partial_data_gap(tmp_path, monkeypatch):
     histories = {
         "000001": _history(today, 30, 15),
         "600000": _history(today, 10, 5),
-        "601169": _history((date.today() - timedelta(days=1)).isoformat(), -20, -5),
+        "601169": _history((date.today() - timedelta(days=20)).isoformat(), -20, -5),
     }
     result = classify_holdings(
         [{"code": symbol} for symbol in histories],
@@ -260,3 +260,32 @@ def test_peer_comparison_distinguishes_partial_data_gap(tmp_path, monkeypatch):
         "601169": "peer_history_not_current",
     }
     assert result["peer_data_quality"]["missing_multi_member_symbols"] == ["601169"]
+
+
+def test_prior_close_reference_is_available_but_explicitly_partial(tmp_path, monkeypatch):
+    today = date.today().isoformat()
+    prior = (date.today() - timedelta(days=1)).isoformat()
+    _source(tmp_path, monkeypatch, [
+        ("000001", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("600000", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+    ])
+    histories = {
+        "000001": _history(prior, 30, 15),
+        "600000": _history(prior, 10, 5),
+    }
+    result = classify_holdings(
+        [{"code": symbol} for symbol in histories],
+        {symbol: "stock" for symbol in histories}, as_of=today,
+        expected_market_date=today, history_loader=histories.get,
+        allow_prior_close=True,
+    )
+
+    assert result["peer_comparison_status"] == "partial"
+    assert result["peer_comparison_available"] is True
+    assert result["peer_comparison_failure_category"] == "data_lag"
+    assert result["peer_comparison_blockers"] == ["peer_history_prior_close_reference"]
+    assert result["peer_data_quality"]["market_as_of_dates"] == [prior]
+    assert result["peer_data_quality"]["prior_close_reference_symbols"] == [
+        "000001", "600000",
+    ]
+    assert result["industry_peer_group_count"] == 1
