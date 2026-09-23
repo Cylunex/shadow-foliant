@@ -506,6 +506,7 @@ class ScheduledSnapshotService:
         strategy_evidence_reader: Callable[..., dict[str, Any]] | None = None,
         cash_reader: Callable[[], dict[str, Any]] | None = None,
         security_metadata_reader: Callable[[str], dict[str, Any]] | None = None,
+        peer_history_loader: Callable[[str], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
@@ -523,6 +524,7 @@ class ScheduledSnapshotService:
         self.strategy_evidence_reader = strategy_evidence_reader
         self.cash_reader = cash_reader
         self.security_metadata_reader = security_metadata_reader
+        self.peer_history_loader = peer_history_loader
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
 
     def _project_intraday_from_loaded_facts(
@@ -625,6 +627,12 @@ class ScheduledSnapshotService:
             )
         if self.security_metadata_reader is None:
             self.security_metadata_reader = default_metadata_reader(self.store)
+        if self.peer_history_loader is None:
+            import datahub
+
+            self.peer_history_loader = lambda symbol: datahub.kline(
+                symbol, "1y", "1d", adjust="qfq", cache_only=True,
+            )
 
     @staticmethod
     def _missing(code: str, hint: str) -> dict[str, Any]:
@@ -2059,6 +2067,10 @@ class ScheduledSnapshotService:
         )
         portfolio_industry = classify_holdings(
             holding_rows, stock_budget.get("classifications") or {}, as_of=now.isoformat(),
+            expected_market_date=(
+                trading_day.get("latest_confirmed_open_date") or today
+            ),
+            history_loader=self.peer_history_loader,
         )
         available_cash = stock_budget.get("available_cash_cny")
         preview_context = context
@@ -2499,6 +2511,11 @@ class ScheduledSnapshotService:
                 "miaoxiang": miaoxiang.get("as_of"),
                 "external_independent_research": external_research.get("decision_as_of"),
                 "holdings": holdings.get("as_of"),
+                "portfolio_industry_peers": (
+                    (portfolio_industry.get("peer_data_quality") or {}).get(
+                        "expected_market_date"
+                    )
+                ),
                 "quotes": quotes.get("as_of"),
                 "post_close_review": (
                     captured_at if post_close_review.get("due") else None

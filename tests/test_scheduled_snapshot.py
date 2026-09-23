@@ -190,6 +190,7 @@ def build_service(
         "sources": [{"source": "test_security_master"}],
         "errors": [],
     },
+    peer_history_loader=lambda _symbol: None,
     strategy_evidence_reader=lambda **kwargs: {
         "horizon_days": kwargs.get("horizon_days"), "lookback_days": 180,
         "strategies": [{
@@ -245,6 +246,7 @@ def build_service(
         external_research_reader=external_research_reader,
         cash_reader=cash_reader,
         security_metadata_reader=security_metadata_reader,
+        peer_history_loader=peer_history_loader,
         clock=clock,
     )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import date, datetime, timedelta
 import json
+import pandas as pd
 from zoneinfo import ZoneInfo
 
 from application.industry_classification import classify_holdings
@@ -16,6 +17,19 @@ def _source(tmp_path, monkeypatch, rows):
         writer.writerow(("股票代码", "计入日期", "行业代码", "更新日期"))
         writer.writerows(rows)
     monkeypatch.setenv("FOLIANT_SW_CLASSIFICATION_CSV", str(path))
+
+
+def _history(day: str, return_60d: float, return_20d: float):
+    dates = pd.date_range(end=day, periods=61, freq="D")
+    start = 100.0
+    middle = start * (1 + return_60d / 100) / (1 + return_20d / 100)
+    first = [start * (middle / start) ** (index / 40) for index in range(41)]
+    second = [middle * ((middle * (1 + return_20d / 100)) / middle) ** (index / 20)
+              for index in range(1, 21)]
+    frame = pd.DataFrame({"Close": first + second}, index=dates)
+    frame.attrs.update({"datahub_source": "fresh_cache", "datahub_stale": False,
+                        "datahub_cache_age_days": 0.0})
+    return frame
 
 
 def test_current_classification_is_point_in_time_and_excludes_fund(tmp_path, monkeypatch):
@@ -163,10 +177,86 @@ def test_qq_summary_names_industry_groups_without_sending():
         "portfolio_industry": {
             "stock_count": 2, "excluded_fund_count": 1, "coverage": 1,
             "industry_coverage_gate": True,
+            "peer_comparison_status": "complete",
+            "pruning_observation_count": 1,
             "industry_groups": [
                 {"industry_l1_name": "银行", "holding_count": 2},
             ],
         },
     })
     assert "持仓一级行业（前三）：银行2只" in body
-    assert "同行/剪枝 待主题和行情证据" in body
+    assert "同行比较可用，弱势观察 1 只（需连续确认，非交易指令）" in body
+
+
+def test_multi_horizon_peer_comparison_and_pruning_watch_are_traceable(
+    tmp_path, monkeypatch,
+):
+    today = date.today().isoformat()
+    rows = [
+        ("000001", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("600000", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("601169", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("600519", "2020-01-01", "340401", "2020-01-02 10:00:00"),
+        ("000858", "2020-01-01", "340401", "2020-01-02 10:00:00"),
+    ]
+    _source(tmp_path, monkeypatch, rows)
+    histories = {
+        "000001": _history(today, 30, 15),
+        "600000": _history(today, 10, 5),
+        "601169": _history(today, -20, -5),
+        "600519": _history(today, 8, 3),
+        "000858": _history(today, -3, 1),
+    }
+    holdings = [{"code": symbol} for symbol in histories]
+    result = classify_holdings(
+        holdings, {symbol: "stock" for symbol in histories}, as_of=today,
+        expected_market_date=today, history_loader=histories.get,
+    )
+
+    assert result["peer_comparison_status"] == "complete"
+    assert result["peer_comparison_available"] is True
+    assert result["pruning_status"] == "complete"
+    assert result["industry_peer_group_count"] == 2
+    bank = next(group for group in result["peer_groups"] if group["group_id"] == "48")
+    assert [row["symbol"] for row in bank["rows"]] == ["000001", "600000", "601169"]
+    assert all(len(row["input_hash"]) == 64 for row in bank["rows"])
+    assert result["pruning_observations"] == [{
+        "symbol": "601169", "group_kind": "industry_l1", "group_id": "48",
+        "group_name": "银行", "peer_rank": 3, "peer_count": 3,
+        "relative_strength_score": 0.0, "return_20d_pct": -5.0,
+        "return_60d_pct": -20.0, "excess_vs_group_median_20d_pct": -10.0,
+        "excess_vs_group_median_60d_pct": -30.0, "market_as_of": today,
+        "status": "watch_pending_consecutive_confirmation",
+        "required_consecutive_snapshots": 2, "trade_action": None,
+        "execution_price": None,
+    }]
+    assert result["peer_methodology"]["single_day_return_used"] is False
+    assert result["peer_methodology"]["execution_price_authority"] is False
+    assert result["auto_execution"] is False
+
+
+def test_peer_comparison_distinguishes_partial_data_gap(tmp_path, monkeypatch):
+    today = date.today().isoformat()
+    _source(tmp_path, monkeypatch, [
+        ("000001", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("600000", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+        ("601169", "2020-01-01", "480101", "2020-01-02 10:00:00"),
+    ])
+    histories = {
+        "000001": _history(today, 30, 15),
+        "600000": _history(today, 10, 5),
+        "601169": _history((date.today() - timedelta(days=1)).isoformat(), -20, -5),
+    }
+    result = classify_holdings(
+        [{"code": symbol} for symbol in histories],
+        {symbol: "stock" for symbol in histories}, as_of=today,
+        expected_market_date=today, history_loader=histories.get,
+    )
+
+    assert result["peer_comparison_status"] == "partial"
+    assert result["peer_comparison_available"] is True
+    assert result["peer_comparison_failure_category"] == "data_gap"
+    assert result["peer_data_quality"]["failure_by_symbol"] == {
+        "601169": "peer_history_not_current",
+    }
+    assert result["peer_data_quality"]["missing_multi_member_symbols"] == ["601169"]

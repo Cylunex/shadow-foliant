@@ -502,7 +502,15 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"申万行业：股票 {industry.get('stock_count', '未知')} 只、"
             f"基金排除 {industry.get('excluded_fund_count', '未知')} 只；"
             f"代码覆盖 {float(industry.get('coverage') or 0):.1%}；"
-            f"同行/剪枝 {'待主题和行情证据' if industry.get('industry_coverage_gate') else '覆盖不足，暂停'}"
+            + (
+                f"同行比较可用，弱势观察 {industry.get('pruning_observation_count') or 0} 只"
+                "（需连续确认，非交易指令）"
+                if industry.get("peer_comparison_status") == "complete" else
+                f"同行比较部分可用，弱势观察 {industry.get('pruning_observation_count') or 0} 只"
+                "（数据缺口详见快照）"
+                if industry.get("peer_comparison_status") == "partial" else
+                "同行比较暂停（历史数据或质量门槛不足）"
+            )
         ),
         (
             f"股票预算：¥{float(stock_budget.get('total_budget_cny') or 0):,.0f}；"

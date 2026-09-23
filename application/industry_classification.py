@@ -15,11 +15,15 @@ from datetime import date, datetime
 from functools import lru_cache
 import hashlib
 import io
+import json
+import math
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from application.manual_concepts import classify_manual_concepts
 
@@ -27,6 +31,10 @@ from application.manual_concepts import classify_manual_concepts
 HEADERS = ("股票代码", "计入日期", "行业代码", "更新日期")
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MIN_COVERAGE = 0.95
+PEER_HORIZONS = (20, 60)
+MIN_PEER_HISTORY_ROWS = max(PEER_HORIZONS) + 1
+MIN_COMPARABLE_PEERS = 2
+MIN_PRUNING_PEERS = 3
 SOURCE_URL = "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
 _CODE = re.compile(r"^[0-9]{6}$")
 
@@ -191,8 +199,302 @@ def classify_symbols(symbols: list[str], *, as_of: str) -> dict[str, Any]:
     return base
 
 
+def _history_metric(
+    symbol: str, frame: Any, *, expected_market_date: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate one cache-only qfq series and derive multi-horizon returns."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None, "peer_history_missing"
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        return None, "peer_history_dates_invalid"
+    history = frame.copy()
+    if history.index.tz is not None:
+        history.index = history.index.tz_convert(ZoneInfo("Asia/Shanghai")).tz_localize(None)
+    history = history.sort_index()
+    if history.index.hasnans or history.index.normalize().has_duplicates:
+        return None, "peer_history_dates_invalid"
+    close_column = next(
+        (column for column in history.columns if str(column).lower() == "close"), None
+    )
+    if close_column is None:
+        return None, "peer_history_close_missing"
+    boundary = pd.Timestamp(expected_market_date)
+    closes = pd.to_numeric(
+        history.loc[history.index.normalize() <= boundary, close_column], errors="coerce",
+    )
+    if len(closes) < MIN_PEER_HISTORY_ROWS:
+        return None, "peer_history_incomplete"
+    values = closes.tail(MIN_PEER_HISTORY_ROWS)
+    if (not all(math.isfinite(float(value)) for value in values)
+            or (values <= 0).any()):
+        return None, "peer_history_values_invalid"
+    market_as_of = values.index[-1].date().isoformat()
+    if market_as_of != expected_market_date:
+        return None, "peer_history_not_current"
+    returns = {
+        f"return_{horizon}d_pct": round(
+            (float(values.iloc[-1]) / float(values.iloc[-horizon - 1]) - 1) * 100, 4,
+        )
+        for horizon in PEER_HORIZONS
+    }
+    trace = {
+        "symbol": symbol,
+        "market_as_of": market_as_of,
+        "history_rows": len(values),
+        **returns,
+        "input_hash": hashlib.sha256(json.dumps({
+            "dates": [item.isoformat() for item in values.index],
+            "closes": [round(float(value), 8) for value in values],
+        }, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest(),
+        "source": str(frame.attrs.get("datahub_source") or "injected_cache"),
+        "cache_stale": bool(frame.attrs.get("datahub_stale", False)),
+        "cache_age_days": frame.attrs.get("datahub_cache_age_days"),
+    }
+    cached_at = frame.attrs.get("datahub_cache_written_at")
+    if cached_at is not None:
+        try:
+            trace["cache_written_at"] = datetime.fromtimestamp(
+                float(cached_at), ZoneInfo("Asia/Shanghai")
+            ).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+    return trace, None
+
+
+def _rank_group(
+    *, kind: str, group_id: str, group_name: str | None, symbols: list[str],
+    metrics: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    comparable = [metrics[symbol] for symbol in sorted(set(symbols)) if symbol in metrics]
+    if len(comparable) < MIN_COMPARABLE_PEERS:
+        return None
+    medians = {
+        horizon: float(pd.Series([
+            row[f"return_{horizon}d_pct"] for row in comparable
+        ]).median())
+        for horizon in PEER_HORIZONS
+    }
+    percentile_by_horizon: dict[int, dict[str, float]] = {}
+    for horizon in PEER_HORIZONS:
+        series = pd.Series({
+            row["symbol"]: row[f"return_{horizon}d_pct"] for row in comparable
+        })
+        ranks = series.rank(method="average", ascending=False)
+        denominator = max(len(series) - 1, 1)
+        percentile_by_horizon[horizon] = {
+            symbol: round((len(series) - float(rank)) / denominator * 100, 2)
+            for symbol, rank in ranks.items()
+        }
+    rows = []
+    for metric in comparable:
+        symbol = metric["symbol"]
+        horizon_percentiles = {
+            f"peer_percentile_{horizon}d": percentile_by_horizon[horizon][symbol]
+            for horizon in PEER_HORIZONS
+        }
+        score = round(sum(horizon_percentiles.values()) / len(PEER_HORIZONS), 2)
+        rows.append({
+            **metric,
+            **horizon_percentiles,
+            "relative_strength_score": score,
+            **{
+                f"excess_vs_group_median_{horizon}d_pct": round(
+                    metric[f"return_{horizon}d_pct"] - medians[horizon], 4,
+                )
+                for horizon in PEER_HORIZONS
+            },
+        })
+    rows.sort(key=lambda row: (-row["relative_strength_score"], row["symbol"]))
+    for rank, row in enumerate(rows, start=1):
+        row["peer_rank"] = rank
+        row["peer_count"] = len(rows)
+    return {
+        "group_kind": kind,
+        "group_id": group_id,
+        "group_name": group_name,
+        "holding_count": len(set(symbols)),
+        "comparable_count": len(rows),
+        "market_as_of": min(row["market_as_of"] for row in rows),
+        "median_return_20d_pct": round(medians[20], 4),
+        "median_return_60d_pct": round(medians[60], 4),
+        "rows": rows,
+    }
+
+
+def _peer_comparison(
+    *, stocks: list[str], classification: dict[str, Any], themes: dict[str, Any],
+    expected_market_date: str, history_loader: Callable[[str], Any] | None,
+    stock_names: dict[str, str],
+) -> dict[str, Any]:
+    methodology = {
+        "version": "cache-only-multi-horizon-v1",
+        "adjustment": "qfq",
+        "horizons_trading_days": list(PEER_HORIZONS),
+        "relative_strength": "mean_of_within_group_20d_and_60d_return_percentiles",
+        "single_day_return_used": False,
+        "minimum_comparable_peers": MIN_COMPARABLE_PEERS,
+        "minimum_pruning_peers": MIN_PRUNING_PEERS,
+        "pruning_observation_conditions": [
+            "same_group_has_at_least_3_comparable_holdings",
+            "relative_strength_ranks_in_bottom_third",
+            "20d_and_60d_returns_both_below_group_median",
+            "confirm_on_at_least_2_consecutive_scheduled_snapshots",
+            "combine_with_fundamentals_and_existing_rule_plan_before_human_decision",
+        ],
+        "execution_price_authority": False,
+        "auto_execution": False,
+    }
+    blockers = []
+    if not classification.get("industry_coverage_gate"):
+        blockers.append("industry_coverage_gate_failed")
+    multi_member_symbols = sorted({
+        symbol
+        for group in classification.get("industry_groups") or []
+        if int(group.get("holding_count") or 0) >= MIN_COMPARABLE_PEERS
+        for symbol in group.get("symbols") or []
+    })
+    if not multi_member_symbols:
+        blockers.append("no_multi_member_industry_groups")
+    multi_member_theme_symbols = {
+        symbol
+        for group in themes.get("theme_groups") or []
+        if int(group.get("holding_count") or 0) >= MIN_COMPARABLE_PEERS
+        for symbol in group.get("symbols") or []
+    }
+    requested_history_symbols = sorted(
+        set(multi_member_symbols) | multi_member_theme_symbols
+    )
+    if requested_history_symbols and history_loader is None:
+        blockers.append("peer_history_loader_unavailable")
+    metrics: dict[str, dict[str, Any]] = {}
+    failures: dict[str, str] = {}
+    if history_loader is not None:
+        for symbol in requested_history_symbols:
+            try:
+                metric, failure = _history_metric(
+                    symbol, history_loader(symbol),
+                    expected_market_date=expected_market_date,
+                )
+            except Exception:
+                metric, failure = None, "peer_history_load_failed"
+            if metric is not None:
+                if stock_names.get(symbol):
+                    metric["name"] = stock_names[symbol]
+                metrics[symbol] = metric
+            elif failure:
+                failures[symbol] = failure
+    industry_groups = [
+        group for item in classification.get("industry_groups") or []
+        if (group := _rank_group(
+            kind="industry_l1",
+            group_id=str(item.get("industry_l1_code") or ""),
+            group_name=item.get("industry_l1_name"),
+            symbols=list(item.get("symbols") or []), metrics=metrics,
+        )) is not None
+    ]
+    theme_groups = [
+        group for item in themes.get("theme_groups") or []
+        if (group := _rank_group(
+            kind="theme",
+            group_id=str(item.get("thscode") or ""), group_name=item.get("label"),
+            symbols=list(item.get("symbols") or []), metrics=metrics,
+        )) is not None
+    ]
+    groups = industry_groups + theme_groups
+    if not industry_groups and multi_member_symbols:
+        blockers.append("no_industry_group_meets_history_quality_gate")
+    comparable_industry_symbols = {
+        row["symbol"] for group in industry_groups for row in group["rows"]
+    }
+    missing_multi_member = sorted(set(multi_member_symbols) - comparable_industry_symbols)
+    available = bool(industry_groups) and classification.get("industry_coverage_gate") is True
+    status = (
+        "complete" if available and not missing_multi_member else
+        "partial" if available else "blocked"
+    )
+    if missing_multi_member:
+        blockers.append("peer_history_coverage_incomplete")
+    observations = []
+    for group in industry_groups:
+        count = group["comparable_count"]
+        if count < MIN_PRUNING_PEERS:
+            continue
+        bottom_count = max(1, math.ceil(count / 3))
+        for row in group["rows"][-bottom_count:]:
+            if (row["excess_vs_group_median_20d_pct"] < 0
+                    and row["excess_vs_group_median_60d_pct"] < 0):
+                observation = {
+                    "symbol": row["symbol"],
+                    "group_kind": group["group_kind"],
+                    "group_id": group["group_id"],
+                    "group_name": group["group_name"],
+                    "peer_rank": row["peer_rank"],
+                    "peer_count": row["peer_count"],
+                    "relative_strength_score": row["relative_strength_score"],
+                    "return_20d_pct": row["return_20d_pct"],
+                    "return_60d_pct": row["return_60d_pct"],
+                    "excess_vs_group_median_20d_pct": row[
+                        "excess_vs_group_median_20d_pct"
+                    ],
+                    "excess_vs_group_median_60d_pct": row[
+                        "excess_vs_group_median_60d_pct"
+                    ],
+                    "market_as_of": row["market_as_of"],
+                    "status": "watch_pending_consecutive_confirmation",
+                    "required_consecutive_snapshots": 2,
+                    "trade_action": None,
+                    "execution_price": None,
+                }
+                if row.get("name"):
+                    observation["name"] = row["name"]
+                observations.append(observation)
+    failure_categories = []
+    if (status != "complete" and requested_history_symbols
+            and (failures or history_loader is None)):
+        failure_categories.append("data_gap")
+    if status != "complete" and (
+        not classification.get("industry_coverage_gate") or not multi_member_symbols
+    ):
+        failure_categories.append("quality_gate")
+    failure_category = (
+        None if not failure_categories else
+        failure_categories[0] if len(failure_categories) == 1 else "mixed"
+    )
+    return {
+        "peer_comparison_engine_status": "enabled",
+        "peer_comparison_status": status,
+        "peer_comparison_available": available,
+        "peer_comparison_failure_category": failure_category,
+        "peer_comparison_failure_categories": failure_categories,
+        "peer_comparison_blockers": list(dict.fromkeys(blockers)),
+        "peer_groups": groups[:100],
+        "industry_peer_group_count": len(industry_groups),
+        "theme_peer_group_count": len(theme_groups),
+        "pruning_status": status if available else "blocked",
+        "pruning_observations": observations[:100],
+        "pruning_observation_count": len(observations),
+        "peer_data_quality": {
+            "status": status,
+            "expected_market_date": expected_market_date,
+            "requested_stock_count": len(stocks),
+            "requested_history_stock_count": len(requested_history_symbols),
+            "history_usable_count": len(metrics),
+            "multi_member_industry_stock_count": len(multi_member_symbols),
+            "comparable_industry_stock_count": len(comparable_industry_symbols),
+            "missing_multi_member_symbols": missing_multi_member[:100],
+            "failure_by_symbol": {
+                symbol: failures[symbol] for symbol in sorted(failures)[:100]
+            },
+            "cache_only": True,
+        },
+        "peer_methodology": methodology,
+    }
+
+
 def classify_holdings(
     holdings: list[dict[str, Any]], asset_types: dict[str, str], *, as_of: str,
+    expected_market_date: str | None = None,
+    history_loader: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """Return bounded account evidence; never infer labels from stock names."""
     stocks = sorted({
@@ -205,6 +507,12 @@ def classify_holdings(
         for row in holdings
         if asset_types.get(str(row.get("symbol") or row.get("code") or "").zfill(6)) == "fund_or_etf_or_lof"
     })
+    stock_names = {
+        symbol: str(row.get("name") or "").strip()
+        for row in holdings
+        if (symbol := str(row.get("symbol") or row.get("code") or "").zfill(6)) in stocks
+        and str(row.get("name") or "").strip()
+    }
     base: dict[str, Any] = {
         "status": "missing", "as_of": as_of, "stock_count": len(stocks),
         "excluded_fund_count": len(funds), "coverage": None, "rows": [],
@@ -223,4 +531,9 @@ def classify_holdings(
         row["theme_labels"] = [item["label"] for item in evidence]
         row["theme_evidence"] = evidence
     base["rows"] = base["rows"][:100]
+    base.update(_peer_comparison(
+        stocks=stocks, classification=classification, themes=themes,
+        expected_market_date=expected_market_date or as_of[:10],
+        history_loader=history_loader, stock_names=stock_names,
+    ))
     return base
