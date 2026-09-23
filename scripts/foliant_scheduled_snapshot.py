@@ -405,7 +405,8 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     lines = [
         f"日期：{day.get('date') or '未知'}；交易日证据："
         f"{'已确认' if day.get('confirmed') else '未知'}",
-        f"正式选股：TOP15 {len(formal.get('formal_top15') or [])} 只，TOP5 {len(top5)} 只；"
+        f"正式选股（{formal.get('display_name') or '正式本地PIT融合榜'}）："
+        f"TOP15 {len(formal.get('formal_top15') or [])} 只，TOP5 {len(top5)} 只；"
         f"状态 {formal.get('status') or 'missing'}",
     ]
     if top5:
@@ -426,6 +427,14 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             f"PIT 行情输入截至 {independent.get('market_as_of')}；"
             "不等同于当日盘后新研究。"
         )
+    compatibility = independent.get("version_compatibility") or {}
+    if compatibility:
+        lines.append(
+            f"独立量化版本：{independent.get('strategy_version') or '未知'}；"
+            f"兼容状态 {compatibility.get('status') or 'unknown'}；"
+            f"权重契约 {'保持' if compatibility.get('weight_contract_preserved') else '不匹配'}；"
+            "v1 外部叠加仅保留为历史，不回填。"
+        )
     if external.get("status") == "complete":
         labels = [
             f"{row.get('name') or row.get('symbol')}({row.get('symbol')})"
@@ -443,9 +452,10 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
             "以下正式选股、持仓和风控取自可用快照。"
         )
     elif external.get("status") in {"stale", "missing", "degraded"}:
+        reasons = ",".join(external.get("stale_reason_codes") or []) or "not_current"
         lines.append(
             "外部独立研究：今日不可用或已过期，旧排名和个股事件加分不参与判断；"
-            "仅对比正式选股与独立量化底座。"
+            f"仅对比正式选股与独立量化底座（原因 {reasons}）。"
         )
     lines.extend([
         (f"问财 OpenAPI 试运行参考：{reference.get('trial_data_groups') or 0}/5 组有数据；"

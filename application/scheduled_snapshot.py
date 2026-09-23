@@ -25,6 +25,12 @@ from application.stock_budget import (
 EXPECTED_WENCAI_STRATEGIES = (
     "低价擒牛", "低估值", "主力资金", "小市值", "净利增长",
 )
+INDEPENDENT_CURRENT_VERSION = "codex-independent-v2"
+INDEPENDENT_PREVIOUS_VERSION = "codex-independent-v1"
+INDEPENDENT_WEIGHT_CONTRACT = {
+    "fundamental_quality": 30, "medium_trend": 25, "valuation": 20,
+    "flow_liquidity": 15, "risk_discount": 10,
+}
 POST_CLOSE_REVIEW_HOUR = 20
 POST_CLOSE_REVIEW_MINUTE = 45
 POST_CLOSE_JOBS = (
@@ -700,6 +706,43 @@ class ScheduledSnapshotService:
         data = value.get("data") or {}
         top15 = [_candidate(row) for row in data.get("formal_top15") or []]
         top5 = [_candidate(row) for row in data.get("formal_top5") or []]
+        fusion_policy = ((data.get("strategy_inputs") or {}).get("fusion_policy") or {})
+
+        def declare_local_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for row in rows:
+                labels = [str(label) for label in row.get("source_labels") or []]
+                row["source_label_details"] = [{
+                    "name": label,
+                    "namespace": (
+                        "local_pit_core" if label == "本地PIT" else
+                        "local_technical_genome" if label == "技术基因组" else
+                        "local_strategy"
+                    ),
+                    "role": "membership_nomination_input",
+                } for label in labels]
+                row["source_labels_role"] = "local_nomination_inputs"
+                row["external_reference_input"] = False
+            return rows
+
+        top15 = declare_local_sources(top15)
+        top5 = declare_local_sources(top5)
+        source_partitions = {
+            "local_pit_core": [
+                row["symbol"] for row in top15
+                if any(item["namespace"] == "local_pit_core"
+                       for item in row.get("source_label_details") or [])
+            ],
+            "local_strategy": [
+                row["symbol"] for row in top15
+                if any(item["namespace"] == "local_strategy"
+                       for item in row.get("source_label_details") or [])
+            ],
+            "local_technical_genome": [
+                row["symbol"] for row in top15
+                if any(item["namespace"] == "local_technical_genome"
+                       for item in row.get("source_label_details") or [])
+            ],
+        }
         state = _status(value)
         selection_date = str(data.get("selection_date") or "")
         expected = str(trading_day.get("latest_confirmed_open_date") or "")
@@ -712,6 +755,21 @@ class ScheduledSnapshotService:
             "selection_date": selection_date or None,
             "market_as_of": (value.get("provenance") or {}).get("market_as_of"),
             "run_id": (value.get("provenance") or {}).get("run_id"),
+            "selection_identity": "formal_local_pit_fusion",
+            "display_name": "正式本地PIT融合榜",
+            "strategy_version": fusion_policy.get("version") or "local-fusion-v2",
+            "source_boundary": {
+                "membership_inputs": [
+                    "local_pit_core", "local_strategy",
+                    "local_technical_genome",
+                ],
+                "external_references_excluded": [
+                    "wencai", "miaoxiang", "external_independent_research",
+                ],
+                "source_labels_semantics": "local_membership_nomination_inputs",
+                "wencai_can_change_membership_rank_or_score": False,
+            },
+            "source_partitions": source_partitions,
             "formal_top15": top15[:15],
             "formal_top5": top5[:5],
             "as_of": value.get("provenance") or {},
@@ -844,6 +902,8 @@ class ScheduledSnapshotService:
                 'reference_mode': 'openapi_trial' if trial_active else 'shadow_validation',
                 'trial_authorized': trial_active,
                 'replacement_status': replacement_status,
+                'expected_market_as_of': formal.get('market_as_of'),
+                'market_as_of_verified_groups': 0,
                 'valid_semantic_sample_day': False,
                 'required_user_options': [] if trial_active else [
                     'upgrade_entitlement', 'retain_legacy_reference',
@@ -867,6 +927,8 @@ class ScheduledSnapshotService:
                 'target_top_n', 'top_n_coverage', 'eligible_top_n_count',
                 'financial_periods_verified', 'capital_flow_metric_verified',
                 'financial_period_evidence', 'threshold_conditions_verified',
+                'yoy_baseline_verified', 'yoy_baseline_evidence',
+                'market_as_of_expected', 'market_as_of_verified',
                 'condition_evidence', 'query_contract_verified',
                 'ranking_verified', 'semantic_verified', 'verification_stage',
                 'scope_rejected_sample_count', 'scope_rejection_counts',
@@ -886,6 +948,9 @@ class ScheduledSnapshotService:
             int(payload.get('semantic_verified_groups') or 0) if current else 0
         )
         semantic_verified = semantic_verified_groups == len(EXPECTED_WENCAI_STRATEGIES)
+        market_as_of_verified_groups = sum(
+            bool(row.get('market_as_of_verified')) for row in groups
+        )
         effective_replacement_status = (
             str(payload.get('replacement_status') or '') if current else ''
         ) or replacement_status
@@ -893,6 +958,9 @@ class ScheduledSnapshotService:
             'status': str(payload.get('status') or 'missing') if current else 'stale',
             'provider': 'iwencai_openapi', 'ready_groups': int(payload.get('ready_groups') or 0) if current else 0,
             'semantic_verified_groups': semantic_verified_groups,
+            'expected_market_as_of': payload.get('expected_market_as_of')
+                                     or formal.get('market_as_of'),
+            'market_as_of_verified_groups': market_as_of_verified_groups,
             'data_groups': int(payload.get('data_groups') or 0) if current else 0,
             'usage': usage,
             'groups': groups, 'as_of': payload.get('executed_at'),
@@ -1011,12 +1079,18 @@ class ScheduledSnapshotService:
                     f"independent_selection.market_as_of({market_as_of or 'missing'}) != "
                     f"formal_selection_date({expected})"
                 )
+        strategy_version = str(payload.get("strategy_version") or "") or None
+        weights = clean_json(payload.get("weights") or {})
+        weight_contract_preserved = all(
+            weights.get(name) == expected
+            for name, expected in INDEPENDENT_WEIGHT_CONTRACT.items()
+        )
         return {
             "status": status,
             "availability": payload.get("status") or "unavailable",
             "reason": reason,
             "strategy_id": payload.get("strategy_id"),
-            "strategy_version": payload.get("strategy_version"),
+            "strategy_version": strategy_version,
             "strategy_hash": payload.get("strategy_hash"),
             "manifest_id": payload.get("manifest_id"),
             "input_snapshot_id": payload.get("input_snapshot_id"),
@@ -1025,7 +1099,25 @@ class ScheduledSnapshotService:
             "market_as_of_role": "selection_input_market_date",
             "selection_session_date": selection_date,
             "expected_market_as_of": expected,
-            "weights": clean_json(payload.get("weights") or {}),
+            "weights": weights,
+            "version_compatibility": {
+                "current_version": INDEPENDENT_CURRENT_VERSION,
+                "previous_version": INDEPENDENT_PREVIOUS_VERSION,
+                "status": (
+                    "current" if strategy_version == INDEPENDENT_CURRENT_VERSION else
+                    "legacy_compatible_read_only" if strategy_version == INDEPENDENT_PREVIOUS_VERSION else
+                    "unknown"
+                ),
+                "weight_contract": dict(INDEPENDENT_WEIGHT_CONTRACT),
+                "weight_contract_preserved": weight_contract_preserved,
+                "v2_change": "industry_neutral_cross_sectional_comparison",
+                "historical_results_rewritten": False,
+                "external_overlay_must_match_exact_base_version": True,
+                "migration_note": (
+                    "Plans must request codex-independent-v2; v1 overlays remain historical only. "
+                    "Weights stay 30/25/20/15/10 and no historical ranking is backfilled."
+                ),
+            },
             "top15": [_candidate(row) for row in (payload.get("top15") or [])][:15],
             "top5": [_candidate(row) for row in (payload.get("top5") or [])][:5],
             "independence_boundary": payload.get("independence_boundary"),
@@ -1244,6 +1336,16 @@ class ScheduledSnapshotService:
             and overlay.get("base_strategy_version") == independent.get("strategy_version")
             and overlay.get("base_input_snapshot_id") == independent.get("input_snapshot_id")
         )
+        stale_reason_codes = []
+        if overlay:
+            if raw.get("status") != "ready":
+                stale_reason_codes.append("external_research_not_ready")
+            if overlay.get("selection_run_id") != formal.get("run_id"):
+                stale_reason_codes.append("formal_selection_run_mismatch")
+            if overlay.get("base_strategy_version") != independent.get("strategy_version"):
+                stale_reason_codes.append("independent_strategy_version_mismatch")
+            if overlay.get("base_input_snapshot_id") != independent.get("input_snapshot_id"):
+                stale_reason_codes.append("independent_input_snapshot_mismatch")
         historical_top15 = [_candidate(row) | {
             "base_rank": row.get("base_rank"),
             "base_score": row.get("base_score"),
@@ -1272,6 +1374,11 @@ class ScheduledSnapshotService:
         } if current else None
         return clean_json({
             "status": "complete" if current else "stale" if overlay else "missing",
+            "stale_reason_codes": stale_reason_codes if not current else [],
+            "base_strategy_version": overlay.get("base_strategy_version"),
+            "expected_base_strategy_version": independent.get("strategy_version"),
+            "base_input_snapshot_id": overlay.get("base_input_snapshot_id"),
+            "expected_base_input_snapshot_id": independent.get("input_snapshot_id"),
             "channel": raw.get("channel") or "codex-external-independent-v1",
             "overlay_id": overlay.get("overlay_id"),
             "idempotency_key": overlay.get("idempotency_key")

@@ -415,6 +415,9 @@ def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():
     assert result["external_independent_research"]["top15"] == []
     assert result["external_independent_research"]["top5"] == []
     assert result["external_independent_research"]["comparison"] is None
+    assert result["external_independent_research"]["stale_reason_codes"] == [
+        "independent_input_snapshot_mismatch",
+    ]
     assert result["external_independent_research"]["pricing_guard"]["ranking_preserved"] is False
     assert result["source_comparison"]["external_top5"] is None
     assert "external_independent" in result["source_comparison"]["unavailable_sources"]
@@ -422,6 +425,37 @@ def test_external_research_with_wrong_base_snapshot_is_stale_but_non_blocking():
     assert "external_independent_research" in result["quality"]["optional_degradations"]
     from scripts import foliant_scheduled_snapshot as cli
     assert "旧排名和个股事件加分不参与判断" in cli.render_qq_report(result)[1]
+
+
+def test_snapshot_namespaces_formal_local_inputs_and_declares_v2_migration():
+    value = selection()
+    value["data"]["formal_top15"][0]["source_labels"] = ["低估值", "主力资金"]
+    value["data"]["formal_top5"][0]["source_labels"] = ["低估值", "主力资金"]
+    value["data"]["strategy_inputs"] = {
+        "fusion_policy": {"version": "local-fusion-v2"},
+    }
+    independent = value["data"]["references"]["independent"]
+    independent["strategy_version"] = "codex-independent-v2"
+
+    result = build_service(selection_value=value).read(owner_id="scheduled-agent")["data"]
+    formal = result["formal_selection"]
+    assert formal["selection_identity"] == "formal_local_pit_fusion"
+    assert formal["strategy_version"] == "local-fusion-v2"
+    assert formal["source_boundary"]["external_references_excluded"] == [
+        "wencai", "miaoxiang", "external_independent_research",
+    ]
+    assert formal["source_partitions"]["local_strategy"] == ["600001"]
+    first = formal["formal_top5"][0]
+    assert first["source_labels"] == ["低估值", "主力资金"]
+    assert {row["namespace"] for row in first["source_label_details"]} == {"local_strategy"}
+    assert first["source_labels_role"] == "local_nomination_inputs"
+    assert first["external_reference_input"] is False
+
+    compatibility = result["independent_selection"]["version_compatibility"]
+    assert compatibility["status"] == "current"
+    assert compatibility["weight_contract_preserved"] is True
+    assert compatibility["historical_results_rewritten"] is False
+    assert compatibility["external_overlay_must_match_exact_base_version"] is True
 
 
 def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():

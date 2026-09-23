@@ -32,19 +32,23 @@ _DIRECT_PROXIES = {'http': '', 'https': '', 'all': ''}
 _DATE_FIELD = re.compile(r'\[(20\d{6})\]')
 _CODE_FIELD = ('股票代码', '证券代码', '代码', 'stock_code', 'symbol')
 _NAME_FIELD = ('股票简称', '证券简称', '名称', 'stock_name', 'name')
+_PROFIT_GROWTH_FIELDS = (
+    '归母净利润同比增长率', '归属母公司股东的净利润同比增长率',
+    '归母净利润增长率', '净利润同比增长率',
+)
 _REQUIRED_FIELDS = {
-    '低价擒牛': (('收盘价', '最新价', '股价'), ('归母净利润同比增长率',), ('成交额',)),
+    '低价擒牛': (('收盘价', '最新价', '股价'), _PROFIT_GROWTH_FIELDS, ('成交额',)),
     '低估值': (('市盈率ttm',), ('市净率',), ('股息率',), ('资产负债率',), ('流通市值',)),
     '主力资金': (('主力资金净流入', '主力资金流向'),),
-    '小市值': (('总市值',), ('营业收入同比增长率',), ('归母净利润同比增长率',)),
-    '净利增长': (('归母净利润同比增长率',), ('成交额',)),
+    '小市值': (('总市值',), ('营业收入同比增长率',), _PROFIT_GROWTH_FIELDS),
+    '净利增长': (_PROFIT_GROWTH_FIELDS, ('上一交易日成交额', '成交额')),
 }
 _SORT_FIELDS = {
     '低价擒牛': (('成交额',), False),
     '低估值': (('流通市值',), False),
     '主力资金': (('主力资金净流入', '主力资金流向'), True),
     '小市值': (('总市值',), False),
-    '净利增长': (('成交额',), False),
+    '净利增长': (('上一交易日成交额', '成交额'), False),
 }
 _TARGET_TOP_N = {'低价擒牛': 5, '低估值': 10, '主力资金': 5,
                  '小市值': 5, '净利增长': 5}
@@ -64,6 +68,7 @@ _REPORT_SOURCE_FIELDS = {
     '净利增长': ('净利润来源说明',),
 }
 _REPORT_PERIOD = re.compile(r'(20\d{2})年(一季报|中报|三季报|年报)')
+_REPORT_DATES = frozenset(('0331', '0630', '0930', '1231'))
 
 
 def configured_key() -> str:
@@ -115,12 +120,33 @@ def _field_candidates(row: dict, aliases: tuple[str, ...]) -> list[str]:
     return exact or matched
 
 
-def _numeric(value) -> bool:
+def _number(value) -> float | None:
+    """Parse bounded provider numerics without weakening metric semantics."""
     try:
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value))
-    except OverflowError:
-        return False
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            text = str(value).strip().replace(',', '').replace('，', '')
+            if not text or text.casefold() in {'--', '-', 'n/a', 'none', 'null', 'nan'}:
+                return None
+            multiplier = 1.0
+            for suffix, factor in (('亿元', 1e8), ('亿', 1e8), ('万元', 1e4),
+                                   ('万', 1e4), ('千元', 1e3), ('千', 1e3),
+                                   ('元', 1.0), ('%', 1.0), ('％', 1.0)):
+                if text.endswith(suffix):
+                    text = text[:-len(suffix)].strip()
+                    multiplier = factor
+                    break
+            number = float(text) * multiplier
+        return number if math.isfinite(number) else None
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _numeric(value) -> bool:
+    return _number(value) is not None
 
 
 def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | None, dict]:
@@ -129,8 +155,8 @@ def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | N
     details = []
     for field in candidates[:6]:
         match = _DATE_FIELD.search(field)
-        numeric = [float(row[field]) for row in sample
-                   if _numeric(row.get(field))]
+        numeric = [number for row in sample
+                   if (number := _number(row.get(field))) is not None]
         details.append({
             'field': field[:80],
             'numeric_rows': len(numeric),
@@ -186,8 +212,8 @@ def _threshold_checks(name: str, sample: list[dict],
     for field_index, operator, threshold, unit in _CONDITION_RULES[name]:
         field = selected_fields[field_index] if field_index < len(selected_fields) else None
         values = [row.get(field) for row in sample] if field else []
-        numeric = [float(value) for value in values
-                   if _numeric(value)]
+        numeric = [number for value in values
+                   if (number := _number(value)) is not None]
         matched = sum(operators[operator](value, threshold) for value in numeric)
         passed = bool(sample and len(numeric) == len(sample) and matched == len(sample))
         verified &= passed
@@ -207,6 +233,12 @@ def _report_period(value) -> str | None:
     return match.group(1) + suffix[match.group(2)]
 
 
+def _field_report_period(field: str) -> str | None:
+    match = _DATE_FIELD.search(field)
+    value = match.group(1) if match else None
+    return value if value and value[-4:] in _REPORT_DATES else None
+
+
 def _financial_period_checks(name: str, sample: list[dict],
                              field_evidence: list[dict]) -> tuple[bool, list[dict]]:
     if name not in _FINANCIAL_GROUPS:
@@ -224,11 +256,26 @@ def _financial_period_checks(name: str, sample: list[dict],
                 'verified': passed,
             })
         return bool(evidence and all(item['verified'] for item in evidence)), evidence
-    for field in _REPORT_SOURCE_FIELDS.get(name, ()):
+    metric_indices = {
+        '低价擒牛': (1,), '小市值': (1, 2), '净利增长': (0,),
+    }.get(name, ())
+    selected_metric_periods = [
+        _field_report_period(str(field_evidence[index].get('selected_field') or ''))
+        for index in metric_indices if index < len(field_evidence)
+    ]
+    for index, field in enumerate(_REPORT_SOURCE_FIELDS.get(name, ())):
         periods = [_report_period(row.get(field)) for row in sample]
         unique = sorted({period for period in periods if period})
-        passed = bool(sample and len(unique) == 1 and all(periods))
-        evidence.append({'source_field': field, 'periods': unique[:3], 'verified': passed})
+        metric_period = (selected_metric_periods[index]
+                         if index < len(selected_metric_periods) else None)
+        if not unique and metric_period:
+            unique = [metric_period]
+        passed = bool(sample and len(unique) == 1
+                      and (all(periods) or metric_period == unique[0]))
+        evidence.append({
+            'source_field': field, 'metric_field_period': metric_period,
+            'periods': unique[:3], 'verified': passed,
+        })
     if name == '小市值' and len(evidence) == 2:
         same_period = evidence[0]['periods'] == evidence[1]['periods']
         evidence.append({'source_field': '收入与净利润报告期',
@@ -237,14 +284,39 @@ def _financial_period_checks(name: str, sample: list[dict],
     return bool(evidence and all(item['verified'] for item in evidence)), evidence
 
 
-def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
+def _yoy_baseline_checks(name: str, field_evidence: list[dict],
+                         financial_evidence: list[dict]) -> tuple[bool, list[dict]]:
+    indices = {'低价擒牛': (1,), '小市值': (1, 2), '净利增长': (0,)}.get(name, ())
+    if not indices:
+        return True, []
+    periods = [item.get('periods', [None])[0] if item.get('periods') else None
+               for item in financial_evidence if item.get('source_field') != '收入与净利润报告期']
+    evidence = []
+    for position, index in enumerate(indices):
+        field = str(field_evidence[index].get('selected_field') or '')
+        period = periods[position] if position < len(periods) else None
+        baseline = str(int(period[:4]) - 1) + period[4:] if period else None
+        passed = bool(field and '同比' in field and period and baseline)
+        evidence.append({
+            'field': field or None, 'report_period': period,
+            'baseline_period': baseline, 'basis': 'same_period_previous_year',
+            'verified': passed,
+        })
+    return bool(evidence and all(item['verified'] for item in evidence)), evidence
+
+
+def _semantic_checks(name: str, rows: list[dict], query: str,
+                     expected_market_as_of: str | None = None) -> dict:
     if not rows:
         return {'required_numeric_fields': False, 'sort_verified': False,
                 'stock_scope_verified': False, 'sort_field_as_of': None,
                 'field_evidence': [], 'financial_periods_verified': False,
                 'financial_period_evidence': [], 'capital_flow_metric_verified': False,
+                'yoy_baseline_verified': False, 'yoy_baseline_evidence': [],
                 'threshold_conditions_verified': False, 'condition_evidence': [],
                 'query_contract_verified': False, 'as_of_verified': False,
+                'market_as_of_expected': expected_market_as_of,
+                'market_as_of_verified': False,
                 'local_conditions_verified': False, 'eligible_top_n_count': 0}
     sample = rows[:20]
     evidence = [_field_evidence(sample, aliases) for aliases in _REQUIRED_FIELDS[name]]
@@ -253,8 +325,8 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
     required = all(field is not None for field in selected_fields)
     aliases, descending = _SORT_FIELDS[name]
     sort_field, sort_evidence = _field_evidence(sample, aliases)
-    values = [row.get(sort_field) for row in sample] if sort_field else []
-    sort_verified = bool(values and all(isinstance(value, (int, float)) for value in values)
+    values = [_number(row.get(sort_field)) for row in sample] if sort_field else []
+    sort_verified = bool(values and all(value is not None for value in values)
                          and all((left >= right if descending else left <= right)
                                  for left, right in zip(values, values[1:])))
     rejections = [_scope_rejections(name, row) for row in sample]
@@ -266,6 +338,9 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
     financial_periods, financial_evidence = _financial_period_checks(
         name, sample, field_evidence,
     )
+    yoy_baseline, yoy_evidence = _yoy_baseline_checks(
+        name, field_evidence, financial_evidence,
+    )
     threshold_conditions, condition_evidence = _threshold_checks(
         name, sample, selected_fields,
     )
@@ -276,13 +351,20 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
          and date_match and '主力资金净流入额' in query)
     )
     try:
-        datetime.strptime(date_match.group(1) if date_match else '', '%Y%m%d')
-        as_of_verified = True
+        sort_as_of = date_match.group(1) if date_match else ''
+        datetime.strptime(sort_as_of, '%Y%m%d')
+        expected = str(expected_market_as_of or '').replace('-', '')[:8]
+        market_as_of_verified = bool(expected and sort_as_of == expected)
+        # Direct library callers may not have the calendar contract; production
+        # jobs always provide it and therefore cannot confuse a merely dated
+        # field with the latest completed trading session.
+        as_of_verified = market_as_of_verified if expected else True
     except ValueError:
         as_of_verified = False
+        market_as_of_verified = False
     local_conditions = bool(
         query_contract and required and threshold_conditions and scope_verified
-        and financial_periods and capital_flow_metric and as_of_verified
+        and financial_periods and yoy_baseline and capital_flow_metric and as_of_verified
     )
     rejection_counts: dict[str, int] = {}
     for reasons in rejections:
@@ -300,7 +382,11 @@ def _semantic_checks(name: str, rows: list[dict], query: str) -> dict:
         'as_of_verified': as_of_verified,
         'financial_periods_verified': financial_periods,
         'financial_period_evidence': financial_evidence,
+        'yoy_baseline_verified': yoy_baseline,
+        'yoy_baseline_evidence': yoy_evidence,
         'capital_flow_metric_verified': capital_flow_metric,
+        'market_as_of_expected': expected_market_as_of,
+        'market_as_of_verified': market_as_of_verified,
         'local_conditions_verified': local_conditions,
         'eligible_top_n_count': min(target, sum(eligible)),
         'scope_rejected_sample_count': len(eligible) - sum(eligible),
@@ -395,7 +481,8 @@ def _one_page(query: str, page: int, key: str, *, session=None) -> dict:
             client.close()
 
 
-def run_group(name: str, *, session=None, key: str | None = None) -> dict:
+def run_group(name: str, *, session=None, key: str | None = None,
+              expected_market_as_of: str | None = None) -> dict:
     """At most two pages and one result per group; errors never cross groups."""
     if name not in ORDER:
         raise ValueError('unknown_wencai_group')
@@ -445,7 +532,7 @@ def run_group(name: str, *, session=None, key: str | None = None) -> dict:
             symbols.append(symbol)
     dates = [m.group(1) for row in rows[:20] for field in row
              for m in [_DATE_FIELD.search(str(field))] if m]
-    checks = _semantic_checks(name, rows, query)
+    checks = _semantic_checks(name, rows, query, expected_market_as_of)
     target = _TARGET_TOP_N[name]
     selected_rows = [row for row in rows if _eligible_row(name, row)]
     top_n_coverage = len({_symbol(row) for row in selected_rows[:PAGE_LIMIT]}) >= min(total or 0, target)
@@ -480,6 +567,8 @@ def run_group(name: str, *, session=None, key: str | None = None) -> dict:
         reasons.append('sort_metric_date_missing')
     if not checks['financial_periods_verified']:
         reasons.append('financial_period_missing')
+    if not checks['yoy_baseline_verified']:
+        reasons.append('yoy_baseline_unverified')
     if not checks['capital_flow_metric_verified']:
         reasons.append('capital_flow_net_inflow_unverified')
     if not top_n_coverage:
@@ -525,13 +614,15 @@ def run_group(name: str, *, session=None, key: str | None = None) -> dict:
 
 
 def run_shadow(old_reference: dict | None = None, *, session=None,
-               key: str | None = None, group_runner=None) -> dict:
+               key: str | None = None, group_runner=None,
+               expected_market_as_of: str | None = None) -> dict:
     """Read-only five-group evaluation; no candidate ranking or trading side effects."""
     old = (old_reference or {}).get('strategies') or {}
     groups = []
     for name in ORDER:
         row = (group_runner(name) if group_runner is not None else
-               run_group(name, session=session, key=key))
+               run_group(name, session=session, key=key,
+                         expected_market_as_of=expected_market_as_of))
         old_row = old.get(name) or {}
         old_symbols = {_symbol(p) for p in (old_row.get('picks') or []) if isinstance(p, dict)}
         new_symbols = set(row.get('picks') or [])
@@ -552,6 +643,7 @@ def run_shadow(old_reference: dict | None = None, *, session=None,
                    else 'complete' if all(g['status'] == 'complete' for g in groups)
                    else 'degraded'),
         'executed_at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(timespec='seconds'),
+        'expected_market_as_of': expected_market_as_of,
         'groups': groups, 'ready_groups': sum(g['status'] == 'complete' for g in groups),
         'semantic_verified_groups': semantic_verified_groups,
         'data_groups': sum(bool(g.get('schema_valid') and g.get('returned_count')) for g in groups),

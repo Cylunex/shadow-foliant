@@ -44,6 +44,8 @@ def test_exact_queries_and_fixed_order():
     assert '上一交易日主力资金净流入额由大到小排名' in QUERIES['主力资金']
     assert '显示上一交易日主力资金净流入额' in QUERIES['主力资金']
     assert '显示最新价、归母净利润同比增长率、成交额' in QUERIES['低价擒牛']
+    assert '最新报告期归母净利润同比增长率≥10%' in QUERIES['净利增长']
+    assert '上一交易日成交额由小到大' in QUERIES['净利增长']
 
 
 def test_missing_key_has_no_network_request(monkeypatch):
@@ -204,6 +206,10 @@ def test_premarket_sampling_cache_is_reused_after_formal_selection(tmp_path, mon
                 }}},
             }
 
+        def expected_market_as_of(self, _day, *, inclusive=False):
+            assert inclusive is False
+            return '2026-09-22'
+
         def save_selection_artifact(self, run_id, artifact_type, payload):
             saved.append((run_id, artifact_type, payload))
 
@@ -211,7 +217,10 @@ def test_premarket_sampling_cache_is_reused_after_formal_selection(tmp_path, mon
     monkeypatch.setattr(hub, '_wait_task_dependency', lambda *_args: True)
     monkeypatch.setattr(hub, '_log_run', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hub, '_iwencai_shadow_premarket_path', lambda: path)
-    monkeypatch.setattr(hub, '_iwencai_shadow_isolated', lambda _old: (calls.append(1), sample)[1])
+    monkeypatch.setattr(
+        hub, '_iwencai_shadow_isolated',
+        lambda _old, **_kwargs: (calls.append(1), sample)[1],
+    )
     monkeypatch.setattr(source, 'configured_key', lambda: 'present')
     monkeypatch.setattr(research_store, 'ResearchStore', Store)
 
@@ -252,13 +261,15 @@ def test_open_retry_only_resamples_unverified_group(monkeypatch):
 
         def latest_formal_selection(self):
             return {'run_id': 'formal-1', 'selection_date': today,
+                    'metadata': {'market_as_of': '2026-09-22'},
                     'artifacts': artifacts}
 
         def save_selection_artifact(self, run_id, artifact_type, payload):
             saved.append((run_id, artifact_type, payload))
             artifacts[artifact_type] = {'payload': payload}
 
-    def fake_isolated(_old, *, cached_verified):
+    def fake_isolated(_old, *, cached_verified, expected_market_as_of=None):
+        assert expected_market_as_of == '2026-09-22'
         sampled.extend(name for name in ORDER if name not in cached_verified)
         return source.run_shadow(group_runner=lambda name: (
             dict(cached_verified[name]) if name in cached_verified else
@@ -440,7 +451,11 @@ def test_all_five_groups_can_be_locally_semantic_and_ranking_verified():
         session = Session([Response({'datas': fixtures[name], 'code_count': 20,
                                      'chunks_info': {}})])
         with patch('data.sources.iwencai_openapi.provider_slot', return_value=nullcontext()):
-            results.append(source.run_group(name, session=session, key='test-key'))
+            results.append(source.run_group(
+                name, session=session, key='test-key',
+                expected_market_as_of=('2026-09-18' if name == '主力资金'
+                                       else '2026-09-21'),
+            ))
 
     assert [row['status'] for row in results] == ['complete'] * 5
     assert all(row['local_conditions_verified'] for row in results)
@@ -450,6 +465,44 @@ def test_all_five_groups_can_be_locally_semantic_and_ranking_verified():
     assert [row['data_as_of'] for row in results] == [
         '20260921', '20260921', '20260918', '20260921', '20260921',
     ]
+
+
+def test_profit_growth_provider_alias_strings_period_yoy_and_market_date_are_verified():
+    rows = [{
+        '股票代码': f'00{i:04d}.SZ', '股票简称': '测试',
+        '净利润同比增长率[20260630]': f'{20 + i}%',
+        '上一交易日成交额[20260922]': f'{i + 1}万元',
+    } for i in range(20)]
+    session = Session([Response({'datas': rows, 'code_count': 20, 'chunks_info': {}})])
+    with patch.object(source, 'provider_slot', return_value=nullcontext()):
+        result = source.run_group(
+            '净利增长', session=session, key='test-key',
+            expected_market_as_of='2026-09-22',
+        )
+    assert result['status'] == 'complete'
+    assert result['required_numeric_fields'] is True
+    assert result['threshold_conditions_verified'] is True
+    assert result['financial_periods_verified'] is True
+    assert result['yoy_baseline_verified'] is True
+    assert result['yoy_baseline_evidence'][0]['baseline_period'] == '20250630'
+    assert result['sort_verified'] is True
+    assert result['market_as_of_verified'] is True
+    assert result['data_as_of'] == '20260922'
+    assert result['failure_reasons'] == []
+
+
+def test_profit_growth_dated_field_does_not_verify_wrong_completed_market_date():
+    rows = [{
+        '股票代码': f'00{i:04d}.SZ', '股票简称': '测试',
+        '净利润同比增长率[20260630]': 20.0,
+        '上一交易日成交额[20260919]': float(i + 1),
+    } for i in range(20)]
+    result = source._semantic_checks(
+        '净利增长', rows, QUERIES['净利增长'], '2026-09-22',
+    )
+    assert result['as_of_verified'] is False
+    assert result['market_as_of_verified'] is False
+    assert result['local_conditions_verified'] is False
 
 
 def test_miaoxiang_error_dict_is_not_neutral():

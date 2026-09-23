@@ -4695,19 +4695,24 @@ def task_strategy_prefetch_retry():
     )
 
 
-def _iwencai_shadow_group_to_file(name: str, filename: str) -> None:
+def _iwencai_shadow_group_to_file(
+    name: str, filename: str, expected_market_as_of: str | None = None,
+) -> None:
     """Child process persists only bounded diagnostics, never a credential."""
     import json as _json
     import os as _os
     from data.sources.iwencai_openapi import run_group
 
-    result = run_group(name)
+    result = run_group(name, expected_market_as_of=expected_market_as_of)
     fd = _os.open(filename, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
     with _os.fdopen(fd, 'w', encoding='utf-8') as handle:
         _json.dump(result, handle, ensure_ascii=False)
 
 
-def _iwencai_shadow_isolated(old_reference: dict, *, cached_verified=None) -> dict:
+def _iwencai_shadow_isolated(
+    old_reference: dict, *, cached_verified=None,
+    expected_market_as_of: str | None = None,
+) -> dict:
     import json as _json
     import os as _os
     import tempfile as _tempfile
@@ -4721,7 +4726,8 @@ def _iwencai_shadow_isolated(old_reference: dict, *, cached_verified=None) -> di
             filename = _os.path.join(directory, str(len(_os.listdir(directory))) + '.json')
             isolated = run_isolated_task(
                 'iwencai_openapi:' + name, _iwencai_shadow_group_to_file,
-                (name, filename), {}, timeout_seconds=35, cancel_grace_seconds=1,
+                (name, filename, expected_market_as_of), {},
+                timeout_seconds=35, cancel_grace_seconds=1,
             )
             if isolated.get('status') != 'complete':
                 return {'name': name, 'status': (
@@ -4735,7 +4741,10 @@ def _iwencai_shadow_isolated(old_reference: dict, *, cached_verified=None) -> di
                 return {'name': name, 'status': 'result_unavailable', 'picks': [],
                         'pages_fetched': 0, 'schema_valid': False, 'data_as_of': None}
 
-        return run_shadow(old_reference, group_runner=group_runner)
+        return run_shadow(
+            old_reference, group_runner=group_runner,
+            expected_market_as_of=expected_market_as_of,
+        )
 
 
 def _iwencai_shadow_premarket_path():
@@ -4766,7 +4775,18 @@ def task_iwencai_openapi_shadow_premarket():
             _log_run(job, 'skipped', error='same_day_shadow_cached', started_at=started,
                      finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
             return
-        result = _iwencai_shadow_isolated({})
+        from data.research_store import ResearchStore
+        expected_market_as_of = ResearchStore(ensure_schema=False).expected_market_as_of(
+            datetime.now(_RUN_TIMEZONE).date().isoformat(), inclusive=False,
+        )
+        if not expected_market_as_of:
+            _log_run(job, 'skipped', error='expected_market_as_of_unavailable',
+                     started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return
+        result = _iwencai_shadow_isolated(
+            {}, expected_market_as_of=expected_market_as_of,
+        )
         result['sampling_slot'] = 'premarket'
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
@@ -4813,6 +4833,10 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
                      notify=False)
             return
         old = (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
+        expected_market_as_of = str(
+            (formal.get('metadata') or {}).get('market_as_of')
+            or formal.get('market_as_of') or ''
+        ) or None
         from data.sources.iwencai_openapi import configured_key, run_shadow
         cached = None
         if slot == 'premarket':
@@ -4833,11 +4857,17 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
                 return
         if cached:
             rows = {row['name']: row for row in cached['groups']}
-            result = run_shadow(old, group_runner=lambda name: dict(rows[name]))
+            result = run_shadow(
+                old, group_runner=lambda name: dict(rows[name]),
+                expected_market_as_of=expected_market_as_of,
+            )
             result['sampled_at'] = cached['executed_at']
         else:
-            result = (_iwencai_shadow_isolated(old) if configured_key() else
-                      run_shadow(old, key=''))
+            result = (_iwencai_shadow_isolated(
+                          old, expected_market_as_of=expected_market_as_of,
+                      ) if configured_key() else
+                      run_shadow(old, key='',
+                                 expected_market_as_of=expected_market_as_of))
             result['sampled_at'] = result['executed_at']
         result['sampling_slot'] = slot
         result['selection_run_id'] = str(formal.get('run_id') or '')
@@ -4893,7 +4923,14 @@ def _iwencai_shadow_open_retry():
                      finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
             return
         old = (artifacts.get('wencai_strategy_runs') or {}).get('payload') or {}
-        result = _iwencai_shadow_isolated(old, cached_verified=verified)
+        expected_market_as_of = str(
+            (formal.get('metadata') or {}).get('market_as_of')
+            or formal.get('market_as_of') or ''
+        ) or None
+        result = _iwencai_shadow_isolated(
+            old, cached_verified=verified,
+            expected_market_as_of=expected_market_as_of,
+        )
         result['sampled_at'] = result['executed_at']
         result['base_sampled_at'] = premarket.get('sampled_at')
         result['sampling_slot'] = 'open_retry'
