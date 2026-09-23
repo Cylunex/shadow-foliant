@@ -153,11 +153,26 @@ def fetch_snapshot() -> dict[str, Any]:
         )
     if (isinstance(payload, dict) and payload.get("data") is None
             and "inline result was truncated" in (payload.get("warnings") or [])):
-        return _failure(
+        failure = _failure(
             "agent_snapshot_truncated",
             "The protected Agent snapshot exceeded its inline budget; do not notify.",
             status="degraded",
         )
+        transport = ((payload.get("continuation") or {}).get("transport") or {})
+        if isinstance(transport, dict):
+            sizes = {
+                str(key): int(value)
+                for key, value in (transport.get("section_bytes") or {}).items()
+                if isinstance(key, str) and isinstance(value, int) and value >= 0
+            }
+            failure["error"]["transport"] = {
+                key: int(transport[key])
+                for key in ("max_bytes", "uncompressed_bytes", "gzip_bytes")
+                if isinstance(transport.get(key), int) and transport[key] >= 0
+            }
+            if sizes:
+                failure["error"]["transport"]["section_bytes"] = sizes
+        return failure
     snapshot = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != "scheduled-agent-snapshot-v1":
         return _failure(

@@ -1331,11 +1331,28 @@ def test_route_requires_exact_scheduled_capability():
                                  headers={"Authorization": token})
             assert allowed.status_code == 200
             read.assert_called_once_with(owner_id="scheduled-agent")
-            fake_result["data"] = {"padding": "x" * 300000}
+            fake_result["data"] = {"padding": "x" * 500000}
             post_close_sized = client.get("/api/machine/v1/agent/scheduled-snapshot",
                                           headers={"Authorization": token})
             assert post_close_sized.status_code == 200
             assert post_close_sized.json()["data"] == fake_result["data"]
+            assert post_close_sized.headers["content-encoding"] == "gzip"
+            assert int(post_close_sized.headers["content-length"]) <= 262144
+            assert int(post_close_sized.headers["x-foliant-uncompressed-bytes"]) > 262144
+
+            identity_only = client.get(
+                "/api/machine/v1/agent/scheduled-snapshot",
+                headers={"Authorization": token, "Accept-Encoding": "identity"},
+            )
+            assert identity_only.status_code == 200
+            truncated = identity_only.json()
+            assert truncated["data"] is None
+            assert "inline result was truncated" in truncated["warnings"]
+            transport = truncated["continuation"]["transport"]
+            assert transport["max_bytes"] == 262144
+            assert transport["uncompressed_bytes"] > 262144
+            assert transport["gzip_bytes"] < 262144
+            assert transport["section_bytes"]["padding"] == 500002
 
 
 def test_cli_missing_config_is_structured_and_does_not_call_http(monkeypatch):
@@ -1410,12 +1427,24 @@ def test_cli_truncated_snapshot_never_sends_qq(monkeypatch):
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     response = SimpleNamespace(
         status_code=200,
-        json=lambda: {"status": "complete", "data": None,
-                      "warnings": ["inline result was truncated"]},
+        json=lambda: {
+            "status": "complete", "data": None,
+            "warnings": ["inline result was truncated"],
+            "continuation": {"transport": {
+                "max_bytes": 262144, "uncompressed_bytes": 500000,
+                "gzip_bytes": 300000,
+                "section_bytes": {"holdings": 120000, "trade_plans": 180000},
+            }},
+        },
     )
     with patch.object(cli.requests, "get", return_value=response):
         failure = cli.fetch_snapshot()
     assert failure["error"]["code"] == "agent_snapshot_truncated"
+    assert failure["error"]["transport"] == {
+        "max_bytes": 262144, "uncompressed_bytes": 500000,
+        "gzip_bytes": 300000,
+        "section_bytes": {"holdings": 120000, "trade_plans": 180000},
+    }
     with patch.object(notification_router, "send") as send:
         notification = cli.send_qq(failure)
     assert notification["sent"] is False

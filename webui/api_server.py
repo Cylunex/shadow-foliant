@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import gzip
 from typing import Annotated, Any, Literal
 
 _log_webui = logging.getLogger("webui")   # _err 脱敏:完整异常进日志、对外回通用文案
@@ -26,7 +27,7 @@ import _bootstrap  # noqa: E402,F401
 from fastapi import FastAPI, Header, Query, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import JSONResponse, RedirectResponse, Response  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator  # noqa: E402
 from webui.access_control import (  # noqa: E402
@@ -281,21 +282,57 @@ def _agent_error(error, *, default_status: int = 500):
     )
 
 
-def _agent_result(value, *, max_bytes: int = 262144, status_code: int = 200):
+def _agent_result(
+    value, *, max_bytes: int = 262144, status_code: int = 200,
+    request: Request | None = None,
+):
     import json
 
-    rendered = json.dumps(_jsonsafe(value), ensure_ascii=False, separators=(",", ":"),
+    safe_value = _jsonsafe(value)
+    rendered = json.dumps(safe_value, ensure_ascii=False, separators=(",", ":"),
                           allow_nan=False).encode("utf-8")
     if len(rendered) <= max_bytes:
-        return JSONResponse(_jsonsafe(value), status_code=status_code)
+        return JSONResponse(safe_value, status_code=status_code)
+    compressed = gzip.compress(rendered, compresslevel=6, mtime=0)
+    accepted_encodings = {
+        item.split(";", 1)[0].strip().lower()
+        for item in str(request.headers.get("accept-encoding") if request else "").split(",")
+    }
+    if "gzip" in accepted_encodings and len(compressed) <= max_bytes:
+        return Response(
+            content=compressed,
+            status_code=status_code,
+            media_type="application/json",
+            headers={
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding",
+                "X-Foliant-Uncompressed-Bytes": str(len(rendered)),
+            },
+        )
+    data = safe_value.get("data") if isinstance(safe_value, dict) else None
+    section_bytes = {}
+    if isinstance(data, dict):
+        section_bytes = {
+            str(key): len(json.dumps(item, ensure_ascii=False, separators=(",", ":"),
+                                    allow_nan=False).encode("utf-8"))
+            for key, item in data.items()
+        }
     bounded = {
-        "summary": str((value or {}).get("summary") or "result exceeds inline budget"),
-        "resource_uri": str((value or {}).get("resource_uri") or ""),
-        "status": str((value or {}).get("status") or "complete"),
-        "provenance": (value or {}).get("provenance") or {},
-        "warnings": list((value or {}).get("warnings") or []) + ["inline result was truncated"],
+        "summary": str((safe_value or {}).get("summary") or "result exceeds inline budget"),
+        "resource_uri": str((safe_value or {}).get("resource_uri") or ""),
+        "status": str((safe_value or {}).get("status") or "complete"),
+        "provenance": (safe_value or {}).get("provenance") or {},
+        "warnings": list((safe_value or {}).get("warnings") or []) + ["inline result was truncated"],
         "data": None,
-        "continuation": {"resource_uri": str((value or {}).get("resource_uri") or "")},
+        "continuation": {
+            "resource_uri": str((safe_value or {}).get("resource_uri") or ""),
+            "transport": {
+                "max_bytes": max_bytes,
+                "uncompressed_bytes": len(rendered),
+                "gzip_bytes": len(compressed),
+                "section_bytes": section_bytes,
+            },
+        },
     }
     return JSONResponse(_jsonsafe(bounded), status_code=status_code)
 
