@@ -767,7 +767,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     # a fresh trigger for every holding.
     for prior_symbol, prior_row in previous_holdings.items():
         key = f"{prior_symbol}:sustained_risk"
-        if key not in states and prior_row.get("action") in {"reduce", "sell"}:
+        if key not in states and _previous_requested_action(prior_row) in {"reduce", "sell"}:
             states[key] = {"active": True,
                            "last_alerted_at": previous.get("generated_at") or current.isoformat()}
     max_upgrades = _bounded_env_int("INTRADAY_MAX_ACTION_UPGRADES", 8, 1, 100)
@@ -888,7 +888,15 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         for kind, active in (("entry", entry), ("stop", stop), ("target", target)):
             _transition(events, states, f"{symbol}:{kind}", bool(active), current,
                         {"trigger_type": kind, "symbol": symbol, "item": row}, cooldown)
-        old_rank = int((states.get(f"{symbol}:action") or {}).get("rank", 0))
+        # Fixed nodes may have guarded a sell to reduce/hold. The twenty-minute
+        # path has no holding override; comparing only the guarded final rank
+        # would invent an upgrade for the same unresolved upstream sell request.
+        prior_holding = previous_holdings.get(symbol) or {}
+        old_rank = max(
+            int((states.get(f"{symbol}:action") or {}).get("rank", 0)),
+            ACTION_RANK.get(_previous_requested_action(prior_holding), 0)
+            if prior_holding else 0,
+        )
         new_rank = ACTION_RANK.get(str(row.get("action")), -1)
         for level in ("reduce", "sell"):
             escalation = (actionable and row.get("action") == level

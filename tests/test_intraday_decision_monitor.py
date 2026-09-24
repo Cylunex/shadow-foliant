@@ -729,6 +729,32 @@ def test_alert_burst_prioritizes_stops_and_groups_remaining_risks():
     assert "完整盘中快照" in body
 
 
+def test_guarded_prior_sell_does_not_reescalate_in_light_monitor():
+    now = datetime(2026, 9, 24, 14, 57, tzinfo=TZ)
+    previous = {
+        "trade_date": now.date().isoformat(), "selection_run_id": "formal-run-1",
+        "generated_at": "2026-09-24T14:30:00+08:00", "plans": _plans(),
+        "holdings": [{"symbol": "000001", "action": "hold",
+                      "requested_action": "sell", "requested_reason": "止损风险"}],
+        "trigger_state": {
+            "000001:stop": {"active": True, "last_alerted_at": "2026-09-24T14:30:00+08:00"},
+            "000001:action": {"rank": 0, "active": False},
+        },
+    }
+    result = monitor.run_cycle(
+        now=now, formal_loader=lambda: _formal(now.date().isoformat()),
+        holdings_loader=lambda: [{"code": "000001", "name": "持仓甲",
+                                  "quantity": 100, "cost_price": 10}],
+        quote_loader=lambda codes: {code: {
+            "price": 8 if code == "000001" else 11, "change_pct": -2,
+            "quote_time": now.strftime("%Y%m%d%H%M%S")} for code in codes},
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None, notify_changes=False,
+    )
+    assert not [event for event in result["events"] if event["symbol"] == "000001"]
+    assert result["holdings"][0]["action"] == "sell"
+
+
 def test_scheduler_registers_twenty_minute_monitor():
     import inspect
 
