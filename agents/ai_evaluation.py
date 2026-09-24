@@ -312,7 +312,8 @@ def format_buckets(results: Dict[str, EvaluationResult], dim: str = 'source') ->
             lines.append('  (样本无入场价,无法计真实收益)')
             continue
         lines.append(f"  综合得分: {r.score}  等级: {r.grade}")
-        lines.append(f"  真实胜率: {m['win_rate_pct']}%  平均收益: {m['avg_return_pct']:+}%  "
+        lines.append(f"  样本盈利占比(含未了结浮动): {m['win_rate_pct']}%  "
+                     f"样本平均回报: {m['avg_return_pct']:+}%  "
                      f"盈亏比: {m['profit_factor']}  (已了结{m['closed']}/持有中{m['pending']})")
     return '\n'.join(lines)
 
@@ -322,7 +323,8 @@ def format_report(result_or_dict) -> str:
         results = {result_or_dict.source or 'ALL': result_or_dict}
     else:
         results = result_or_dict
-    lines = ['=== AI 推荐评估报告 ===']
+    lines = ['=== AI 推荐评估报告 ===',
+             '口径：未了结为浮动估值、已了结为实现收益；盈利占比不是已成交胜率。']
     for src, r in results.items():
         lines.append(f'\n[{_src_cn(src)}]  样本={r.sample_size} 期间={r.period_days}天')
         if r.sample_size == 0:
@@ -330,7 +332,7 @@ def format_report(result_or_dict) -> str:
             continue
         lines.append(f'  综合得分: {r.score}  等级: {r.grade}')
         m = r.metrics
-        lines.append(f"  真实胜率: {m['win_rate_pct']}%  平均收益: {m['avg_return_pct']:+}%  "
+        lines.append(f"  样本盈利占比(含未了结浮动): {m['win_rate_pct']}%  平均回报: {m['avg_return_pct']:+}%  "
                      f"中位: {m['median_return_pct']:+}%  最大亏损: {m['max_loss_pct']}%")
         lines.append(f"  盈亏比: {m['profit_factor']}  已了结: {m['closed']}  "
                      f"持有中: {m['pending']}  (止盈{m['hit_target']}/止损{m['hit_stop']})")
@@ -341,7 +343,7 @@ def format_report(result_or_dict) -> str:
 
 def format_unowned_picks(held_codes: set, days: int = 30,
                          top_winners: int = 10, top_losers: int = 5) -> str:
-    """列出"推荐了但用户没买"的票, 按真实收益排序 — 让用户看到错过的机会 + 幸亏没买的雷。
+    """回看当前未持仓推荐样本；无法据此断言历史上未买入。
 
     Args:
         held_codes: 用户当前持仓代码集合(6 位 zfill)。空集合表示完全没持仓 → 列出所有。
@@ -353,7 +355,7 @@ def format_unowned_picks(held_codes: set, days: int = 30,
         Markdown 文本块, 无未持仓样本返回空字符串。
     """
     recs = _fetch_period(days)
-    unowned = []
+    latest_by_symbol = {}
     for r in recs:
         sym = str(r.get('symbol') or '').zfill(6)
         if not sym or sym in held_codes:
@@ -361,21 +363,26 @@ def format_unowned_picks(held_codes: set, days: int = 30,
         ret = _rec_return(r)
         if ret is None:
             continue
-        unowned.append({
+        candidate = {
             'symbol': sym,
             'name': r.get('name', '') or '',
             'source': r.get('source', '') or '(unknown)',
             'status': r.get('close_reason') or 'pending',
             'return_pct': ret,
-        })
+            'recommended_at': str(r.get('recommended_at') or ''),
+        }
+        previous = latest_by_symbol.get(sym)
+        if previous is None or candidate['recommended_at'] > previous['recommended_at']:
+            latest_by_symbol[sym] = candidate
+    unowned = list(latest_by_symbol.values())
     if not unowned:
         return ''
     unowned.sort(key=lambda x: -x['return_pct'])
 
-    lines = ['', '=== 推荐但未持仓(按真实收益排序) ===']
+    lines = ['', '=== 当前未持仓推荐样本回看（每票仅最近一次；不代表历史未买入） ===']
     n_w = min(top_winners, len(unowned))
     if n_w > 0 and unowned[0]['return_pct'] > 0:
-        lines.append(f'\n📈 错过的机会 Top {n_w}:')
+        lines.append(f'\n📈 正回报样本 Top {n_w}（含未了结浮动）:')
         for r in unowned[:n_w]:
             if r['return_pct'] <= 0:
                 break
@@ -386,7 +393,7 @@ def format_unowned_picks(held_codes: set, days: int = 30,
     if losers:
         losers.sort(key=lambda x: x['return_pct'])  # 跌幅最大在前
         n_l = min(top_losers, len(losers))
-        lines.append(f'\n📉 幸亏没买 Top {n_l} (跌幅最大):')
+        lines.append(f'\n📉 负回报样本 Top {n_l}（含未了结浮动）:')
         for r in losers[:n_l]:
             lines.append(f"  {r['symbol']}  {r['name'][:8]:<8s}  "
                          f"{_src_cn(r['source']):<12s}  {_st_cn(r['status']):<6s}  "

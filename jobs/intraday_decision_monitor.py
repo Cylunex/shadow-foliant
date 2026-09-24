@@ -510,7 +510,9 @@ def _transition(events: list, states: dict, key: str, active: bool, now: datetim
             allowed = now - datetime.fromisoformat(str(last)) >= timedelta(minutes=cooldown_minutes)
         except (TypeError, ValueError):
             allowed = True
-    if active and not was_active and allowed:
+    # An unresolved risk gets a bounded reminder after the cooldown. A fresh
+    # transition is immediate; one unchanged state cannot flood each poll.
+    if active and (not was_active or allowed) and allowed:
         events.append({"state_key": key, **payload})
         old["last_alerted_at"] = now.isoformat(timespec="seconds")
     old["active"] = bool(active)
@@ -534,12 +536,23 @@ def _holding_action_summary(row: dict[str, Any]) -> str:
               "add": "加仓", "data_insufficient": "数据不足"}
     final = str(row.get("action") or "hold")
     requested = str(row.get("requested_action") or final)
-    trigger = str(row.get("requested_reason") or row.get("reason") or "")[:100]
-    final_reason = str(row.get("reason") or "")[:100]
+    trigger = str(row.get("requested_reason") or row.get("reason") or "")[:75]
+    final_reason = str(row.get("reason") or "")[:75]
     if requested != final:
+        guard = row.get("action_guard") or {}
+        codes = (guard.get("transition_reasons") or []) + (guard.get("current_limit_reasons") or [])
+        explanations = {
+            "multi_level_action_jump": "跨级升级需复核",
+            "portfolio_upgrade_count_limit": "本轮升级数超限",
+            "same_reason_upgrade_limit": "同因升级过密",
+            "same_reason_action_limit": "同类风险动作过密",
+            "portfolio_sell_count_limit": "卖出动作数超限",
+            "portfolio_action_count_limit": "总动作数超限",
+        }
+        why = "、".join(dict.fromkeys(explanations.get(code, code) for code in codes)) or "组合保护限制"
         return (f"原始触发{labels.get(requested, requested)}({trigger})→"
-                f"最终{labels.get(final, final)}({final_reason})；原触发未作废，保护不代表风险解除")
-    return f"最终{labels.get(final, final)}({final_reason})"
+                f"本轮判断{labels.get(final, final)}({why})；风险仍在，未发生交易")
+    return f"本轮判断{labels.get(final, final)}({final_reason})；未发生交易"
 
 
 def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, Any],
@@ -597,8 +610,8 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
     for row in shown_h:
         lines.append(
             f"持仓 {row.get('name') or row['symbol']}({_code(row['symbol'])}) 当前{_row_price(row, 'price')}｜"
-            f"{_holding_action_summary(row)}｜卖出/止损{_row_price(row, 'stop_loss')}｜"
-            f"止盈{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
+            f"{_holding_action_summary(row)}｜计划止损参考{_row_price(row, 'stop_loss')}｜"
+            f"目标参考{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
         )
     independent = snapshot.get("independent_selection") or {}
     independent_label = (str(len(independent.get("top5") or []))
@@ -619,12 +632,14 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
             entry = "暂不给价"
         lines.append(
             f"候选 {row.get('name') or row['symbol']}({_code(row['symbol'])}) 当前{_row_price(row, 'price')}｜"
-            f"{row.get('action_cn')}｜买入{entry}｜止损{_row_price(row, 'stop_loss')}｜"
-            f"目标{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
+            f"{row.get('action_cn')}｜"
+            f"{'买入触发参考' if row.get('action') == 'add' else '计划观察区(非买入指令)'}{entry}｜"
+            f"计划止损参考{_row_price(row, 'stop_loss')}｜"
+            f"目标参考{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
         )
     if quality.get("status") != "success":
         lines.append("⚠️ 行情缺失、陈旧或计划不足项已失败关闭，不据此给明确动作")
-    lines.append("价格依据：trade_plan + 正式 manifest qfq 日线；仅研究建议，不自动下单")
+    lines.append("价格依据：trade_plan + 正式 manifest qfq 日线；参考价非委托/成交价，委托价须另核盘口与复权；不自动下单")
     return "\n".join(lines[:8])
 
 
@@ -632,7 +647,8 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
     kind = event.get("trigger_type")
     labels = {
         "entry": "进入买入区", "stop": "触及止损", "target": "触及止盈",
-        "action_escalation": "持仓动作升级", "quote_degraded": "盘中关键数据降级",
+        "action_escalation": "持仓动作升级", "sustained_risk": "持仓风险持续",
+        "quote_degraded": "盘中关键数据降级",
     }
     title = f"盘中提醒：{labels.get(kind, kind)}"
     if kind == "quote_degraded":
@@ -652,11 +668,12 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
     body = [
         f"{row.get('name') or row.get('symbol')}({row.get('symbol')}) 当前{_fmt_price(row.get('price'))}",
         (f"动作：{_holding_action_summary(row)}" if is_holding else
-         f"动作：{row.get('action_cn')}｜买入区{entry}"),
-        f"止损：{_fmt_price(row.get('stop_loss'))}｜第一目标：{_fmt_price(row.get('target_price'))}",
+         f"动作：{row.get('action_cn')}｜"
+         f"{'买入触发参考' if row.get('action') == 'add' else '计划观察区(非买入指令)'}{entry}"),
+        f"计划止损参考：{_fmt_price(row.get('stop_loss'))}｜第一目标参考：{_fmt_price(row.get('target_price'))}",
         f"依据：{row.get('reason') or row.get('price_basis')}",
         f"数据时点：{row.get('quote_as_of') or '未知'}",
-        "仅研究建议，不自动下单",
+        "参考价非委托/成交价；实际委托须另核盘口、复权和时点；不自动下单",
     ]
     return title, "\n".join(body)
 
@@ -846,6 +863,11 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
             _transition(events, states, f"{symbol}:action_escalation:{level}", escalation,
                         current, {"trigger_type": "action_escalation", "symbol": symbol,
                                   "item": row}, cooldown)
+        if is_holding:
+            _transition(events, states, f"{symbol}:sustained_risk",
+                        actionable and row.get("action") in {"reduce", "sell"}, current,
+                        {"trigger_type": "sustained_risk", "symbol": symbol,
+                         "item": row}, max(cooldown, 180))
         action_state = states.setdefault(f"{symbol}:action", {})
         action_state["rank"] = new_rank
         action_state["active"] = new_rank >= ACTION_RANK["reduce"]
@@ -862,6 +884,18 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     selection_comparison = compare_selection_lanes(
         formal_top15, independent_selection, wencai
     )
+    # One quote can satisfy stop, target and action conditions together. Send
+    # one highest-priority explanation per symbol while retaining every trigger
+    # state and the complete decision row in the snapshot.
+    event_priority = {"stop": 5, "target": 4, "action_escalation": 3,
+                      "entry": 2, "sustained_risk": 1, "quote_degraded": 0}
+    by_symbol = {}
+    for event in events:
+        symbol = event["symbol"]
+        if (symbol not in by_symbol or event_priority.get(event["trigger_type"], 0)
+                > event_priority.get(by_symbol[symbol]["trigger_type"], 0)):
+            by_symbol[symbol] = event
+    events = list(by_symbol.values())
     snapshot = {
         "version": VERSION,
         "trade_date": current.date().isoformat(),

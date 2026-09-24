@@ -24,9 +24,11 @@ import os
 import json
 import logging
 import inspect
+import hashlib
 import requests
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -67,6 +69,19 @@ def _submitted_body(channel: str, title: str, content: str) -> str:
     if channel == "dingtalk":
         return f"# {title}\n\n{content}"
     return content
+
+
+def _qq_archive_summary(content: str) -> str:
+    """Keep long weekly material in encrypted archive; QQ gets a bounded index."""
+    lines = []
+    for raw in str(content or "").splitlines():
+        line = raw.strip()
+        if not line or len(line) > 150 or line.startswith(("━━", "===")):
+            continue
+        lines.append(line)
+        if len(lines) == 5:
+            break
+    return "\n".join(lines + ["完整正文与数据口径见加密消息存档；QQ仅显示摘要。"])
 
 
 def _receipt(ok: bool, message: str) -> dict:
@@ -408,6 +423,15 @@ def send(category: str, title: str, content: str,
     source_run_id = source_run_id or os.getenv("FOLIANT_TASK_RUN_ID") or None
     # 即时消息统一去掉装饰和专业术语，并限制手机端长度；archive 长文保持完整。
     delivery_content = compact_notification(category, content) if compact else content
+    if category == "alert" and not idempotency_key:
+        # Independent schedulers may raise the same event at once. Use the
+        # submitted event text rather than caller path/run ID as its identity;
+        # changed quote, reason or decision remains a separate event.
+        event_text = f"{title}\n{original_body if original_body is not None else content}"
+        digest = hashlib.sha256(event_text.encode("utf-8")).hexdigest()
+        day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        idempotency_key = f"alert-event:{day}:{digest}"
+        source = "notification_event"
     results = DeliveryResults()
     message_id = uuid4().hex
     results.message_id = message_id
@@ -419,12 +443,14 @@ def send(category: str, title: str, content: str,
             return
         delivery_id = None
         archive_ready = False
+        channel_content = (_qq_archive_summary(delivery_content)
+                           if category == "archive" and ch == "qq" else delivery_content)
         try:
             prepared = archive_action("prepare", {
                 "message_id": message_id, "source": source,
                 "source_run_id": source_run_id, "category": category,
                 "title": title, "original_body": original_body if original_body is not None else content,
-                "channel": ch, "final_body": _submitted_body(ch, title, delivery_content),
+                "channel": ch, "final_body": _submitted_body(ch, title, channel_content),
                 "idempotency_key": idempotency_key, "business_as_of": business_as_of,
                 "sensitivity": sensitivity, "planned_at": planned_at,
                 "fallback_from": fallback_from, "retry_of": None,
@@ -456,7 +482,7 @@ def send(category: str, title: str, content: str,
         try:
             token = IN_ROUTER_DELIVERY.set(True)
             try:
-                results[ch] = sender(title, delivery_content)
+                results[ch] = sender(title, channel_content)
             finally:
                 IN_ROUTER_DELIVERY.reset(token)
         except Exception:

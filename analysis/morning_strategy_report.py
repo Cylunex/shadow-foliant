@@ -293,8 +293,20 @@ def build_diagnosis(raw: Any, sources: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 
 def format_plain_morning_notification(diagnosis: Dict[str, Any], *,
                                       market: Any = '', holdings: Any = '',
-                                      as_of: Any = '') -> Tuple[str, str]:
+                                      as_of: Any = '', premarket: bool = False) -> Tuple[str, str]:
     """晨报即时通知只保留方向、动作和两句依据。"""
+    if premarket:
+        # At 09:02 a zero/unchanged index quote is not a live market signal.
+        # Keep the entire QQ message short enough to avoid per-line truncation.
+        yesterday = next((line.strip() for line in str(holdings or '').splitlines()
+                          if '昨日收益' in line), '')
+        lines = ['A股盘前数据未形成；不据零值或昨收判断盘中方向。',
+                 '待确认：开盘后核实核心指数、持仓报价与风险触发条件。']
+        if yesterday:
+            lines.append(yesterday)
+        if as_of:
+            lines.append(f'时间：{as_of}')
+        return '⏳ 盘前待确认', '\n'.join(lines)
     from notify.plain_language import build_market_message
 
     position = diagnosis.get('position_advice') or holdings

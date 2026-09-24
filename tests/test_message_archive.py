@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 from uuid import uuid4
 
@@ -90,12 +91,70 @@ def test_router_archives_original_and_each_submitted_body_without_sending(tmp_pa
     assert next(d for d in detail["deliveries"] if d["channel"] == "email")["fallback_from"] == "qq"
 
 
+def test_long_archive_is_full_in_storage_and_email_but_bounded_on_qq(tmp_path, monkeypatch):
+    svc, _ = service(tmp_path)
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, body: (
+        svc.prepare(**body) if action == "prepare" else
+        {"started": svc.start(body["delivery_id"])} if action == "start" else
+        {"recorded": svc.finish(**body)}))
+    sent = {}
+    for channel in ("email", "qq"):
+        monkeypatch.setitem(notification_router.CHANNELS, channel, lambda title, body, ch=channel: (
+            sent.__setitem__(ch, body) or (True, "ok")))
+    long_body = "周报\n" + "\n".join(f"证据{i}：完整内容" for i in range(30))
+    result = notification_router.send("archive", "周报", long_body,
+                                      only_channels=["email", "qq"])
+    assert sent["email"] == long_body
+    assert len(sent["qq"].splitlines()) <= 6
+    assert "完整正文" in sent["qq"]
+    assert svc.detail(result.message_id)["original_body"] == long_body
+
+
 def test_archive_unavailable_still_sends_alert(monkeypatch):
     monkeypatch.setattr(notification_router, "archive_action", lambda *_: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (True, "HTTP 200"))
     result = notification_router.send("alert", "告警", "正文", only_channels=["qq"])
     assert result["qq"][0] is True
     assert result.archive_status == "unrecorded"
+
+
+def test_identical_alert_from_two_paths_is_suppressed_and_changed_quote_delivers(tmp_path, monkeypatch):
+    svc, _ = service(tmp_path)
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, body: (
+        svc.prepare(**body) if action == "prepare" else
+        {"started": svc.start(body["delivery_id"])} if action == "start" else
+        {"recorded": svc.finish(**body)}))
+    calls = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        calls.append(body) or (True, "HTTP 200")))
+    first = notification_router.send("alert", "触及止损", "荣盛发展 当前¥1.21｜10:05:18",
+                                     source="path.one", only_channels=["qq"])
+    repeated = notification_router.send("alert", "触及止损", "荣盛发展 当前¥1.21｜10:05:18",
+                                        source="path.two", only_channels=["qq"])
+    changed = notification_router.send("alert", "触及止损", "荣盛发展 当前¥1.19｜10:25:18",
+                                       source="path.two", only_channels=["qq"])
+    assert first["qq"][0] is True
+    assert repeated["qq"] == (False, "archive_suppressed")
+    assert changed["qq"][0] is True
+    assert len(calls) == 2
+    assert svc.detail(first.message_id)["deliveries"][0]["suppression_reason"] == "prior_accepted"
+
+
+def test_concurrent_identical_alert_claims_only_one_delivery(tmp_path, monkeypatch):
+    svc, _ = service(tmp_path)
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, body: (
+        svc.prepare(**body) if action == "prepare" else
+        {"started": svc.start(body["delivery_id"])} if action == "start" else
+        {"recorded": svc.finish(**body)}))
+    deliveries = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        deliveries.append(body) or (True, "HTTP 200")))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda source: notification_router.send(
+            "alert", "触及止损", "荣盛发展 当前¥1.21｜10:05:18",
+            source=source, only_channels=["qq"]), ["path.one", "path.two"]))
+    assert len(deliveries) == 1
+    assert sum(result["qq"][0] for result in results) == 1
 
 
 def test_archive_conflict_and_unknown_idempotent_start_never_send(monkeypatch):

@@ -212,7 +212,7 @@ def test_stop_target_and_holding_action_escalation_notify_only_on_crossing():
     monitor.run_cycle(now=quote_now[0], **kwargs)
     assert alerts.count("盘中提醒：触及止盈") == 1
     assert alerts.count("盘中提醒：触及止损") == 1
-    assert alerts.count("盘中提醒：持仓动作升级") == 1
+    assert alerts.count("盘中提醒：持仓动作升级") == 0  # 同票目标与升级合并
     crossed = len(alerts)
     quote_now[0] = now + timedelta(minutes=40)
     monitor.run_cycle(now=quote_now[0], **kwargs)
@@ -442,8 +442,8 @@ def test_transition_guard_reports_original_trigger_and_final_action():
     assert holding['action'] == 'reduce'
     assert holding['action_guard']['original_reason'] == '技术破位待退出'
     summary = monitor.format_fixed_summary(result, '14:30')
-    assert '原始触发卖出(技术破位待退出)→最终减仓' in summary
-    assert '原触发未作废，保护不代表风险解除' in summary
+    assert '原始触发卖出(技术破位待退出)→本轮判断减仓(跨级升级需复核)' in summary
+    assert '风险仍在，未发生交易' in summary
 
 
 def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkeypatch):
@@ -473,8 +473,8 @@ def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkey
     assert holding['action_guard']['reason_family'] == 'take_profit'
     summary = monitor.format_fixed_summary(result, '14:30')
     assert '永杰新材' in summary
-    assert '原始触发减仓(当前价触及 trade_plan 第一目标 12.00)→最终不动' in summary
-    assert '原触发未作废，保护不代表风险解除' in summary
+    assert '原始触发减仓(当前价触及 trade_plan 第一目标 12.00)→本轮判断不动(同类风险动作过密)' in summary
+    assert '风险仍在，未发生交易' in summary
 
 
 def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
@@ -489,11 +489,11 @@ def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
                          'coverage': 1, 'plan_available': 1, 'plan_requested': 1},
         'holdings': [qilu], 'formal_top5': [], 'formal_top15_watch': [qilu],
     }, '14:30')
-    assert '齐鲁银行' in text and '最终减仓(跌破20日均线(6.98))' in text
+    assert '齐鲁银行' in text and '本轮判断减仓(跌破20日均线(6.98))' in text
     assert '候选 齐鲁银行' not in text
     assert '量化候选（排名非买入指令）' in text
     _, alert = monitor.format_alert({'trigger_type': 'action_escalation', 'item': qilu}, {})
-    assert '最终减仓' in alert
+    assert '本轮判断减仓' in alert
     assert '买入区' not in alert
 
 
@@ -648,10 +648,71 @@ def test_nine_forty_five_summary_keeps_five_reference_states_and_overlap_bounded
     )
     assert len(text.splitlines()) <= 8
     assert "正式TOP5" in text and "正式TOP15：15只" in text
-    assert "与正式TOP15重合：600001 甲" in text
-    for name in ("主力资金", "低价擒牛", "低估值", "小市值", "净利增长"):
-        assert f"问财参考·{name}" in text
+    assert "正式TOP15↔问财五组：问财不可用，无法比较" in text
+    assert "问财五组：1/5可用" in text
+    assert "问财参考·主力资金" in text
     assert "仅供参考" in text
+    full = jobs_hub._format_selection_reference_summary(
+        [{"code": "600001", "name": "甲", "price": 10}],
+        [{"code": str(i)} for i in range(15)], results, {},
+        {"600001": "甲"}, compact_failures=False,
+    )
+    for name in ("主力资金", "低价擒牛", "低估值", "小市值", "净利增长"):
+        assert f"问财参考·{name}" in full
+
+
+def test_alert_prices_are_references_and_waiting_is_not_buy_instruction():
+    holding = {"symbol": "000425", "name": "徐工机械", "sources": ["holding"],
+               "price": 7.33, "action": "sell", "requested_action": "sell",
+               "reason": "跌破60日均线", "stop_loss": 7.06,
+               "target_price": 7.50, "quote_as_of": "2026-09-24T10:05:18+08:00"}
+    _, body = monitor.format_alert({"trigger_type": "action_escalation", "item": holding}, {})
+    assert "当前¥7.33" in body
+    assert "计划止损参考：¥7.06" in body
+    assert "卖出/止损" not in body and "最终卖出" not in body
+    assert "非委托/成交价" in body
+    candidate = {"symbol": "000001", "name": "平安银行", "sources": ["formal_top5"],
+                 "price": 11.39, "action": "hold", "action_cn": "回避",
+                 "entry_low": 11.54, "entry_high": 11.60}
+    _, body = monitor.format_alert({"trigger_type": "stop", "item": candidate}, {})
+    assert "计划观察区(非买入指令)" in body
+    assert "买入区" not in body
+
+
+def test_persistent_risk_respects_cooldown():
+    now = datetime(2026, 9, 24, 10, 5, tzinfo=TZ)
+    events, states = [], {}
+    for minutes in (0, 20, 179, 180):
+        monitor._transition(events, states, "000425:sustained_risk", True,
+                            now + timedelta(minutes=minutes),
+                            {"trigger_type": "sustained_risk"}, 180)
+    assert len(events) == 2
+    monitor._transition(events, states, "000425:sustained_risk", False,
+                        now + timedelta(minutes=190), {}, 180)
+    assert states["000425:sustained_risk"]["active"] is False
+
+
+def test_same_quote_stop_and_action_upgrade_emit_one_holding_alert():
+    now = datetime(2026, 9, 24, 10, 5, tzinfo=TZ)
+    plans = _plans()
+    previous = {"trade_date": now.date().isoformat(), "selection_run_id": "formal-run-1",
+                "plans": plans}
+    alerts = []
+    result = monitor.run_cycle(
+        now=now, formal_loader=lambda: _formal(now.date().isoformat()),
+        holdings_loader=lambda: [{"code": "000001", "name": "持仓甲",
+                                  "quantity": 100, "cost_price": 10}],
+        quote_loader=lambda codes: {code: {
+            "price": 8 if code == "000001" else 11, "change_pct": -2,
+            "quote_time": now.strftime("%Y%m%d%H%M%S")} for code in codes},
+        snapshot_loader=lambda key: previous if key == monitor.SNAPSHOT_KEY else {},
+        snapshot_saver=lambda key, value: None,
+        notify_fn=lambda title, body: alerts.append((title, body)),
+    )
+    holding_events = [event for event in result["events"] if event["symbol"] == "000001"]
+    assert len(holding_events) == 1
+    assert holding_events[0]["trigger_type"] == "stop"
+    assert sum("持仓甲" in body for _, body in alerts) == 1
 
 
 def test_scheduler_registers_twenty_minute_monitor():

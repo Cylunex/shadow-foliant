@@ -58,15 +58,15 @@ def run_stress_narrative(include_funds: bool = True) -> Dict[str, Any]:
 压力矩阵(组合损益% + 各情景重灾持仓):
 {chr(10).join(lines)}
 
-请输出**可执行风险预案**(≤180字),包含:
+请输出**仅供研究的压力情景解释**(≤180字),包含:
 1. 最脆弱情景 + 一句话原因(集中/高β/行业暴露)
-2. 跨情景反复出现的"风险担当"持仓(最该先减的)
-3. 1-2 条具体动作(减哪只/配什么对冲/降哪类暴露)
-务实、点名到具体持仓,不空谈。"""
+2. 跨情景反复出现的风险暴露持仓及其原因
+3. 数据假设与尚待验证的风险缓释方向
+不得给具体减仓比例、期权或期货委托方案；没有核验交易权限、成本和用户授权。"""
     try:
         from deepseek_client import DeepSeekClient
         narr = DeepSeekClient().call_api(
-            [{'role': 'system', 'content': '你是务实的组合风险官,只给点名到持仓的可执行预案。'},
+            [{'role': 'system', 'content': '你是组合压力情景研究员，只解释风险来源与待核验缓释方向，不下交易指令。'},
              {'role': 'user', 'content': prompt}], max_tokens=900, call_type='stress_narrative')
     except Exception as e:
         out['summary'] = f'AI 叙事失败: {type(e).__name__}: {str(e)[:60]}'
@@ -78,7 +78,11 @@ def run_stress_narrative(include_funds: bool = True) -> Dict[str, Any]:
             f"({(wp * 100 if wp is not None else 0):+.1f}%) · 前三集中{conc['top3_pct']}%")
     out['ok'] = True
     out['summary'] = head
-    out['text'] = head + '\n\n' + (narr or '').strip()
+    narrative = (narr or '').strip()
+    if any(word in narrative for word in ('认沽', '期权', '期货', 'IF空头', '减仓', '卖出', '买入')):
+        narrative = '模型解释含未经权限和成本核验的交易动作，本期仅保留压力矩阵与风险暴露供研究。'
+    out['text'] = (head + '\n\n' + narrative +
+                   '\n仅研究情景；执行任何调整前须核验权限、成本、时点并由用户自行决定。')
     return out
 
 

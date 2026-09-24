@@ -100,6 +100,20 @@ class MorningStrategyReportTests(unittest.TestCase):
         self.assertEqual(body.splitlines()[0], '操作：减仓')
         self.assertNotIn('北向', title + body)
 
+    def test_premarket_notification_does_not_interpret_zero_quotes_or_truncate(self):
+        title, body = format_plain_morning_notification(
+            {'market_direction': '震荡', 'position_action': '不动'},
+            market='深证成指0.00 (+0.00%) 创业板指0.00 (+0.00%)',
+            holdings='💰 昨日收益(2026-09-23): 合计 -1,048元(-0.20%)\n建议卖出若干',
+            as_of='2026-09-24 09:02', premarket=True,
+        )
+        self.assertEqual(title, '⏳ 盘前待确认')
+        self.assertIn('盘前数据未形成', body)
+        self.assertIn('昨日收益', body)
+        self.assertNotIn('0.00', body)
+        self.assertNotIn('建议卖出', body)
+        self.assertNotIn('…', body)
+
 
 if __name__ == '__main__':
     unittest.main()

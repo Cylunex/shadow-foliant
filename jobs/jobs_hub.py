@@ -1489,7 +1489,9 @@ def task_fund_valuation_signal():
             text = "🏦 宽基估值分位(定投择时)\n" + head + "\n\n" + "\n".join(lines)
             try:
                 from notification_router import send
-                send('report', '基金估值分位', text)
+                # Slow valuation percentile changes belong in the full archive;
+                # do not occupy a separate QQ notification every morning.
+                send('archive', '基金估值分位', text, only_channels=['email'])
             except Exception as ne:
                 print(f'[fund_valuation_signal] 推送失败: {ne}\n{text}')
         _log_run(job, 'success', error=f'indexes={len(rows)} cheap={len(cheap)}',
@@ -2501,21 +2503,26 @@ def _format_wencai_reference_notification(results: dict, *, max_per_strategy: in
 
 
 def _format_wencai_overlap_notification(comparison: dict, names: dict = None) -> str:
-    """只翻译既有 comparison，不据问财结果调整任何正式字段。"""
-    overlap = [str(code) for code in ((comparison or {}).get('overlap') or [])]
+    """Only compare formal and Wencai when both source sets are complete."""
+    available = (comparison or {}).get('availability') or {}
+    pair = ((comparison or {}).get('pairwise') or {}).get('formal_wencai')
+    if not available.get('wencai') or not isinstance(pair, dict):
+        return '正式TOP15↔问财五组：问财不可用，无法比较'
+    overlap = [str(code) for code in (pair.get('intersection') or [])]
     name_map = names or {}
     if not overlap:
-        return '与正式TOP15重合：无（仅供参考）'
+        return '正式TOP15↔问财五组：0只重合（仅供参考）'
     shown = [f'{code} {name_map.get(code, "")}'.strip() for code in overlap[:5]]
     suffix = f' 等{len(overlap)}只' if len(overlap) > 5 else ''
-    return '与正式TOP15重合：' + '、'.join(shown) + suffix + '（仅供参考）'
+    return '正式TOP15↔问财五组：' + '、'.join(shown) + suffix + '（仅供参考）'
 
 
 def _format_selection_reference_summary(final_rows: list, top15_rows: list,
                                         results: dict, comparison: dict,
                                         names: dict = None, data_note: str = '',
                                         independent: dict = None,
-                                        three_way: dict = None) -> str:
+                                        three_way: dict = None,
+                                        compact_failures: bool = True) -> str:
     """09:45 QQ 的固定八行摘要，保证五组状态不会被路由截断。"""
     def _label(row):
         code = str(row.get('code') or row.get('symbol') or '')
@@ -2531,19 +2538,25 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
         independent_codes = {str(row.get('symbol') or row.get('code') or '')
                              for row in independent.get('top15') or []}
         overlap_count = len(formal_codes & independent_codes)
-        lines.append('独立TOP5：' + ('、'.join(_label(row) for row in independent_rows[:5]) or '未产出')
-                     + f'｜与正式TOP15重合{overlap_count}只')
+        source_date = str(independent.get('market_as_of') or '未知')[:10]
+        lines.append('独立量化TOP5（PIT底座截至' + source_date + '）：'
+                     + ('、'.join(_label(row) for row in independent_rows[:5]) or '未产出')
+                     + f'｜独立TOP15↔正式TOP15重合{overlap_count}只')
     else:
         lines.append('独立TOP5：⚠️不可用（' + str(independent.get('reason') or '必要输入不完整')[:35] + '）')
-    overlap = _format_wencai_overlap_notification(comparison, names)
+    overlap = _format_wencai_overlap_notification(three_way or {}, names)
     note = re.sub(r'\s+', ' ', str(data_note or '')).strip()
     lines.append(f'正式TOP15：{len(top15_rows or [])}只｜{overlap}' + (f'｜{note[:70]}' if note else ''))
     order = _WENCAI_REFERENCE_ORDER
+    failures = []
     for strategy in order:
         ok, frame, message = (results or {}).get(strategy, (False, None, '未执行'))
         if not ok or frame is None or len(frame) == 0:
             state = '缓存缺失' if '缓存' in str(message or '') else '外部源失败'
-            lines.append(f'问财参考·{strategy}：⚠️{state}（仅供参考）')
+            if compact_failures:
+                failures.append(f'{strategy}{state}')
+            else:
+                lines.append(f'问财参考·{strategy}：⚠️{state}（仅供参考）')
             continue
         picks = []
         for _, row in frame.head(3).iterrows():
@@ -2555,6 +2568,10 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
                 picks.append(f'{code} {name}'.strip())
         lines.append(f'问财参考·{strategy}：✅可用·' +
                      ('、'.join(picks) if picks else '无命中') + '（仅供参考）')
+    if failures:
+        lines.append(f'问财五组：{5-len(failures)}/5可用；'
+                     + '、'.join(failures[:2])
+                     + ('等失败详情见存档' if len(failures) > 2 else ''))
     return '\n'.join(lines[:8])
 
 
@@ -2760,20 +2777,10 @@ def task_morning_strategy():
         # ─── 5c. A股大盘指数 + 板块强弱（原晨报 briefing 并入） ───
         cn_index_summary = '（无数据）'
         sector_summary = '（无数据）'
-        try:
-            import briefing as _brief
-            _mkt = _brief._market()
-            if _mkt.get('indices'):
-                cn_index_summary = '  '.join(f"{x['name']}{x['v']}" for x in _mkt['indices'])
-            parts = []
-            if _mkt.get('sector_top'):
-                parts.append('强势: ' + '、'.join(f"{s['板块']}{s['涨跌幅']}%" for s in _mkt['sector_top']))
-            if _mkt.get('sector_bottom'):
-                parts.append('弱势: ' + '、'.join(f"{s['板块']}{s['涨跌幅']}%" for s in _mkt['sector_bottom']))
-            if parts:
-                sector_summary = '\n'.join(parts)
-        except Exception as e:
-            cn_index_summary = f'(拉取失败: {e})'
+        # 09:02 的行情接口可能返回零值或昨收，尚无当日价格发现。
+        # 不把它们输入方向判断，也不补写成 0.00%。
+        cn_index_summary = '盘前数据未形成；开盘后确认指数与板块方向'
+        sector_summary = '盘前数据未形成；开盘后确认'
 
         # ─── 5d. 持仓逐只扫描（共用 _scan_holdings_with_snapshot,零逐只接口）───
         # 仅供 AI 第8维研判;详细买卖列表已移至 10:05 早盘持仓分析推送
@@ -2958,8 +2965,9 @@ def task_morning_strategy():
         notify_title, notify_body = format_plain_morning_notification(
             diagnosis,
             market=cn_index_summary,
-            holdings=diagnosis.get('position_advice') or hold_summary,
+            holdings=hold_summary,
             as_of=now_str,
+            premarket=True,
         )
         mod_a = [notify_title, notify_body]
 
@@ -4072,7 +4080,8 @@ def task_weekly_backtest():
             lines.append('━━━ 最有效策略 TOP 5(含8%止损/15%止盈纪律对比)━━━')
             for i, r in enumerate(results[:5], 1):
                 lines.append(f"{i}. {r['cn']:>12s} 胜率={r['win_rate']}% "
-                             f"avg_ret={r['avg_ret_pct']}% 触发{r['count']}次 "
+                             f"avg_ret={r['avg_ret_pct']}% 触发{r['count']}次"
+                             f"{'（小样本，仅描述）' if r['count'] < 30 else ''} "
                              f"avg_max_dd={r['max_dd_pct']}%")
                 if r.get('disc_ret_pct') is not None:
                     lines.append(f"     纪律收益={r['disc_ret_pct']}%(差{r.get('disc_impact')}%)"
@@ -4098,7 +4107,7 @@ def task_weekly_backtest():
             ev_r = (ab.get('evolved') or {}).get('total_return_pct')
             df_r = (ab.get('default') or {}).get('total_return_pct')
             if ex is not None and ev_r is not None and df_r is not None:
-                tag = '✅进化跑赢' if ex > 0 else ('⚖️持平' if ex == 0 else '⚠️进化跑输(将自动回退默认)')
+                tag = '历史模拟差异；时间切分与同口径尚待核验，不能据此认定跑赢'
                 lines.append('')
                 lines.append(f'🧬 进化 vs 默认 A/B（{ab_start}~{end_date}）：'
                              f'进化集 {ev_r:+.2f}% vs 默认集 {df_r:+.2f}% → 超额 {ex:+.2f}% {tag}')
@@ -5506,7 +5515,15 @@ def task_unified_selection():
                     independent=independent_selection,
                     three_way=selection_comparison,
                 )
-                _push_daily('今日候选：加、减还是不动', _final_body)
+                _full_reference = _format_selection_reference_summary(
+                    final_rows, local_formal_rows, strategy_scan.get('results', {}),
+                    comparison, name_map, data_note,
+                    independent=independent_selection, three_way=selection_comparison,
+                    compact_failures=False,
+                )
+                from notification_router import send
+                send('report', '今日量化候选与数据状态', _final_body,
+                     original_body=_full_reference)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
                       f'{type(_fpe).__name__}: {str(_fpe)[:80]}')
@@ -6281,7 +6298,12 @@ def task_mx_weekend_outlook():
             return
         body = f'🔮 周末妙想研判 — {datetime.now().strftime("%Y-%m-%d")}\n\n' + '\n\n'.join(parts)
         from notification_router import send
-        send('report', '🔮 周末妙想研判', body)
+        # The SaaS response exposes citation markers but no verifiable source
+        # URLs. Preserve the complete text, while the instant message states
+        # the evidence limitation instead of repeating unverified forecasts.
+        send('report', '🔮 周末妙想研判',
+             f'本周妙想返回{ok}/3段；缺少可核验来源链接，正文仅存档供研究，不作交易依据。',
+             original_body=body)
         _log_run(job, 'success', error=f'segments={ok}/3',
                  started_at=started, finished_at=datetime.now().isoformat())
     except Exception as e:
@@ -6436,17 +6458,13 @@ def task_weekly_analysis():
         lines.append(f"  共 {len(analysis)} 只持仓 | 🔴买入 {len(buy_stocks)} | "
                      f"⚪持有 {len(hold_stocks)} | 🟢卖出 {len(sell_stocks)}")
         lines.append('')
-        lines.append('━━━ 📰 周末/隔夜新闻影响 ━━━')
+        lines.append('━━━ 📰 持仓相关新闻线索（官方链接；影响待核验） ━━━')
         try:
-            news = datahub.market_news(15)
-            for n in (news or [])[:8]:
-                title = (n.get('title') or n.get('content', ''))[:60]
-                t = n.get('time', '')[:16] if n.get('time') else ''
-                lines.append(f"  [{t}] {title}")
-            if not news:
-                lines.append('  （暂无新闻数据）')
+            from analysis.weekly_news import relevant_official_news
+            news_lines = relevant_official_news(datahub.market_news(100), analysis)
+            lines.extend(news_lines or ['  （本期没有与持仓直接相关且可核验的官方链接；不作影响判断）'])
         except Exception:
-            lines.append('  （新闻拉取暂不可用）')
+            lines.append('  （新闻拉取暂不可用；不作影响判断）')
 
         _push_archive('📊 本周持仓综合周报', '\n'.join(lines))
         _log_run(job, 'success' if ok else 'error',
