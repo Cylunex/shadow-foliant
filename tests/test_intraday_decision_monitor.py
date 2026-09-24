@@ -725,8 +725,87 @@ def test_alert_burst_prioritizes_stops_and_groups_remaining_risks():
     assert len(individual) == 3 and len(overflow) == 7
     title, body = monitor._overflow_alert(overflow, {"generated_at": "2026-09-24T14:30:00+08:00"})
     assert "其余风险汇总" in title
-    assert "600001" in body and "600007" in body
+    assert "名称待核验（600001）" in body
+    assert "另有1项见完整盘中快照" in body
     assert "完整盘中快照" in body
+
+
+def test_five_event_summary_keeps_trusted_names_codes_actions_and_time():
+    from notify.plain_language import compact_notification
+
+    rows = [
+        ("002204", "大连重工", "action_escalation", "卖出"),
+        ("159892", "HK创新药", "action_escalation", "减仓"),
+        ("160723", "嘉实原油", "action_escalation", "减仓"),
+        ("600699", "均胜电子", "action_escalation", "减仓"),
+        ("164902", "油气基金", "target", "减仓"),
+    ]
+    events = [{"symbol": code, "trigger_type": kind,
+               "item": {"symbol": code, "name": name, "action_cn": action}}
+              for code, name, kind, action in rows]
+    snapshot = {"generated_at": "2026-09-24T14:57:17+08:00",
+                "holdings": [event["item"] for event in events]}
+    _, body = monitor._overflow_alert(events, snapshot)
+    delivered = compact_notification("alert", body)
+    for code, name, kind, action in rows:
+        label = "目标触发" if kind == "target" else "动作升级"
+        assert f"{name}（{code}）｜{label}｜{action}" in delivered
+    assert "14:57:17" in delivered
+    assert "…" not in delivered
+    assert len(delivered.splitlines()) <= 10
+
+
+def test_missing_conflicting_and_reused_names_do_not_become_guessed_names():
+    missing = {"symbol": "159892", "item": {"symbol": "159892", "name": ""}}
+    assert monitor._event_label(missing, {}) == "名称待核验（159892）"
+    conflict = {"symbol": "600699", "item": {"symbol": "600699", "name": "均胜电子"}}
+    snapshot = {"holdings": [{"symbol": "600699", "name": "另一名称"}]}
+    assert monitor._event_label(conflict, snapshot) == "名称待核验（600699）"
+    reused = {"holdings": [{"symbol": "002204", "name": "同名基金"},
+                            {"symbol": "164902", "name": "同名基金"}]}
+    assert monitor._event_label({"symbol": "002204"}, reused) == "同名基金（002204）"
+    assert monitor._event_label({"symbol": "164902"}, reused) == "同名基金（164902）"
+    title, body = monitor.format_alert(
+        {"symbol": "159892", "trigger_type": "stop",
+         "item": {"symbol": "159892", "name": "", "sources": ["holding"],
+                  "action": "sell", "reason": "触及计划止损"}}, {})
+    assert "名称待核验（159892）" in body and "触及止损" in title
+
+
+def test_fixed_and_quality_summaries_use_the_same_verified_labels():
+    snapshot = {
+        "data_quality": {"status": "degraded", "missing_symbols": ["159892"],
+                         "stale_symbols": ["160723"], "plan_missing_symbols": ["164902"]},
+        "holdings": [{"symbol": "159892", "name": "HK创新药", "action": "hold",
+                      "requested_action": "hold"},
+                     {"symbol": "160723", "name": "嘉实原油", "action": "hold",
+                      "requested_action": "hold"}],
+        "formal_top5": [{"symbol": "164902", "name": "油气基金", "action": "hold"}],
+    }
+    summary = monitor.format_fixed_summary(snapshot, "14:30")
+    assert "HK创新药（159892）" in summary
+    assert "嘉实原油（160723）" in summary
+    assert "油气基金（164902）" in summary
+    _, degraded = monitor.format_alert({"trigger_type": "quote_degraded"}, snapshot)
+    assert "缺失:HK创新药（159892）" in degraded
+    assert "陈旧:嘉实原油（160723）" in degraded
+    assert "计划不足:油气基金（164902）" in degraded
+
+
+def test_long_overflow_preserves_named_items_and_time_without_code_only_fallback():
+    from notify.plain_language import compact_notification
+
+    events = [{"symbol": f"600{i:03d}", "trigger_type": "stop",
+               "item": {"symbol": f"600{i:03d}", "name": f"示例股票{i}",
+                        "action_cn": "卖出"}} for i in range(20)]
+    _, body = monitor._overflow_alert(events, {"generated_at": "2026-09-24T14:57:17+08:00"})
+    delivered = compact_notification("alert", body)
+    assert len(delivered.splitlines()) <= 10
+    assert "示例股票0（600000）｜止损｜卖出" in delivered
+    assert "示例股票5（600005）｜止损｜卖出" in delivered
+    assert "另有14项见完整盘中快照" in delivered
+    assert "14:57:17" in delivered
+    assert "涉及股票：600" not in delivered and "…" not in delivered
 
 
 def test_guarded_prior_sell_does_not_reescalate_in_light_monitor():

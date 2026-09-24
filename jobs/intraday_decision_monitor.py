@@ -531,6 +531,41 @@ def _row_price(row: dict[str, Any], key: str) -> str:
     return _fmt_price(row.get(key))
 
 
+def _trusted_event_name(event: dict[str, Any], snapshot: dict[str, Any]) -> str:
+    """Use only names tied to this event or the same decision snapshot."""
+    symbol = _code(event.get("symbol"))
+    if not symbol:
+        return "名称待核验"
+
+    def valid_name(value: Any) -> str:
+        name = " ".join(str(value or "").split())
+        if (not name or len(name) > 40 or name == symbol
+                or name.lower() in {"none", "nan", "null", "unknown", "etf"}
+                or name in {"未知", "待确认", "股票", "基金"}
+                or any(ord(char) < 32 or char in "|｜<>" for char in name)):
+            return ""
+        return name
+
+    names = set()
+    item = event.get("item") or {}
+    if isinstance(item, dict) and _code(item.get("symbol")) == symbol:
+        name = valid_name(item.get("name"))
+        if name:
+            names.add(name)
+    for section in ("holdings", "formal_top5", "formal_top15_watch"):
+        for row in snapshot.get(section) or []:
+            if isinstance(row, dict) and _code(row.get("symbol")) == symbol:
+                name = valid_name(row.get("name"))
+                if name:
+                    names.add(name)
+    return next(iter(names)) if len(names) == 1 else "名称待核验"
+
+
+def _event_label(event: dict[str, Any], snapshot: dict[str, Any]) -> str:
+    symbol = _code(event.get("symbol"))
+    return f"{_trusted_event_name(event, snapshot)}（{symbol or '代码待核验'}）"
+
+
 def _holding_action_summary(row: dict[str, Any]) -> str:
     labels = {"hold": "不动", "reduce": "减仓", "sell": "卖出",
               "add": "加仓", "data_insufficient": "数据不足"}
@@ -609,7 +644,7 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
     ))[:2]
     for row in shown_h:
         lines.append(
-            f"持仓 {row.get('name') or row['symbol']}({_code(row['symbol'])}) 当前{_row_price(row, 'price')}｜"
+            f"持仓 {_event_label({'symbol': row['symbol'], 'item': row}, snapshot)} 当前{_row_price(row, 'price')}｜"
             f"{_holding_action_summary(row)}｜计划止损参考{_row_price(row, 'stop_loss')}｜"
             f"目标参考{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
         )
@@ -631,7 +666,7 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
         if not row.get("price_actionable") or row.get("action") == "data_insufficient":
             entry = "暂不给价"
         lines.append(
-            f"候选 {row.get('name') or row['symbol']}({_code(row['symbol'])}) 当前{_row_price(row, 'price')}｜"
+            f"候选 {_event_label({'symbol': row['symbol'], 'item': row}, snapshot)} 当前{_row_price(row, 'price')}｜"
             f"{row.get('action_cn')}｜"
             f"{'买入触发参考' if row.get('action') == 'add' else '计划观察区(非买入指令)'}{entry}｜"
             f"计划止损参考{_row_price(row, 'stop_loss')}｜"
@@ -653,12 +688,19 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
     title = f"盘中提醒：{labels.get(kind, kind)}"
     if kind == "quote_degraded":
         q = snapshot.get("data_quality") or {}
+        def affected(symbols: list[str]) -> str:
+            if not symbols:
+                return "无"
+            labels = [_event_label({"symbol": symbol}, snapshot) for symbol in symbols[:3]]
+            if len(symbols) > 3:
+                labels.append(f"另有{len(symbols) - 3}只见快照")
+            return "、".join(labels)
         return title, (
             f"行情覆盖 {q.get('valid')}/{q.get('requested')}（{q.get('coverage', 0) * 100:.0f}%）\n"
             f"价格计划 {q.get('plan_available', 0)}/{q.get('plan_requested', 0)}\n"
-            f"缺失:{','.join(q.get('missing_symbols') or []) or '无'}\n"
-            f"陈旧:{','.join(q.get('stale_symbols') or []) or '无'}\n"
-            f"计划不足:{','.join(q.get('plan_missing_symbols') or []) or '无'}\n"
+            f"缺失:{affected(q.get('missing_symbols') or [])}\n"
+            f"陈旧:{affected(q.get('stale_symbols') or [])}\n"
+            f"计划不足:{affected(q.get('plan_missing_symbols') or [])}\n"
             "无效项已失败关闭：本轮不据此给明确买卖价"
         )
     row = event.get("item") or {}
@@ -666,7 +708,7 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
     entry = (f"¥{row['entry_low']:.2f}-{row['entry_high']:.2f}"
              if row.get("entry_low") is not None and row.get("entry_high") is not None else "暂不给价")
     body = [
-        f"{row.get('name') or row.get('symbol')}({row.get('symbol')}) 当前{_fmt_price(row.get('price'))}",
+        f"{_event_label(event, snapshot)} 当前{_fmt_price(row.get('price'))}",
         (f"动作：{_holding_action_summary(row)}" if is_holding else
          f"动作：{row.get('action_cn')}｜"
          f"{'买入触发参考' if row.get('action') == 'add' else '计划观察区(非买入指令)'}{entry}"),
@@ -687,7 +729,6 @@ def _notification_batches(events: list[dict[str, Any]], limit: int = 6):
 
 
 def _overflow_alert(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> tuple[str, str]:
-    symbols = [str(event.get("symbol") or "") for event in events if event.get("symbol") != "__pool__"]
     kinds = {}
     for event in events:
         kind = str(event.get("trigger_type") or "unknown")
@@ -695,12 +736,19 @@ def _overflow_alert(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> t
     kind_names = {"stop": "止损", "action_escalation": "动作升级", "target": "目标触发",
                   "entry": "买入触发", "sustained_risk": "持续风险", "quote_degraded": "数据降级"}
     counts = "、".join(f"{kind_names.get(kind, kind)}{count}" for kind, count in kinds.items())
-    body = (f"本轮另有{len(events)}项风险/触发事件：{counts}\n"
-            f"涉及股票：{'、'.join(symbols[:30]) or '行情池'}"
-            + (f"等共{len(symbols)}只" if len(symbols) > 30 else "")
-            + f"\n数据时点：{snapshot.get('generated_at') or '未知'}\n"
-              "逐只原始触发、保护原因和价格计划见完整盘中快照；未发生交易。")
-    return "盘中提醒：其余风险汇总", body
+    lines = [f"本轮另有{len(events)}项事件：{counts}；完整明细见盘中快照"]
+    for event in events[:6]:
+        kind = kind_names.get(str(event.get("trigger_type") or ""), "风险变化")
+        row = event.get("item") or {}
+        action = str(row.get("action_cn") or "").strip()
+        label = ("行情池" if event.get("symbol") == "__pool__" else
+                 _event_label(event, snapshot))
+        lines.append(f"{label}｜{kind}" + (f"｜{action}" if action else ""))
+    if len(events) > 6:
+        lines.append(f"另有{len(events) - 6}项见完整盘中快照")
+    lines.append(f"数据时点：{snapshot.get('generated_at') or '未知'}")
+    lines.append("研究提醒；未发生交易")
+    return "盘中提醒：其余风险汇总", "\n".join(lines)
 
 
 def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
