@@ -23,9 +23,12 @@
 import os
 import json
 import logging
+import inspect
 import requests
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
 
 try:
     from .plain_language import compact_notification
@@ -39,6 +42,44 @@ except ImportError:
     pass
 
 log = logging.getLogger(__name__)
+
+try:
+    from .archive_gateway import archive_action, IN_ROUTER_DELIVERY
+except ImportError:
+    from archive_gateway import archive_action, IN_ROUTER_DELIVERY
+
+
+class DeliveryResults(dict):
+    """Existing channel-result mapping with separate archive diagnostics."""
+
+    def __init__(self):
+        super().__init__()
+        self.archive_status = "unrecorded"
+        self.message_id = None
+        self.archive_outcomes = {}
+
+
+def _submitted_body(channel: str, title: str, content: str) -> str:
+    if channel == "wechat_work":
+        return f"## {title}\n\n{content}"
+    if channel in {"telegram", "slack"}:
+        return f"*{title}*\n\n{content}"
+    if channel == "dingtalk":
+        return f"# {title}\n\n{content}"
+    return content
+
+
+def _receipt(ok: bool, message: str) -> dict:
+    # Sender text may contain webhook URLs, tokens, addresses, or response bodies.
+    match = re.fullmatch(r"HTTP ([1-5][0-9]{2})(?: app:rejected)?", message or "")
+    rejected = bool(match) or message in {"provider_rejected", "send_failed",
+                                         "webhook 未启用", "feishu 未启用"}
+    return {"status": "accepted" if ok else "failed" if rejected else "unknown",
+            "http_status": int(match.group(1)) if match else None,
+            "provider_code": "accepted" if ok else "rejected" if rejected else None,
+            "error_code": "http_rejected" if match and not ok else
+                          "provider_rejected" if rejected and not ok else
+                          "transport_unknown" if not ok else None}
 
 
 # =============================================================================
@@ -56,13 +97,14 @@ def _send_wechat_work(title: str, content: str) -> Tuple[bool, str]:
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
+        if r.status_code != 200:
+            return False, f'HTTP {r.status_code}'
         ret = r.json()
         if ret.get('errcode') == 0:
-            return True, 'ok'
-        return False, str(ret)
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code} app:rejected'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_telegram(title: str, content: str) -> Tuple[bool, str]:
@@ -79,13 +121,14 @@ def _send_telegram(title: str, content: str) -> Tuple[bool, str]:
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
+        if r.status_code != 200:
+            return False, f'HTTP {r.status_code}'
         ret = r.json()
         if ret.get('ok'):
-            return True, 'ok'
-        return False, str(ret)
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code} app:rejected'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_discord(title: str, content: str) -> Tuple[bool, str]:
@@ -105,10 +148,10 @@ def _send_discord(title: str, content: str) -> Tuple[bool, str]:
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code in (200, 204):
-            return True, 'ok'
-        return False, f'HTTP {r.status_code}: {r.text[:200]}'
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code}'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_slack(title: str, content: str) -> Tuple[bool, str]:
@@ -123,10 +166,10 @@ def _send_slack(title: str, content: str) -> Tuple[bool, str]:
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code in (200, 204):
-            return True, 'ok'
-        return False, f'HTTP {r.status_code}: {r.text[:200]}'
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code}'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_dingtalk_via_legacy(title: str, content: str) -> Tuple[bool, str]:
@@ -149,12 +192,14 @@ def _send_dingtalk_via_legacy(title: str, content: str) -> Tuple[bool, str]:
             'markdown': {'title': safe_title, 'text': f'# {title}\n\n{content}'},
         }
         r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            return False, f'HTTP {r.status_code}'
         ret = r.json()
         if ret.get('errcode') == 0 or ret.get('ok') == True:
-            return True, 'ok'
-        return False, str(ret)
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code} app:rejected'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_feishu_via_legacy(title: str, content: str) -> Tuple[bool, str]:
@@ -176,12 +221,14 @@ def _send_feishu_via_legacy(title: str, content: str) -> Tuple[bool, str]:
             }
         }
         r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            return False, f'HTTP {r.status_code}'
         ret = r.json()
         if ret.get('StatusCode') == 0 or ret.get('code') == 0:
-            return True, 'ok'
-        return False, str(ret)
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        return False, f'HTTP {r.status_code} app:rejected'
+    except Exception:
+        return False, 'request_error'
 
 
 def _send_email_via_legacy(title: str, content: str) -> Tuple[bool, str]:
@@ -197,8 +244,8 @@ def _send_email_via_legacy(title: str, content: str) -> Tuple[bool, str]:
             ok = ns.send_email(title, content)
             return (bool(ok), 'ok' if ok else 'send failed')
         return False, 'NotificationService 无 send_email'
-    except Exception as e:
-        return False, str(e)
+    except Exception:
+        return False, 'send_failed'
 
 
 def _send_qq(title: str, content: str) -> Tuple[bool, str]:
@@ -332,7 +379,11 @@ def _get_routes_for(category: str, title: str = '') -> List[str]:
 
 def send(category: str, title: str, content: str,
          only_channels: Optional[List[str]] = None,
-         fallback: Optional[str] = None) -> Dict[str, Tuple[bool, str]]:
+         fallback: Optional[str] = None, *, source: Optional[str] = None,
+         source_run_id: Optional[str] = None, idempotency_key: Optional[str] = None,
+         business_as_of: Optional[str] = None, original_body: Optional[str] = None,
+         planned_at: Optional[str] = None, sensitivity: str = "private",
+         compact: bool = True) -> Dict[str, Tuple[bool, str]]:
     """统一发送入口(所有业务推送都应走这里,不要在业务代码里直连 webhook)
 
     Args:
@@ -348,26 +399,83 @@ def send(category: str, title: str, content: str,
         {channel_name: (ok, message)} 每个渠道的发送结果
     """
     targets = only_channels or _get_routes_for(category, title)
+    if source is None:
+        frame = inspect.currentframe()
+        try:
+            source = str(frame.f_back.f_globals.get("__name__", "unknown")) if frame and frame.f_back else "unknown"
+        finally:
+            del frame
+    source_run_id = source_run_id or os.getenv("FOLIANT_TASK_RUN_ID") or None
     # 即时消息统一去掉装饰和专业术语，并限制手机端长度；archive 长文保持完整。
-    delivery_content = compact_notification(category, content)
-    results: Dict[str, Tuple[bool, str]] = {}
-    for ch in targets:
+    delivery_content = compact_notification(category, content) if compact else content
+    results = DeliveryResults()
+    message_id = uuid4().hex
+    results.message_id = message_id
+
+    def attempt(ch: str, *, fallback_from: Optional[str] = None) -> None:
         sender = CHANNELS.get(ch)
         if sender is None:
             results[ch] = (False, 'unknown channel')
-            continue
+            return
+        delivery_id = None
+        archive_ready = False
         try:
-            results[ch] = sender(title, delivery_content)
-        except Exception as e:
-            results[ch] = (False, str(e))
+            prepared = archive_action("prepare", {
+                "message_id": message_id, "source": source,
+                "source_run_id": source_run_id, "category": category,
+                "title": title, "original_body": original_body if original_body is not None else content,
+                "channel": ch, "final_body": _submitted_body(ch, title, delivery_content),
+                "idempotency_key": idempotency_key, "business_as_of": business_as_of,
+                "sensitivity": sensitivity, "planned_at": planned_at,
+                "fallback_from": fallback_from, "retry_of": None,
+            })
+            results.message_id = prepared["message_id"]
+            if not prepared["should_send"]:
+                results[ch] = (False, "archive_suppressed")
+                results.archive_outcomes[ch] = "suppressed"
+                return
+            delivery_id = prepared["delivery_id"]
+            archive_ready = bool(archive_action("start", {"delivery_id": delivery_id})["started"])
+            if not archive_ready:
+                results[ch] = (False, "archive_start_suppressed")
+                results.archive_outcomes[ch] = "unknown"
+                return
+        except Exception:
+            # A broken archive does not silence operational alerts or reports.
+            results.archive_outcomes[ch] = "unrecorded"
+            log.warning("message archive unavailable before %s delivery; source=%s", ch, source)
+        try:
+            token = IN_ROUTER_DELIVERY.set(True)
+            try:
+                results[ch] = sender(title, delivery_content)
+            finally:
+                IN_ROUTER_DELIVERY.reset(token)
+        except Exception:
+            results[ch] = (False, "sender_exception")
+        if archive_ready and delivery_id:
+            try:
+                receipt = _receipt(*results[ch])
+                recorded = archive_action("finish", {"delivery_id": delivery_id, **receipt})["recorded"]
+                results.archive_outcomes[ch] = "recorded" if recorded else "unknown"
+            except Exception:
+                results.archive_outcomes[ch] = "unknown"
+                log.warning("message archive finish unavailable; source=%s channel=%s", source, ch)
+
+    for ch in targets:
+        attempt(ch)
 
     # 兜底:主渠道全军覆没 → 尝试 fallback。默认 None(不兜底, 保持路由约定)。
     if (fallback and fallback in CHANNELS and fallback not in results
-            and results and not any(ok for ok, _ in results.values())):
-        try:
-            results[fallback] = CHANNELS[fallback](title, delivery_content)
-        except Exception as e:
-            results[fallback] = (False, str(e))
+            and results and not any(ok for ok, _ in results.values())
+            and not any(message.startswith('archive_') for _, message in results.values())):
+        attempt(fallback, fallback_from=','.join(targets))
+
+    outcomes = set(results.archive_outcomes.values())
+    results.archive_status = (
+        "suppressed" if "suppressed" in outcomes else
+        "recorded" if outcomes == {"recorded"} else
+        "partial" if "recorded" in outcomes else
+        "unknown" if "unknown" in outcomes else "unrecorded")
 
     # 审计日志:让"实际发到哪些渠道 / 哪些成功"可观察(否则无法验证路由配置生效)
     audit = ' '.join(f'{ch}={"ok" if ok else "❌"}' for ch, (ok, _) in results.items())

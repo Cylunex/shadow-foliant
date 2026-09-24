@@ -4,6 +4,12 @@ from email.mime.multipart import MIMEMultipart
 import json
 import os
 from typing import Dict
+from uuid import uuid4
+
+try:
+    from .archive_gateway import archived_call
+except ImportError:
+    from archive_gateway import archived_call
 
 from monitor_db import monitor_db
 
@@ -111,6 +117,7 @@ class NotificationService:
         # ---- 兜底: 老路径(webhook + email 都推, 行为不变, 向后兼容) ----
         success = False
         real_attempted = False
+        notification = dict(notification, _archive_message_id=uuid4().hex)
 
         if self.config.get('webhook_enabled'):
             real_attempted = True
@@ -161,19 +168,29 @@ class NotificationService:
             msg.attach(MIMEText(body, 'html'))
             
             print(f"📧 正在发送邮件: id={notification.get('id', 'unknown')}")
-            
-            # 根据端口选择连接方式
-            if self.config['smtp_port'] == 465:
-                server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
-            else:
-                server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
-                server.starttls()
-            
-            server.login(self.config['email_from'], self.config['email_password'])
-            server.send_message(msg)
-            server.quit()
-            print(f"✅ 邮件发送成功: id={notification.get('id', 'unknown')}")
-            return True
+            def deliver():
+                if self.config['smtp_port'] == 465:
+                    server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
+                else:
+                    server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
+                    server.starttls()
+                try:
+                    server.login(self.config['email_from'], self.config['email_password'])
+                    server.send_message(msg)
+                    return True
+                finally:
+                    server.quit()
+            accepted = archived_call(
+                channel='email', title=f"股票监测提醒 - {notification.get('symbol', '')}",
+                original_body=str(notification.get('message', '')),
+                final_body=json.dumps({'subject': msg['Subject'], 'html': body},
+                                      ensure_ascii=False), sender=deliver,
+                source='notify.notification_service.monitor',
+                category=notification.get('_archive_category', 'alert'),
+                message_id=notification.get('_archive_message_id'))
+            if accepted:
+                print(f"✅ 邮件发送成功: id={notification.get('id', 'unknown')}")
+            return accepted
             
         except Exception as e:
             print(f"邮件发送失败: category={type(e).__name__}")
@@ -220,14 +237,6 @@ class NotificationService:
                 <p>这是一封来自AI股票分析系统的测试邮件。</p>
                 <p>如果您收到这封邮件，说明邮件通知功能已正常工作。</p>
                 <hr>
-                <p><strong>邮件配置信息：</strong></p>
-                <ul>
-                    <li>SMTP服务器: {self.config['smtp_server']}</li>
-                    <li>SMTP端口: {self.config['smtp_port']}</li>
-                    <li>发送邮箱: {self.config['email_from']}</li>
-                    <li>接收邮箱: {self.config['email_to']}</li>
-                </ul>
-                <hr>
                 <p><em>此邮件由AI股票分析系统自动发送</em></p>
             </body>
             </html>
@@ -235,17 +244,24 @@ class NotificationService:
             
             msg.attach(MIMEText(body, 'html'))
             
-            # 根据端口选择连接方式
-            if self.config['smtp_port'] == 465:
-                server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
-            else:
-                server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
-                server.starttls()
-            
-            server.login(self.config['email_from'], self.config['email_password'])
-            server.send_message(msg)
-            server.quit()
-            return True, "测试邮件发送成功！请检查收件箱（包括垃圾邮件箱）。"
+            def deliver():
+                if self.config['smtp_port'] == 465:
+                    server = smtplib.SMTP_SSL(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
+                else:
+                    server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=15)
+                    server.starttls()
+                try:
+                    server.login(self.config['email_from'], self.config['email_password'])
+                    server.send_message(msg)
+                    return True
+                finally:
+                    server.quit()
+            accepted = archived_call(
+                channel='email', title=msg['Subject'], original_body=body,
+                final_body=body, sender=deliver,
+                source='notify.notification_service.send_test_email', category='test')
+            return (accepted, "测试邮件发送成功！请检查收件箱（包括垃圾邮件箱）。"
+                    if accepted else "测试邮件发送失败")
             
         except smtplib.SMTPAuthenticationError:
             return False, "邮箱认证失败，请检查邮箱和授权码是否正确"
@@ -342,25 +358,25 @@ _此消息由AI股票分析系统自动发送_"""
             }
             
             print("[钉钉] 正在发送Webhook")
-            
-            response = requests.post(
-                self.config['webhook_url'],
-                json=data,
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('errcode') == 0 or result.get('ok') == True:
-                    print(f"[成功] 钉钉Webhook发送成功")
-                    return True
-                else:
-                    print("[失败] 钉钉Webhook返回业务错误")
-                    return False
-            else:
-                print(f"[失败] 钉钉Webhook请求失败: HTTP {response.status_code}")
-                return False
+            def deliver():
+                response = requests.post(
+                    self.config['webhook_url'], json=data,
+                    headers={'Content-Type': 'application/json'}, timeout=10)
+                result = response.json() if response.status_code == 200 else {}
+                ok = response.status_code == 200 and (
+                    result.get('errcode') == 0 or result.get('ok') is True)
+                return {'ok': ok, 'http_status': response.status_code,
+                        'provider_code': 'accepted' if ok else 'rejected',
+                        'error_code': None if ok else 'provider_rejected'}
+            accepted = archived_call(
+                channel='dingtalk', title=f"股票监测提醒 - {notification.get('symbol', '')}",
+                original_body=str(notification.get('message', '')),
+                final_body=json.dumps(data, ensure_ascii=False), sender=deliver,
+                source='notify.notification_service.monitor',
+                category=notification.get('_archive_category', 'alert'),
+                message_id=notification.get('_archive_message_id'))
+            print("[成功] 钉钉Webhook发送成功" if accepted else "[失败] 钉钉Webhook未接受")
+            return accepted
         
         except Exception as e:
             print(f"钉钉Webhook发送异常: category={type(e).__name__}")
@@ -445,25 +461,23 @@ _此消息由AI股票分析系统自动发送_"""
             }
             
             print("[飞书] 正在发送Webhook")
-            
-            response = requests.post(
-                self.config['webhook_url'],
-                json=data,
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('code') == 0:
-                    print(f"[成功] 飞书Webhook发送成功")
-                    return True
-                else:
-                    print("[失败] 飞书Webhook返回业务错误")
-                    return False
-            else:
-                print(f"[失败] 飞书Webhook请求失败: HTTP {response.status_code}")
-                return False
+            def deliver():
+                response = requests.post(
+                    self.config['webhook_url'], json=data,
+                    headers={'Content-Type': 'application/json'}, timeout=10)
+                ok = response.status_code == 200 and response.json().get('code') == 0
+                return {'ok': ok, 'http_status': response.status_code,
+                        'provider_code': 'accepted' if ok else 'rejected',
+                        'error_code': None if ok else 'provider_rejected'}
+            accepted = archived_call(
+                channel='feishu', title=f"股票监测提醒 - {notification.get('symbol', '')}",
+                original_body=str(notification.get('message', '')),
+                final_body=json.dumps(data, ensure_ascii=False), sender=deliver,
+                source='notify.notification_service.monitor',
+                category=notification.get('_archive_category', 'alert'),
+                message_id=notification.get('_archive_message_id'))
+            print("[成功] 飞书Webhook发送成功" if accepted else "[失败] 飞书Webhook未接受")
+            return accepted
         
         except Exception as e:
             print(f"飞书Webhook发送异常: category={type(e).__name__}")
@@ -482,7 +496,8 @@ _此消息由AI股票分析系统自动发送_"""
                 'name': 'Webhook配置测试',
                 'type': '系统测试',
                 'message': '如果您收到此消息，说明Webhook配置正确！',
-                'triggered_at': '刚刚'
+                'triggered_at': '刚刚',
+                '_archive_category': 'test',
             }
             
             webhook_type = self.config['webhook_type']
@@ -529,7 +544,21 @@ _此消息由AI股票分析系统自动发送_"""
     # ============================================================
     # 通用分析结果通知（龙虎榜/新闻流量/智策板块/宏观分析 等共用入口）
     # ============================================================
-    def send_email(self, subject: str, content: str) -> bool:
+    def send_email(self, subject: str, content: str, *, _message_id: str = None,
+                   _source: str = 'notify.notification_service.send_email') -> bool:
+        if not self.config.get('email_enabled'):
+            return False
+        html_body = '<pre style="font-family:Consolas,monospace;font-size:14px;line-height:1.5;color:#222">' \
+                    + content.replace('<', '&lt;').replace('>', '&gt;') + '</pre>'
+        return archived_call(
+            channel='email', title=subject, original_body=content,
+            final_body=json.dumps({'subject': subject, 'text': content, 'html': html_body},
+                                  ensure_ascii=False),
+            sender=lambda: self._send_email_unarchived(subject, content),
+            source=_source, category='report',
+            message_id=_message_id)
+
+    def _send_email_unarchived(self, subject: str, content: str) -> bool:
         """简易邮件发送 — subject + 纯文本/HTML 正文"""
         if not self.config.get('email_enabled'):
             return False
@@ -543,50 +572,56 @@ _此消息由AI股票分析系统自动发送_"""
             print(f"[NotificationService] send_email 失败: category={type(e).__name__}")
             return False
 
-    def send_webhook(self, subject: str, content: str) -> bool:
+    def send_webhook(self, subject: str, content: str, *, _message_id: str = None,
+                     _source: str = 'notify.notification_service.send_webhook') -> bool:
         """简易 webhook 发送 — 通用消息（不复用股票监测专用的 _send_dingtalk_webhook）"""
         if not self.config.get('webhook_enabled'):
             return False
         url = (self.config.get('webhook_url') or '').strip()
         if not url:
             return False
+        wt = self.config.get('webhook_type', 'dingtalk')
+        keyword = self.config.get('webhook_keyword', '') or ''
+        if wt == 'feishu':
+            payload = {'msg_type': 'interactive', 'card': {
+                'header': {'title': {'tag': 'plain_text', 'content': f'{keyword} {subject}'.strip()}},
+                'elements': [{'tag': 'markdown', 'content': content}]}}
+        else:
+            safe_title = f'{keyword} {subject}'.strip() if keyword else subject
+            payload = {'msgtype': 'markdown', 'markdown': {
+                'title': safe_title,
+                'text': f'# {subject}\n\n{content}\n\n_发送时间: {self._now()}_',
+            }}
+        return archived_call(
+            channel=wt if wt in {'dingtalk', 'feishu'} else 'webhook',
+            title=subject, original_body=content,
+            final_body=json.dumps(payload, ensure_ascii=False),
+            sender=lambda: self._send_webhook_unarchived(payload),
+            source=_source, category='report',
+            message_id=_message_id)
+
+    def _send_webhook_unarchived(self, payload: dict) -> dict:
         try:
             import requests
-            wt = self.config.get('webhook_type', 'dingtalk')
-            keyword = self.config.get('webhook_keyword', '') or ''
-            if wt == 'feishu':
-                payload = {
-                    'msg_type': 'interactive',
-                    'card': {
-                        'header': {'title': {'tag': 'plain_text',
-                                              'content': f'{keyword} {subject}'.strip()}},
-                        'elements': [{'tag': 'markdown', 'content': content}],
-                    }
-                }
-            else:
-                # 钉钉 markdown
-                safe_title = f'{keyword} {subject}'.strip() if keyword else subject
-                payload = {
-                    'msgtype': 'markdown',
-                    'markdown': {
-                        'title': safe_title,
-                        'text': f'# {subject}\n\n{content}\n\n_发送时间: {self._now()}_',
-                    },
-                }
+            url = (self.config.get('webhook_url') or '').strip()
             r = requests.post(url, json=payload,
                               headers={'Content-Type': 'application/json'},
                               timeout=10)
             if r.status_code != 200:
                 print(f"[NotificationService] send_webhook HTTP {r.status_code}")
-                return False
+                return {'ok': False, 'http_status': r.status_code,
+                        'provider_code': 'rejected', 'error_code': 'http_rejected'}
             ret = r.json()
             if ret.get('errcode') == 0 or ret.get('StatusCode') == 0 or ret.get('code') == 0:
-                return True
+                return {'ok': True, 'http_status': r.status_code,
+                        'provider_code': 'accepted', 'error_code': None}
             print("[NotificationService] send_webhook 返回业务错误")
-            return False
+            return {'ok': False, 'http_status': r.status_code,
+                    'provider_code': 'rejected', 'error_code': 'provider_rejected'}
         except Exception as e:
             print(f"[NotificationService] send_webhook 异常: category={type(e).__name__}")
-            return False
+            return {'ok': False, 'http_status': None,
+                    'provider_code': None, 'error_code': 'transport_unknown'}
 
     def send_analysis_result(self, subject: str, content: str,
                              channels: list = None) -> bool:
@@ -601,12 +636,16 @@ _此消息由AI股票分析系统自动发送_"""
             True 表示至少有一个渠道成功
         """
         channels = channels or ['email', 'webhook']
+        message_id = uuid4().hex
+        source = 'notify.notification_service.send_analysis_result'
         ok_any = False
         if 'email' in channels and self.config.get('email_enabled'):
-            if self.send_email(subject, content):
+            if self.send_email(subject, content, _message_id=message_id,
+                               _source=source):
                 ok_any = True
         if 'webhook' in channels and self.config.get('webhook_enabled'):
-            if self.send_webhook(subject, content):
+            if self.send_webhook(subject, content, _message_id=message_id,
+                                 _source=source):
                 ok_any = True
         return ok_any
 
@@ -759,17 +798,37 @@ _此消息由AI股票分析系统自动发送_"""
                     text_body += f"- {code}: 分析失败 ({error})\n"
             
             success = False
+            message_id = uuid4().hex
             
             # 发送邮件
             if self.config['email_enabled']:
-                email_success = self._send_custom_email(subject, html_body, text_body)
+                email_success = archived_call(
+                    channel='email', title=subject, original_body=text_body,
+                    final_body=json.dumps({'subject': subject, 'text': text_body,
+                                           'html': html_body}, ensure_ascii=False),
+                    sender=lambda: self._send_custom_email(subject, html_body, text_body),
+                    source='notify.notification_service.portfolio', category='report',
+                    message_id=message_id)
                 if email_success:
                     success = True
                     print("[OK] 邮件通知发送成功")
             
             # 发送Webhook
             if self.config['webhook_enabled']:
-                webhook_success = self._send_portfolio_webhook(analysis_results, sync_result)
+                try:
+                    payload = self._portfolio_webhook_payload(analysis_results, sync_result)
+                    webhook_success = archived_call(
+                        channel=self.config['webhook_type'] if self.config['webhook_type'] in
+                                {'dingtalk', 'feishu'} else 'webhook',
+                        title=subject, original_body=text_body,
+                    final_body=json.dumps(payload, ensure_ascii=False),
+                    sender=lambda: self._send_portfolio_webhook(
+                        analysis_results, sync_result, payload=payload,
+                        return_receipt=True),
+                        source='notify.notification_service.portfolio', category='report',
+                        message_id=message_id)
+                except Exception:
+                    webhook_success = False
                 if webhook_success:
                     success = True
                     print("[OK] Webhook通知发送成功")
@@ -817,11 +876,7 @@ _此消息由AI股票分析系统自动发送_"""
             print(f"[ERROR] 邮件发送失败: category={type(e).__name__}")
             return False
 
-    def _send_portfolio_webhook(self, analysis_results: dict, sync_result: dict = None) -> bool:
-        """发送持仓分析Webhook通知"""
-        try:
-            import requests
-            
+    def _portfolio_webhook_payload(self, analysis_results: dict, sync_result: dict = None) -> dict:
             total = analysis_results.get("total", 0)
             succeeded = len([r for r in analysis_results.get("results", []) if r.get("result", {}).get("success")])
             failed = total - succeeded
@@ -858,18 +913,28 @@ _此消息由AI股票分析系统自动发送_"""
                     }
                 }
             
+            return data
+
+    def _send_portfolio_webhook(self, analysis_results: dict, sync_result: dict = None,
+                                *, payload: dict = None,
+                                return_receipt: bool = False):
+        """发送持仓分析Webhook通知"""
+        try:
+            import requests
+            data = payload or self._portfolio_webhook_payload(analysis_results, sync_result)
             response = requests.post(self.config['webhook_url'], json=data, timeout=10)
-            return response.status_code == 200
+            ok = response.status_code == 200
+            if return_receipt:
+                return {'ok': ok, 'http_status': response.status_code,
+                        'provider_code': 'accepted' if ok else 'rejected',
+                        'error_code': None if ok else 'http_rejected'}
+            return ok
             
         except Exception as e:
             print(f"[ERROR] Webhook发送失败: category={type(e).__name__}")
-            return False
+            return ({'ok': False, 'http_status': None,
+                     'provider_code': None, 'error_code': 'transport_unknown'}
+                    if return_receipt else False)
 
 # 全局通知服务实例
 notification_service = NotificationService()
-
-
-
-
-
-

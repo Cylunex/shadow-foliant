@@ -3466,6 +3466,8 @@ from webui.scheduled_snapshot_routes import register_scheduled_snapshot_routes
 register_scheduled_snapshot_routes(
     app, agent_result=_agent_result, agent_error=_agent_error
 )
+from webui.message_archive_routes import register_message_archive_routes
+register_message_archive_routes(app, agent_result=_agent_result, agent_error=_agent_error)
 from webui.external_research_routes import register_external_research_routes
 register_external_research_routes(
     app, agent_result=_agent_result, agent_error=_agent_error

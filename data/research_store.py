@@ -410,6 +410,26 @@ class ResearchStore:
                 error_code TEXT, delivery_status TEXT NOT NULL,
                 suppression_reason TEXT, suppressed_count INTEGER NOT NULL DEFAULT 0
             )""",
+            """CREATE TABLE IF NOT EXISTS notification_messages (
+                message_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                source_run_id TEXT, category TEXT NOT NULL,
+                title_cipher TEXT NOT NULL, original_cipher TEXT NOT NULL,
+                original_sha256 TEXT NOT NULL, generated_at TEXT NOT NULL,
+                business_as_of TEXT, idempotency_key TEXT UNIQUE,
+                sensitivity TEXT NOT NULL, version TEXT NOT NULL,
+                status TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS notification_deliveries (
+                delivery_id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                channel TEXT NOT NULL, target_label TEXT NOT NULL,
+                final_body_cipher TEXT NOT NULL, final_sha256 TEXT NOT NULL,
+                planned_at TEXT, attempted_at TEXT, acknowledged_at TEXT,
+                status TEXT NOT NULL, http_status INTEGER, provider_code TEXT,
+                error_code TEXT, retry_of TEXT, fallback_from TEXT,
+                suppressed_count INTEGER NOT NULL DEFAULT 0,
+                last_suppressed_at TEXT, suppression_reason TEXT,
+                version TEXT NOT NULL, UNIQUE(message_id,channel)
+            )""",
             "CREATE INDEX IF NOT EXISTS idx_external_evidence_decision ON external_research_evidence(channel,decision_as_of)",
             "CREATE INDEX IF NOT EXISTS idx_external_overlay_latest ON external_independent_overlays(channel,ranking_locked_at)",
             "CREATE INDEX IF NOT EXISTS idx_external_outcomes_horizon ON external_overlay_outcomes(horizon_days,decision_as_of)",
@@ -478,6 +498,11 @@ class ResearchStore:
             "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
             "ON CONFLICT(version) DO NOTHING",
             ("18-scheduled-notification-audit", datetime.now().astimezone().isoformat()),
+        )
+        cur.execute(
+            "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
+            "ON CONFLICT(version) DO NOTHING",
+            ("19-message-channel-archive", datetime.now().astimezone().isoformat()),
         )
         version = "4-reproducible-inputs"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))

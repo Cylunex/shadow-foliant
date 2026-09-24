@@ -13,6 +13,7 @@ PySocks>=1.7.1,<2       # eltdx 可选 HTTP/SOCKS 代理；仅局部注入 TDX �
 tdx-python==0.1.6; python_version >= "3.12"  # 3.12+ 增强兜底；原生 SDK 隔离子进程
 zzshare>=0.4.9,<1       # A股正式 API:Token 由仓库外环境注入，分钟线主源
 PyJWT[crypto]>=2.8,<3   # 原生 OIDC ID Token 签名/issuer/audience/exp/iat 校验
+cryptography>=42,<48    # 消息渠道存档正文加密
 PyYAML>=6.0             # Shadow Platform Agent/LLM registry
 # ⚠️ easy-tdx / mootdx 仅保留旧协议兼容，默认关闭；需要时单独安装 easy-tdx>=1.20.7,<2。
 #    主 TDX 已迁到 eltdx。mootdx 包元数据锁 httpx<0.26,与上面 mcp 需要的

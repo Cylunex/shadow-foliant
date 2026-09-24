@@ -734,7 +734,8 @@ def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
+            notification_slot: str | None = None) -> dict[str, Any]:
     failed = qq_preflight(snapshot)
     if failed:
         return failed
@@ -753,6 +754,13 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None) 
             result = notification_router.send(
                 "report", payload["title"], payload["content"],
                 only_channels=["qq"], fallback=None,
+                source="scripts.foliant_scheduled_snapshot",
+                source_run_id=str(snapshot.get("run_id") or "") or None,
+                idempotency_key="scheduled-qq:" + hashlib.sha256(
+                    (notification_slot or payload["payload_hash"]).encode("utf-8")
+                ).hexdigest(),
+                business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
+                original_body=render_qq_report(snapshot)[1],
             )
     except Exception:
         return {"requested": True, "sent": False, "channel": "qq",
@@ -768,11 +776,17 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None) 
     detail = str(result["qq"][1] or "")
     match = re.fullmatch(r"HTTP (\d{3})", detail)
     http_status = int(match.group(1)) if match else None
+    archive_status = getattr(result, "archive_status", "unobserved")
+    archive_message_id = getattr(result, "message_id", None)
     return ({"requested": True, "sent": True, "channel": "qq",
-             "delivery_status": "delivered", "http_status": http_status} if sent else
+             "delivery_status": "delivered", "http_status": http_status,
+             "message_archive_status": archive_status,
+             "message_archive_id": archive_message_id} if sent else
             {"requested": True, "sent": False, "channel": "qq",
              "delivery_status": "failed" if http_status else "unknown",
              "http_status": http_status,
+             "message_archive_status": archive_status,
+             "message_archive_id": archive_message_id,
              "error_code": "qq_http_rejected" if http_status else "qq_delivery_unknown"})
 
 
@@ -870,7 +884,8 @@ def main(argv: list[str] | None = None) -> int:
                             "delivery_status": "unknown",
                             "error_code": "notification_start_unconfirmed"}
                     else:
-                        notification = send_qq(snapshot, payload=payload)
+                        notification = send_qq(snapshot, payload=payload,
+                                               notification_slot=notification_slot)
                         status = notification.get("delivery_status") or "unknown"
                         finish, finish_failure = notification_ledger("finish", {
                             "notification_slot": notification_slot,

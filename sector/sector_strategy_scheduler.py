@@ -158,7 +158,7 @@ class SectorStrategyScheduler:
             print(f"[智策定时] ✗ 分析过程出错: {e}")
             import traceback
             traceback.print_exc()
-            self._send_error_notification(f"分析异常: {str(e)}")
+            self._send_error_notification(f"分析异常: {type(e).__name__}")
     
     def _send_analysis_notification(self, result):
         """发送分析结果通知（邮件和/或webhook）- 带去重保护"""
@@ -174,13 +174,35 @@ class SectorStrategyScheduler:
             config = notification_service.config
             predictions = result.get("final_predictions", {})
             timestamp = result.get("timestamp", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            from uuid import uuid4
+            from notify.archive_gateway import archived_call
+            archive_message_id = uuid4().hex
+            try:
+                original_body = self._format_email_body(predictions, timestamp)
+            except Exception:
+                original_body = self._format_webhook_summary(predictions, timestamp)
             
             sent_count = 0
             
             # 尝试发送Webhook
             if config.get('webhook_enabled') and config.get('webhook_url'):
                 print("[智策定时] [Webhook] 准备发送...")
-                webhook_success = self._send_webhook_direct(predictions, timestamp)
+                channel = config.get('webhook_type', 'dingtalk')
+                summary = self._format_webhook_summary(predictions, timestamp)
+                if channel == 'feishu':
+                    keyword = config.get('webhook_keyword', '')
+                    prefix = f"【{keyword} - " if keyword else "【"
+                    submitted = f"{prefix}智策板块分析报告】\n分析时间: {timestamp}\n\n{summary}"
+                else:
+                    submitted = summary
+                webhook_success = archived_call(
+                    channel=channel if channel in {'dingtalk', 'feishu'} else 'webhook',
+                    title=f"智策板块分析报告 - {timestamp}", original_body=original_body,
+                    final_body=submitted,
+                    sender=lambda: self._send_webhook_direct(
+                        predictions, timestamp, return_receipt=True),
+                    source='sector.sector_strategy_scheduler', category='report',
+                    message_id=archive_message_id)
                 if webhook_success:
                     print("[智策定时] ✓ Webhook发送成功")
                     sent_count += 1
@@ -196,8 +218,13 @@ class SectorStrategyScheduler:
             ]):
                 print("[智策定时] [邮件] 准备发送...")
                 subject = f"智策板块分析报告 - {timestamp}"
-                body = self._format_email_body(predictions, timestamp)
-                email_success = self._send_email_direct(subject, body)
+                body = original_body
+                email_success = archived_call(
+                    channel='email', title=f"智策板块分析报告 - {timestamp}",
+                    original_body=original_body, final_body=body,
+                    sender=lambda: self._send_email_direct(subject, body),
+                    source='sector.sector_strategy_scheduler', category='report',
+                    message_id=archive_message_id)
                 if email_success:
                     print("[智策定时] ✓ 邮件发送成功")
                     sent_count += 1
@@ -229,11 +256,15 @@ class SectorStrategyScheduler:
 
 请检查系统日志获取详细信息。
 """
-            self._send_email_direct(subject, body)
+            from notify.archive_gateway import archived_call
+            archived_call(channel='email', title=subject, original_body=body,
+                          final_body=body,
+                          sender=lambda: self._send_email_direct(subject, body),
+                          source='sector.sector_strategy_scheduler', category='system_error')
         except:
             pass
     
-    def _send_webhook_direct(self, predictions, timestamp):
+    def _send_webhook_direct(self, predictions, timestamp, *, return_receipt=False):
         """发送webhook通知"""
         try:
             import requests
@@ -246,20 +277,24 @@ class SectorStrategyScheduler:
             summary = self._format_webhook_summary(predictions, timestamp)
             
             if webhook_type == 'dingtalk':
-                return self._send_dingtalk(webhook_url, summary, timestamp)
+                return self._send_dingtalk(webhook_url, summary, timestamp,
+                                           return_receipt=return_receipt)
             elif webhook_type == 'feishu':
-                return self._send_feishu(webhook_url, summary, timestamp)
+                return self._send_feishu(webhook_url, summary, timestamp,
+                                         return_receipt=return_receipt)
             else:
                 print(f"[智策定时] ✗ 不支持的webhook类型: {webhook_type}")
-                return False
+                return ({'ok': False, 'error_code': 'channel_unsupported'}
+                        if return_receipt else False)
         
         except Exception as e:
             print(f"[智策定时] ✗ Webhook发送失败: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            return ({'ok': False, 'error_code': 'transport_unknown'}
+                    if return_receipt else False)
     
-    def _send_dingtalk(self, url, summary, timestamp):
+    def _send_dingtalk(self, url, summary, timestamp, *, return_receipt=False):
         """发送钉钉消息"""
         try:
             import requests
@@ -278,16 +313,18 @@ class SectorStrategyScheduler:
             
             response = requests.post(url, json=data, headers={'Content-Type': 'application/json'}, timeout=10)
             
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('errcode') == 0
-            return False
+            ok = response.status_code == 200 and response.json().get('errcode') == 0
+            return ({'ok': ok, 'http_status': response.status_code,
+                     'provider_code': 'accepted' if ok else 'rejected',
+                     'error_code': None if ok else 'provider_rejected'}
+                    if return_receipt else ok)
         
         except Exception as e:
             print(f"[智策定时] 钉钉发送异常: {e}")
-            return False
+            return ({'ok': False, 'error_code': 'transport_unknown'}
+                    if return_receipt else False)
     
-    def _send_feishu(self, url, summary, timestamp):
+    def _send_feishu(self, url, summary, timestamp, *, return_receipt=False):
         """发送飞书消息"""
         try:
             import requests
@@ -305,14 +342,16 @@ class SectorStrategyScheduler:
             
             response = requests.post(url, json=data, headers={'Content-Type': 'application/json'}, timeout=10)
             
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('code') == 0
-            return False
+            ok = response.status_code == 200 and response.json().get('code') == 0
+            return ({'ok': ok, 'http_status': response.status_code,
+                     'provider_code': 'accepted' if ok else 'rejected',
+                     'error_code': None if ok else 'provider_rejected'}
+                    if return_receipt else ok)
         
         except Exception as e:
             print(f"[智策定时] 飞书发送异常: {e}")
-            return False
+            return ({'ok': False, 'error_code': 'transport_unknown'}
+                    if return_receipt else False)
     
     def _format_webhook_summary(self, predictions, timestamp):
         """格式化webhook摘要（精简版）"""
@@ -390,15 +429,14 @@ class SectorStrategyScheduler:
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
             
             print(f"[智策定时] 📧 正在发送邮件...")
-            print(f"[智策定时]   - 收件人: {config['email_to']}")
             print(f"[智策定时]   - 主题: {subject}")
             
             # 根据端口选择连接方式
             if config['smtp_port'] == 465:
-                print(f"[智策定时]   - 使用 SMTP_SSL 连接 {config['smtp_server']}:{config['smtp_port']}")
+                print("[智策定时]   - 使用 SMTP_SSL 连接")
                 server = smtplib.SMTP_SSL(config['smtp_server'], config['smtp_port'], timeout=15)
             else:
-                print(f"[智策定时]   - 使用 SMTP+TLS 连接 {config['smtp_server']}:{config['smtp_port']}")
+                print("[智策定时]   - 使用 SMTP+TLS 连接")
                 server = smtplib.SMTP(config['smtp_server'], config['smtp_port'], timeout=15)
                 server.starttls()
             

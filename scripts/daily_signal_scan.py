@@ -36,93 +36,18 @@ from io import StringIO
 
 import datahub  # 统一数据层:行情/龙虎/板块/估值/资金流/强势股/龙虎榜明细一律走 datahub
 
-# ═══════════════════════════════════════════════════════════
-#  通知层 — QQ Webhook 优先，邮件兜底
-# ═══════════════════════════════════════════════════════════
-
-# QQ Webhook(生产机本地代理;其他机器在 .env 配 QQ_WEBHOOK_URL,如 NAS nginx 入口)
-import os as _os
-QQ_WEBHOOK_URL = _os.getenv("QQ_WEBHOOK_URL", "").strip() or "http://127.0.0.1:18888/webhook/qq"
-
-# 邮件兜底(从 env 读,勿硬编码密钥)
-EMAIL_ENABLED = _os.getenv("EMAIL_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-SMTP_SERVER = _os.getenv("SMTP_SERVER", "smtp.qq.com")
-SMTP_PORT = int(_os.getenv("SMTP_PORT", "587"))
-EMAIL_FROM = _os.getenv("EMAIL_FROM", "")
-EMAIL_PASSWORD = _os.getenv("EMAIL_PASSWORD", "")
-EMAIL_TO = _os.getenv("EMAIL_TO", "")
-
-
-def send_via_qq_webhook(text: str, title: str = "") -> bool:
-    """通过 QQ Webhook 发送（钉钉 markdown 格式 → webhook-to-qq 自动识别为 markdown 通道）"""
-    try:
-        import requests
-        payload = {
-            "msgtype": "markdown",
-            "markdown": {
-                "title": title or "股票分析报告",
-                "text": text,
-            }
-        }
-        r = requests.post(QQ_WEBHOOK_URL, json=payload, timeout=10)
-        if r.status_code == 200:
-            print(f"[QQ] ✅ 消息发送成功 ({len(text)} chars)")
-            return True
-        else:
-            print(f"[QQ] ❌ 发送失败: {r.status_code}")
-            return False
-    except Exception as e:
-        print(f"[QQ] ❌ 发送异常: {e}")
-        return False
-
-
-def send_via_email(subject: str, body: str) -> bool:
-    """通过 QQ 邮箱发送"""
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_FROM
-        msg['To'] = EMAIL_TO
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_FROM, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"[Email] ✅ 邮件发送成功")
-        return True
-    except Exception as e:
-        print(f"[Email] ❌ 发送失败: {e}")
-        return False
-
-
 def send_report(text: str, title: str = ""):
-    """发送报告:优先走 notification_router 统一路由(report→默认QQ,全挂自动兜底邮件);
-    路由不可用时退回本脚本自带的 QQ→邮件链(保持独立可运行)。"""
-    # 截断长文本
-    if len(text) > 15000:
-        text = text[:14800] + "\n\n... (内容过长已截断)"
-
+    """统一路由，QQ 失败时由同一逻辑消息记录邮件兜底。"""
     try:
         from notification_router import send as _nr_send
-        res = _nr_send('report', title or "股票分析报告", text)
+        res = _nr_send('report', title or "股票分析报告", text,
+                       fallback='email', source='scripts.daily_signal_scan')
         if any(ok for ok, _ in res.values()):
             print(f"[通知] ✅ 路由发送成功: {[c for c, (ok, _) in res.items() if ok]}")
             return
-        print(f"[通知] 路由全部失败({res}),退回本地发送链")
-    except Exception as e:
-        print(f"[通知] 路由不可用({e}),退回本地发送链")
-
-    # 本地兜底链: QQ Webhook → 邮件
-    if send_via_qq_webhook(text, title):
-        return
-    print("[通知] QQ发送失败，尝试邮件兜底...")
-    send_via_email(title or "股票分析报告", text)
+        print("[通知] 已配置渠道均未接受消息")
+    except Exception:
+        print("[通知] 统一路由不可用")
 
 
 # 持仓池 = 从数据库动态读取（非选股用）

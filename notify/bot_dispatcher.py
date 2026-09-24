@@ -233,11 +233,25 @@ class TelegramPoller:
         if not self.token:
             return
         import requests
-        url = f'https://api.telegram.org/bot{self.token}/sendMessage'
         try:
-            requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
-        except Exception as e:
-            log.warning(f'telegram reply failed: {e}')
+            from .archive_gateway import archived_call
+        except ImportError:
+            from archive_gateway import archived_call
+        url = f'https://api.telegram.org/bot{self.token}/sendMessage'
+        def deliver():
+            try:
+                response = requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
+                ok = response.status_code == 200 and bool(response.json().get('ok'))
+                return {'ok': ok, 'http_status': response.status_code,
+                        'provider_code': 'accepted' if ok else 'rejected',
+                        'error_code': None if ok else 'provider_rejected'}
+            except Exception:
+                return {'ok': False, 'error_code': 'transport_unknown'}
+        if not archived_call(channel='telegram', title='Telegram 回复',
+                             original_body=text, final_body=text, sender=deliver,
+                             source='notify.bot_dispatcher.TelegramPoller',
+                             category='interactive_reply'):
+            log.warning('telegram reply failed')
 
     def _loop(self):
         if not self.token:

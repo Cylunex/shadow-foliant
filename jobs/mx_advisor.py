@@ -162,20 +162,14 @@ def run_mx_advisor() -> Optional[str]:
 
 
 def send_to_qq_webhook(text: str) -> bool:
-    """通过 QQ Webhook 发送消息"""
-    webhook_url = os.getenv('QQ_WEBHOOK_URL', 'http://127.0.0.1:18888/webhook/qq')
+    """保留完整妙想报告并通过统一渠道存档/投递。"""
     try:
-        import urllib.request as _req
-        data = json.dumps({
-            'msgtype': 'markdown',
-            'markdown': {'text': text}
-        }, ensure_ascii=False).encode('utf-8')
-        req = _req.Request(webhook_url, data=data,
-                          headers={'Content-Type': 'application/json'})
-        _req.urlopen(req, timeout=10)
-        return True
-    except Exception as e:
-        print(f'[mx_advisor] ⚠️ Webhook 发送失败: {e}')
+        from notify.notification_router import send
+        result = send('report', '妙想第二意见', text, only_channels=['qq'],
+                      source='jobs.mx_advisor', compact=False)
+        return bool(result.get('qq', (False, ''))[0])
+    except Exception:
+        print('[mx_advisor] ⚠️ Webhook 发送失败')
         return False
 
 

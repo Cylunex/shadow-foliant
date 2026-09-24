@@ -423,11 +423,9 @@ class PortfolioScheduler:
 请检查系统日志或手动运行分析。
 """
             
-            if self.notification_service.email_enabled:
-                self.notification_service.send_email("【持仓定时分析】执行失败", content)
-            
-            if self.notification_service.webhook_enabled:
-                self.notification_service.send_webhook("【持仓定时分析】执行失败", content)
+            self.notification_service.send_analysis_result(
+                "【持仓定时分析】执行失败", content,
+                channels=['email', 'webhook'])
                 
         except Exception as e:
             print(f"[ERROR] 发送错误通知失败: {str(e)}")

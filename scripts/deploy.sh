@@ -94,6 +94,8 @@ fi
   fi
 )
 
+"$python_bin" "$validation_dir/scripts/provision_message_archive_key.py"
+
 (cd "$validation_dir" && bash scripts/migrate.sh)
 
 if [[ "${DEPLOY_RESTART:-false}" != "true" ]]; then
