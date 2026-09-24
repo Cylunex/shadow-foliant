@@ -61,8 +61,9 @@ def register_scheduled_snapshot_routes(
     def notification_audit(request: Request):
         try:
             from application.scheduled_notification import ScheduledNotificationService
-            return agent_result({"rows": ScheduledNotificationService().audit(
-                actor_id=str(request.state.agent_identity.agent_id))})
+            return agent_result({"status": "complete", "data": {
+                "rows": ScheduledNotificationService().audit(
+                    actor_id=str(request.state.agent_identity.agent_id))}})
         except Exception as exc:
             return agent_error(exc)
 
@@ -71,11 +72,11 @@ def register_scheduled_snapshot_routes(
     def notification_claim(req: NotificationClaimReq, request: Request):
         try:
             from application.scheduled_notification import ScheduledNotificationService
-            return agent_result(ScheduledNotificationService().claim(
+            return agent_result({"status": "complete", "data": ScheduledNotificationService().claim(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
                 original_lines=req.original_lines, delivered_lines=req.delivered_lines,
                 category=req.category, version=req.version,
-                actor_id=str(request.state.agent_identity.agent_id)))
+                actor_id=str(request.state.agent_identity.agent_id))})
         except Exception as exc:
             return agent_error(exc)
 
@@ -84,9 +85,9 @@ def register_scheduled_snapshot_routes(
     def notification_start(req: NotificationStartReq, request: Request):
         try:
             from application.scheduled_notification import ScheduledNotificationService
-            return agent_result(ScheduledNotificationService().start(
+            return agent_result({"status": "complete", "data": ScheduledNotificationService().start(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
-                actor_id=str(request.state.agent_identity.agent_id)))
+                actor_id=str(request.state.agent_identity.agent_id))})
         except Exception as exc:
             return agent_error(exc)
 
@@ -95,9 +96,9 @@ def register_scheduled_snapshot_routes(
     def notification_finish(req: NotificationFinishReq, request: Request):
         try:
             from application.scheduled_notification import ScheduledNotificationService
-            return agent_result(ScheduledNotificationService().finish(
+            return agent_result({"status": "complete", "data": ScheduledNotificationService().finish(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
                 actor_id=str(request.state.agent_identity.agent_id), status=req.status,
-                http_status=req.http_status, error_code=req.error_code))
+                http_status=req.http_status, error_code=req.error_code)})
         except Exception as exc:
             return agent_error(exc)

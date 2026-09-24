@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import sqlite3
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from application.scheduled_notification import ScheduledNotificationService
 from data.research_store import ResearchStore
@@ -117,3 +121,37 @@ def test_audit_is_read_scoped_and_slot_mutations_require_writer_capability():
     for action in ("claim", "start", "finish"):
         assert MACHINE_CAPABILITIES[("POST", base + action)] == "foliant.selection.preview"
         assert MACHINE_SCOPES[("POST", base + action)] == "stock.research"
+
+
+def test_protected_routes_wrap_claim_attempt_receipt_and_audit_in_data(tmp_path, monkeypatch):
+    from application import scheduled_notification as module
+    from webui.scheduled_snapshot_routes import register_scheduled_snapshot_routes
+
+    service = _service(tmp_path, 11, 25)
+    monkeypatch.setattr(module, "ScheduledNotificationService", lambda: service)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identity(request, call_next):
+        request.state.agent_identity = SimpleNamespace(agent_id="writer")
+        return await call_next(request)
+
+    register_scheduled_snapshot_routes(app, agent_result=lambda value, **_kwargs: value,
+                                       agent_error=lambda exc: {"error": str(exc)})
+    client = TestClient(app)
+    base = "/api/machine/v1/agent/scheduled-snapshot/notification-"
+    slot = "2026-09-24T11:25+08:00"
+    claimed = client.post(base + "claim", json={
+        "notification_slot": slot, "payload_hash": HASH,
+        "original_lines": 24, "delivered_lines": 8,
+        "category": "report", "version": cli.QQ_SUMMARY_VERSION,
+    }).json()
+    assert claimed["data"]["should_send"] is True
+    assert client.post(base + "start", json={"notification_slot": slot,
+                                             "payload_hash": HASH}).json()["data"]["started"] is True
+    assert client.post(base + "finish", json={"notification_slot": slot,
+                                              "payload_hash": HASH,
+                                              "status": "delivered", "http_status": 204}).json()["data"]["recorded"] is True
+    audit = client.get(base + "audit").json()
+    assert audit["data"]["rows"][0]["http_status"] == 204
+    assert audit["data"]["rows"][0]["notification_slot"] == slot
