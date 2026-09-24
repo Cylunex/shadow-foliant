@@ -678,6 +678,31 @@ def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, 
     return title, "\n".join(body)
 
 
+def _notification_batches(events: list[dict[str, Any]], limit: int = 6):
+    """Bound the QQ burst while preserving all risk events in the snapshot."""
+    priority = {"stop": 5, "action_escalation": 4, "target": 3,
+                "entry": 2, "sustained_risk": 1, "quote_degraded": 0}
+    ordered = sorted(events, key=lambda event: -priority.get(event.get("trigger_type"), 0))
+    return ordered[:limit], ordered[limit:]
+
+
+def _overflow_alert(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> tuple[str, str]:
+    symbols = [str(event.get("symbol") or "") for event in events if event.get("symbol") != "__pool__"]
+    kinds = {}
+    for event in events:
+        kind = str(event.get("trigger_type") or "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    kind_names = {"stop": "止损", "action_escalation": "动作升级", "target": "目标触发",
+                  "entry": "买入触发", "sustained_risk": "持续风险", "quote_degraded": "数据降级"}
+    counts = "、".join(f"{kind_names.get(kind, kind)}{count}" for kind, count in kinds.items())
+    body = (f"本轮另有{len(events)}项风险/触发事件：{counts}\n"
+            f"涉及股票：{'、'.join(symbols[:30]) or '行情池'}"
+            + (f"等共{len(symbols)}只" if len(symbols) > 30 else "")
+            + f"\n数据时点：{snapshot.get('generated_at') or '未知'}\n"
+              "逐只原始触发、保护原因和价格计划见完整盘中快照；未发生交易。")
+    return "盘中提醒：其余风险汇总", body
+
+
 def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
               notify_changes: bool = True, quote_loader: Callable | None = None,
               formal_loader: Callable | None = None, holdings_loader: Callable | None = None,
@@ -737,6 +762,14 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         str(row.get("symbol") or ""): row
         for row in (previous.get("holdings") or []) if isinstance(row, dict)
     } if str(previous.get("trade_date") or "") == current.date().isoformat() else {}
+    # A release may add this new reminder state while the same risk has
+    # already been visible in today's prior snapshot. Do not treat rollout as
+    # a fresh trigger for every holding.
+    for prior_symbol, prior_row in previous_holdings.items():
+        key = f"{prior_symbol}:sustained_risk"
+        if key not in states and prior_row.get("action") in {"reduce", "sell"}:
+            states[key] = {"active": True,
+                           "last_alerted_at": previous.get("generated_at") or current.isoformat()}
     max_upgrades = _bounded_env_int("INTRADAY_MAX_ACTION_UPGRADES", 8, 1, 100)
     max_same_reason = _bounded_env_int("INTRADAY_MAX_SAME_REASON_UPGRADES", 3, 1, 100)
     upgrade_count = 0
@@ -934,12 +967,19 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         if notify_fn is None:
             from notify.notification_router import send
             notify_fn = lambda title, body: send("alert", title, body)
-        for event in events:
+        immediate, overflow = _notification_batches(
+            events, _bounded_env_int("INTRADAY_MAX_INDIVIDUAL_ALERTS", 6, 1, 20))
+        for event in immediate:
             title, body = format_alert(event, snapshot)
             try:
                 notify_fn(title, body)
             except Exception:
                 LOGGER.exception("intraday transition notification failed: %s", event.get("state_key"))
+        if overflow:
+            try:
+                notify_fn(*_overflow_alert(overflow, snapshot))
+            except Exception:
+                LOGGER.exception("intraday overflow notification failed")
     return snapshot
 
 

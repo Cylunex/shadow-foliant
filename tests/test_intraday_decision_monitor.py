@@ -715,6 +715,20 @@ def test_same_quote_stop_and_action_upgrade_emit_one_holding_alert():
     assert sum("持仓甲" in body for _, body in alerts) == 1
 
 
+def test_alert_burst_prioritizes_stops_and_groups_remaining_risks():
+    events = [{"symbol": f"6000{i:02d}", "trigger_type": "action_escalation"}
+              for i in range(8)]
+    events += [{"symbol": "000001", "trigger_type": "stop"},
+               {"symbol": "000002", "trigger_type": "stop"}]
+    individual, overflow = monitor._notification_batches(events, limit=3)
+    assert [event["symbol"] for event in individual[:2]] == ["000001", "000002"]
+    assert len(individual) == 3 and len(overflow) == 7
+    title, body = monitor._overflow_alert(overflow, {"generated_at": "2026-09-24T14:30:00+08:00"})
+    assert "其余风险汇总" in title
+    assert "600001" in body and "600007" in body
+    assert "完整盘中快照" in body
+
+
 def test_scheduler_registers_twenty_minute_monitor():
     import inspect
 
