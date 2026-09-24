@@ -45,10 +45,13 @@ def test_all_scheduled_slots_claim_once_and_audit_without_message(tmp_path):
         assert replay["should_send"] is False
         assert replay["suppression_reason"] == "prior_sent"
     rows = service.audit(actor_id="reader")
-    assert len(rows) == 4
+    recorded = [row for row in rows if row["delivery_status"] == "delivered"]
+    assert len(recorded) == 4
     assert all(row["payload_hash"] == HASH and row["delivered_lines"] == 8
                and row["http_status"] == 200 and row["version"] == cli.QQ_SUMMARY_VERSION
-               for row in rows)
+               for row in recorded)
+    assert any(row["notification_slot"] == "2026-09-18T20:45+08:00"
+               and row["delivery_status"] == "unobserved" for row in rows)
     assert "webhook" not in str(rows)
 
 

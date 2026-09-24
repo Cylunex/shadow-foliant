@@ -150,7 +150,8 @@ class ScheduledNotificationService:
         if not actor_id:
             raise PermissionError("actor_required")
         days = max(1, min(int(days), 14))
-        cutoff = (self._now() - timedelta(days=days)).date().isoformat()
+        current = self._now()
+        cutoff = (current.date() - timedelta(days=days - 1)).isoformat()
         conn = self.store.connect()
         try:
             cur = conn.cursor()
@@ -162,11 +163,31 @@ class ScheduledNotificationService:
                            WHERE notification_slot>=?
                            ORDER BY notification_slot DESC LIMIT 56""", (cutoff,))
             rows = cur.fetchall()
-            return [dict(zip(("notification_slot", "claimed_at", "attempted_at",
-                              "delivered_at", "payload_hash", "original_lines",
-                              "delivered_lines", "category", "http_status",
-                              "error_code", "delivery_status", "version",
-                              "suppression_reason", "suppressed_count"), row))
-                    for row in rows]
+            fields = ("notification_slot", "claimed_at", "attempted_at",
+                      "delivered_at", "payload_hash", "original_lines",
+                      "delivered_lines", "category", "http_status",
+                      "error_code", "delivery_status", "version",
+                      "suppression_reason", "suppressed_count")
+            by_slot = {row[0]: dict(zip(fields, row)) for row in rows}
+            for offset in range(days):
+                date = current.date() - timedelta(days=offset)
+                if date.weekday() >= 5:
+                    continue
+                for planned_time in ("10:15", "11:25", "14:35", "20:45"):
+                    slot = f"{date.isoformat()}T{planned_time}+08:00"
+                    if datetime.fromisoformat(slot) > current or slot in by_slot:
+                        continue
+                    by_slot[slot] = {
+                        "notification_slot": slot, "claimed_at": None,
+                        "attempted_at": None, "delivered_at": None,
+                        "payload_hash": None, "original_lines": None,
+                        "delivered_lines": None, "category": "report",
+                        "http_status": None, "error_code": None,
+                        "delivery_status": "unobserved",
+                        "version": "pre-audit-unobserved",
+                        "suppression_reason": "no_ledger_record",
+                        "suppressed_count": 0,
+                    }
+            return [by_slot[slot] for slot in sorted(by_slot, reverse=True)[:56]]
         finally:
             conn.close()

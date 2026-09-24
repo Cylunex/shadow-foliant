@@ -11,7 +11,7 @@
 3. 在同一正常时点只调用一次受保护启动器的 `--external-bundle <bundle文件> --send-qq --notification-slot <HH:MM>`。CLI 先提交 bundle，再重新读取合并快照，先校验必需章节和本次外部 overlay，接着生成 QQ 摘要并领取 slot。研究失败时省略 `--external-bundle`，仍调用一次 `--send-qq --notification-slot <HH:MM>` 发送真实降级摘要。
 4. 核对返回的 `notification.delivery_status`、`notification.sent`、`notification.prior_sent`、`notification.delivery_recorded` 和 `notification.notification_slot`。只有本次 HTTP 200/204 且审计落库才算 **Webhook 已接受**；这不是 QQ 客户端实际展示的证明。`prior_sent` 仅说明此前 Webhook 已接受。同槽 `suppressed`、`unknown`、`failed` 均不得当作本次送达，也不得人工补发。
 
-无发送检查：不带参数读取快照；`--audit-notifications` 只读取最近 14 天、最多 56 条脱敏审计，不能与发送或 bundle 参数并用。审计包括计划 slot、claim/尝试/确认时间、标题及有界正文的 SHA-256、压缩前后行数、类别、HTTP 状态、错误码、最终状态、版本、去重原因和次数。不返回消息正文、Webhook、Token、持仓内容或账户地址。2026-09-24 前的旧 claim 只迁移已知状态；当时未保存的哈希、HTTP 与压缩计数以零值或空值表示，不能反推为成功。
+无发送检查：不带参数读取快照；`--audit-notifications` 只读取最近 14 天、最多 56 条脱敏审计，不能与发送或 bundle 参数并用。审计包括计划 slot、claim/尝试/确认时间、标题及有界正文的 SHA-256、压缩前后行数、类别、HTTP 状态、错误码、最终状态、版本、去重原因和次数。不返回消息正文、Webhook、Token、持仓内容或账户地址。2026-09-24 前的旧 claim 只迁移已知状态；当时未保存的哈希、HTTP 与压缩计数以零值或空值表示，不能反推为成功。工作日没有任何 ledger 行的计划 slot 标为 `unobserved`，表示历史证据缺口，不等于未发送；节假日也只标观察缺口，不推断原调度一定执行。
 
 QQ 正文固定为 8 行且不超过 900 字，按权威持仓动作、失效条件和风控、现金及买入门、三方有效性、当期差异、盘后与次日缺口排序。其末行明确标为“有界摘要”。完整 57 只等全部持仓、原始计划与失效证据只在受保护快照中读取，不声称 QQ 已覆盖全部持仓。
 
