@@ -98,6 +98,24 @@ def test_archive_unavailable_still_sends_alert(monkeypatch):
     assert result.archive_status == "unrecorded"
 
 
+def test_archive_conflict_and_unknown_idempotent_start_never_send(monkeypatch):
+    from notify.archive_gateway import ArchiveConflict
+    calls = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        calls.append(body) or (True, "HTTP 200")))
+    monkeypatch.setattr(notification_router, "archive_action", lambda *_: (
+        (_ for _ in ()).throw(ArchiveConflict())))
+    conflict = notification_router.send("report", "计划", "正文", only_channels=["qq"],
+                                        idempotency_key="fixed-slot")
+    assert conflict["qq"] == (False, "archive_identity_conflict")
+    monkeypatch.setattr(notification_router, "archive_action", lambda *_: (
+        (_ for _ in ()).throw(RuntimeError())))
+    uncertain = notification_router.send("report", "计划", "正文", only_channels=["qq"],
+                                         idempotency_key="fixed-slot")
+    assert uncertain["qq"] == (False, "archive_unavailable")
+    assert calls == []
+
+
 def test_direct_http_receipt_is_recorded_without_destination(tmp_path, monkeypatch):
     from notify import archive_gateway
     svc, path = service(tmp_path)
@@ -161,6 +179,15 @@ def test_protected_route_page_detail_and_export_are_read_only(tmp_path, monkeypa
     detail = client.get("/api/machine/v1/agent/message-archive/" + row["message_id"])
     assert detail.json()["data"]["original_body"] == "完整原稿：卖出 600001"
     assert detail.headers["cache-control"] == "no-store"
+    conflict_body = {
+        "message_id": uuid4().hex, "source": "test.source", "source_run_id": "run-1",
+        "category": "report", "title": "计划", "original_body": "变化的原稿",
+        "channel": "qq", "final_body": "摘要：卖出 600001",
+        "idempotency_key": "slot:20260924:1435",
+    }
+    conflict = client.post("/api/machine/v1/agent/message-archive/prepare",
+                           json=conflict_body)
+    assert conflict.status_code == 409
     export = client.get("/api/machine/v1/agent/message-archive/export",
                         params={"from_date": "2026-09-24", "to_date": "2026-09-24"})
     assert export.status_code == 200

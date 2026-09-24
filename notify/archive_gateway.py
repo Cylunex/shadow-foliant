@@ -19,6 +19,10 @@ import requests
 log = logging.getLogger(__name__)
 
 
+class ArchiveConflict(Exception):
+    """The persisted idempotency identity disagrees with this payload."""
+
+
 IN_ROUTER_DELIVERY = ContextVar("in_router_delivery", default=False)
 
 
@@ -52,6 +56,8 @@ def archive_action(action: str, payload: dict):
                 json=payload, headers={"Authorization": "Bearer " + token},
                 timeout=8,
             )
+            if response.status_code == 409:
+                raise ArchiveConflict("archive_identity_conflict")
             if response.status_code != 200:
                 raise RuntimeError("archive_http_rejected")
             body = response.json()
@@ -63,7 +69,13 @@ def archive_action(action: str, payload: dict):
     from application.message_archive import MessageArchiveService
     service = MessageArchiveService()
     if action == "prepare":
-        return service.prepare(**payload)
+        try:
+            return service.prepare(**payload)
+        except ValueError as exc:
+            if str(exc) in {"message_archive_idempotency_conflict",
+                            "message_archive_delivery_conflict"}:
+                raise ArchiveConflict("archive_identity_conflict") from None
+            raise
     if action == "start":
         return {"started": service.start(payload["delivery_id"])}
     return {"recorded": service.finish(**payload)}
@@ -76,7 +88,8 @@ def archived_call(*, channel: str, title: str, original_body: str,
                   business_as_of: str | None = None) -> bool:
     """Wrap one legacy direct send without changing its transport or route."""
     if IN_ROUTER_DELIVERY.get():
-        return bool(sender())
+        direct_result = sender()
+        return bool(direct_result.get("ok")) if isinstance(direct_result, dict) else bool(direct_result)
     delivery_id = None
     prepared = False
     try:
@@ -94,7 +107,11 @@ def archived_call(*, channel: str, title: str, original_body: str,
         prepared = bool(archive_action("start", {"delivery_id": delivery_id})["started"])
         if not prepared:
             return False
+    except ArchiveConflict:
+        return False
     except Exception:
+        if idempotency_key and category != "alert":
+            return False
         log.warning("message archive unavailable before direct delivery; source=%s channel=%s",
                     source, channel)
     try:

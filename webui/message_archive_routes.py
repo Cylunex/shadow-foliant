@@ -55,6 +55,14 @@ def register_message_archive_routes(
             from application.message_archive import MessageArchiveService
             return agent_result({"status": "complete", "data":
                                  MessageArchiveService().prepare(**req.model_dump())})
+        except ValueError as exc:
+            if str(exc) in {"message_archive_idempotency_conflict",
+                            "message_archive_delivery_conflict"}:
+                return JSONResponse({"ok": False, "error": {
+                    "code": "message_archive_identity_conflict",
+                    "message": "message identity already has different content"}},
+                    status_code=409, headers={"Cache-Control": "no-store"})
+            return agent_error(exc)
         except Exception as exc:
             return agent_error(exc)
 

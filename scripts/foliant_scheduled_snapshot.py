@@ -761,6 +761,7 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
                 ).hexdigest(),
                 business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
                 original_body=render_qq_report(snapshot)[1],
+                externally_deduplicated=True,
             )
     except Exception:
         return {"requested": True, "sent": False, "channel": "qq",

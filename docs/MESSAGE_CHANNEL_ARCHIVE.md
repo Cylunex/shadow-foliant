@@ -12,6 +12,6 @@
 
 受保护机器接口 `/api/machine/v1/agent/message-archive` 支持 `from_date`、`to_date`、`offset`、`limit`（每页最多 50），列表只返回元数据和哈希。`/{message_id}` 返回授权范围内的解密原稿及各渠道正文。`/export` 在日期范围内按页输出 NDJSON；以 `X-Archive-Has-More` 和下一页 `offset` 继续，响应均禁止缓存。读取需要 `stock.portfolio.read` / `foliant.scheduled-report.read`，写入需要 `stock.research` / `foliant.selection.preview`。不要把导出内容复制到公开日志。
 
-状态：`prepared` 表示未尝试，`sending`/`unknown` 表示结果不确定，`accepted` 是提供者接受，`failed` 是明确失败；一条逻辑消息的渠道结果不一致时标 `partial`。同幂等键重复调用会保留原状态并累计 `suppressed_count`，不会再次发送。不确定结果不能自动重试；如要显式重试，创建新逻辑消息并填写 `retry_of`。`fallback_from` 连接同一逻辑消息的兜底渠道。
+状态：`prepared` 表示未尝试，`sending`/`unknown` 表示结果不确定，`accepted` 是提供者接受，`failed` 是明确失败；一条逻辑消息的渠道结果不一致时标 `partial`。同幂等键重复调用会保留原状态并累计 `suppressed_count`，不会再次发送。同一键若对应不同原稿或渠道正文，接口明确返回 409，路由停止该次投递；无法确认幂等状态的普通报告也停止。定时 QQ 另有独立 slot 互斥，存档暂不可用时仍可按既有 slot 记录发送，并标明存档缺口。不确定结果不能自动重试；如要显式重试，创建新逻辑消息并填写 `retry_of`。`fallback_from` 连接同一逻辑消息的兜底渠道。
 
 上线前的实际发送正文、提供者回执和客户端显示状态无法从旧日志反推；迁移不伪造历史消息。旧定时 QQ slot 审计继续独立保留，用于定时去重和历史观察缺口。

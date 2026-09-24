@@ -44,9 +44,9 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 try:
-    from .archive_gateway import archive_action, IN_ROUTER_DELIVERY
+    from .archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
 except ImportError:
-    from archive_gateway import archive_action, IN_ROUTER_DELIVERY
+    from archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
 
 
 class DeliveryResults(dict):
@@ -383,7 +383,7 @@ def send(category: str, title: str, content: str,
          source_run_id: Optional[str] = None, idempotency_key: Optional[str] = None,
          business_as_of: Optional[str] = None, original_body: Optional[str] = None,
          planned_at: Optional[str] = None, sensitivity: str = "private",
-         compact: bool = True) -> Dict[str, Tuple[bool, str]]:
+         compact: bool = True, externally_deduplicated: bool = False) -> Dict[str, Tuple[bool, str]]:
     """统一发送入口(所有业务推送都应走这里,不要在业务代码里直连 webhook)
 
     Args:
@@ -440,8 +440,17 @@ def send(category: str, title: str, content: str,
                 results[ch] = (False, "archive_start_suppressed")
                 results.archive_outcomes[ch] = "unknown"
                 return
+        except ArchiveConflict:
+            results[ch] = (False, "archive_identity_conflict")
+            results.archive_outcomes[ch] = "suppressed"
+            return
         except Exception:
-            # A broken archive does not silence operational alerts or reports.
+            # Alerts and externally serialized reports may continue with a visible
+            # archive gap. Other idempotent calls stop when the outcome is unknown.
+            if idempotency_key and not externally_deduplicated and category != "alert":
+                results[ch] = (False, "archive_unavailable")
+                results.archive_outcomes[ch] = "unknown"
+                return
             results.archive_outcomes[ch] = "unrecorded"
             log.warning("message archive unavailable before %s delivery; source=%s", ch, source)
         try:
