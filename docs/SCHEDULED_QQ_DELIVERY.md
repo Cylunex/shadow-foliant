@@ -20,3 +20,5 @@ QQ 正文固定为 8 行且不超过 900 字，按权威持仓动作、失效条
 领取 slot 前完成快照、Webhook 存在性及摘要长度校验。`claimed` 且尚无尝试时间可由同槽后续启动恢复；发送前以条件更新写入 `sending/attempted_at`，只有成功更新的调用方才发 HTTP。HTTP 200/204 记 `delivered`，明确 HTTP 拒绝记 `failed`，网络超时、进程中断或落库不确定记 `unknown`。已开始的尝试不自动重发，避免不确定回执造成双发。slot 与外部 overlay 幂等键解耦；同一 slot 最多一次 Webhook 尝试。过往外部 claim 迁入新 ledger，避免发布恰逢旧 slot 时重复发送。
 
 发布顺序：先部署包含 migration 的服务端和 CLI，做无发送快照及审计检查，再由主计划会话切换心跳提示顺序。切换前旧调度不应在部署窗口运行；如部署窗口恰逢正常 slot，等待该时点结束再切换。回滚时保留 append-only 审计表，不恢复数据库；把心跳临时切回只读模式，待 ledger 兼容版本恢复后再启用发送。正式 QQ 效果只在下一正常时点观察，不手动补发。
+
+仓库外受保护启动器更新必须使用 `scripts/install_scheduled_heartbeat.py`：先核对候选文件 SHA-256 和版本，再在同一目录建立旧版备份，把新文件权限设置为私有可执行的 0700 后原子替换。`scripts/deploy.sh` 在受控发布时检查该入口是否为可执行的 0700。安装后直接执行受保护入口的 `--version`、无参数完整只读快照和 `--summary-only`，确认机器回包可解析且 `notification.requested=false/sent=false`。如果某个 slot 因入口权限或进程故障错过，不改用 Python 绕过启动器，也不补发旧 slot。

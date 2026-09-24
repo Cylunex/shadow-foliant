@@ -37,6 +37,15 @@ fi
 
 release_root="${FOLIANT_RELEASE_ROOT:-}"
 if [[ -n "$release_root" ]]; then
+  protected_launcher="${FOLIANT_SCHEDULED_LAUNCHER:-/data/project/shadow-foliant-ops/runtime/foliant-scheduled-heartbeat.py}"
+  if [[ ! -f "$protected_launcher" || ! -x "$protected_launcher" ]]; then
+    echo "protected scheduled launcher is missing or not executable" >&2
+    exit 11
+  fi
+  if [[ "$(stat -c '%a' "$protected_launcher")" != "700" ]]; then
+    echo "protected scheduled launcher must have mode 0700" >&2
+    exit 11
+  fi
   release_dir="$release_root/$EXPECTED_COMMIT"
   venv_dir="$release_dir/venv"
   mkdir -p "$release_dir"
