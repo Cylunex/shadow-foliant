@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi.testclient import TestClient
 
 from application.scheduled_snapshot import ScheduledSnapshotService
@@ -1869,3 +1870,117 @@ requests.post = fake_post
     assert payload["notification"]["delivery_recorded"] is True
     assert json.loads(marker.read_text("utf-8"))["msgtype"] == "markdown"
     assert "external-cwd-test-token" not in completed.stdout
+
+
+def test_delivery_receipt_is_bounded_and_preserves_read_only_snapshot(monkeypatch, capsys):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    huge_snapshot = {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
+        "as_of": {"captured_at": "2026-09-24T14:40:30+08:00"},
+        "full_report": "完整快照" * 100000,
+    }
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: deepcopy(huge_snapshot))
+    monkeypatch.setattr(cli, "_degrade_external_submission", lambda snapshot, *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(cli, "scheduled_notification_slot", lambda *_args, **_kwargs: "2026-09-24T14:35+08:00")
+    monkeypatch.setattr(cli, "qq_preflight", lambda *_args: None)
+    monkeypatch.setattr(cli, "qq_payload", lambda *_args: {
+        "payload_hash": "a" * 64, "original_lines": 17, "delivered_lines": 8,
+        "category": "report", "version": cli.QQ_SUMMARY_VERSION})
+    monkeypatch.setattr(cli, "notification_ledger", lambda action, _body: (
+        {"data": {"should_send": True, "payload_matches": True,
+                  "started": True, "recorded": True}}, None))
+    calls = []
+    monkeypatch.setattr(cli, "send_qq", lambda *_args, **_kwargs: (
+        calls.append("send") or {
+            "requested": True, "sent": True, "channel": "qq",
+            "delivery_status": "delivered", "http_status": 200,
+            "message_archive_status": "recorded", "message_archive_id": "b" * 32,
+        }))
+
+    assert cli.main(["--send-qq", "--notification-slot", "14:35",
+                     "--delivery-receipt"]) == 0
+    raw = capsys.readouterr().out
+    receipt = json.loads(raw)
+    assert len(raw.encode("utf-8")) < 4096
+    assert receipt["schema_version"] == cli.DELIVERY_RECEIPT_VERSION
+    assert receipt["snapshot_as_of"] == "2026-09-24T14:40:30+08:00"
+    assert receipt["observed_at"].endswith("+08:00")
+    assert receipt["notification"]["notification_slot"] == "2026-09-24T14:35+08:00"
+    assert receipt["notification"]["sent"] is True
+    assert receipt["notification"]["delivery_recorded"] is True
+    assert receipt["notification"]["message_archive_status"] == "recorded"
+    assert receipt["notification"]["message_archive_id"] == "b" * 32
+    assert "完整快照" not in raw
+    assert calls == ["send"]
+
+    assert cli.main([]) == 0
+    complete = json.loads(capsys.readouterr().out)
+    assert complete["full_report"] == huge_snapshot["full_report"]
+
+
+def test_delivery_receipt_reports_unknown_and_suppressed_without_second_send(monkeypatch, capsys):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded"})
+    monkeypatch.setattr(cli, "_degrade_external_submission", lambda snapshot, *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(cli, "scheduled_notification_slot", lambda *_args, **_kwargs: "2026-09-24T14:35+08:00")
+    monkeypatch.setattr(cli, "qq_preflight", lambda *_args: None)
+    monkeypatch.setattr(cli, "qq_payload", lambda *_args: {
+        "payload_hash": "a" * 64, "original_lines": 17, "delivered_lines": 8,
+        "category": "report", "version": cli.QQ_SUMMARY_VERSION})
+    sends = []
+    monkeypatch.setattr(cli, "send_qq", lambda *_args, **_kwargs: sends.append("sent"))
+
+    def no_start(action, _body):
+        if action == "claim":
+            return {"data": {"should_send": True, "payload_matches": True}}, None
+        return {"data": {"started": False}}, None
+    monkeypatch.setattr(cli, "notification_ledger", no_start)
+    assert cli.main(["--send-qq", "--delivery-receipt"]) == 2
+    unknown = json.loads(capsys.readouterr().out)
+    assert unknown["notification"]["sent"] is False
+    assert unknown["notification"]["delivery_status"] == "unknown"
+    assert unknown["notification"]["error_code"] == "notification_start_unconfirmed"
+    assert unknown["notification"]["delivery_recorded"] is None
+
+    monkeypatch.setattr(cli, "notification_ledger", lambda action, _body: (
+        {"data": {"should_send": False, "payload_matches": True,
+                  "prior_sent": True, "delivery_status": "delivered",
+                  "suppression_reason": "prior_sent"}}, None))
+    assert cli.main(["--send-qq", "--delivery-receipt"]) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["notification"]["prior_sent"] is True
+    assert replay["notification"]["suppressed"] is True
+    assert replay["notification"]["sent"] is False
+    assert sends == []
+
+
+def test_delivery_receipt_bounds_adversarial_metadata():
+    from scripts import foliant_scheduled_snapshot as cli
+
+    huge = "𠀋" * 100000
+    receipt = cli.delivery_receipt({
+        "status": huge, "schema_version": huge,
+        "as_of": {"captured_at": huge},
+        "external_submission": {"status": huge, "error_code": huge},
+        "notification": {
+            "requested": True, "sent": False,
+            "error_code": huge, "suppression_reason": huge,
+            "payload_hash": huge, "message_archive_status": huge,
+            "original_lines": 10**10000,
+        },
+    })
+    encoded = json.dumps(receipt, ensure_ascii=False).encode("utf-8")
+    assert len(encoded) < 8192
+    assert receipt["notification"]["original_lines"] is None
+
+
+def test_delivery_receipt_requires_explicit_send(monkeypatch):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: (_ for _ in ()).throw(AssertionError()))
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--delivery-receipt"])
+    assert error.value.code == 2

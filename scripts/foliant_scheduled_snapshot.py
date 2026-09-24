@@ -52,6 +52,7 @@ NOTIFICATION_REJECTION_HINTS = {
 }
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
 QQ_SUMMARY_VERSION = "scheduled-qq-v2"
+DELIVERY_RECEIPT_VERSION = "scheduled-delivery-receipt-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|(?:token|secret|password|cookie)\s*[:=]\s*\S+)"
@@ -791,9 +792,55 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
              "error_code": "qq_http_rejected" if http_status else "qq_delivery_unknown"})
 
 
+def delivery_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Bounded machine result for one requested send; never include report bodies."""
+    notification = snapshot.get("notification")
+    notification = notification if isinstance(notification, dict) else {}
+    as_of = snapshot.get("as_of")
+    as_of = as_of if isinstance(as_of, dict) else {}
+    submission = snapshot.get("external_submission")
+    submission = submission if isinstance(submission, dict) else {}
+
+    def short(value: Any, length: int = 96) -> str | None:
+        return str(value)[:length] if value is not None else None
+
+    def bounded_int(value: Any) -> int | None:
+        return value if type(value) is int and 0 <= value <= 1000000 else None
+
+    fields = (
+        "channel", "notification_slot", "delivery_status", "suppression_reason",
+        "delivered_at", "error_code", "payload_hash", "summary_version",
+        "message_archive_status", "message_archive_id",
+    )
+    result = {key: short(notification.get(key)) for key in fields}
+    result.update({
+        "requested": bool(notification.get("requested")),
+        "sent": bool(notification.get("sent")),
+        "delivery_recorded": (bool(notification["delivery_recorded"])
+                              if "delivery_recorded" in notification else None),
+        "prior_sent": bool(notification.get("prior_sent")),
+        "suppressed": bool(notification.get("suppressed")),
+        "http_status": bounded_int(notification.get("http_status")),
+        "original_lines": bounded_int(notification.get("original_lines")),
+        "delivered_lines": bounded_int(notification.get("delivered_lines")),
+    })
+    return {
+        "schema_version": DELIVERY_RECEIPT_VERSION,
+        "snapshot_schema_version": short(snapshot.get("schema_version"), 80),
+        "status": short(snapshot.get("status"), 80),
+        "observed_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+        "snapshot_as_of": short(as_of.get("captured_at"), 80),
+        "external_submission_status": short(submission.get("status"), 80),
+        "external_submission_error_code": short(submission.get("error_code")),
+        "notification": result,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one bounded Foliant scheduled snapshot")
     parser.add_argument("--send-qq", action="store_true", help="explicitly send a compact QQ report")
+    parser.add_argument("--delivery-receipt", action="store_true",
+                        help="with --send-qq, print only a bounded machine-readable delivery receipt")
     parser.add_argument("--audit-notifications", action="store_true",
                         help="read a bounded, redacted 14-day slot audit; never send")
     parser.add_argument(
@@ -805,8 +852,10 @@ def main(argv: list[str] | None = None) -> int:
         help="strict codex-external-independent-v1 JSON submitted before snapshot retrieval",
     )
     args = parser.parse_args(argv)
+    if args.delivery_receipt and not args.send_qq:
+        parser.error("--delivery-receipt requires --send-qq")
     if args.audit_notifications:
-        if args.send_qq or args.external_bundle:
+        if args.send_qq or args.external_bundle or args.delivery_receipt:
             parser.error("--audit-notifications cannot submit research or send QQ")
         audit = fetch_notification_audit()
         print(json.dumps(_safe(audit), ensure_ascii=False, sort_keys=True,
@@ -908,7 +957,8 @@ def main(argv: list[str] | None = None) -> int:
                             notification["delivery_status"] = "unknown"
                             notification["error_code"] = "notification_finish_unconfirmed"
                         snapshot["notification"] = notification
-    print(json.dumps(_safe(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    output = delivery_receipt(snapshot) if args.delivery_receipt else snapshot
+    print(json.dumps(_safe(output), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     notification = snapshot.get("notification") or {}
     notification_failed = bool(
         args.send_qq and not (
