@@ -1156,8 +1156,18 @@ def task_closing_trade_plans():
         from jobs.closing_trade_plans import refresh_closing_plans
         result = refresh_closing_plans()
         status = result.get('status')
-        _log_run(job, 'success' if status == 'complete' else 'skipped' if status == 'skipped' else 'error',
-                 error=f"closing_plans={status} available={result.get('available_count', 0)} "
+        # job_runs 的历史枚举没有 degraded。逐标的缓存缺口已经完整保留在
+        # closing-trade-plans 快照中；只要批任务正常收尾，就不能把部分可用误记为
+        # 整批运行错误并污染次日 cockpit.recent_task_failures。详情以 degraded
+        # 开头，供日志和受保护快照继续显式投影为降级，而不是静默伪装 complete。
+        run_status = (
+            'success' if status in {'complete', 'degraded'} else
+            'skipped' if status == 'skipped' else 'error'
+        )
+        detail_prefix = 'degraded ' if status == 'degraded' else ''
+        _log_run(job, run_status,
+                 error=f"{detail_prefix}closing_plans={status} "
+                       f"available={result.get('available_count', 0)} "
                        f"requested={result.get('requested_count', 0)}",
                  started_at=started, finished_at=datetime.now().isoformat(), notify=False)
     except Exception as exc:

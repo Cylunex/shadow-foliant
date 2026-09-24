@@ -286,6 +286,19 @@ def _job_run(row: Any) -> dict[str, Any]:
             partial_failures.append("decision_loop_incomplete")
             if status == "success":
                 status = "degraded"
+    closing_plans = re.search(r"\bclosing_plans=([a-zA-Z0-9_-]+)", detail)
+    closing_available = re.search(r"\bavailable=(\d+)", detail)
+    closing_requested = re.search(r"\brequested=(\d+)", detail)
+    if closing_plans:
+        metrics["closing_plan_status"] = closing_plans.group(1)[:40]
+        if closing_available:
+            metrics["closing_plans_available"] = int(closing_available.group(1))
+        if closing_requested:
+            metrics["closing_plans_requested"] = int(closing_requested.group(1))
+        if closing_plans.group(1) != "complete":
+            partial_failures.append("closing_plan_coverage_incomplete")
+            if status == "success":
+                status = "degraded"
     return clean_json({
         "job_name": row.get("job_name"),
         "status": status,

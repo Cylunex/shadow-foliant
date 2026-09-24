@@ -182,6 +182,39 @@ def test_closing_job_registered_and_persisted_without_notifications(monkeypatch)
     assert events[0][1]['notify'] is False
 
 
+def test_partial_closing_job_is_not_promoted_to_whole_task_error(monkeypatch):
+    from jobs import jobs_hub as hub
+    from jobs import closing_trade_plans as closing
+    events = []
+    monkeypatch.setattr(hub, '_skip_if_not_trading', lambda _: False)
+    monkeypatch.setattr(closing, 'refresh_closing_plans', lambda: {
+        'status': 'degraded', 'requested_count': 72, 'available_count': 71,
+    })
+    monkeypatch.setattr(hub, '_log_run', lambda *args, **kwargs: events.append((args, kwargs)))
+
+    hub.task_closing_trade_plans()
+
+    assert events[0][0] == ('closing_trade_plans', 'success')
+    assert events[0][1]['error'] == (
+        'degraded closing_plans=degraded available=71 requested=72'
+    )
+    assert events[0][1]['notify'] is False
+
+    projected = _job_run({
+        'job_name': 'closing_trade_plans', 'status': 'success',
+        'error': events[0][1]['error'],
+    })
+    assert projected['status'] == 'degraded'
+    assert projected['partial_failure_codes'] == [
+        'closing_plan_coverage_incomplete',
+    ]
+    assert projected['metrics'] == {
+        'closing_plan_status': 'degraded',
+        'closing_plans_available': 71,
+        'closing_plans_requested': 72,
+    }
+
+
 def test_only_current_formal_candidates_join_prefetch_pool():
     from jobs.jobs_hub import _today_formal_prefetch_symbols
     assert _today_formal_prefetch_symbols(formal(), '2026-09-22') == ['600001']
