@@ -213,10 +213,11 @@ def _send_qq(title: str, content: str) -> Tuple[bool, str]:
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code in (200, 204):
-            return True, 'ok'
-        return False, f'HTTP {r.status_code}: {r.text[:200]}'
-    except Exception as e:
-        return False, str(e)
+            return True, f'HTTP {r.status_code}'
+        # A response body may echo private content or infrastructure details.
+        return False, f'HTTP {r.status_code}'
+    except Exception:
+        return False, 'request_error'
 
 
 # =============================================================================

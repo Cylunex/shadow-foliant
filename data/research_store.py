@@ -401,6 +401,15 @@ class ResearchStore:
                 delivery_attempted_at TEXT, delivered_at TEXT, delivery_error_code TEXT,
                 PRIMARY KEY(idempotency_key,notification_slot)
             )""",
+            """CREATE TABLE IF NOT EXISTS scheduled_notification_deliveries (
+                notification_slot TEXT PRIMARY KEY, actor_id TEXT NOT NULL,
+                payload_hash TEXT NOT NULL, original_lines INTEGER NOT NULL,
+                delivered_lines INTEGER NOT NULL, category TEXT NOT NULL,
+                version TEXT NOT NULL, claimed_at TEXT NOT NULL,
+                attempted_at TEXT, delivered_at TEXT, http_status INTEGER,
+                error_code TEXT, delivery_status TEXT NOT NULL,
+                suppression_reason TEXT, suppressed_count INTEGER NOT NULL DEFAULT 0
+            )""",
             "CREATE INDEX IF NOT EXISTS idx_external_evidence_decision ON external_research_evidence(channel,decision_as_of)",
             "CREATE INDEX IF NOT EXISTS idx_external_overlay_latest ON external_independent_overlays(channel,ranking_locked_at)",
             "CREATE INDEX IF NOT EXISTS idx_external_outcomes_horizon ON external_overlay_outcomes(horizon_days,decision_as_of)",
@@ -465,6 +474,11 @@ class ResearchStore:
                 "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                 (version, datetime.now().astimezone().isoformat()),
             )
+        cur.execute(
+            "INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?) "
+            "ON CONFLICT(version) DO NOTHING",
+            ("18-scheduled-notification-audit", datetime.now().astimezone().isoformat()),
+        )
         version = "4-reproducible-inputs"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():

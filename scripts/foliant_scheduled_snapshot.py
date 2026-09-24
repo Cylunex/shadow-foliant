@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from datetime import datetime
+import hashlib
 import io
 import json
 import os
@@ -30,8 +31,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 ENDPOINT = "/api/machine/v1/agent/scheduled-snapshot"
 EXTERNAL_ENDPOINT = "/api/machine/v1/agent/external-independent-research"
-EXTERNAL_CLAIM_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-claim"
-EXTERNAL_DELIVERY_ENDPOINT = EXTERNAL_ENDPOINT + "/notification-delivery"
+NOTIFICATION_ENDPOINT = ENDPOINT + "/notification-"
+AUDIT_ENDPOINT = ENDPOINT + "/notification-audit"
 MAX_EXTERNAL_BUNDLE_BYTES = 262144
 EXTERNAL_REJECTION_HINTS = {
     "external_evidence_dedupe_conflict": (
@@ -44,7 +45,13 @@ EXTERNAL_REJECTION_HINTS = {
         "The decision is outside the contemporaneous window; do not backfill ranking or a past QQ slot."
     ),
 }
+NOTIFICATION_REJECTION_HINTS = {
+    "scheduled_notification_slot_outside_window": "Use only the current planned slot; never backfill QQ.",
+    "scheduled_notification_actor_mismatch": "Check the protected writer identity; do not retry blindly.",
+    "scheduled_notification_slot_invalid": "Use one of the four planned Shanghai slots.",
+}
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
+QQ_SUMMARY_VERSION = "scheduled-qq-v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|(?:token|secret|password|cookie)\s*[:=]\s*\S+)"
@@ -256,8 +263,9 @@ def _external_post(endpoint: str, body: dict[str, Any], failure_code: str):
                 code = error.get("code")
             except (ValueError, AttributeError, TypeError):
                 code = None
-            if isinstance(code, str) and code in EXTERNAL_REJECTION_HINTS:
-                return None, _failure(code, EXTERNAL_REJECTION_HINTS[code], status="degraded")
+            hints = EXTERNAL_REJECTION_HINTS | NOTIFICATION_REJECTION_HINTS
+            if isinstance(code, str) and code in hints:
+                return None, _failure(code, hints[code], status="degraded")
         return None, _failure(failure_code, "Inspect protected Foliant logs by request time.", status="degraded")
     try:
         payload = response.json()
@@ -270,31 +278,35 @@ def submit_external_bundle(bundle: dict[str, Any]):
     return _external_post(EXTERNAL_ENDPOINT, bundle, "external_research_submit_failed")
 
 
-def claim_external_notification(
-    idempotency_key: str, overlay_id: str, notification_slot: str,
-):
-    return _external_post(EXTERNAL_CLAIM_ENDPOINT, {
-        "idempotency_key": idempotency_key,
-        "overlay_id": overlay_id,
-        "notification_slot": notification_slot,
-    }, "external_notification_claim_failed")
+def notification_ledger(action: str, body: dict[str, Any]):
+    if action not in {"claim", "start", "finish"}:
+        raise ValueError("notification_action_invalid")
+    return _external_post(NOTIFICATION_ENDPOINT + action, body,
+                          "notification_ledger_unavailable")
 
 
-def record_external_notification_delivery(
-    idempotency_key: str, overlay_id: str, notification_slot: str,
-    *, sent: bool, error_code: str | None,
-):
-    body: dict[str, Any] = {
-        "idempotency_key": idempotency_key,
-        "overlay_id": overlay_id,
-        "notification_slot": notification_slot,
-        "sent": bool(sent),
-    }
-    if error_code:
-        body["error_code"] = str(error_code)[:100]
-    return _external_post(
-        EXTERNAL_DELIVERY_ENDPOINT, body, "external_notification_delivery_record_failed",
-    )
+def fetch_notification_audit() -> dict[str, Any]:
+    client, failure = _configured_client()
+    if failure:
+        return failure
+    url, token, timeout = client
+    try:
+        response = requests.get(
+            url.replace(ENDPOINT, AUDIT_ENDPOINT),
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            raise ValueError("audit_response_failed")
+        payload = response.json()
+        rows = (payload.get("data") or {}).get("rows")
+        if not isinstance(rows, list):
+            raise ValueError("audit_response_invalid")
+        return {"schema_version": "scheduled-notification-audit-v1", "rows": rows[:56]}
+    except (requests.RequestException, ValueError, AttributeError, TypeError):
+        return _failure("notification_audit_unavailable",
+                        "Inspect the protected audit endpoint and authorization.",
+                        status="degraded")
 
 
 def scheduled_notification_slot(
@@ -587,7 +599,99 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     return "ShadowFoliant 计划报告", "\n".join(lines)
 
 
-def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
+def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
+    """Eight priority-ordered lines. The protected snapshot remains the full report."""
+    from notify.plain_language import plain_text
+
+    def short(value: Any, limit: int = 100) -> str:
+        return plain_text(str(value or "未知").replace("\n", " "), limit)
+
+    day = snapshot.get("trading_day") or {}
+    holdings = snapshot.get("holdings") or {}
+    plans = snapshot.get("trade_plans") or {}
+    review = snapshot.get("holdings_review") or {}
+    next_plan = snapshot.get("next_session_plan") or {}
+    post_close = snapshot.get("post_close_review") or {}
+    cash = plans.get("cash_policy") or {}
+    budget = cash.get("stock_budget") or {}
+    formal = snapshot.get("formal_selection") or {}
+    independent = snapshot.get("independent_selection") or {}
+    external = snapshot.get("external_independent_research") or {}
+    comparison = snapshot.get("source_comparison") or {}
+    authority = plans.get("holding_actions_authority") or {}
+    if post_close.get("due"):
+        actions = review.get("rows") or []
+        authority_text = "当日收盘复盘" if review.get("status") in {"complete", "degraded"} else "盘后动作不可用"
+    else:
+        actions = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
+        authority_text = "同批行情持仓动作" if authority.get("status") == "current" else "当期动作不可用，旧信号不作依据"
+    sells = [row for row in actions if row.get("action") in {"sell", "reduce"}]
+    sell_labels = [short(row.get("name") or row.get("symbol") or row.get("code"), 14)
+                   for row in sells[:3]]
+    remainder = f"等{len(sells)}只" if len(sells) > 3 else ""
+    action_text = ("、".join(sell_labels) + remainder) if sells else "无卖出/减仓信号"
+    action_line = (f"权威动作（{authority_text}）：卖出/减仓{len(sells)}只，{action_text}；"
+                   f"持仓{holdings.get('count', '未知')}只。")
+    if post_close.get("due"):
+        invalid = sorted(set((review.get("unusable_trade_plan_symbols") or [])
+                             + (next_plan.get("unusable_trade_plan_symbols") or [])))
+        condition = (f"失效：{len(invalid)}只权威计划不可用，旧价位无效（例：{','.join(invalid[:3])}）。"
+                     if invalid else "失效条件：次日行情、现金及可卖量须重新确认。")
+    else:
+        condition = ("失效条件：若行情批次/计划不匹配，停止使用上述动作。"
+                     if authority.get("status") == "current" else
+                     "失效条件：行情或计划未绑定当期，停止使用旧动作。")
+    condition = f"风控{short((plans.get('portfolio_risk') or {}).get('summary'), 25)}；{condition}"
+    if budget.get("status") == "complete":
+        cash_text = (f"股票预算可用¥{float(budget.get('available_cash_cny') or 0):,.0f}；"
+                     f"现金口径{short(budget.get('as_of') or '未知', 25)}；"
+                     "仅预览，不允许自动买入。")
+    else:
+        cash_text = "股票预算/现金质量不完整；买入侧关闭，卖出复核继续。"
+    if cash.get("buy_side", {}).get("status") == "blocked" or cash.get("new_or_add_positions_allowed") is False:
+        cash_text += "买入不放行。"
+    external_status = external.get("status")
+    if external_status == "complete":
+        external_text = f"外部独立当期锁定{len(external.get('top5') or [])}只"
+    else:
+        external_text = "外部独立当期无效，旧排名不采用"
+    picks = (f"三方：正式{formal.get('status') or 'missing'} TOP5={len(formal.get('formal_top5') or [])}；"
+             f"独立{independent.get('status') or 'missing'} TOP5={len(independent.get('top5') or [])}；"
+             f"{external_text}。")
+    pairs = comparison.get("pairwise") or {}
+    fi = pairs.get("formal_independent") or {}
+    overlap = len(fi.get("intersection") or []) if fi else None
+    formal_symbols = {str(row.get("symbol")) for row in formal.get("formal_top5") or []
+                      if row.get("symbol")}
+    external_symbols = {str(row.get("symbol")) for row in external.get("top5") or []
+                        if row.get("symbol")}
+    external_difference = (f"正式/外部交集{len(formal_symbols & external_symbols)}只；"
+                           if external_status == "complete" and formal_symbols else "")
+    difference = (f"正式/独立交集{overlap}只；{external_difference}"
+                  f"差异正式{len(fi.get('formal_only') or [])}只、"
+                  f"独立{len(fi.get('independent_only') or [])}只。"
+                  if overlap is not None else "三方差异：当期对比不可用。")
+    if post_close.get("due"):
+        plan_count = int(next_plan.get("count") or 0)
+        ready_count = int(next_plan.get("ready_count") or 0)
+        blocked_count = int(next_plan.get("blocked_count") or max(0, plan_count - ready_count))
+        close_line = (f"盘后：{short(post_close.get('conclusion'), 65)}；"
+                      f"持仓复盘{review.get('reviewed_count') or 0}/{review.get('count') or 0}；"
+                      f"次日计划{ready_count}/{plan_count}可用，缺口{blocked_count}。")
+    else:
+        close_line = f"盘后/次日计划：{short(snapshot.get('phase'), 25)}阶段未到期；下一时点复核。"
+    lines = [
+        f"{day.get('date') or '未知日期'} {short(snapshot.get('phase'), 25)}；质量{short(snapshot.get('status'), 15)}。",
+        action_line, condition, cash_text, picks, difference, close_line,
+        "QQ仅为有界摘要，未覆盖全部持仓；完整持仓与失效证据请走受保护快照。",
+    ]
+    # Every priority category has its own line; trim within each line before
+    # the generic router's eight-line/900-character transport limit applies.
+    lines = [short(line, 108) for line in lines]
+    return "ShadowFoliant 计划摘要", "\n".join(lines)
+
+
+def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     required = (
         "trading_day", "formal_selection", "holdings", "trade_plans", "quotes",
         "post_close_review", "holdings_review", "next_session_plan", "as_of", "quality",
@@ -612,7 +716,33 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not os.getenv("QQ_WEBHOOK_URL", "").strip():
         return {"requested": True, "sent": False, "error_code": "qq_webhook_missing",
                 "repair_hint": "Set QQ_WEBHOOK_URL outside the repository."}
-    title, content = render_qq_report(snapshot)
+    return None
+
+
+def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    from notify.plain_language import compact_notification
+    title, content = render_qq_summary(snapshot)
+    delivered = compact_notification("report", content)
+    if delivered != content or len(delivered.splitlines()) != 8 or len(delivered) > 900:
+        raise ValueError("qq_summary_exceeds_transport_budget")
+    return {
+        "title": title, "content": content,
+        "payload_hash": hashlib.sha256((title + "\n" + delivered).encode("utf-8")).hexdigest(),
+        "original_lines": len(render_qq_report(snapshot)[1].splitlines()),
+        "delivered_lines": len(delivered.splitlines()),
+        "category": "report", "version": QQ_SUMMARY_VERSION,
+    }
+
+
+def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    failed = qq_preflight(snapshot)
+    if failed:
+        return failed
+    try:
+        payload = payload or qq_payload(snapshot)
+    except Exception:
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_summary_invalid"}
     try:
         from notify import notification_router
     except (ImportError, ModuleNotFoundError):
@@ -621,7 +751,8 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             result = notification_router.send(
-                "report", title, content, only_channels=["qq"], fallback=None,
+                "report", payload["title"], payload["content"],
+                only_channels=["qq"], fallback=None,
             )
     except Exception:
         return {"requested": True, "sent": False, "channel": "qq",
@@ -634,14 +765,22 @@ def send_qq(snapshot: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "qq_router_result_invalid"}
-    return ({"requested": True, "sent": True, "channel": "qq"} if sent else
+    detail = str(result["qq"][1] or "")
+    match = re.fullmatch(r"HTTP (\d{3})", detail)
+    http_status = int(match.group(1)) if match else None
+    return ({"requested": True, "sent": True, "channel": "qq",
+             "delivery_status": "delivered", "http_status": http_status} if sent else
             {"requested": True, "sent": False, "channel": "qq",
-             "error_code": "qq_delivery_failed"})
+             "delivery_status": "failed" if http_status else "unknown",
+             "http_status": http_status,
+             "error_code": "qq_http_rejected" if http_status else "qq_delivery_unknown"})
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one bounded Foliant scheduled snapshot")
     parser.add_argument("--send-qq", action="store_true", help="explicitly send a compact QQ report")
+    parser.add_argument("--audit-notifications", action="store_true",
+                        help="read a bounded, redacted 14-day slot audit; never send")
     parser.add_argument(
         "--notification-slot", choices=SCHEDULED_NOTIFICATION_TIMES,
         help="planned Asia/Shanghai report time; defaults to the latest due slot",
@@ -651,6 +790,13 @@ def main(argv: list[str] | None = None) -> int:
         help="strict codex-external-independent-v1 JSON submitted before snapshot retrieval",
     )
     args = parser.parse_args(argv)
+    if args.audit_notifications:
+        if args.send_qq or args.external_bundle:
+            parser.error("--audit-notifications cannot submit research or send QQ")
+        audit = fetch_notification_audit()
+        print(json.dumps(_safe(audit), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")))
+        return 0 if audit.get("schema_version") == "scheduled-notification-audit-v1" else 2
     submission = None
     external_failure = None
     bundle = None
@@ -672,79 +818,87 @@ def main(argv: list[str] | None = None) -> int:
                 snapshot, failure, selection_run_id=(bundle or {}).get("selection_run_id"),
             )
     if args.send_qq:
-        external = snapshot.get("external_independent_research") or {}
-        if external_failure:
-            snapshot["notification"] = send_qq(snapshot)
-        elif external.get("status") == "complete" and not submission:
-            snapshot["notification"] = {
-                "requested": True, "sent": False,
-                "error_code": "external_submission_claim_required",
-            }
-        elif submission:
-            overlay = (submission.get("data") or {}).get("overlay") or {}
-            claim = None
-            failure = None
-            notification_slot = scheduled_notification_slot(
-                snapshot, scheduled_time=args.notification_slot,
+        if not submission and not external_failure:
+            snapshot = _degrade_external_submission(
+                snapshot,
+                _failure("external_current_slot_unsubmitted",
+                         "Current-slot external ranking was not submitted; use formal and portfolio evidence only.",
+                         status="degraded"),
             )
-            if not notification_slot:
-                snapshot["notification"] = {
-                    "requested": True, "sent": False,
-                    "error_code": "scheduled_notification_slot_unavailable",
-                }
-            else:
-                claim, failure = claim_external_notification(
-                    str(overlay.get("idempotency_key") or ""),
-                    str(overlay.get("overlay_id") or ""),
-                    notification_slot,
-                )
-            if notification_slot and failure:
-                snapshot["notification"] = failure.get("notification") | {
-                    "requested": True, "sent": False,
-                    "error_code": (failure.get("error") or {}).get("code"),
-                }
-            elif notification_slot and (claim.get("data") or {}).get("should_send"):
-                claim_data = claim.get("data") or {}
-                notification = send_qq(snapshot)
-                delivery, delivery_failure = record_external_notification_delivery(
-                    str(overlay.get("idempotency_key") or ""),
-                    str(overlay.get("overlay_id") or ""),
-                    notification_slot,
-                    sent=bool(notification.get("sent")),
-                    error_code=notification.get("error_code"),
-                )
-                notification.update({
-                    "notification_slot": notification_slot,
-                    "prior_sent": False,
-                    "delivery_status": (
-                        (delivery.get("data") or {}).get("delivery_status")
-                        if delivery else "record_failed"
-                    ),
-                    "delivery_recorded": delivery_failure is None,
-                })
-                if delivery_failure:
-                    notification["delivery_record_error_code"] = (
-                        (delivery_failure.get("error") or {}).get("code")
-                    )
-                snapshot["notification"] = notification
-            elif notification_slot:
-                claim_data = claim.get("data") or {}
-                snapshot["notification"] = {
-                    "requested": True,
-                    "sent": bool(claim_data.get("prior_sent")),
-                    "prior_sent": bool(claim_data.get("prior_sent")),
-                    "replayed": True,
-                    "delivery_status": claim_data.get("delivery_status") or "unknown",
-                    "delivered_at": claim_data.get("delivered_at"),
-                    "error_code": claim_data.get("delivery_error_code"),
-                    "notification_slot": notification_slot,
-                }
+        notification_slot = scheduled_notification_slot(
+            snapshot, scheduled_time=args.notification_slot)
+        failed = qq_preflight(snapshot)
+        if not notification_slot:
+            snapshot["notification"] = {"requested": True, "sent": False,
+                "error_code": "scheduled_notification_slot_unavailable"}
+        elif failed:
+            snapshot["notification"] = failed | {"notification_slot": notification_slot}
         else:
-            snapshot["notification"] = send_qq(snapshot)
+            try:
+                payload = qq_payload(snapshot)
+            except Exception:
+                snapshot["notification"] = {"requested": True, "sent": False,
+                    "notification_slot": notification_slot,
+                    "error_code": "qq_summary_invalid"}
+            else:
+                claim, claim_failure = notification_ledger("claim", {
+                    "notification_slot": notification_slot,
+                    **{key: payload[key] for key in (
+                        "payload_hash", "original_lines", "delivered_lines",
+                        "category", "version")},
+                })
+                claim_data = (claim or {}).get("data") or {}
+                if claim_failure:
+                    snapshot["notification"] = {"requested": True, "sent": False,
+                        "notification_slot": notification_slot,
+                        "error_code": (claim_failure.get("error") or {}).get("code")}
+                elif not claim_data.get("should_send") or not claim_data.get("payload_matches"):
+                    snapshot["notification"] = {"requested": True, "sent": False,
+                        "prior_sent": bool(claim_data.get("prior_sent")),
+                        "suppressed": True, "notification_slot": notification_slot,
+                        "delivery_status": claim_data.get("delivery_status") or "unknown",
+                        "suppression_reason": claim_data.get("suppression_reason"),
+                        "delivered_at": claim_data.get("delivered_at")}
+                else:
+                    start, start_failure = notification_ledger("start", {
+                        "notification_slot": notification_slot,
+                        "payload_hash": payload["payload_hash"],
+                    })
+                    if start_failure or not ((start or {}).get("data") or {}).get("started"):
+                        snapshot["notification"] = {"requested": True, "sent": False,
+                            "notification_slot": notification_slot,
+                            "delivery_status": "unknown",
+                            "error_code": "notification_start_unconfirmed"}
+                    else:
+                        notification = send_qq(snapshot, payload=payload)
+                        status = notification.get("delivery_status") or "unknown"
+                        finish, finish_failure = notification_ledger("finish", {
+                            "notification_slot": notification_slot,
+                            "payload_hash": payload["payload_hash"],
+                            "status": status,
+                            "http_status": notification.get("http_status"),
+                            "error_code": notification.get("error_code"),
+                        })
+                        notification.update({
+                            "notification_slot": notification_slot,
+                            "payload_hash": payload["payload_hash"],
+                            "summary_version": payload["version"],
+                            "original_lines": payload["original_lines"],
+                            "delivered_lines": payload["delivered_lines"],
+                            "delivery_recorded": finish_failure is None and bool(
+                                ((finish or {}).get("data") or {}).get("recorded")),
+                        })
+                        if not notification["delivery_recorded"]:
+                            notification["delivery_status"] = "unknown"
+                            notification["error_code"] = "notification_finish_unconfirmed"
+                        snapshot["notification"] = notification
     print(json.dumps(_safe(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     notification = snapshot.get("notification") or {}
     notification_failed = bool(
-        args.send_qq and not notification.get("sent")
+        args.send_qq and not (
+            notification.get("prior_sent") or
+            (notification.get("sent") and notification.get("delivery_recorded"))
+        )
     )
     return 0 if snapshot.get("status") in {"complete", "degraded"} and not notification_failed else 2
 

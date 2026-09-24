@@ -904,6 +904,15 @@ CREATE TABLE IF NOT EXISTS external_research_notification_claims (
     delivery_attempted_at TEXT, delivered_at TEXT, delivery_error_code TEXT,
     PRIMARY KEY(idempotency_key,notification_slot)
 );
+CREATE TABLE IF NOT EXISTS scheduled_notification_deliveries (
+    notification_slot TEXT PRIMARY KEY, actor_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL, original_lines INTEGER NOT NULL,
+    delivered_lines INTEGER NOT NULL, category TEXT NOT NULL,
+    version TEXT NOT NULL, claimed_at TEXT NOT NULL,
+    attempted_at TEXT, delivered_at TEXT, http_status INTEGER,
+    error_code TEXT, delivery_status TEXT NOT NULL,
+    suppression_reason TEXT, suppressed_count INTEGER NOT NULL DEFAULT 0
+);
 CREATE INDEX IF NOT EXISTS idx_external_evidence_decision
     ON external_research_evidence(channel,decision_as_of);
 CREATE INDEX IF NOT EXISTS idx_external_overlay_latest
@@ -1019,6 +1028,9 @@ VALUES ('16-scheduled-notification-slots', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 INSERT INTO research_schema_migrations(version, applied_at)
 VALUES ('17-notification-delivery-lifecycle', NOW()::TEXT)
+ON CONFLICT(version) DO NOTHING;
+INSERT INTO research_schema_migrations(version, applied_at)
+VALUES ('18-scheduled-notification-audit', NOW()::TEXT)
 ON CONFLICT(version) DO NOTHING;
 
 -- Publish the latest complete legacy master when upgrading an existing install.

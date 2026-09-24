@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import subprocess
@@ -1410,8 +1411,9 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
 
     with patch.object(notification_router, "send", side_effect=send):
         result = cli.send_qq(snapshot)
-    assert result == {"requested": True, "sent": False, "channel": "qq",
-                      "error_code": "qq_delivery_failed"}
+    assert result["sent"] is False
+    assert result["delivery_status"] == "unknown"
+    assert result["error_code"] == "qq_delivery_unknown"
     body = captured["body"]
     assert "private.example.invalid" not in body
     assert "should-not-appear" not in body
@@ -1500,7 +1502,7 @@ def test_cli_partial_post_close_sends_bounded_warning_without_missing_prices(mon
     body = send.call_args.args[2]
     assert "53/55" in body and "67/69" in body
     assert "600699,601919" in body
-    assert "对应标的旧阈值仅作历史参考" in body
+    assert "旧价位无效" in body
 
 
 def test_cli_report_appends_due_post_close_conclusion():
@@ -1603,17 +1605,21 @@ def test_cli_external_rejection_preserves_degraded_snapshot_and_can_notify(
     monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
         events.append("fetch") or deepcopy(original)
     ))
-    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
-        events.append("claim") or None
-    ))
-    monkeypatch.setattr(cli, "send_qq", lambda snapshot: (
-        events.append("qq") or {"requested": True, "sent": True, "channel": "qq"}
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    def ledger(action, _body):
+        events.append(action)
+        return {"data": {"should_send": True, "payload_matches": True,
+                         "started": True, "recorded": True}}, None
+    monkeypatch.setattr(cli, "notification_ledger", ledger)
+    monkeypatch.setattr(cli, "send_qq", lambda snapshot, **_kwargs: (
+        events.append("qq") or {"requested": True, "sent": True, "channel": "qq",
+                                "delivery_status": "delivered"}
     ))
 
     assert cli.main(["--external-bundle", str(path), "--send-qq",
                      "--notification-slot", "10:15"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert events == ["submit", "fetch", "qq"]
+    assert events == ["submit", "fetch", "claim", "start", "qq", "finish"]
     assert result["status"] == "degraded"
     assert result["quality"]["status"] == "degraded"
     assert result["external_submission"]["error_code"] == "external_evidence_dedupe_conflict"
@@ -1680,14 +1686,12 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
         "selection_run_id": bundle["selection_run_id"],
     }
     submission = {"status": "complete", "data": {"overlay": overlay}}
-    snapshot = {
-        "schema_version": "scheduled-agent-snapshot-v1", "status": "complete",
-        "trading_day": {"date": "2026-09-15", "status": "complete"},
-        "external_independent_research": {
-            "status": "complete", **overlay,
-            "decision_as_of": bundle["decision_as_of"],
-            "ranking_locked_at": "2026-09-15T20:45:01+08:00",
-        },
+    snapshot = build_service().read(owner_id="scheduled-agent")["data"]
+    snapshot["trading_day"]["date"] = "2026-09-15"
+    snapshot["external_independent_research"] = {
+        "status": "complete", **overlay,
+        "decision_as_of": bundle["decision_as_of"],
+        "ranking_locked_at": "2026-09-15T20:45:01+08:00",
     }
     events = []
     monkeypatch.setattr(cli, "submit_external_bundle", lambda value: (
@@ -1696,22 +1700,22 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
         events.append(("fetch", None)) or deepcopy(snapshot)
     ))
-    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
-        events.append(("claim", _args[2])) or {"data": {"should_send": True}}, None
-    ))
-    monkeypatch.setattr(cli, "send_qq", lambda _snapshot: (
-        events.append(("qq", None)) or {"requested": True, "sent": True, "channel": "qq"}
-    ))
-    monkeypatch.setattr(cli, "record_external_notification_delivery", lambda *_args, **_kwargs: (
-        events.append(("delivery", _kwargs["sent"])) or
-        {"data": {"delivery_status": "delivered"}}, None
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    def ledger(action, body):
+        events.append((action, body["notification_slot"]))
+        return {"data": {"should_send": True, "payload_matches": True,
+                         "started": True, "recorded": True}}, None
+    monkeypatch.setattr(cli, "notification_ledger", ledger)
+    monkeypatch.setattr(cli, "send_qq", lambda _snapshot, **_kwargs: (
+        events.append(("qq", None)) or {"requested": True, "sent": True,
+                                        "channel": "qq", "delivery_status": "delivered"}
     ))
 
     assert cli.main([
         "--external-bundle", str(path), "--send-qq",
         "--notification-slot", "20:45",
     ]) == 0
-    assert [name for name, _ in events] == ["submit", "fetch", "claim", "qq", "delivery"]
+    assert [name for name, _ in events] == ["submit", "fetch", "claim", "start", "qq", "finish"]
     assert events[2][1] == "2026-09-15T20:45+08:00"
     first_output = json.loads(capsys.readouterr().out)
     assert first_output["notification"]["sent"] is True
@@ -1720,12 +1724,12 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     )
 
     events.clear()
-    monkeypatch.setattr(cli, "claim_external_notification", lambda *_args: (
-        events.append(("claim", None)) or {"data": {
-            "should_send": False, "prior_sent": True, "delivery_status": "delivered",
-            "delivered_at": "2026-09-15T20:45:02+08:00",
-        }}, None
-    ))
+    def replay(action, _body):
+        events.append((action, None))
+        return {"data": {"should_send": False, "payload_matches": True,
+                         "prior_sent": True, "delivery_status": "delivered",
+                         "delivered_at": "2026-09-15T20:45:02+08:00"}}, None
+    monkeypatch.setattr(cli, "notification_ledger", replay)
     assert cli.main([
         "--external-bundle", str(path), "--send-qq",
         "--notification-slot", "20:45",
@@ -1733,8 +1737,8 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
     output = json.loads(capsys.readouterr().out)
     assert [name for name, _ in events] == ["submit", "fetch", "claim"]
     assert output["notification"]["prior_sent"] is True
-    assert output["notification"]["sent"] is True
-    assert output["notification"]["replayed"] is True
+    assert output["notification"]["sent"] is False
+    assert output["notification"]["suppressed"] is True
     assert output["notification"]["notification_slot"] == "2026-09-15T20:45+08:00"
 
 
@@ -1759,6 +1763,33 @@ def test_cli_notification_slot_boundaries_cover_all_four_planned_times():
         ) == expected
 
 
+def test_cli_without_current_bundle_degrades_old_overlay_but_sends_formal_summary(monkeypatch, capsys):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    snapshot = build_service().read(owner_id="scheduled-agent")["data"]
+    snapshot["external_independent_research"] = {
+        "status": "complete", "top5": [{"symbol": "600999"}],
+        "ranking_locked_at": "2026-09-10T10:15:00+08:00",
+    }
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda: deepcopy(snapshot))
+    monkeypatch.setattr(cli, "notification_ledger", lambda action, _body: (
+        {"data": {"should_send": True, "payload_matches": True,
+                  "started": True, "recorded": True}}, None))
+    captured = {}
+    def send(value, **kwargs):
+        captured["body"] = kwargs["payload"]["content"]
+        return {"requested": True, "sent": True, "channel": "qq",
+                "delivery_status": "delivered"}
+    monkeypatch.setattr(cli, "send_qq", send)
+    assert cli.main(["--send-qq", "--notification-slot", "10:15"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["external_independent_research"]["status"] == "degraded"
+    assert result["external_independent_research"]["top5"] == []
+    assert "旧排名不采用" in captured["body"]
+    assert "600999" not in captured["body"]
+
+
 def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):
     hook_dir = tmp_path / "hooks"
     hook_dir.mkdir()
@@ -1768,6 +1799,8 @@ def test_cli_absolute_path_from_external_cwd_sends_qq(tmp_path):
 import json
 import os
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 class Response:
     status_code = 200
@@ -1778,9 +1811,9 @@ class Response:
 
 def fake_get(*_args, **_kwargs):
     return Response({"data": {
-        "schema_version": "scheduled-agent-snapshot-v1",
-        "status": "degraded",
-        "trading_day": {"date": "2026-09-10", "confirmed": False},
+            "schema_version": "scheduled-agent-snapshot-v1",
+            "status": "degraded",
+            "trading_day": {"date": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(), "confirmed": False},
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
         "wencai_reference": {"ready_groups": 0},
         "holdings": {"status": "complete", "count": 2},
@@ -1794,6 +1827,12 @@ def fake_get(*_args, **_kwargs):
     }})
 
 def fake_post(_url, *, json=None, **_kwargs):
+    if _url.endswith("/notification-claim"):
+        return Response({"data": {"should_send": True, "payload_matches": True}})
+    if _url.endswith("/notification-start"):
+        return Response({"data": {"started": True}})
+    if _url.endswith("/notification-finish"):
+        return Response({"data": {"recorded": True}})
     with open(os.environ["FOLIANT_TEST_POST_MARKER"], "w", encoding="utf-8") as handle:
         handle.write(__import__("json").dumps(json, ensure_ascii=False))
     return Response({"ok": True})
@@ -1809,6 +1848,7 @@ requests.post = fake_post
         "FOLIANT_TEST_POST_MARKER": str(marker),
         "FOLIANT_AGENT_BASE_URL": "https://agent.example.invalid",
         "FOLIANT_AGENT_TOKEN": "external-cwd-test-token-that-is-long-enough",
+        "FOLIANT_EXTERNAL_RESEARCH_TOKEN": "external-cwd-writer-token",
         "QQ_WEBHOOK_URL": "https://qq.example.invalid/private-hook",
         "SHADOW_LOG_TIMESTAMPS": "false",
     })
@@ -1825,6 +1865,7 @@ requests.post = fake_post
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    assert payload["notification"] == {"requested": True, "sent": True, "channel": "qq"}
+    assert payload["notification"]["sent"] is True
+    assert payload["notification"]["delivery_recorded"] is True
     assert json.loads(marker.read_text("utf-8"))["msgtype"] == "markdown"
     assert "external-cwd-test-token" not in completed.stdout
