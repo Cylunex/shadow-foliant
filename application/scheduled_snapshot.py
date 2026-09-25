@@ -771,6 +771,11 @@ class ScheduledSnapshotService:
         if state in {"complete", "success"} and expected and selection_date < expected:
             state = "stale"
             warnings.append("formal selection predates the latest confirmed open date")
+        elif (state in {"complete", "success"}
+              and trading_day.get("confirmed")
+              and not trading_day.get("is_trading_day")):
+            state = "historical_reference"
+            warnings.append("formal selection is a previous open day reference")
         return {
             "status": "complete" if state == "success" else state,
             "selection_date": selection_date or None,

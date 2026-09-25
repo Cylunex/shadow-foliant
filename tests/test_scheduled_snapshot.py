@@ -568,6 +568,7 @@ def test_holiday_snapshot_never_promotes_previous_quote_or_plan(day):
     assert snapshot["trading_day"]["confirmed"] is True
     assert snapshot["trading_day"]["is_trading_day"] is False
     assert snapshot["phase"] == "closed_day"
+    assert snapshot["formal_selection"]["status"] == "historical_reference"
     assert snapshot["trade_plans"]["status"] == "not_applicable"
     assert snapshot["trade_plans"]["current_authority"] == "none_non_trading_day"
     assert snapshot["trade_plans"]["holding_actions_authority"]["status"] != "current"
