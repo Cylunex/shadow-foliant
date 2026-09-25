@@ -325,6 +325,9 @@ def scheduled_notification_slot(
         current = current.replace(tzinfo=SHANGHAI)
     current = current.astimezone(SHANGHAI)
     report_date = str((snapshot.get("trading_day") or {}).get("date") or "")
+    trading_day = snapshot.get("trading_day") or {}
+    if trading_day.get("confirmed") is not True or trading_day.get("is_trading_day") is not True:
+        return None
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", report_date):
         return None
     target = str(scheduled_time or "").strip()
@@ -707,6 +710,10 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             or not (snapshot.get("quality") or {}).get("status")):
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "snapshot_contract_incomplete"}
+    day = snapshot["trading_day"]
+    if day.get("confirmed") is not True or day.get("is_trading_day") is not True:
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "trading_day_not_confirmed_open"}
     if (snapshot["post_close_review"].get("due")
             and (snapshot["post_close_review"].get("status") not in {"complete", "degraded"}
                  or snapshot["holdings_review"].get("status") not in {"complete", "degraded"}

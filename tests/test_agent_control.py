@@ -151,6 +151,43 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(
             REGISTRY['mx_selection_review']['depends_on'], ['unified_selection'])
 
+    def test_market_jobs_skip_when_calendar_missing_or_closed(self):
+        today = datetime.now().date().isoformat()
+        for consensus, expected_reason in (
+            ({'ready': False}, 'calendar_consensus_incomplete'),
+            ({'ready': True, 'latest_confirmed_open_date': '2026-09-24'},
+             'non-trading day'),
+        ):
+            with mock.patch('data.research_store.ResearchStore') as store_class, \
+                    mock.patch.object(jobs_hub, '_log_run') as log_run:
+                store_class.return_value.calendar_consensus.return_value = consensus
+                self.assertTrue(jobs_hub._skip_if_not_trading('test_job'))
+            store_class.return_value.calendar_consensus.assert_called_once_with(
+                today, inclusive=True)
+            self.assertEqual(log_run.call_args.kwargs['error'], expected_reason)
+
+    def test_direct_trading_day_guard_fails_closed_without_calendar(self):
+        with mock.patch('data.research_store.ResearchStore') as store_class:
+            store_class.return_value.calendar_consensus.return_value = {'ready': False}
+            self.assertFalse(jobs_hub._is_trading_day(datetime(2026, 9, 25)))
+            store_class.return_value.calendar_consensus.return_value = {
+                'ready': True, 'latest_confirmed_open_date': '2026-09-28',
+            }
+            self.assertTrue(jobs_hub._is_trading_day(datetime(2026, 9, 28)))
+
+    def test_calendar_refresh_runs_without_market_day_guard(self):
+        today = datetime.now().date().isoformat()
+        with mock.patch('data.research_sync.ResearchSynchronizer') as sync_class, \
+                mock.patch.object(jobs_hub, '_skip_if_not_trading',
+                                  side_effect=AssertionError('calendar must run on holidays')), \
+                mock.patch.object(jobs_hub, '_log_run') as log_run:
+            sync_class.return_value.store.calendar_consensus.return_value = {
+                'ready': True, 'covered_provider_count': 2,
+            }
+            jobs_hub.task_research_calendar_refresh()
+        sync_class.return_value.refresh_calendar_for_day.assert_called_once_with(today)
+        self.assertEqual(log_run.call_args.args[:2], ('research_calendar_refresh', 'success'))
+
     def test_formal_selection_failure_does_not_run_external_candidate_fallback(self):
         with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
                 mock.patch(

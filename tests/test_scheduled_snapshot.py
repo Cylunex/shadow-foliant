@@ -556,6 +556,39 @@ def test_confirmed_closed_day_and_stale_formal_are_explicit():
     assert result["status"] == "degraded"
 
 
+@pytest.mark.parametrize("day", ("2026-09-25", "2026-09-26", "2026-09-27"))
+def test_holiday_snapshot_never_promotes_previous_quote_or_plan(day):
+    now = datetime.fromisoformat(f"{day}T10:15:00+08:00")
+    previous = datetime.fromisoformat("2026-09-24T14:35:00+08:00")
+    snapshot = build_service(
+        store=CalendarStore(coverage=day, latest="2026-09-24"),
+        clock=lambda: now, quote_time=previous,
+        selection_value=selection(day="2026-09-24"),
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["trading_day"]["confirmed"] is True
+    assert snapshot["trading_day"]["is_trading_day"] is False
+    assert snapshot["phase"] == "closed_day"
+    assert snapshot["trade_plans"]["status"] == "not_applicable"
+    assert snapshot["trade_plans"]["current_authority"] == "none_non_trading_day"
+    assert snapshot["trade_plans"]["holding_actions_authority"]["status"] != "current"
+    assert all(row["freshness"] != "actionable" for row in snapshot["quotes"]["rows"])
+
+
+def test_reopening_day_needs_current_quote_and_selection():
+    now = datetime.fromisoformat("2026-09-28T10:15:00+08:00")
+    previous = datetime.fromisoformat("2026-09-24T14:35:00+08:00")
+    snapshot = build_service(
+        store=CalendarStore(coverage="2026-09-28", latest="2026-09-28"),
+        clock=lambda: now, quote_time=previous,
+        selection_value=selection(day="2026-09-24"),
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["trading_day"]["is_trading_day"] is True
+    assert snapshot["formal_selection"]["status"] == "stale"
+    assert all(row["freshness"] != "actionable" for row in snapshot["quotes"]["rows"])
+    assert snapshot["trade_plans"]["holding_actions_authority"]["status"] != "current"
+    assert snapshot["trade_plans"]["current_authority"] == "none_unverified_intraday"
+
+
 def test_independent_selection_stale_when_as_of_mismatch():
     value = selection(day="2026-09-11", independent_day="2026-09-10")
     result = build_service(selection_value=value).read(owner_id="scheduled-agent")["data"]
@@ -1386,7 +1419,8 @@ def test_cli_auth_failure_and_notification_never_leak_secrets(monkeypatch):
     snapshot = selection()
     snapshot.update({
         "schema_version": "scheduled-agent-snapshot-v1",
-        "status": "degraded", "trading_day": {"date": "2026-09-10", "confirmed": True},
+        "status": "degraded", "trading_day": {"date": "2026-09-10", "confirmed": True,
+                                            "is_trading_day": True},
         "as_of": {"captured_at": "2026-09-10T11:30:00+08:00"},
         "quality": {"status": "degraded"},
         "formal_selection": selection()["data"],
@@ -1462,7 +1496,8 @@ def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     snapshot = {
         "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
-        "trading_day": {"date": "2026-09-16"},
+        "trading_day": {"date": "2026-09-16", "confirmed": True,
+                        "is_trading_day": True},
         "formal_selection": {}, "holdings": {}, "trade_plans": {}, "quotes": {},
         "post_close_review": {"due": True, "status": "missing", "conclusion": "不完整"},
         "holdings_review": {"status": "complete"},
@@ -1484,7 +1519,8 @@ def test_cli_partial_post_close_sends_bounded_warning_without_missing_prices(mon
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     snapshot = {
         "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
-        "trading_day": {"date": "2026-09-18", "confirmed": True},
+        "trading_day": {"date": "2026-09-18", "confirmed": True,
+                        "is_trading_day": True},
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
         "holdings": {"status": "complete", "count": 55},
         "trade_plans": {"status": "degraded", "portfolio_risk": {}},
@@ -1511,7 +1547,8 @@ def test_cli_report_appends_due_post_close_conclusion():
 
     snapshot = {
         "status": "complete",
-        "trading_day": {"date": "2026-09-10", "confirmed": True},
+        "trading_day": {"date": "2026-09-10", "confirmed": True,
+                        "is_trading_day": True},
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
         "independent_selection": {"status": "missing", "market_as_of": "2026-09-09",
                                   "selection_session_date": "2026-09-10"},
@@ -1746,7 +1783,8 @@ def test_cli_submits_external_before_snapshot_and_claims_only_one_qq(tmp_path, m
 def test_cli_notification_slot_boundaries_cover_all_four_planned_times():
     from scripts import foliant_scheduled_snapshot as cli
 
-    snapshot = {"trading_day": {"date": "2026-09-16"}}
+    snapshot = {"trading_day": {"date": "2026-09-16", "confirmed": True,
+                                "is_trading_day": True}}
     shanghai = ZoneInfo("Asia/Shanghai")
     cases = (
         ((10, 14), None),
@@ -1762,6 +1800,27 @@ def test_cli_notification_slot_boundaries_cover_all_four_planned_times():
             snapshot,
             now=datetime(2026, 9, 16, hour, minute, tzinfo=shanghai),
         ) == expected
+
+
+@pytest.mark.parametrize("day", (
+    {"date": "2026-09-25", "confirmed": True, "is_trading_day": False},
+    {"date": "2026-09-25", "confirmed": False, "is_trading_day": None},
+))
+def test_cli_never_claims_or_sends_closed_or_unknown_day(day):
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    snapshot = build_service().read(owner_id="scheduled-agent")["data"]
+    snapshot["trading_day"] = day
+    assert cli.scheduled_notification_slot(
+        snapshot, scheduled_time="10:15",
+        now=datetime.fromisoformat("2026-09-25T10:15:00+08:00"),
+    ) is None
+    with patch.object(notification_router, "send") as send:
+        result = cli.send_qq(snapshot)
+    assert result["sent"] is False
+    assert result["error_code"] == "trading_day_not_confirmed_open"
+    send.assert_not_called()
 
 
 def test_cli_without_current_bundle_degrades_old_overlay_but_sends_formal_summary(monkeypatch, capsys):
@@ -1814,7 +1873,7 @@ def fake_get(*_args, **_kwargs):
     return Response({"data": {
             "schema_version": "scheduled-agent-snapshot-v1",
             "status": "degraded",
-            "trading_day": {"date": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(), "confirmed": False},
+            "trading_day": {"date": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(), "confirmed": True, "is_trading_day": True},
         "formal_selection": {"status": "complete", "formal_top15": [], "formal_top5": []},
         "wencai_reference": {"ready_groups": 0},
         "holdings": {"status": "complete", "count": 2},

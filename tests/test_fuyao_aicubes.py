@@ -255,4 +255,4 @@ def test_calendar_fetch_adds_fuyao_as_independent_recent_validator(monkeypatch):
         today, today, timeout_seconds=1
     )
     assert failures == {}
-    assert set(actual) == {"fuyao_aicubes", "zzshare", "baostock"}
+    assert {"fuyao_aicubes", "zzshare", "baostock"} <= set(actual)

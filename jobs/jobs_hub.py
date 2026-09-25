@@ -30,7 +30,7 @@ import concurrent.futures
 
 # PostgreSQL runtime storage.
 from db_compat import connect as db_connect
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
@@ -267,47 +267,36 @@ def _log_run(job_name: str, status: str, error: str = None,
 
 
 # --- 交易日历（节假日感知） ---
-# 用 akshare 官方 A 股交易日历;进程内按"加载日"缓存,一天最多拉一次。
-# 联网/akshare 失败、或查询日期超出日历覆盖范围时,回退到"只跳周六/日"(绝不误杀真实交易日)。
-_TRADE_CAL_LOCK = threading.Lock()
-_TRADE_CAL = {'dates': None, 'min': None, 'max': None, 'loaded_on': None}
-
-
-def _load_trade_calendar():
-    """加载/刷新交易日历到进程缓存(每个自然日最多一次)。失败则保持 dates=None → 回退周末判断。"""
-    today = datetime.now().date()
-    if _TRADE_CAL['loaded_on'] == today and _TRADE_CAL['dates'] is not None:
-        return
-    with _TRADE_CAL_LOCK:
-        if _TRADE_CAL['loaded_on'] == today and _TRADE_CAL['dates'] is not None:
-            return
-        try:
-            import akshare as ak
-            df = ak.tool_trade_date_hist_sina()
-            ds = {v if isinstance(v, date) else datetime.strptime(str(v)[:10], '%Y-%m-%d').date()
-                  for v in df['trade_date'].tolist()}
-            _TRADE_CAL.update(dates=ds, min=min(ds), max=max(ds), loaded_on=today)
-        except Exception as e:
-            _TRADE_CAL['loaded_on'] = today  # 标记今天已尝试,避免反复重试拖慢任务
-            print(f'[jobs_hub] 交易日历加载失败,本日回退到"只判周末": {e}')
-
-
 def _is_trading_day(d: datetime = None) -> bool:
-    """判断是否为 A 股交易日(节假日感知)。
-    优先用 akshare 官方交易日历;日历不可用或日期超出覆盖范围时,回退到"只跳周六/日"。"""
+    """Only return true when the target date has persisted two-source evidence."""
     dt = d or datetime.now()
     day = dt.date() if isinstance(dt, datetime) else dt  # datetime 是 date 子类,纯 date 走 else
-    _load_trade_calendar()
-    cal = _TRADE_CAL['dates']
-    if cal and _TRADE_CAL['min'] <= day <= _TRADE_CAL['max']:
-        return day in cal
-    return day.weekday() < 5  # 回退:无日历或超出日历范围(0=Mon..6=Sun)
+    try:
+        from data.research_store import ResearchStore
+        consensus = ResearchStore(ensure_schema=False).calendar_consensus(
+            day.isoformat(), inclusive=True
+        )
+        return bool(consensus.get('ready')
+                    and consensus.get('latest_confirmed_open_date') == day.isoformat())
+    except Exception:
+        return False
 
 
 def _skip_if_not_trading(job_name: str) -> bool:
-    """非交易日跳过；记录 skipped"""
-    if not _is_trading_day():
-        _log_run(job_name, 'skipped', error='non-trading day',
+    """Only independently confirmed open days may run market business jobs."""
+    try:
+        from data.research_store import ResearchStore
+        today = datetime.now().strftime('%Y-%m-%d')
+        consensus = ResearchStore(ensure_schema=False).calendar_consensus(
+            today, inclusive=True
+        )
+        confirmed = bool(consensus.get('ready'))
+        is_open = confirmed and consensus.get('latest_confirmed_open_date') == today
+    except Exception:
+        confirmed, is_open = False, False
+    if not is_open:
+        reason = 'non-trading day' if confirmed else 'calendar_consensus_incomplete'
+        _log_run(job_name, 'skipped', error=reason,
                  started_at=datetime.now().isoformat(),
                  finished_at=datetime.now().isoformat())
         return True
@@ -3837,6 +3826,25 @@ def _preopen_research_context(syncer, selection_date=None):
     return selector, context, effective_market_date
 
 
+def task_research_calendar_refresh():
+    """Maintain same-day evidence even when market-data jobs skip a holiday."""
+    job = 'research_calendar_refresh'
+    started = datetime.now().isoformat()
+    try:
+        from data.research_sync import ResearchSynchronizer
+        day = datetime.now().strftime('%Y-%m-%d')
+        syncer = ResearchSynchronizer()
+        syncer.refresh_calendar_for_day(day)
+        consensus = syncer.store.calendar_consensus(day, inclusive=True)
+        if not consensus.get('ready'):
+            raise RuntimeError('two_source_calendar_consensus_incomplete')
+        _log_run(job, 'success', error=f"date={day};providers={consensus['covered_provider_count']}",
+                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+    except Exception as exc:
+        _log_run(job, 'error', error=f'{type(exc).__name__}:calendar_refresh_failed',
+                 started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+
+
 def task_research_data_sync():
     """盘后同步全市场本地研究快照，并在新行情入库后更新正式选股后验。"""
     job = 'research_data_sync'
@@ -6641,6 +6649,8 @@ def register_default_jobs():
         持仓扫描改读盘后快照(不再逐只拉K线);AI 加 lazy_summary 口语化一句话。
     """
     # ---- 🟢 盘前 ----
+    hub.register('research_calendar_refresh', MARKET_DATA_TIMES['research_calendar_refresh'],
+                 task_research_calendar_refresh)
     hub.register(
         'research_data_sync_premarket_retry',
         MARKET_DATA_TIMES['research_data_sync_premarket_retry'],

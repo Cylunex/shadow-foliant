@@ -18,6 +18,7 @@ BAOSTOCK_READY_TIMES = {
 }
 
 MARKET_DATA_TIMES = {
+    'research_calendar_refresh': '08:20',
     # 若前夜估值源晚到，开盘前先补一次；09:45 正式选股仍保留最终的
     # fail-closed 自愈，不会用陈旧估值生成候选。
     'research_data_sync_premarket_retry': '08:35',

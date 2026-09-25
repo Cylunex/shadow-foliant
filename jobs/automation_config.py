@@ -169,6 +169,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '数据', 'default': True, 'core': True,
         'description': '18:00复权因子完成后优先拉取全市场复权日线、估值和PIT财务；成功入库后更新正式选股1/3/5/10/20日后验',
     },
+    'research_calendar_refresh': {
+        'cn': '🗓️ 双源交易日历维护',
+        'schedule': f"{MARKET_DATA_TIMES['research_calendar_refresh']} 每自然日",
+        'category': '数据', 'default': True, 'core': True,
+        'description': '独立刷新当日开闭市证据；节假日亦运行，来源不足时保持未知',
+    },
     'research_data_sync_retry': {
         'cn': '🔁 本地研究数据补跑',
         'schedule': f"{MARKET_DATA_TIMES['research_data_sync_retry']} 每交易日（仅首轮未完成时）",

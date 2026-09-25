@@ -1475,6 +1475,14 @@ class ResearchStore:
         )
         return len(rows)
 
+    def delete_trade_days(self, closed_days: Iterable[str]) -> int:
+        days = sorted({_iso_date(day) for day in closed_days if _iso_date(day)})
+        self._executemany(
+            "DELETE FROM research_trade_calendar WHERE trade_date=?",
+            [(day,) for day in days],
+        )
+        return len(days)
+
     def upsert_calendar_evidence(self, evidence: Iterable[tuple[str, bool]], *,
                                  provider: str) -> int:
         """Persist one provider's explicit open/closed evidence for calendar consensus."""
@@ -1559,14 +1567,16 @@ class ResearchStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT provider,MAX(range_end) FROM research_calendar_fetch_runs
-                   WHERE quality_status='ok' GROUP BY provider"""
+                """SELECT DISTINCT e.provider,e.is_open FROM research_trade_calendar_evidence e
+                   WHERE e.trade_date=? AND EXISTS (
+                     SELECT 1 FROM research_calendar_fetch_runs f
+                     WHERE f.provider=e.provider AND f.quality_status='ok'
+                       AND f.range_start<=? AND f.range_end>=?
+                   )""",
+                (cutoff, cutoff, cutoff),
             )
-            provider_coverage = {str(row[0]): str(row[1]) for row in cur.fetchall()}
-            covered = sorted(
-                provider for provider, through in provider_coverage.items()
-                if through and through >= cutoff
-            )
+            target_states = {str(provider): int(state) for provider, state in cur.fetchall()}
+            covered = sorted(target_states)
             operator = "<=" if inclusive else "<"
             cur.execute(
                 f"""SELECT trade_date,COUNT(DISTINCT provider),MIN(is_open),MAX(is_open)
@@ -1587,14 +1597,15 @@ class ResearchStore:
                 if latest_open is None and int(minimum) == 1:
                     latest_open = str(trade_date)
             return {
-                "ready": len(covered) >= 2 and not disagreement_dates,
-                "provider_count": len(provider_coverage),
+                "ready": len(covered) >= 2 and len(set(target_states.values())) == 1
+                         and not disagreement_dates,
+                "provider_count": len(target_states),
                 "covered_provider_count": len(covered),
-                "coverage_through_date": min(
-                    (provider_coverage[p] for p in covered), default=None
-                ),
+                "coverage_through_date": cutoff if len(covered) >= 2 else None,
                 "latest_confirmed_open_date": latest_open,
-                "disagreement_count": len(disagreement_dates),
+                "disagreement_count": len(disagreement_dates)
+                                      + int(len(set(target_states.values())) > 1
+                                            and cutoff not in disagreement_dates),
             }
         finally:
             conn.close()

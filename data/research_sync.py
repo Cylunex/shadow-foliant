@@ -12,7 +12,7 @@ import pandas as pd
 
 from data.research_store import ResearchStore
 from data.research_readiness import resolve_valuation, valuation_lag_budget
-from data.sources import akshare, baostock, fuyao_aicubes, zzshare
+from data.sources import akshare, baostock, exchange_holiday_notices, fuyao_aicubes, zzshare
 from data.valuation_sync import ValuationSynchronizer
 
 
@@ -116,6 +116,7 @@ def _fetch_calendar_sources(start_date: str, end_date: str, *,
         except Exception as exc:
             evidence[provider] = []
             failures[provider] = f"source_error:{type(exc).__name__}"
+    evidence.update(exchange_holiday_notices.evidence(start_date, end_date))
     return evidence, failures
 
 
@@ -244,16 +245,24 @@ class ResearchSynchronizer:
         end = pd.Timestamp(end_date).date().isoformat()
         run_id = self.store.start_sync("consensus", "trade_calendar", end)
         try:
-            provider_evidence = {"zzshare": [], "baostock": []}
-            if fuyao_aicubes.available():
-                provider_evidence["fuyao_aicubes"] = []
+            provider_evidence = {}
             incomplete_chunks = []
             for chunk_start, chunk_end in _calendar_chunks(start, end):
                 chunks, failures = _fetch_calendar_sources(chunk_start, chunk_end)
                 for provider, evidence in chunks.items():
-                    quality, chunk_detail = _calendar_chunk_quality(
-                        evidence, chunk_start, chunk_end
-                    )
+                    if provider in exchange_holiday_notices.NOTICES and not evidence:
+                        continue
+                    if provider in exchange_holiday_notices.NOTICES:
+                        quality = "ok"
+                        chunk_detail = {
+                            "reasons": [],
+                            "row_count": len(evidence),
+                            "notice_url": exchange_holiday_notices.NOTICES[provider],
+                        }
+                    else:
+                        quality, chunk_detail = _calendar_chunk_quality(
+                            evidence, chunk_start, chunk_end
+                        )
                     if provider in failures:
                         quality = "incomplete"
                         chunk_detail["reasons"] = list(dict.fromkeys(
@@ -268,34 +277,36 @@ class ResearchSynchronizer:
                             evidence, provider=provider,
                             start_date=chunk_start, end_date=chunk_end,
                         )
-                        provider_evidence[provider].extend(evidence)
+                        provider_evidence.setdefault(provider, []).extend(evidence)
                     else:
                         incomplete_chunks.append({
                             "provider": provider, "start": chunk_start, "end": chunk_end,
                             **chunk_detail,
                         })
-            open_sets = {
-                provider: {day for day, state in rows if state}
-                for provider, rows in provider_evidence.items() if rows
-            }
-            if len(open_sets) < 2 or any(not days for days in open_sets.values()):
-                unavailable = [
-                    provider for provider, rows in provider_evidence.items() if not rows
-                ]
-                raise RuntimeError(
-                    "independent trade calendar source unavailable: "
-                    + ",".join(unavailable)
-                )
-            sets = list(open_sets.values())
-            confirmed_set = set.intersection(*sets)
-            union_set = set.union(*sets)
-            confirmed = sorted(confirmed_set)
-            disagreements = sorted(union_set - confirmed_set)
-            consensus_provider = "+".join(sorted(open_sets))
-            self.store.upsert_trade_days(confirmed, provider=consensus_provider)
+            observations = {}
+            for provider, rows in provider_evidence.items():
+                for day, state in rows:
+                    observations.setdefault(day, {})[provider] = bool(state)
+            target_states = observations.get(end, {})
+            if len(target_states) < 2 or len(set(target_states.values())) != 1:
+                raise RuntimeError("independent trade calendar source unavailable or conflicting")
+            confirmed = sorted(
+                day for day, states in observations.items()
+                if len(states) >= 2 and len(set(states.values())) == 1
+                and next(iter(states.values()))
+            )
+            disagreements = sorted(
+                day for day, states in observations.items()
+                if len(states) >= 2 and len(set(states.values())) > 1
+            )
+            self.store.upsert_trade_days(confirmed, provider="two_source_consensus")
+            self.store.delete_trade_days(
+                day for day, states in observations.items()
+                if len(states) >= 2 and set(states.values()) == {False}
+            )
             quality = "ok" if not disagreements and not incomplete_chunks else "incomplete"
             detail = {
-                "provider_count": len(open_sets),
+                "provider_count": len(provider_evidence),
                 "confirmed_open_days": len(confirmed),
                 "disagreement_count": len(disagreements),
                 "coverage_through_date": end,

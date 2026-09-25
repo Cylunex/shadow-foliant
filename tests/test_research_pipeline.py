@@ -532,6 +532,44 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertTrue(consensus["ready"], consensus)
         self.assertEqual(consensus["latest_confirmed_open_date"], "2026-08-21")
 
+    def test_calendar_requires_explicit_target_day_from_two_sources(self):
+        for provider in ("one", "two"):
+            self.store.record_calendar_fetch(
+                provider, "2026-09-24", "2026-09-25",
+                [("2026-09-24", True)], quality_status="ok",
+            )
+            self.store.replace_calendar_evidence(
+                [("2026-09-24", True)], provider=provider,
+                start_date="2026-09-24", end_date="2026-09-25",
+            )
+        state = self.store.calendar_consensus("2026-09-25", inclusive=True)
+        self.assertFalse(state["ready"])
+        self.assertEqual(state["covered_provider_count"], 0)
+
+    def test_official_holiday_and_reopening_have_two_source_consensus(self):
+        syncer = ResearchSynchronizer(self.store)
+        with patch("data.research_sync.zzshare.get_trade_calendar_evidence", return_value=[]), \
+                patch("data.research_sync.baostock.trade_calendar_evidence", return_value=[]), \
+                patch("data.research_sync.fuyao_aicubes.available", return_value=False):
+            for day in ("2026-09-25", "2026-09-26", "2026-09-27", "2026-09-28"):
+                syncer.sync_calendar(day, day)
+                state = self.store.calendar_consensus(day, inclusive=True)
+                self.assertTrue(state["ready"], (day, state))
+                self.assertEqual(state["latest_confirmed_open_date"] == day,
+                                 day == "2026-09-28")
+        self.assertEqual(self.store.expected_market_as_of("2026-09-28", inclusive=True),
+                         "2026-09-28")
+
+    def test_calendar_conflict_fails_closed(self):
+        syncer = ResearchSynchronizer(self.store)
+        with patch("data.research_sync.zzshare.get_trade_calendar_evidence",
+                   return_value=[("2026-09-25", True)]), \
+                patch("data.research_sync.baostock.trade_calendar_evidence", return_value=[]), \
+                patch("data.research_sync.fuyao_aicubes.available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "conflicting"):
+                syncer.sync_calendar("2026-09-25", "2026-09-25")
+        self.assertFalse(self.store.calendar_consensus("2026-09-25", inclusive=True)["ready"])
+
     def test_finance_revisions_are_preserved_and_loaded_point_in_time(self):
         for as_of, pub_date, roe in (
             ("2026-08-20", "2026-08-20", 10),

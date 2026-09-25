@@ -2157,9 +2157,11 @@ class ScheduledSnapshotService:
         except Exception:
             intraday = {}
         intraday_quote_binding = "persisted_reference"
-        if phase == "intraday" and context is not None and account_plan.get("status") not in {
-            "missing", "stale",
-        }:
+        if (phase == "intraday" and context is not None
+                and formal.get("status") == "complete"
+                and formal.get("selection_date") == today
+                and quote_quality.get("status") in {"complete", "success"}
+                and account_plan.get("status") not in {"missing", "stale"}):
             projected_intraday = self._project_intraday_from_loaded_facts(
                 now=pricing_at, context=context, raw_quotes=raw_quotes, previous=intraday,
             )
@@ -2170,7 +2172,9 @@ class ScheduledSnapshotService:
                 intraday = projected_intraday
                 intraday_quote_binding = "same_snapshot_quote_batch"
         plan_run_matches = bool(
-            formal.get("run_id")
+            formal.get("status") == "complete"
+            and formal.get("selection_date") == today
+            and formal.get("run_id")
             and str(intraday.get("selection_run_id") or "") == str(formal.get("run_id"))
         )
         persisted_plans = (intraday.get("plans") or {}) if plan_run_matches else {}
@@ -2215,7 +2219,9 @@ class ScheduledSnapshotService:
             and pricing_state in {"complete", "success"}
         )
         intraday_actions_current = intraday_quote_binding == "same_snapshot_quote_batch"
-        if phase == "intraday":
+        if phase == "closed_day":
+            trade_plan_state = "not_applicable"
+        elif phase == "intraday":
             trade_plan_state = (
                 plan_state if plan_state in {"missing", "stale"} else
                 "complete" if plan_state == "complete"
@@ -2231,6 +2237,8 @@ class ScheduledSnapshotService:
         trade_plans = {
             "status": trade_plan_state,
             "status_basis": (
+                "confirmed_non_trading_day"
+                if phase == "closed_day" else
                 "current_intraday_actions"
                 if trade_plan_state == "complete" and intraday_actions_current else
                 "fixed_stock_budget_risk_and_pricing_complete"
@@ -2389,7 +2397,10 @@ class ScheduledSnapshotService:
             "pricing_status": pricing_state,
             "pricing_context": quote_quality.get("mode") or "intraday",
             "current_authority": (
-                "intraday_rule_plan" if phase == "intraday" else
+                "intraday_rule_plan" if phase == "intraday" and intraday_actions_current else
+                "fixed_budget_preview" if phase == "intraday" and fixed_budget_plan_complete else
+                "none_unverified_intraday" if phase == "intraday" else
+                "none_non_trading_day" if phase == "closed_day" else
                 "pending_post_close_review"
             ),
         }
