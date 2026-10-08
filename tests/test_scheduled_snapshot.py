@@ -1207,7 +1207,12 @@ def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
                                      "fallback": {"ok": 1}}},
             "portfolio_policy": {
                 "fail_closed": True,
-                "market_add_signal": {"stale": True, "fresh": False},
+                "market_add_signal": {
+                    "date": evening.date().isoformat(), "report_slot": "14:35",
+                    "source_status": "success", "source_failure_code": None,
+                    "stale": True, "fresh": False,
+                    "breadth": {"available": True, "covered": 500},
+                },
             },
             "strategy_deployment": {},
         }}
@@ -1223,6 +1228,98 @@ def test_post_close_expired_intraday_add_gate_is_expected_not_blocking():
     ]
     assert snapshot["quality"]["sections"]["cockpit"] == "complete"
     assert snapshot["status"] == "complete"
+
+
+def test_post_close_successful_a500_gate_expiry_is_not_reported_as_source_gap():
+    evening = NOW.replace(hour=20, minute=48)
+
+    def cockpit(**_kwargs):
+        return {"status": "degraded", "meta": {"as_of": evening.isoformat()}, "data": {
+            "tasks": {"total": 54, "failed_recent": [{
+                "name": "research_data_sync", "status": "error",
+                "at": evening.isoformat(),
+            }], "disabled_core": [], "running_manual": []},
+            "degradation_reasons": ["recent_task_failures", "fresh_market_add_signal_missing"],
+            "blocking_dimensions": [{
+                "dimension": "fresh_market_add_signal", "status": "stale_or_missing",
+                "source_failure_code": None,
+                "affected_decisions": ["new_positions", "add_positions"],
+            }],
+            "portfolio_policy": {"fail_closed": True, "market_add_signal": {
+                "date": evening.date().isoformat(), "report_slot": "14:35",
+                "source_status": "success", "source_failure_code": None,
+                "stale": True, "fresh": False,
+                "breadth": {"available": True, "covered": 500, "expected": 500},
+            }},
+        }}
+
+    service = build_service(clock=lambda: evening, quote_time=evening)
+    service.cockpit_reader = cockpit
+    snapshot = service.read(owner_id="scheduled-agent")["data"]
+    projected = snapshot["cockpit"]
+    assert projected["raw_status"] == "degraded"
+    assert projected["phase_quality_status"] == "degraded"
+    assert projected["degradation_reasons"] == ["recent_task_failures"]
+    assert projected["expected_phase_degradations"] == [
+        "intraday_market_add_signal_expired_after_close",
+    ]
+    assert projected["blocking_dimensions"][0]["status"] == "expected_expired_after_close"
+    assert snapshot["trade_plans"]["decision_boundary"]["status"] == "pricing_only"
+    assert snapshot["quality"]["sections"]["cockpit"] == "degraded"
+
+
+def test_post_close_a500_source_failure_stays_a_blocker():
+    evening = NOW.replace(hour=20, minute=48)
+
+    def cockpit(**_kwargs):
+        return {"status": "degraded", "meta": {"as_of": evening.isoformat()}, "data": {
+            "tasks": {"total": 54, "failed_recent": [], "disabled_core": [],
+                      "running_manual": []},
+            "degradation_reasons": ["fresh_market_add_signal_missing"],
+            "blocking_dimensions": [{
+                "dimension": "fresh_market_add_signal", "status": "source_failed",
+                "source_failure_code": "a500_constituents_missing",
+                "affected_decisions": ["new_positions", "add_positions"],
+            }],
+            "portfolio_policy": {"fail_closed": True, "market_add_signal": {
+                "date": evening.date().isoformat(), "report_slot": "14:35",
+                "source_status": "failed",
+                "source_failure_code": "a500_constituents_missing",
+                "stale": True, "fresh": False,
+                "breadth": {"available": False},
+            }},
+        }}
+
+    service = build_service(clock=lambda: evening, quote_time=evening)
+    service.cockpit_reader = cockpit
+    snapshot = service.read(owner_id="scheduled-agent")["data"]
+    projected = snapshot["cockpit"]
+    assert projected["degradation_reasons"] == ["fresh_market_add_signal_missing"]
+    assert projected["blocking_dimensions"][0]["status"] == "source_failed"
+    assert projected["blocking_dimensions"][0]["source_failure_code"] == \
+        "a500_constituents_missing"
+    assert "expected_phase_degradations" not in projected
+    assert snapshot["quality"]["sections"]["cockpit"] == "degraded"
+
+
+def test_post_close_missing_afternoon_refresh_is_not_expected_expiry():
+    from application.scheduled_snapshot import _project_expected_post_close_gate_expiry
+
+    cockpit = {
+        "degradation_reasons": ["fresh_market_add_signal_missing"],
+        "blocking_dimensions": [{"dimension": "fresh_market_add_signal",
+                                 "status": "stale_or_missing"}],
+        "portfolio_policy": {"fail_closed": True, "market_add_signal": {
+            "date": NOW.date().isoformat(), "report_slot": "10:15",
+            "source_status": "success", "stale": True,
+            "breadth": {"available": True, "covered": 500},
+        }},
+    }
+    _project_expected_post_close_gate_expiry(
+        cockpit, "post_close_review", NOW.date().isoformat())
+    assert cockpit["degradation_reasons"] == ["fresh_market_add_signal_missing"]
+    assert cockpit["blocking_dimensions"][0]["status"] == "stale_or_missing"
+    assert "expected_phase_degradations" not in cockpit
 
 
 def test_auxiliary_quote_failure_is_non_blocking_when_fallback_coverage_is_complete():

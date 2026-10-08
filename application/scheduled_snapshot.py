@@ -356,13 +356,20 @@ def _cockpit_quality_for_phase(
     state = str(cockpit.get("status") or "missing")
     reasons = set(cockpit.get("degradation_reasons") or [])
     if (state == "degraded" and reasons
-            and reasons <= {"optional_quote_provider_degraded"}
+            and reasons <= ({"optional_quote_provider_degraded",
+                            "fresh_market_add_signal_missing"}
+                           if phase == "closed_day" else
+                           {"optional_quote_provider_degraded"})
             and _quote_coverage_complete(quotes)):
         return "complete"
     if phase not in {"post_close_pending", "post_close_review", "closed_day"}:
         return state
     tasks = cockpit.get("tasks") or {}
     if (state == "degraded"
+            and (phase == "closed_day" or
+                 "intraday_market_add_signal_expired_after_close" in
+                 (cockpit.get("expected_phase_degradations") or []))
+            and reasons <= {"optional_quote_provider_degraded"}
             and not (tasks.get("failed_recent") or [])
             and not (tasks.get("disabled_core") or [])
             and not (tasks.get("running_manual") or [])):
@@ -371,6 +378,42 @@ def _cockpit_quality_for_phase(
         if policy.get("fail_closed") and signal.get("stale"):
             return "complete"
     return state
+
+
+def _project_expected_post_close_gate_expiry(
+        cockpit: dict[str, Any], phase: str, today: str) -> None:
+    """Distinguish an expired successful intraday gate from a source failure.
+
+    This only changes the scheduled report projection. The live portfolio buy
+    guard remains fail-closed after its 120-minute intraday TTL.
+    """
+    if phase not in {"post_close_pending", "post_close_review"}:
+        return
+    policy = cockpit.get("portfolio_policy") or {}
+    signal = policy.get("market_add_signal") or {}
+    breadth = signal.get("breadth") or {}
+    if not (policy.get("fail_closed") and signal.get("stale")
+            and signal.get("date") == today
+            and signal.get("report_slot") == "14:35"
+            and signal.get("source_status") == "success"
+            and not signal.get("source_failure_code")
+            and isinstance(breadth, dict) and breadth.get("available")):
+        return
+    dimensions = cockpit.get("blocking_dimensions") or []
+    for row in dimensions:
+        if (isinstance(row, dict)
+                and row.get("dimension") == "fresh_market_add_signal"
+                and row.get("status") == "stale_or_missing"
+                and not row.get("source_failure_code")):
+            row["status"] = "expected_expired_after_close"
+            row["source_status"] = "success"
+    cockpit["degradation_reasons"] = [
+        reason for reason in cockpit.get("degradation_reasons") or []
+        if reason != "fresh_market_add_signal_missing"
+    ]
+    expected = cockpit.setdefault("expected_phase_degradations", [])
+    if "intraday_market_add_signal_expired_after_close" not in expected:
+        expected.append("intraday_market_add_signal_expired_after_close")
 
 
 def _outcome_evidence(value: Any) -> dict[str, Any]:
@@ -2058,16 +2101,20 @@ class ScheduledSnapshotService:
         cockpit["optional_provider_degradations"] = (
             _optional_quote_provider_degradations(cockpit, quotes)
         )
+        _project_expected_post_close_gate_expiry(cockpit, phase, today)
         cockpit["phase_quality_status"] = _cockpit_quality_for_phase(
             cockpit, phase, quotes,
         )
         if cockpit["phase_quality_status"] != cockpit.get("status"):
             reasons = set(cockpit.get("degradation_reasons") or [])
-            cockpit["expected_phase_degradations"] = (
+            expected = (
                 ["auxiliary_quote_provider_failed_with_complete_fallback"]
                 if reasons == {"optional_quote_provider_degraded"} else
                 ["intraday_market_add_signal_expired_after_close"]
             )
+            cockpit["expected_phase_degradations"] = list(dict.fromkeys(
+                (cockpit.get("expected_phase_degradations") or []) + expected
+            ))
 
         try:
             cash_fact = self.cash_reader() or {}
