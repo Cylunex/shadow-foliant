@@ -5610,6 +5610,25 @@ def _run_fixed_intraday(label: str, *, holding_overrides: dict = None) -> dict:
     )
 
 
+def task_a500_constituents_refresh():
+    """Verify the official A500 universe before fixed intraday reports."""
+    job = 'a500_constituents_refresh'
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    from analysis.a500_universe import refresh
+    result = refresh()
+    status = 'success' if result.get('available') else 'error'
+    detail = (f"source=csindex source_date={result.get('source_date')} "
+              f"count={len(result.get('codes') or [])} "
+              f"failure_code={result.get('failure_code')} "
+              f"error_type={result.get('error_type')}")
+    _log_run(job, status, error=detail,
+             started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+             notify=False)
+    print(f'[{job}] {status}: {detail}', flush=True)
+
+
 def _refresh_market_gate(report_slot: str) -> dict:
     """Each fixed report owns a fresh core-index + A500 breadth snapshot."""
     from application.market_signal_refresh import refresh_market_add_signal
@@ -6656,6 +6675,8 @@ def register_default_jobs():
         MARKET_DATA_TIMES['research_data_sync_premarket_retry'],
         task_research_data_sync_premarket_retry,
     )
+    hub.register('a500_constituents_refresh', MARKET_DATA_TIMES['a500_constituents_refresh'],
+                 task_a500_constituents_refresh)
     hub.register('morning_strategy',            '09:00', task_morning_strategy)
     # 基金盘前合并(2026-06-27):fund_dca_reminder(08:55)+fund_valuation_signal(09:05)→ 一条 fund_premarket
     hub.register('fund_premarket',              '08:55', task_fund_premarket)

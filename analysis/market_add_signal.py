@@ -43,7 +43,9 @@ def _result(action: str, reason: str, **base) -> Dict:
 def fail_closed(signal: Optional[Dict], failure_code: str) -> Dict:
     """Turn an incomplete refresh into an explicit, non-actionable signal."""
     original = dict(signal or {})
-    reason = str(original.get('reason') or '市场总闸数据源不可用，默认保持仓位。')
+    code = str(failure_code or 'market_add_signal_refresh_failed')
+    reason = (f'市场总闸数据未完整确认（{code}），暂停买入与加仓；'
+              '其余风险动作仍按独立持仓风控处理。')
     generated = {
         'action', 'action_cn', 'action_rank', 'resolved_action', 'action_decision',
         'suggested_position_delta', 'headline', 'must_add', 'allow_buy', 'reason',
@@ -52,7 +54,7 @@ def fail_closed(signal: Optional[Dict], failure_code: str) -> Dict:
     diagnostics = {key: value for key, value in original.items() if key not in generated}
     return _result(
         'unknown', reason, **diagnostics, level='unknown', source_status='failed',
-        source_failure_code=str(failure_code or 'market_add_signal_refresh_failed'),
+        source_failure_code=code,
     )
 
 

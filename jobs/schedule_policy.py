@@ -18,6 +18,8 @@ BAOSTOCK_READY_TIMES = {
 }
 
 MARKET_DATA_TIMES = {
+    # 长假后旧 Redis 成分会过期；每天盘前从中证官网重取并核对最近交易日。
+    'a500_constituents_refresh': '08:50',
     'research_calendar_refresh': '08:20',
     # 若前夜估值源晚到，开盘前先补一次；09:45 正式选股仍保留最终的
     # fail-closed 自愈，不会用陈旧估值生成候选。

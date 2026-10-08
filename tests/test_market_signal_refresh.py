@@ -58,6 +58,7 @@ def test_breadth_failure_is_saved_with_source_code_and_fails_closed():
     assert signal["action"] == "unknown"
     assert signal["source_status"] == "failed"
     assert signal["source_failure_code"] == "a500_quotes_failed"
+    assert "暂停买入与加仓" in signal["reason"]
     assert not is_usable_market_add_signal(signal, now=now)
 
 

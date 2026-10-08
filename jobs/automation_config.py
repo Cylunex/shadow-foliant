@@ -187,6 +187,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '数据', 'default': True,
         'description': '08:35 按双源交易日历补前一交易日行情与多源估值，估值默认120秒预算；允许整份估值最多晚一个交易日，不混用不同日期',
     },
+    'a500_constituents_refresh': {
+        'cn': '📊 A500 成分盘前校验',
+        'schedule': f"{MARKET_DATA_TIMES['a500_constituents_refresh']} 每交易日",
+        'category': '数据', 'default': True, 'core': True,
+        'description': '从中证官网抓取 A500 成分，按双源交易日历核对最近交易日与 500 只覆盖；缺失时市场加仓总闸失败关闭',
+    },
     'dragon_tiger_archive': {
         'cn': '🐉 龙虎榜归档',
         'schedule': '18:30 每日(晚间出全量)',

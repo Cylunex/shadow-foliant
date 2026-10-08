@@ -1,7 +1,7 @@
 """可降级的市场宽度快照。
 
-默认使用已经缓存的中证 A500 成分列表，再批量取一次实时报价；成分缓存缺失时直接
-返回 unavailable，绝不在早盘临时请求中证官网或全市场慢接口。
+使用当日校验的中证 A500 成分列表，再批量取一次实时报价。固定报告节点
+在盘前预取缺失时可有界自愈；失败仍明确关闭买入侧。
 """
 
 from __future__ import annotations
@@ -62,13 +62,26 @@ def build(symbols: Optional[Iterable[str]] = None, force: bool = False) -> Dict[
         except Exception:
             cache_get = cache_set = None
     codes = [str(x).zfill(6) for x in (symbols or []) if x]
-    if not codes:
-        try:
-            from analysis.multi_factor_screener import DEFAULT_INDEX
-            from cache import cache_get
-            codes = cache_get(f"index_universe:{DEFAULT_INDEX}") or []
-        except Exception:
-            codes = []
+    provenance = {}
+    if symbols is None:
+        from analysis.a500_universe import current, refresh
+        universe = current()
+        if not universe.get("available") and force:
+            universe = refresh()
+        if not universe.get("available"):
+            return {
+                "available": False, "covered": 0,
+                "reason": "当日校验的 A500 成分未就绪",
+                "failure_code": universe.get("failure_code") or "a500_constituents_missing",
+                "constituents_source_date": universe.get("source_date"),
+                "constituents_error_type": universe.get("error_type"),
+            }
+        codes = universe["codes"]
+        provenance = {
+            "constituents_source": universe["source"],
+            "constituents_source_date": universe["source_date"],
+            "constituents_fetched_at": universe["fetched_at"],
+        }
     codes = list(dict.fromkeys(str(x).zfill(6) for x in codes if x))
     if not codes:
         return {
@@ -78,6 +91,7 @@ def build(symbols: Optional[Iterable[str]] = None, force: bool = False) -> Dict[
     try:
         import datahub
         result = evaluate_quotes(datahub.quotes(codes), expected=len(codes))
+        result.update(provenance)
         if cache_set and result.get("available"):
             cache_set(cache_key, result, 60)
         return result
