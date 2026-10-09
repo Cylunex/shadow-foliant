@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import _bootstrap  # noqa: F401 - register legacy flat imports for isolated runs
 from analysis import a500_universe, market_breadth
 
 
@@ -83,6 +84,9 @@ def test_fixed_report_self_heals_only_with_verified_universe(monkeypatch):
 
 
 def test_nonforced_breadth_never_fetches_missing_universe(monkeypatch):
+    import cache
+
+    monkeypatch.setattr(cache, "cache_get", lambda _key: None)
     monkeypatch.setattr(a500_universe, "current", lambda: {"available": False,
                          "failure_code": "a500_constituents_source_failed"})
     monkeypatch.setattr(a500_universe, "refresh", lambda: (_ for _ in ()).throw(
