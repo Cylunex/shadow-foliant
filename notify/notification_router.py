@@ -59,6 +59,25 @@ class DeliveryResults(dict):
         self.archive_status = "unrecorded"
         self.message_id = None
         self.archive_outcomes = {}
+        self.policy_status = None
+
+
+def _certified_critical_event(source: str, key: str | None,
+                              event: dict | None) -> bool:
+    """Only the common intraday decision engine may open the investment gate."""
+    if source != "jobs.intraday_decision_monitor" or not isinstance(event, dict):
+        return False
+    symbol = str(event.get("symbol") or "")
+    epoch = str(event.get("epoch") or "")
+    episode = event.get("episode")
+    return (event.get("policy_version") == "critical-only-action-required-v1"
+            and event.get("level") == "critical"
+            and event.get("trigger_type") == "hard_risk_stop"
+            and event.get("final_action") == "sell"
+            and bool(re.fullmatch(r"\d{6}", symbol))
+            and bool(re.fullmatch(r"[0-9a-f]{12}", epoch))
+            and isinstance(episode, int) and episode > 0
+            and key == f"critical-stop:{symbol}:{epoch}:sell:{episode}")
 
 
 def _submitted_body(channel: str, title: str, content: str) -> str:
@@ -398,7 +417,8 @@ def send(category: str, title: str, content: str,
          source_run_id: Optional[str] = None, idempotency_key: Optional[str] = None,
          business_as_of: Optional[str] = None, original_body: Optional[str] = None,
          planned_at: Optional[str] = None, sensitivity: str = "private",
-         compact: bool = True, externally_deduplicated: bool = False) -> Dict[str, Tuple[bool, str]]:
+         compact: bool = True, externally_deduplicated: bool = False,
+         critical_event: Optional[dict] = None) -> Dict[str, Tuple[bool, str]]:
     """统一发送入口(所有业务推送都应走这里,不要在业务代码里直连 webhook)
 
     Args:
@@ -413,13 +433,23 @@ def send(category: str, title: str, content: str,
     Returns:
         {channel_name: (ok, message)} 每个渠道的发送结果
     """
-    targets = only_channels or _get_routes_for(category, title)
     if source is None:
         frame = inspect.currentframe()
         try:
             source = str(frame.f_back.f_globals.get("__name__", "unknown")) if frame and frame.f_back else "unknown"
         finally:
             del frame
+    # Routine investment summaries, technical degradation and unverified model
+    # recommendations are intentionally silent across every routed channel.
+    if category != "test" and not _certified_critical_event(source, idempotency_key,
+                                                              critical_event):
+        silent = DeliveryResults()
+        silent.policy_status = "silent_critical_only"
+        return silent
+    targets = only_channels or _get_routes_for(category, title)
+    if critical_event:
+        targets = targets[:1]
+        fallback = None
     source_run_id = source_run_id or os.getenv("FOLIANT_TASK_RUN_ID") or None
     # 即时消息统一去掉装饰和专业术语，并限制手机端长度；archive 长文保持完整。
     delivery_content = compact_notification(category, content) if compact else content
@@ -473,6 +503,10 @@ def send(category: str, title: str, content: str,
         except Exception:
             # Alerts and externally serialized reports may continue with a visible
             # archive gap. Other idempotent calls stop when the outcome is unknown.
+            if critical_event:
+                results[ch] = (False, "archive_unavailable")
+                results.archive_outcomes[ch] = "unknown"
+                return
             if idempotency_key and not externally_deduplicated and category != "alert":
                 results[ch] = (False, "archive_unavailable")
                 results.archive_outcomes[ch] = "unknown"

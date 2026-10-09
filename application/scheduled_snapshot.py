@@ -2557,6 +2557,11 @@ class ScheduledSnapshotService:
         ]
         healthy = not blocking_sections
         captured_at = pricing_at.isoformat(timespec="seconds")
+        critical_projection = (
+            intraday.get("critical_notification_policy") or {}
+            if phase == "intraday" and intraday_quote_binding == "same_snapshot_quote_batch"
+            else {}
+        )
         snapshot = {
             "schema_version": "scheduled-agent-snapshot-v1",
             "status": "complete" if healthy else "degraded",
@@ -2572,6 +2577,33 @@ class ScheduledSnapshotService:
             "holdings": holdings,
             "portfolio_industry": portfolio_industry,
             "trade_plans": trade_plans,
+            "notification_policy": {
+                "version": "critical-only-action-required-v1",
+                "mode": "critical_only",
+                "active_level": critical_projection.get("active_level") or "unverified",
+                "delivery_gate": critical_projection.get("delivery_gate") or "unverified",
+                "eligible_new_event_count": min(100, int(
+                    critical_projection.get("eligible_new_event_count") or 0
+                )),
+                "silent_reasons": {
+                    key: min(100, int(value)) for key, value in
+                    (critical_projection.get("silent_reasons") or {}).items()
+                    if isinstance(key, str) and type(value) is int and value >= 0
+                },
+                "criteria": ["new_authoritative_hard_stop", "final_sell",
+                             "fresh_same_batch_quote", "same_run_plan_with_explicit_ttl",
+                             "matching_qfq_price_basis", "broker_sellable_quantity",
+                             "verified_tradeability"],
+                "scheduled_delivery": "silent_monitor_owns_critical_events",
+                "silent_reason": (
+                    "critical_input_unverified" if critical_projection.get("delivery_gate")
+                    == "disabled_missing_authoritative_inputs" else
+                    "no_new_critical_event" if critical_projection
+                    and not critical_projection.get("eligible_new_event_count") else
+                    "critical_event_monitor_owned" if critical_projection else
+                    "non_intraday_or_unverified_inputs"
+                ),
+            },
             "quotes": quotes,
             "post_close_review": post_close_review,
             "holdings_review": holdings_review,

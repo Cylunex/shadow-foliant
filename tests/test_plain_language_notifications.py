@@ -66,6 +66,8 @@ def test_portfolio_message_only_exposes_plain_actions_and_moves():
 
 
 def test_router_compacts_content_before_delivery(monkeypatch):
+    monkeypatch.setattr(notification_router, "_certified_critical_event",
+                        lambda *_args: True)
     delivered = {}
 
     def fake_sender(title, content):
@@ -84,6 +86,8 @@ def test_router_compacts_content_before_delivery(monkeypatch):
 
 
 def test_buy_rows_survive_real_report_delivery_with_many_sell_rows(monkeypatch):
+    monkeypatch.setattr(notification_router, "_certified_critical_event",
+                        lambda *_args: True)
     delivered = {}
     def send(title, content):
         delivered["body"] = content

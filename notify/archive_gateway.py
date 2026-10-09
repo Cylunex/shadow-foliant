@@ -90,6 +90,11 @@ def archived_call(*, channel: str, title: str, original_body: str,
     if IN_ROUTER_DELIVERY.get():
         direct_result = sender()
         return bool(direct_result.get("ok")) if isinstance(direct_result, dict) else bool(direct_result)
+    if source.startswith("notify.notification_service.") and category != "test":
+        # These legacy monitor and portfolio transports have no shared,
+        # verified critical-event state. Fail closed instead of bypassing the
+        # action-required policy through email or a direct webhook.
+        return False
     delivery_id = None
     prepared = False
     try:

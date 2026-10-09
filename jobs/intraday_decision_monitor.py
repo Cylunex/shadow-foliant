@@ -12,11 +12,13 @@ import os
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_KEY = "intraday_decision"
 VERSION = "intraday-decision-v1"
+CRITICAL_POLICY_VERSION = "critical-only-action-required-v1"
 ACTION_REASON_VERSION = "portfolio-action-reason-v3"
 ACTION_RANK = {"data_insufficient": -1, "hold": 0, "add": 1, "reduce": 2, "sell": 3}
 LOGGER = logging.getLogger(__name__)
@@ -184,6 +186,9 @@ def build_monitor_pool(formal: dict[str, Any], holdings: Iterable[dict[str, Any]
             "priority": "holding",
             "cost_price": _finite(raw.get("cost_price", raw.get("cost"))),
             "quantity": quantity,
+            "sellable_quantity": _finite(raw.get("sellable_quantity")),
+            "sellability_source": str(raw.get("sellability_source") or ""),
+            "sellability_as_of": str(raw.get("sellability_as_of") or ""),
             "selection_run_id": run_id,
             "selection_as_of": selection_as_of,
             "formal_rank": None,
@@ -272,7 +277,7 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         age_minutes = max(0.0, (now - stamp).total_seconds() / 60.0)
         is_stale = bool(raw_stamp) and age_minutes > stale_minutes
         intraday_actionable = bool(
-            mode == "intraday" and price and price > 0 and not is_stale
+            mode == "intraday" and raw_stamp and price and price > 0 and not is_stale
         )
         closing_current = bool(
             mode == "post_close"
@@ -301,6 +306,8 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
             "quote_as_of": stamp.isoformat(timespec="seconds"),
             "quote_time_source": stamp_source,
             "quote_provider": quote.get("source") if isinstance(quote, dict) else None,
+            "tradeable": quote.get("tradeable") is True if isinstance(quote, dict) else False,
+            "quote_adjustment": str(quote.get("adjustment_basis") or "") if isinstance(quote, dict) else "",
             "quote_age_minutes": round(age_minutes, 2),
             "freshness": freshness,
             "price_actionable": intraday_actionable,
@@ -566,6 +573,167 @@ def _event_label(event: dict[str, Any], snapshot: dict[str, Any]) -> str:
     return f"{_trusted_event_name(event, snapshot)}（{symbol or '代码待核验'}）"
 
 
+def _critical_stop_policy(
+    rows: list[dict[str, Any]], previous: dict[str, Any],
+    now: datetime, formal: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Alert only for a newly crossed, executable hard stop; seed old risk silently.
+
+    Two observations above 101% of the same stop rearm an episode. A changed
+    plan starts a new baseline, so editing a stop cannot manufacture an alert.
+    The state is saved with the decision snapshot and shared by fixed and light
+    monitor runs. The archive idempotency key closes the remaining race.
+    """
+    formal = formal or {}
+    formal_market_day = str((formal.get("metadata") or {}).get("market_as_of") or "")[:10]
+    formal_run = str(formal.get("run_id") or "")
+    old_rows = {str(row.get("symbol") or ""): row for row in previous.get("holdings") or []
+                if isinstance(row, dict)}
+    previous_policy = previous.get("critical_notification_policy") or {}
+    old_states = previous_policy.get("states") or {}
+    states: dict[str, dict[str, Any]] = {
+        str(symbol): dict(state) for symbol, state in old_states.items()
+        if isinstance(state, dict) and _code(symbol) == symbol
+    } if isinstance(old_states, dict) else {}
+    eligible: list[dict[str, Any]] = []
+    silent = {"old_or_active_risk": 0, "guarded_or_unexecutable": 0,
+              "sellability_or_trading_unverified": 0,
+              "plan_or_price_basis_unverified": 0,
+              "unverified_inputs": 0, "no_hard_stop": 0}
+    active_count = 0
+    verified_count = 0
+    for row in rows:
+        symbol = _code(row.get("symbol"))
+        stop = _finite(row.get("stop_loss"))
+        price = _finite(row.get("price"))
+        prior = old_rows.get(symbol) or {}
+        prior_stop = _finite(prior.get("stop_loss"))
+        same_plan = bool(prior and prior.get("plan_as_of")
+                         and prior.get("plan_as_of") == row.get("plan_as_of")
+                         and prior_stop is not None and stop is not None
+                         and abs(prior_stop - stop) < 0.005)
+        quote_current = (row.get("price_actionable") is True
+                         and str(row.get("quote_as_of") or "")[:10] == now.date().isoformat()
+                         and bool(row.get("quote_provider"))
+                         and row.get("quote_time_source") not in {
+                             "retrieved_at_invalid_provider_time", "missing"})
+        try:
+            valid_until = datetime.fromisoformat(str(row.get("plan_valid_until") or ""))
+            plan_unexpired = valid_until.tzinfo is not None and valid_until >= now
+        except ValueError:
+            plan_unexpired = False
+        plan_current = (row.get("plan_available") is True
+                        and stop is not None and stop > 0
+                        and formal_run and row.get("selection_run_id") == formal_run
+                        and formal_market_day and row.get("plan_as_of") == formal_market_day
+                        and plan_unexpired
+                        and row.get("plan_adjustment") == "qfq"
+                        and row.get("quote_adjustment") == "qfq"
+                        and "trade_plan" in str(row.get("price_basis") or ""))
+        observed = bool(quote_current and plan_current and price is not None and price > 0)
+        breached = bool(observed and price <= stop)
+        old = old_states.get(symbol) if isinstance(old_states, dict) else None
+        old = dict(old) if isinstance(old, dict) else {}
+        if (not old or old.get("plan_as_of") != row.get("plan_as_of")
+                or old.get("stop_loss") != stop or not same_plan
+                or len(str(old.get("epoch") or "")) != 12):
+            # Deployment, missing position and plan replacement are baselines.
+            # A historical above-stop row alone cannot arm a new policy.
+            old = {"active": False, "armed": False,
+                   "recovery_count": 0, "last_recovery_quote_as_of": None,
+                   "episode": int(old.get("episode") or 0),
+                   "plan_as_of": row.get("plan_as_of"), "stop_loss": stop,
+                   "epoch": uuid4().hex[:12]}
+        was_active = bool(old.get("active"))
+        if breached:
+            active_count += 1
+            executable = (
+                (_finite(row.get("quantity")) or 0) > 0
+                and (_finite(row.get("sellable_quantity")) or 0) > 0
+                and row.get("sellability_source") == "broker"
+                and str(row.get("sellability_as_of") or "")[:10] == now.date().isoformat()
+                and row.get("tradeable") is True
+            )
+            hard_stop = (row.get("action") == "sell"
+                         and row.get("decision_source") == "hard_risk")
+            if not hard_stop:
+                silent["guarded_or_unexecutable"] += 1
+            elif not executable:
+                silent["sellability_or_trading_unverified"] += 1
+            elif not was_active and old.get("armed"):
+                verified_count += 1
+                episode = int(old.get("episode") or 0) + 1
+                epoch = str(old["epoch"])
+                event = {"symbol": symbol, "trigger_type": "hard_risk_stop",
+                         "final_action": "sell", "level": "critical",
+                         "item": row, "episode": episode, "epoch": epoch,
+                         "idempotency_key":
+                             f"critical-stop:{symbol}:{epoch}:sell:{episode}"}
+                eligible.append(event)
+                old["episode"] = episode
+            else:
+                silent["old_or_active_risk"] += 1
+            old["active"] = True
+            old["armed"] = False
+            old["recovery_count"] = 0
+            old["last_recovery_quote_as_of"] = None
+        elif observed and price > stop * 1.01:
+            stamp = str(row.get("quote_as_of") or "")
+            count = int(old.get("recovery_count") or 0)
+            if stamp and stamp != old.get("last_recovery_quote_as_of"):
+                count = min(2, count + 1)
+                old["last_recovery_quote_as_of"] = stamp
+            old["recovery_count"] = count
+            if count >= 2:
+                old["active"] = False
+                old["armed"] = True
+            silent["no_hard_stop"] += 1
+        elif not observed:
+            old["recovery_count"] = 0
+            old["last_recovery_quote_as_of"] = None
+            silent["plan_or_price_basis_unverified" if not plan_current else
+                   "unverified_inputs"] += 1
+        else:
+            old["recovery_count"] = 0
+            old["last_recovery_quote_as_of"] = None
+            silent["no_hard_stop"] += 1
+        states[symbol] = old
+    policy = {
+        "version": CRITICAL_POLICY_VERSION,
+        "mode": "critical_only",
+        "active_level": ("critical" if verified_count else
+                         "critical_risk_execution_unverified" if active_count else
+                         "unverified" if silent["plan_or_price_basis_unverified"]
+                         or silent["unverified_inputs"] else "none"),
+        "delivery_gate": (
+            "disabled_missing_authoritative_inputs"
+            if silent["plan_or_price_basis_unverified"]
+            or silent["sellability_or_trading_unverified"] else "ready"
+        ),
+        "active_hard_stop_count": active_count,
+        "eligible_new_event_count": len(eligible),
+        "criteria": ["new_crossing_after_two_recovery_quotes", "fresh_provider_quote",
+                     "same_run_manifest_plan", "explicit_plan_valid_until",
+                     "matching_qfq_price_basis", "broker_sellable_quantity",
+                     "quote_tradeable", "final_hard_risk_sell"],
+        "buy_side": "closed_no_verified_critical_buy_authority",
+        "silent_reasons": silent,
+        "states": states,
+    }
+    return policy, eligible
+
+
+def format_critical_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, str]:
+    row = event["item"]
+    return "盘中最高级止损风险", "\n".join([
+        f"{_event_label(event, snapshot)}｜最终判断：卖出复核",
+        f"同批现价：{_fmt_price(row.get('price'))}｜权威止损：{_fmt_price(row.get('stop_loss'))}",
+        f"原因：{str(row.get('reason') or '触及权威止损')[:70]}",
+        f"行情时点：{row.get('quote_as_of') or snapshot.get('generated_at') or '未知'}",
+        "失效条件：行情过期、计划改变或持仓不可卖时停止使用；须人工核实可卖量与盘口；未发生交易。",
+    ])
+
+
 def _holding_action_summary(row: dict[str, Any]) -> str:
     labels = {"hold": "不动", "reduce": "减仓", "sell": "卖出",
               "add": "加仓", "data_insufficient": "数据不足"}
@@ -613,6 +781,8 @@ def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, A
         "target_price_2": _finite(plan.get("target_price_2")),
         "price_basis": plan.get("price_basis") or "数据不足，暂不给价",
         "plan_as_of": plan.get("plan_as_of"),
+        "plan_valid_until": plan.get("valid_until"),
+        "plan_adjustment": plan.get("adjustment_basis"),
         "plan_available": bool(plan.get("available")),
     }
 
@@ -985,6 +1155,10 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
                 > event_priority.get(by_symbol[symbol]["trigger_type"], 0)):
             by_symbol[symbol] = event
     events = list(by_symbol.values())
+    critical_policy, critical_events = _critical_stop_policy(
+        [decisions[row["symbol"]] for row in pool if "holding" in row.get("sources", [])],
+        previous, current, formal,
+    )
     snapshot = {
         "version": VERSION,
         "trade_date": current.date().isoformat(),
@@ -1003,6 +1177,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         "plans": plans,
         "trigger_state": states,
         "events": [{key: value for key, value in event.items() if key != "item"} for event in events],
+        "critical_notification_policy": critical_policy,
         "portfolio_action_guard": {
             "status": "applied",
             "reason_version": ACTION_REASON_VERSION,
@@ -1019,23 +1194,28 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     }
     snapshot_saver(SNAPSHOT_KEY, snapshot)
 
-    if notify_changes and events:
-        if notify_fn is None:
-            from notify.notification_router import send
-            notify_fn = lambda title, body: send("alert", title, body)
-        immediate, overflow = _notification_batches(
-            events, _bounded_env_int("INTRADAY_MAX_INDIVIDUAL_ALERTS", 6, 1, 20))
-        for event in immediate:
-            title, body = format_alert(event, snapshot)
+    if notify_changes and critical_events:
+        for event in critical_events:
+            title, body = format_critical_alert(event, snapshot)
             try:
-                notify_fn(title, body)
+                if notify_fn is not None:
+                    notify_fn(title, body)
+                else:
+                    from notify.notification_router import send
+                    send("alert", title, body,
+                         source="jobs.intraday_decision_monitor",
+                         idempotency_key=event["idempotency_key"],
+                         critical_event={
+                             "policy_version": CRITICAL_POLICY_VERSION,
+                             "level": event["level"],
+                             "trigger_type": event["trigger_type"],
+                             "final_action": event["final_action"],
+                             "symbol": event["symbol"],
+                             "episode": event["episode"],
+                             "epoch": event["epoch"],
+                         })
             except Exception:
-                LOGGER.exception("intraday transition notification failed: %s", event.get("state_key"))
-        if overflow:
-            try:
-                notify_fn(*_overflow_alert(overflow, snapshot))
-            except Exception:
-                LOGGER.exception("intraday overflow notification failed")
+                LOGGER.exception("critical intraday notification failed")
     return snapshot
 
 

@@ -721,10 +721,17 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                  or not snapshot["post_close_review"].get("conclusion"))):
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "post_close_review_incomplete"}
-    if not os.getenv("QQ_WEBHOOK_URL", "").strip():
-        return {"requested": True, "sent": False, "error_code": "qq_webhook_missing",
-                "repair_hint": "Set QQ_WEBHOOK_URL outside the repository."}
-    return None
+    policy = snapshot.get("notification_policy") or {}
+    if policy.get("version") != "critical-only-action-required-v1":
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "critical_notification_policy_unverified"}
+    # Four scheduled slots remain analysis-only. The intraday monitor owns
+    # critical event delivery; a routine or degraded summary never claims a
+    # slot or makes an HTTP attempt.
+    return {"requested": False, "sent": False, "channel": "qq",
+            "delivery_status": "silent", "suppressed": True,
+            "suppression_reason": str(policy.get("silent_reason") or
+                                      "critical_event_monitor_owned")[:80]}
 
 
 def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -839,6 +846,14 @@ def delivery_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
         "snapshot_as_of": short(as_of.get("captured_at"), 80),
         "external_submission_status": short(submission.get("status"), 80),
         "external_submission_error_code": short(submission.get("error_code")),
+        "notification_policy": {
+            "version": short((snapshot.get("notification_policy") or {}).get("version"), 80),
+            "active_level": short((snapshot.get("notification_policy") or {}).get("active_level"), 40),
+            "delivery_gate": short((snapshot.get("notification_policy") or {}).get("delivery_gate"), 80),
+            "eligible_new_event_count": bounded_int(
+                (snapshot.get("notification_policy") or {}).get("eligible_new_event_count")),
+            "silent_reason": short((snapshot.get("notification_policy") or {}).get("silent_reason"), 80),
+        },
         "notification": result,
     }
 
@@ -899,7 +914,9 @@ def main(argv: list[str] | None = None) -> int:
         notification_slot = scheduled_notification_slot(
             snapshot, scheduled_time=args.notification_slot)
         failed = qq_preflight(snapshot)
-        if not notification_slot:
+        if failed and failed.get("delivery_status") == "silent":
+            snapshot["notification"] = failed | {"notification_slot": notification_slot}
+        elif not notification_slot:
             snapshot["notification"] = {"requested": True, "sent": False,
                 "error_code": "scheduled_notification_slot_unavailable"}
         elif failed:
@@ -969,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
     notification = snapshot.get("notification") or {}
     notification_failed = bool(
         args.send_qq and not (
+            notification.get("delivery_status") == "silent" or
             notification.get("prior_sent") or
             (notification.get("sent") and notification.get("delivery_recorded"))
         )

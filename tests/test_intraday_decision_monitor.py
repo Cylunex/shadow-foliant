@@ -106,7 +106,7 @@ def test_portfolio_agent_result_exposes_complete_persisted_snapshot_without_refr
     assert complete["status"] == "complete"
 
 
-def test_cycle_uses_one_batch_quote_and_statefully_rearms_after_exit_and_cooldown():
+def test_cycle_uses_one_batch_quote_and_silences_ordinary_entry_rearms():
     now = datetime(2026, 9, 10, 10, 5, tzinfo=TZ)
     persisted = {
         monitor.SNAPSHOT_KEY: {
@@ -144,13 +144,13 @@ def test_cycle_uses_one_batch_quote_and_statefully_rearms_after_exit_and_cooldow
     assert first["status"] == "success"
     assert len(quote_calls) == 1
     assert set(quote_calls[0]) == {"000001", "600001", "600002", "600003"}
-    assert sum("进入买入区" in title for title, _ in alerts) == 3
+    assert alerts == []
     assert first["independent_selection"]["status"] == "ready"
     assert first["selection_comparison"]["availability"]["wencai"] is False
 
     quote_now[0] = now + timedelta(minutes=20)
     monitor.run_cycle(now=quote_now[0], **kwargs)
-    assert sum("进入买入区" in title for title, _ in alerts) == 3
+    assert alerts == []
 
     def outside_quotes(codes):
         return {code: {"price": 11.0, "change_pct": 0.2,
@@ -161,7 +161,7 @@ def test_cycle_uses_one_batch_quote_and_statefully_rearms_after_exit_and_cooldow
                       **{k: v for k, v in kwargs.items() if k != "quote_loader"})
     quote_now[0] = now + timedelta(minutes=80)
     monitor.run_cycle(now=quote_now[0], **kwargs)
-    assert sum("进入买入区" in title for title, _ in alerts) == 6
+    assert alerts == []
 
 
 def test_lunch_weekend_and_missing_fixed_plan_skip_without_quotes():
@@ -178,7 +178,7 @@ def test_lunch_weekend_and_missing_fixed_plan_skip_without_quotes():
     assert calls == []
 
 
-def test_stop_target_and_holding_action_escalation_notify_only_on_crossing():
+def test_stop_target_and_unverified_holding_action_remain_snapshot_only():
     now = datetime(2026, 9, 10, 10, 5, tzinfo=TZ)
     persisted = {monitor.SNAPSHOT_KEY: {
         "selection_run_id": "formal-run-1", "plans": _plans(),
@@ -210,14 +210,13 @@ def test_stop_target_and_holding_action_escalation_notify_only_on_crossing():
     prices["600002"] = 8.5
     quote_now[0] = now + timedelta(minutes=20)
     monitor.run_cycle(now=quote_now[0], **kwargs)
-    assert alerts.count("盘中提醒：触及止盈") == 1
-    assert alerts.count("盘中提醒：触及止损") == 1
-    assert alerts.count("盘中提醒：持仓动作升级") == 0  # 同票目标与升级合并
+    assert alerts == []
+    assert persisted[monitor.SNAPSHOT_KEY]["events"]
     crossed = len(alerts)
     quote_now[0] = now + timedelta(minutes=40)
     monitor.run_cycle(now=quote_now[0], **kwargs)
     assert len(alerts) == crossed
-    assert crossed > baseline
+    assert crossed == baseline == 0
 
 
 def test_stale_quotes_fail_closed_and_report_quality():
@@ -692,7 +691,7 @@ def test_persistent_risk_respects_cooldown():
     assert states["000425:sustained_risk"]["active"] is False
 
 
-def test_same_quote_stop_and_action_upgrade_emit_one_holding_alert():
+def test_same_quote_stop_and_action_upgrade_do_not_bypass_sellability_gate():
     now = datetime(2026, 9, 24, 10, 5, tzinfo=TZ)
     plans = _plans()
     previous = {"trade_date": now.date().isoformat(), "selection_run_id": "formal-run-1",
@@ -712,7 +711,8 @@ def test_same_quote_stop_and_action_upgrade_emit_one_holding_alert():
     holding_events = [event for event in result["events"] if event["symbol"] == "000001"]
     assert len(holding_events) == 1
     assert holding_events[0]["trigger_type"] == "stop"
-    assert sum("持仓甲" in body for _, body in alerts) == 1
+    assert alerts == []
+    assert result["critical_notification_policy"]["eligible_new_event_count"] == 0
 
 
 def test_alert_burst_prioritizes_stops_and_groups_remaining_risks():

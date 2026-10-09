@@ -16,6 +16,13 @@ from data.research_store import ResearchStore
 from notify import notification_router
 
 
+@pytest.fixture(autouse=True)
+def exercise_archive_transport_below_investment_gate(monkeypatch):
+    """Keep archive transport tests independent of the production signal gate."""
+    monkeypatch.setattr(notification_router, "_certified_critical_event",
+                        lambda *_args: True)
+
+
 def service(tmp_path):
     path = str(tmp_path / "archive.db")
     store = ResearchStore(path, connect_fn=sqlite3.connect,
@@ -197,7 +204,11 @@ def test_direct_http_receipt_is_recorded_without_destination(tmp_path, monkeypat
 
 def test_analysis_email_and_webhook_share_one_logical_message(tmp_path, monkeypatch):
     from notify import archive_gateway
+    from notify import notification_service
     from notify.notification_service import NotificationService
+    real_archive_call = archive_gateway.archived_call
+    monkeypatch.setattr(notification_service, "archived_call", lambda **kwargs:
+                        real_archive_call(**{**kwargs, "source": "test.portfolio_transport"}))
     svc, _ = service(tmp_path)
     monkeypatch.setattr(archive_gateway, "archive_action", lambda action, body: (
         svc.prepare(**body) if action == "prepare" else
