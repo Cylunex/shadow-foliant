@@ -197,6 +197,10 @@ def _schedule_persist(provider: str, endpoint: str, state: dict[str, Any]) -> No
     applying back-pressure to market-data or research work; the latest in-memory state remains
     available to the current process either way.
     """
+    if os.getenv("FOLIANT_RUNTIME_CAPABILITY_PERSIST", "true").lower() in {
+        "0", "false", "no", "off",
+    }:
+        return
     global _PERSIST_WORKER
     with _PERSIST_WORKER_LOCK:
         if _PERSIST_WORKER is None or not _PERSIST_WORKER.is_alive():

@@ -114,6 +114,17 @@ def test_runtime_capability_snapshot_never_exposes_secret_values(monkeypatch) ->
     assert snapshot["dataset_routes"]["external_reference"]["policy"] == "reference_only"
 
 
+def test_release_tests_do_not_queue_runtime_capability_persistence(monkeypatch) -> None:
+    monkeypatch.setenv("FOLIANT_RUNTIME_CAPABILITY_PERSIST", "false")
+    monkeypatch.setattr(
+        runtime_capabilities._PERSIST_QUEUE, "put_nowait",
+        lambda *_args: pytest.fail("release test queued a database write"),
+    )
+    runtime_capabilities._schedule_persist(
+        "provider", "quotes", {"updated_at": "2026-10-09T15:00:00+08:00"},
+    )
+
+
 def test_source_call_rejects_active_cooldown_without_provider_work(monkeypatch) -> None:
     class RateLimitError(RuntimeError):
         pass

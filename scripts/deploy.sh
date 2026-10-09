@@ -97,7 +97,8 @@ fi
   # Keep this isolation scoped to pytest; the migration below uses the
   # protected deployment environment after tests pass.
   test_env=(env -i PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}"
-            APP_REVISION="$EXPECTED_COMMIT")
+            APP_REVISION="$EXPECTED_COMMIT"
+            FOLIANT_RUNTIME_CAPABILITY_PERSIST=false)
   if [[ -n "${FOLIANT_TEST_TARGETS:-}" ]]; then
     read -r -a test_targets <<< "$FOLIANT_TEST_TARGETS"
     "${test_env[@]}" "$python_bin" -m pytest -q "${test_targets[@]}"
