@@ -58,6 +58,33 @@ class DecisionLoopService:
         groups = {"fusion": top15, "top5": capsule["opportunity_set"]["top5"],
                   "without_satellite": [r for r in top15 if r.get("assigned_lane") != "satellite"],
                   "without_timing": [r for r in top15 if r.get("assigned_lane") != "timing"]}
+        # Explicit source and stratum books make later comparisons cost adjusted
+        # and policy bound. They begin only when the source membership was frozen;
+        # absent historical books are never reconstructed after the fact.
+        groups["source:formal"] = top15
+        ranked_scores = sorted(
+            (
+                (float(row["total_score"]), str(row.get("symbol") or ""))
+                for row in top15
+                if isinstance(row.get("total_score"), (int, float))
+                and not isinstance(row.get("total_score"), bool)
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        score_buckets = {
+            symbol: ("high" if index < 5 else "medium" if index < 10 else "low")
+            for index, (_score, symbol) in enumerate(ranked_scores)
+        }
+        for row in top15:
+            industry = str(row.get("industry") or "").strip()
+            if industry and industry not in {"未知", "未分类", "N/A"}:
+                groups.setdefault("stratum:industry:" + industry[:80], []).append(row)
+            bucket = score_buckets.get(str(row.get("symbol") or ""))
+            if bucket:
+                groups.setdefault("stratum:score:" + bucket, []).append(row)
+        market_regime = str(capsule.get("market_regime") or "").strip()
+        if market_regime:
+            groups["stratum:market_regime:" + market_regime[:40]] = top15
         # PIT-only benchmark comes from persisted nominations, not the core subset
         # that survived fusion. Avoid survivorship bias in the comparison.
         conn = self.store.connect()
@@ -79,6 +106,46 @@ class DecisionLoopService:
             if arms:
                 for name, value in _decode(arms[0]).items():
                     groups[name] = value["top15"]
+            cur.execute(
+                "SELECT artifact_type,payload FROM selection_artifacts "
+                "WHERE run_id=? AND (artifact_type='independent_selection' "
+                "OR artifact_type LIKE 'independent_selection_repair%' "
+                "OR artifact_type='wencai_strategy_runs' "
+                "OR artifact_type LIKE 'wencai_strategy_runs_repair%') "
+                "ORDER BY created_at",
+                (capsule["run_id"],),
+            )
+            source_artifacts = {}
+            for artifact_type, payload in cur.fetchall():
+                name = str(artifact_type)
+                if name.startswith("independent_selection_repair"):
+                    name = "independent_selection_repair"
+                elif name.startswith("wencai_strategy_runs_repair"):
+                    name = "wencai_strategy_runs_repair"
+                source_artifacts[name] = _decode(payload)
+            independent_repair = source_artifacts.get("independent_selection_repair") or {}
+            independent = (
+                independent_repair
+                if independent_repair.get("status") == "ready"
+                else source_artifacts.get("independent_selection") or independent_repair
+            ) or {}
+            independent_rows = independent.get("top15") or []
+            if independent.get("status") in {"ready", "complete", "success"} and independent_rows:
+                groups["source:independent"] = independent_rows[:15]
+            wencai = (
+                source_artifacts.get("wencai_strategy_runs_repair")
+                or source_artifacts.get("wencai_strategy_runs") or {}
+            )
+            wencai_rows = []
+            seen_wencai = set()
+            for strategy in (wencai.get("strategies") or {}).values():
+                for row in (strategy or {}).get("picks") or (strategy or {}).get("rows") or []:
+                    symbol = str((row or {}).get("symbol") or "")
+                    if symbol and symbol not in seen_wencai:
+                        seen_wencai.add(symbol)
+                        wencai_rows.append(row)
+            if wencai_rows:
+                groups["source:wencai"] = wencai_rows[:15]
             cur.execute("SELECT strategy_id,symbol,lane_rank FROM selection_candidate_nominations "
                         "WHERE selection_run_id=? AND eligibility='eligible' ORDER BY strategy_id,lane_rank",
                         (capsule["run_id"],))

@@ -202,6 +202,8 @@ def test_partial_closing_job_is_not_promoted_to_whole_task_error(monkeypatch):
 
     projected = _job_run({
         'job_name': 'closing_trade_plans', 'status': 'success',
+        'started_at': '2026-09-10T20:20:00+08:00',
+        'finished_at': '2026-09-10T20:21:00+08:00',
         'error': events[0][1]['error'],
     })
     assert projected['status'] == 'degraded'

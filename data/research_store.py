@@ -1617,6 +1617,31 @@ class ResearchStore:
             return None
         return consensus.get("latest_confirmed_open_date")
 
+    def next_confirmed_open_date(self, after_date: str) -> Optional[str]:
+        """Return the first future day unanimously open in two valid calendars."""
+        cutoff = _iso_date(after_date)
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT e.trade_date,COUNT(DISTINCT e.provider),MIN(e.is_open),MAX(e.is_open)
+                   FROM research_trade_calendar_evidence e
+                   WHERE e.trade_date>? AND EXISTS (
+                     SELECT 1 FROM research_calendar_fetch_runs f
+                     WHERE f.provider=e.provider AND f.quality_status='ok'
+                       AND f.range_start<=e.trade_date AND f.range_end>=e.trade_date
+                   )
+                   GROUP BY e.trade_date ORDER BY e.trade_date LIMIT 62""",
+                (cutoff,),
+            )
+            for trade_date, provider_count, minimum, maximum in cur.fetchall():
+                if (int(provider_count or 0) >= 2
+                        and int(minimum or 0) == 1 and int(maximum or 0) == 1):
+                    return str(trade_date)
+            return None
+        finally:
+            conn.close()
+
     def stale_trading_days(self, actual: str, expected: str) -> int:
         conn = self.connect()
         try:

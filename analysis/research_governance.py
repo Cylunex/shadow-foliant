@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import date, timedelta
 import math
+from statistics import median
 from application.results import payload_hash
 
 HYPOTHESES = {
@@ -44,6 +45,12 @@ def evidence_summary(rows, *, trials_attempted=1, block_days=5):
             last_end = item["end"]
     n = len(independent)
     mean = sum(independent) / n if n else None
+    wins = [value for value in independent if value > 0]
+    losses = [value for value in independent if value < 0]
+    win_loss_ratio = (
+        (sum(wins) / len(wins)) / abs(sum(losses) / len(losses))
+        if wins and losses else None
+    )
     variance = sum((v - mean) ** 2 for v in independent) / (n - 1) if n > 1 else None
     # Conservative Bonferroni-style normal threshold; never claim this establishes
     # causality or solves all dependence. Require 20 non-overlapping intervals.
@@ -63,6 +70,8 @@ def evidence_summary(rows, *, trials_attempted=1, block_days=5):
               "nonoverlapping_samples": n,
               "date_blocks": bn, "block_days": block_days, "independence_claimed": False,
               "trials_attempted": trials_attempted, "mean_net_excess_pct": mean,
+              "median_net_excess_pct": median(independent) if independent else None,
+              "net_excess_win_loss_ratio": win_loss_ratio,
               "conservative_lower_bound_pct": robust_lower,
               "status": "sufficient" if n >= 20 and bn >= 4 and len(versions) == 1 else "insufficient_evidence",
               "promotion_ready": n >= 20 and bn >= 4 and len(versions) == 1 and robust_lower is not None and robust_lower > 0}

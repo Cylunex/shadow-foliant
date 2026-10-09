@@ -35,13 +35,15 @@ POST_CLOSE_REVIEW_HOUR = 20
 POST_CLOSE_REVIEW_MINUTE = 45
 POST_CLOSE_JOBS = (
     "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
-    "research_data_sync_retry",
+    "research_data_sync_retry", "closing_trade_plans",
 )
 REQUIRED_STRATEGY_HORIZONS = (1, 3, 5, 10, 20)
 REQUIRED_STRATEGY_METRICS = (
-    "median_return_pct", "win_loss_ratio", "benchmark_excess_pct",
+    "median_net_excess_pct", "net_excess_win_loss_ratio", "benchmark_excess_pct",
 )
 REQUIRED_COMPARISON_SOURCES = ("formal", "independent", "wencai")
+REQUIRED_EVIDENCE_STRATA = ("industry", "market_regime", "score_bucket")
+REQUIRED_SCORE_BUCKETS = ("high", "medium", "low")
 MIN_STRATEGY_FEEDBACK_SAMPLES = 30
 MIN_PERFORMANCE_FACTOR_DEVIATION = 0.05
 MAX_STRATEGY_MULTIPLIER_STEP = 0.05
@@ -299,6 +301,12 @@ def _job_run(row: Any) -> dict[str, Any]:
             partial_failures.append("closing_plan_coverage_incomplete")
             if status == "success":
                 status = "degraded"
+    terminal = raw_status in {"success", "error", "failed", "skipped"}
+    terminal_verified = bool(terminal and row.get("finished_at"))
+    if terminal and not terminal_verified:
+        partial_failures.append("terminal_timestamp_missing")
+        if status in {"success", "not_applicable"}:
+            status = "degraded"
     return clean_json({
         "job_name": row.get("job_name"),
         "status": status,
@@ -307,6 +315,7 @@ def _job_run(row: Any) -> dict[str, Any]:
         "metrics": metrics,
         "partial_failure_codes": partial_failures,
         "completion_semantics": completion_semantics,
+        "terminal_verified": terminal_verified,
     })
 
 
@@ -453,6 +462,10 @@ def _strategy_evidence(value: Any) -> dict[str, Any]:
         "independent_dates", "nonoverlapping_price_intervals", "effective_samples",
         "promotion_blocker", "symbol_count", "win_rate_pct", "avg_return_pct",
         "median_return_pct", "win_loss_ratio", "benchmark_excess_pct",
+        "median_net_excess_pct", "net_excess_win_loss_ratio",
+        "mean_net_excess_pct", "conservative_lower_bound_pct", "date_blocks",
+        "evidence_kind", "evidence_policy_hash", "cost_included", "cost_basis",
+        "benchmark_baseline", "promotion_ready", "blocker",
         "benchmark_sample_size", "worst_drawdown_pct", "worst_mae_pct",
     )
     horizons = []
@@ -472,6 +485,13 @@ def _strategy_evidence(value: Any) -> dict[str, Any]:
             if isinstance(row, dict)
         ]
         for row in strategies:
+            row["median_net_excess_pct"] = row.get(
+                "median_net_excess_pct", row.get("median_return_pct")
+            )
+            row["net_excess_win_loss_ratio"] = row.get(
+                "net_excess_win_loss_ratio", row.get("win_loss_ratio")
+            )
+            row["promotion_blocker"] = row.get("promotion_blocker") or row.get("blocker")
             row["horizon_days"] = horizon or None
             effective_samples += int(row.get("effective_samples") or 0)
         if horizon in REQUIRED_STRATEGY_HORIZONS and strategies:
@@ -496,7 +516,25 @@ def _strategy_evidence(value: Any) -> dict[str, Any]:
         values[0],
     )
     comparison = primary.get("portfolio_comparison") or {}
-    supplied_sources = set(primary.get("source_outcomes") or {})
+    evidence_summary_keys = (
+        "status", "reason_code", "effective_samples", "entry_dates", "date_blocks",
+        "mean_net_excess_pct", "median_net_excess_pct",
+        "net_excess_win_loss_ratio", "benchmark_excess_pct",
+        "conservative_lower_bound_pct", "cost_included", "cost_basis",
+        "benchmark_baseline", "evidence_policy_hash", "evidence_snapshot_id",
+    )
+    source_outcomes = {
+        str(source): clean_json({
+            key: outcome.get(key) for key in evidence_summary_keys if key in outcome
+        })
+        for source, outcome in (primary.get("source_outcomes") or {}).items()
+        if isinstance(outcome, dict)
+    }
+    supplied_sources = {
+        source for source, outcome in source_outcomes.items()
+        if isinstance(outcome, dict) and outcome.get("status") == "complete"
+        and int(outcome.get("effective_samples") or 0) > 0
+    }
     missing_sources = [
         source for source in REQUIRED_COMPARISON_SOURCES if source not in supplied_sources
     ]
@@ -508,6 +546,38 @@ def _strategy_evidence(value: Any) -> dict[str, Any]:
         missing_components.append("required_metrics")
     if missing_sources:
         missing_components.append("three_source_outcome_strata")
+    primary_strata = primary.get("strata") or {}
+    stratum_status = {}
+    for dimension in REQUIRED_EVIDENCE_STRATA:
+        buckets = primary_strata.get(dimension) or {}
+        mature = {
+            str(label): clean_json({
+                key: row.get(key) for key in evidence_summary_keys if key in row
+            })
+            for label, row in buckets.items()
+            if (isinstance(row, dict) and row.get("status") == "sufficient"
+                and int(row.get("effective_samples") or 0) >= 20)
+        }
+        missing_buckets = (
+            sorted(set(REQUIRED_SCORE_BUCKETS) - set(mature))
+            if dimension == "score_bucket" else []
+        )
+        complete = bool(mature) and not missing_buckets
+        stratum_status[dimension] = {
+            "status": "complete" if complete else "unavailable",
+            "buckets": mature,
+            "missing_buckets": missing_buckets,
+            "reason_code": (
+                None if complete else
+                "forward_executable_stratum_evidence_unavailable"
+            ),
+        }
+    missing_strata = [
+        name for name, item in stratum_status.items()
+        if item["status"] != "complete"
+    ]
+    if missing_strata:
+        missing_components.append("required_outcome_strata")
     if effective_samples == 0:
         missing_components.append("independent_effective_samples")
     status = "complete" if not missing_components else "degraded"
@@ -529,11 +599,27 @@ def _strategy_evidence(value: Any) -> dict[str, Any]:
         "required_sources": list(REQUIRED_COMPARISON_SOURCES),
         "available_source_outcomes": sorted(supplied_sources),
         "missing_source_outcomes": missing_sources,
+        "source_outcomes": source_outcomes,
+        "required_strata": list(REQUIRED_EVIDENCE_STRATA),
+        "strata": stratum_status,
+        "missing_strata": missing_strata,
         "effective_samples": effective_samples,
         "missing_components": missing_components,
         "completeness_semantics": (
             "job_success_does_not_imply_statistical_completeness"
         ),
+        "evidence_contract": primary.get("evidence_contract") or {
+            "data_class": "unverified",
+            "cost_included": False,
+            "benchmark_baseline": None,
+        },
+        "diagnostic_candidate_outcomes": clean_json({
+            key: (primary.get("diagnostic_candidate_outcomes") or {}).get(key)
+            for key in (
+                "evidence_snapshot_id", "horizon_days", "lookback_days",
+                "evidence_kind", "promotion_eligible", "reason_code",
+            )
+        }),
         "portfolio_comparison": {
             "matured_runs": comparison.get("matured_runs"),
             "avg_satellite_marginal_pct": comparison.get("avg_satellite_marginal_pct"),
@@ -673,7 +759,11 @@ class ScheduledSnapshotService:
 
             self.outcome_stats_reader = outcome_stats
         if self.strategy_evidence_reader is None:
-            self.strategy_evidence_reader = self.store.selection_strategy_evidence
+            from application.model_evidence import scheduled_strategy_evidence
+
+            self.strategy_evidence_reader = lambda **kwargs: scheduled_strategy_evidence(
+                self.store, **kwargs,
+            )
         if self.cash_reader is None:
             from application.account_reconciliation import AccountReconciliation
 
@@ -717,12 +807,17 @@ class ScheduledSnapshotService:
                  "basis": "two_source_consensus_required", "as_of": coverage or None,
                  "provider_count": int(consensus.get("covered_provider_count") or 0)}
         latest_open = consensus.get("latest_confirmed_open_date")
+        try:
+            next_open = self.store.next_confirmed_open_date(today)
+        except Exception:
+            next_open = None
         return {
             "status": "complete",
             "date": today,
             "confirmed": True,
             "is_trading_day": str(latest_open or "") == today,
             "latest_confirmed_open_date": latest_open,
+            "next_confirmed_open_date": next_open,
             "basis": "two_source_calendar_consensus",
             "as_of": coverage,
             "provider_count": int(consensus.get("covered_provider_count") or 0),
@@ -1273,6 +1368,7 @@ class ScheduledSnapshotService:
     @staticmethod
     def _next_premarket_check(
         formal: dict[str, Any], independent: dict[str, Any] | None = None,
+        target_session_date: str | None = None,
     ) -> dict[str, Any]:
         checks = [
             "refresh_two_source_calendar_consensus",
@@ -1285,8 +1381,12 @@ class ScheduledSnapshotService:
             checks.append("revalidate_independent_selection_freshness")
         return {
             "status": "required" if formal.get("formal_top15") else "missing",
-            "target_session_date": None,
-            "date_basis": "next_confirmed_open_date_requires_fresh_two_source_consensus",
+            "target_session_date": target_session_date,
+            "date_basis": (
+                "two_source_calendar_consensus"
+                if target_session_date else
+                "next_confirmed_open_date_unavailable"
+            ),
             "checks": checks[:10],
             "preview_only": True,
             "auto_execution": False,
@@ -1584,8 +1684,12 @@ class ScheduledSnapshotService:
         base = {
             "based_on_session": trading_day.get("date"),
             "pricing_snapshot": pricing_snapshot,
-            "target_session_date": None,
-            "target_date_basis": "next_confirmed_open_date_requires_fresh_two_source_consensus",
+            "target_session_date": trading_day.get("next_confirmed_open_date"),
+            "target_date_basis": (
+                "two_source_calendar_consensus"
+                if trading_day.get("next_confirmed_open_date") else
+                "next_confirmed_open_date_unavailable"
+            ),
             "preview_only": True,
             "auto_execution": False,
             "execution_preconditions": [
@@ -1713,8 +1817,22 @@ class ScheduledSnapshotService:
 
     @staticmethod
     def _adjustment_proposals(outcomes: dict[str, Any], strategies: dict[str, Any]) -> dict[str, Any]:
+        blocked_strategies = [
+            {
+                "strategy_id": row.get("strategy_id"),
+                "effective_samples": int(row.get("effective_samples") or 0),
+                "blocker": row.get("promotion_blocker") or "independent_evidence_insufficient",
+            }
+            for row in strategies.get("strategies") or []
+            if (row.get("promotion_blocker")
+                or int(row.get("effective_samples") or 0) < MIN_STRATEGY_FEEDBACK_SAMPLES)
+        ]
         proposals = []
-        for row in outcomes.get("buckets") or []:
+        evidence_ready = (
+            not blocked_strategies
+            and all(item.get("status") == "complete" for item in (outcomes, strategies))
+        )
+        for row in (outcomes.get("buckets") or []) if evidence_ready else []:
             directional_n = int(row.get("directional_n") or 0)
             factor = float(row.get("performance_factor") or 1.0)
             deviation = abs(factor - 1.0)
@@ -1735,16 +1853,6 @@ class ScheduledSnapshotService:
                 "status": "review_required",
                 "rationale": "posterior_feedback_crossed_conservative_threshold",
             })
-        blocked_strategies = [
-            {
-                "strategy_id": row.get("strategy_id"),
-                "effective_samples": int(row.get("effective_samples") or 0),
-                "blocker": row.get("promotion_blocker") or "independent_evidence_insufficient",
-            }
-            for row in strategies.get("strategies") or []
-            if (row.get("promotion_blocker")
-                or int(row.get("effective_samples") or 0) < MIN_STRATEGY_FEEDBACK_SAMPLES)
-        ]
         return clean_json({
             "status": "complete" if all(
                 item.get("status") == "complete" for item in (outcomes, strategies)
@@ -1759,6 +1867,7 @@ class ScheduledSnapshotService:
                 "maximum_multiplier_step": MAX_STRATEGY_MULTIPLIER_STEP,
                 "human_review_required": True,
                 "auto_apply": False,
+                "evidence_complete_required": True,
             },
         })
 
@@ -1803,15 +1912,20 @@ class ScheduledSnapshotService:
             raw_runs = self.job_runs_reader(limit=200) or []
         except Exception:
             raw_runs = []
-        latest: dict[str, dict[str, Any]] = {}
+        latest_rows: dict[str, dict[str, Any]] = {}
         for row in raw_runs:
             if not isinstance(row, dict):
                 continue
             job_name = str(row.get("job_name") or "")
             run_day = str(row.get("started_at") or row.get("finished_at") or "")[:10]
-            if (job_name in (*POST_CLOSE_JOBS, "research_data_sync")
-                    and run_day == today and job_name not in latest):
-                latest[job_name] = _job_run(row)
+            if job_name not in (*POST_CLOSE_JOBS, "research_data_sync") or run_day != today:
+                continue
+            prior = latest_rows.get(job_name) or {}
+            stamp = str(row.get("finished_at") or row.get("started_at") or "")
+            prior_stamp = str(prior.get("finished_at") or prior.get("started_at") or "")
+            if stamp >= prior_stamp:
+                latest_rows[job_name] = row
+        latest = {name: _job_run(row) for name, row in latest_rows.items()}
         jobs = [latest.get(name) or {"job_name": name, "status": "missing"}
                 for name in POST_CLOSE_JOBS]
 
@@ -1867,6 +1981,10 @@ class ScheduledSnapshotService:
             },
             "conclusion": conclusion,
             "jobs": jobs,
+            "closing_trade_plans_job": latest.get("closing_trade_plans") or {
+                "job_name": "closing_trade_plans", "status": "missing",
+                "terminal_verified": False,
+            },
             "decision_signal_evidence": outcomes,
             "selection_strategy_evidence": strategies,
         }
@@ -2308,7 +2426,10 @@ class ScheduledSnapshotService:
             "phase": phase,
             "formal": formal_plans[:15],
             "formal_candidate_follow_up": candidate_follow_up,
-            "next_premarket_check": self._next_premarket_check(formal, independent=independent),
+            "next_premarket_check": self._next_premarket_check(
+                formal, independent=independent,
+                target_session_date=trading_day.get("next_confirmed_open_date"),
+            ),
             "portfolio_risk": plan_projection,
             # After the close these are stale intraday decisions, not the
             # current holding review. Omit their bulky rows; the dedicated

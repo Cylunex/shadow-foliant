@@ -20,6 +20,7 @@ def build_capsule(*, run_id, metadata, top15, top5, published_at, next_open_date
             "published_at": published_at, "earliest_execution_at": earliest,
             "recording_mode": "contemporaneous" if selection_date == published_at[:10] else "backfilled",
             "manifest_id": metadata.get("manifest_id"), "policy_hash": metadata.get("policy_hash"),
+            "market_regime": metadata.get("market_regime"),
             "code_revision": (metadata.get("decision_context") or {}).get("code_revision"),
             "opportunity_set": {"top15": deepcopy(top15), "top5": deepcopy(top5)},
             "execution_model": "next-open-raw-v1", "scope": "research"}

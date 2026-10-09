@@ -28,17 +28,22 @@ def close_evidence(day: str) -> dict:
 
 
 class CalendarStore:
-    def __init__(self, *, ready=True, coverage="2026-09-10", latest="2026-09-10"):
+    def __init__(self, *, ready=True, coverage="2026-09-10", latest="2026-09-10",
+                 next_open="2026-09-11"):
         self.value = {
             "ready": ready,
             "covered_provider_count": 2 if ready else 1,
             "coverage_through_date": coverage,
             "latest_confirmed_open_date": latest,
         }
+        self.next_open = next_open
 
     def calendar_consensus(self, _day, *, inclusive=False):
         assert inclusive is True
         return dict(self.value)
+
+    def next_confirmed_open_date(self, _day):
+        return self.next_open
 
 
 def selection(*, day="2026-09-10", market_as_of: str | None = None,
@@ -198,9 +203,25 @@ def build_service(
         "strategies": [{
             "strategy_id": "fixture", "lane": "core", "sample_size": 30,
             "effective_samples": 30, "median_return_pct": 1.2,
-            "win_loss_ratio": 1.4, "benchmark_excess_pct": 0.3,
+            "win_loss_ratio": 1.4, "median_net_excess_pct": 1.2,
+            "net_excess_win_loss_ratio": 1.4, "benchmark_excess_pct": 0.3,
         }],
-        "source_outcomes": {"formal": {}, "independent": {}, "wencai": {}},
+        "source_outcomes": {
+            source: {"status": "complete", "effective_samples": 30}
+            for source in ("formal", "independent", "wencai")
+        },
+        "strata": {
+            "industry": {"fixture": {"status": "sufficient", "effective_samples": 30}},
+            "market_regime": {"fixture": {"status": "sufficient", "effective_samples": 30}},
+            "score_bucket": {
+                bucket: {"status": "sufficient", "effective_samples": 30}
+                for bucket in ("high", "medium", "low")
+            },
+        },
+        "evidence_contract": {
+            "data_class": "strict_observed_pit", "cost_included": True,
+            "benchmark_baseline": "pit_only",
+        },
         "portfolio_comparison": {"matured_runs": 1, "avg_satellite_marginal_pct": 0.1},
         "evidence_snapshot_id": f"fixture-{kwargs.get('horizon_days')}",
     },
@@ -887,9 +908,9 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
     assert outcomes_job["metrics"]["signals_evaluated"] == 40
     assert "secret.invalid" not in str(snapshot)
     proposals = snapshot["strategy_adjustment_proposals"]
-    assert proposals["proposal_count"] == 1
-    assert proposals["proposals"][0]["direction"] == "downweight"
-    assert proposals["proposals"][0]["proposed_multiplier"] == 0.95
+    assert proposals["proposal_count"] == 0
+    assert proposals["proposals"] == []
+    assert proposals["guardrails"]["evidence_complete_required"] is True
     assert proposals["blocked_strategy_count"] == 1
     assert proposals["guardrails"]["auto_apply"] is False
 
@@ -938,6 +959,8 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     assert snapshot["next_session_plan"]["status"] == "complete"
     assert snapshot["next_session_plan"]["count"] == 16
     assert snapshot["next_session_plan"]["auto_execution"] is False
+    assert snapshot["next_session_plan"]["target_session_date"] == "2026-09-11"
+    assert snapshot["trade_plans"]["next_premarket_check"]["target_session_date"] == "2026-09-11"
     assert snapshot["source_comparison"]["status"] == "complete"
     assert snapshot["source_comparison"]["availability"] == {
         "formal": True, "independent": True, "wencai": True,
@@ -955,13 +978,73 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
     assert shared["mode"] == "post_close"
 
 
+def test_post_close_requires_verified_same_day_closing_job_terminal_status():
+    evening = NOW.replace(hour=20, minute=46)
+    jobs = [
+        {"job_name": name, "started_at": evening.isoformat(),
+         "finished_at": evening.isoformat(), "status": "success", "error": ""}
+        for name in (
+            "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
+            "research_data_sync_retry",
+        )
+    ]
+    missing = build_service(
+        clock=lambda: evening, job_runs_reader=lambda **_kwargs: jobs,
+    ).read(owner_id="scheduled-agent")["data"]
+    assert missing["post_close_review"]["status"] == "degraded"
+    assert missing["post_close_review"]["closing_trade_plans_job"] == {
+        "job_name": "closing_trade_plans", "status": "missing",
+        "terminal_verified": False,
+    }
+
+    jobs.append({
+        "job_name": "closing_trade_plans", "started_at": evening.isoformat(),
+        "finished_at": evening.isoformat(), "status": "success",
+        "error": "closing_plans=complete available=71 requested=71",
+    })
+    complete = build_service(
+        clock=lambda: evening, job_runs_reader=lambda **_kwargs: list(reversed(jobs)),
+    ).read(owner_id="scheduled-agent")["data"]
+    closing = complete["post_close_review"]["closing_trade_plans_job"]
+    assert closing["status"] == "success"
+    assert closing["terminal_verified"] is True
+    assert closing["metrics"] == {
+        "closing_plan_status": "complete",
+        "closing_plans_available": 71,
+        "closing_plans_requested": 71,
+    }
+    assert complete["post_close_review"]["status"] == "complete"
+
+
+def test_terminal_job_without_finished_at_is_not_accepted():
+    evening = NOW.replace(hour=20, minute=46)
+    jobs = [
+        {"job_name": name, "started_at": evening.isoformat(),
+         "finished_at": evening.isoformat(), "status": "success", "error": ""}
+        for name in (
+            "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
+            "research_data_sync_retry",
+        )
+    ] + [{
+        "job_name": "closing_trade_plans", "started_at": evening.isoformat(),
+        "status": "success", "error": "closing_plans=complete available=71 requested=71",
+    }]
+    snapshot = build_service(
+        clock=lambda: evening, job_runs_reader=lambda **_kwargs: jobs,
+    ).read(owner_id="scheduled-agent")["data"]
+    closing = snapshot["post_close_review"]["closing_trade_plans_job"]
+    assert closing["status"] == "degraded"
+    assert closing["terminal_verified"] is False
+    assert "terminal_timestamp_missing" in closing["partial_failure_codes"]
+
+
 def test_four_report_phases_keep_expected_authority_and_pending_semantics():
     jobs = [
         {"job_name": name, "started_at": "2026-09-10T20:30:00+08:00",
          "finished_at": "2026-09-10T20:31:00+08:00", "status": "success", "error": ""}
         for name in (
             "portfolio_indicator_snapshot", "eod_outcomes", "daily_backtest",
-            "research_data_sync_retry",
+            "research_data_sync_retry", "closing_trade_plans",
         )
     ]
     holding_plan = {

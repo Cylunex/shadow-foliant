@@ -33,6 +33,15 @@ def _git_revision() -> str:
         pass
     git_dir = os.path.join(_bootstrap.ROOT, '.git')
     try:
+        if os.path.isfile(git_dir):
+            with open(git_dir, encoding='utf-8') as handle:
+                marker = handle.read().strip()
+            if marker.startswith('gitdir: '):
+                candidate = marker[8:].strip()
+                git_dir = (
+                    candidate if os.path.isabs(candidate)
+                    else os.path.normpath(os.path.join(_bootstrap.ROOT, candidate))
+                )
         with open(os.path.join(git_dir, 'HEAD'), encoding='utf-8') as handle:
             head = handle.read().strip()
         if not head.startswith('ref: '):
@@ -42,15 +51,26 @@ def _git_revision() -> str:
         if os.path.isfile(ref_path):
             with open(ref_path, encoding='utf-8') as handle:
                 return handle.read().strip()
-        packed = os.path.join(git_dir, 'packed-refs')
-        if os.path.isfile(packed):
-            with open(packed, encoding='utf-8', errors='replace') as handle:
-                for line in handle:
-                    if line.startswith(('#', '^')):
-                        continue
-                    revision, _, name = line.strip().partition(' ')
-                    if name == ref:
-                        return revision
+        roots = [git_dir]
+        common_path = os.path.join(git_dir, 'commondir')
+        if os.path.isfile(common_path):
+            with open(common_path, encoding='utf-8') as handle:
+                common = handle.read().strip()
+            roots.append(os.path.normpath(os.path.join(git_dir, common)))
+        for root in roots:
+            ref_path = os.path.join(root, *ref.split('/'))
+            if os.path.isfile(ref_path):
+                with open(ref_path, encoding='utf-8') as handle:
+                    return handle.read().strip()
+            packed = os.path.join(root, 'packed-refs')
+            if os.path.isfile(packed):
+                with open(packed, encoding='utf-8', errors='replace') as handle:
+                    for line in handle:
+                        if line.startswith(('#', '^')):
+                            continue
+                        revision, _, name = line.strip().partition(' ')
+                        if name == ref:
+                            return revision
     except (OSError, ValueError):
         pass
     return 'unknown'

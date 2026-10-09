@@ -201,6 +201,42 @@ def test_forward_cohorts_idempotent_and_missing_data_remains_recoverable(store, 
     conn.close()
 
 
+def test_forward_cohorts_record_sources_and_available_strata_without_backfill(
+    store, capsule,
+):
+    rows = [
+        {
+            "symbol": f"600{index:03d}", "assigned_lane": "core",
+            "industry": "bank" if index <= 8 else "technology",
+            "total_score": 101 - index,
+        }
+        for index in range(1, 16)
+    ]
+    capsule["opportunity_set"] = {"top15": rows, "top5": rows[:5]}
+    conn = store.connect()
+    store._insert_selection_artifact(conn, "r1", "independent_selection", {
+        "status": "ready", "top15": list(reversed(rows)),
+    }, {"policy_hash": "p1"})
+    store._insert_selection_artifact(conn, "r1", "wencai_strategy_runs", {
+        "strategies": {"fixture": {"picks": rows[:6]}},
+    }, {"policy_hash": "p1"})
+    conn.commit()
+    conn.close()
+
+    DecisionLoopService(store).start_model_cohorts(capsule)
+    conn = store.connect()
+    baselines = {
+        str(row[0]) for row in conn.execute(
+            "SELECT baseline FROM research_model_portfolios"
+        ).fetchall()
+    }
+    conn.close()
+    assert {"source:formal", "source:independent", "source:wencai"} <= baselines
+    assert {"stratum:score:high", "stratum:score:medium", "stratum:score:low"} <= baselines
+    assert {"stratum:industry:bank", "stratum:industry:technology"} <= baselines
+    assert not any(name.startswith("stratum:market_regime:") for name in baselines)
+
+
 def test_policy_publication_compare_and_swap(store):
     policy = FusionPolicy().as_dict()
     store.save_selection_strategy_records("r1", [], policy=policy, policy_hash="base", selection_date="2026-09-04")
@@ -407,7 +443,12 @@ def test_net_evidence_requires_complete_policy_bound_comparable_marks(store):
     days = pd.bdate_range("2025-01-01", periods=160).strftime("%Y-%m-%d").tolist()
     conn = store.connect()
     conn.executemany("INSERT INTO research_trade_calendar VALUES (?,?,?)", [(d, "fixture", d) for d in days])
-    for name, growth in [("pit_only", 1), ("strategy:local_value_v2", 1.001)]:
+    for name, growth in [
+        ("pit_only", 1), ("strategy:local_value_v2", 1.001),
+        ("source:formal", 1.001), ("stratum:industry:bank", 1.001),
+        ("stratum:score:high", 1.001),
+        ("stratum:market_regime:range", 1.001),
+    ]:
         ledger = {"marks": [{"trade_date": day, "net_asset_value": str(100000 * growth ** i),
                               "status": "verified", "policy_hash": "p1"} for i, day in enumerate(days)]}
         conn.execute("INSERT INTO research_model_portfolios VALUES (?,?,?)", (name, json.dumps(ledger), days[-1]))
@@ -416,6 +457,17 @@ def test_net_evidence_requires_complete_policy_bound_comparable_marks(store):
     evidence = model_strategy_evidence(store, "p1")["strategies"][0]
     assert evidence["effective_samples"] >= 20 and evidence["promotion_ready"]
     assert evidence["rolling_folds"]
+    assert evidence["cost_included"] is True
+    assert evidence["benchmark_baseline"] == "pit_only"
+    assert evidence["median_net_excess_pct"] is not None
+    complete = model_strategy_evidence(store, "p1")
+    assert complete["source_outcomes"]["formal"]["status"] == "complete"
+    assert complete["source_outcomes"]["independent"]["reason_code"] == (
+        "forward_source_model_portfolio_missing"
+    )
+    assert complete["strata"]["industry"]["bank"]["effective_samples"] >= 20
+    assert complete["strata"]["score_bucket"]["high"]["effective_samples"] >= 20
+    assert complete["strata"]["market_regime"]["range"]["effective_samples"] >= 20
     assert model_strategy_evidence(store, "p2")["strategies"][0]["effective_samples"] == 0
     conn = store.connect()
     ledger["marks"] = [{**r, "status": "indicative"} for r in ledger["marks"]]

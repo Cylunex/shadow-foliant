@@ -546,6 +546,29 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertFalse(state["ready"])
         self.assertEqual(state["covered_provider_count"], 0)
 
+    def test_next_open_date_requires_two_valid_source_records(self):
+        evidence = [
+            ("2026-09-10", True), ("2026-09-11", False),
+            ("2026-09-12", False), ("2026-09-14", True),
+        ]
+        for provider in ("one", "two"):
+            self.store.record_calendar_fetch(
+                provider, "2026-09-10", "2026-09-14", evidence,
+                quality_status="ok",
+            )
+            self.store.replace_calendar_evidence(
+                evidence, provider=provider,
+                start_date="2026-09-10", end_date="2026-09-14",
+            )
+        self.assertEqual(
+            self.store.next_confirmed_open_date("2026-09-10"), "2026-09-14",
+        )
+        self.store.replace_calendar_evidence(
+            [("2026-09-14", False)], provider="two",
+            start_date="2026-09-14", end_date="2026-09-14",
+        )
+        self.assertIsNone(self.store.next_confirmed_open_date("2026-09-10"))
+
     def test_official_holiday_and_reopening_have_two_source_consensus(self):
         syncer = ResearchSynchronizer(self.store)
         with patch("data.research_sync.zzshare.get_trade_calendar_evidence", return_value=[]), \
