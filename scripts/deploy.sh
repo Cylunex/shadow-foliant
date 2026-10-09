@@ -93,13 +93,18 @@ fi
   "$python_bin" -m compileall -q \
     -x '(^|[\\/])(venv2?|\.venv|\.git|node_modules)([\\/]|$)' .
   find scripts -type f -name '*.sh' -exec bash -n {} +
+  # Tests must not inherit production database credentials or provider tokens.
+  # Keep this isolation scoped to pytest; the migration below uses the
+  # protected deployment environment after tests pass.
+  test_env=(env -i PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}"
+            APP_REVISION="$EXPECTED_COMMIT")
   if [[ -n "${FOLIANT_TEST_TARGETS:-}" ]]; then
     read -r -a test_targets <<< "$FOLIANT_TEST_TARGETS"
-    "$python_bin" -m pytest -q "${test_targets[@]}"
+    "${test_env[@]}" "$python_bin" -m pytest -q "${test_targets[@]}"
   elif [[ "${FOLIANT_SKIP_TESTS:-false}" == "true" ]]; then
     echo "pytest skipped by explicit deployment policy"
   else
-    "$python_bin" -m pytest -q
+    "${test_env[@]}" "$python_bin" -m pytest -q
   fi
 )
 
