@@ -76,6 +76,22 @@ def test_same_slot_cannot_be_resent_or_changed(tmp_path):
         prepare(svc, final="changed")
 
 
+def test_critical_event_cannot_move_to_another_channel(tmp_path):
+    svc, _ = service(tmp_path)
+    key = "critical-stop:600001:aaaaaaaaaaaa:sell:1"
+    first = prepare(svc, channel="qq", key=key)
+    assert svc.start(first["delivery_id"]) is True
+    assert svc.finish(first["delivery_id"], status="accepted", http_status=200) is True
+    second = prepare(svc, channel="email", key=key)
+    assert second["should_send"] is False
+    assert second["suppression_reason"] == "critical_cross_channel_duplicate"
+    detail = svc.detail(first["message_id"])
+    assert len(detail["deliveries"]) == 1
+    assert detail["deliveries"][0]["channel"] == "qq"
+    assert detail["deliveries"][0]["suppressed_count"] == 1
+    assert detail["deliveries"][0]["suppression_reason"] == "critical_cross_channel_duplicate"
+
+
 def test_router_archives_original_and_each_submitted_body_without_sending(tmp_path, monkeypatch):
     svc, _ = service(tmp_path)
     calls = []

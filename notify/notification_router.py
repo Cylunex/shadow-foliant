@@ -448,7 +448,9 @@ def send(category: str, title: str, content: str,
         return silent
     targets = only_channels or _get_routes_for(category, title)
     if critical_event:
-        targets = targets[:1]
+        # Critical investment events have one stable destination. A changed
+        # route configuration must not create a second channel attempt.
+        targets = ["qq"]
         fallback = None
     source_run_id = source_run_id or os.getenv("FOLIANT_TASK_RUN_ID") or None
     # 即时消息统一去掉装饰和专业术语，并限制手机端长度；archive 长文保持完整。

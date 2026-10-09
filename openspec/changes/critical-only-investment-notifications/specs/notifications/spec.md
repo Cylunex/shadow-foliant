@@ -6,7 +6,8 @@
 - An exit alert MUST require a final hard risk sell, a new crossing of the unchanged stop after two distinct verified recovery quotes, same batch current market data, a current same run plan with an explicit expiry, compatible quote and plan price basis, current broker sellable quantity, and verified tradeability.
 - A buy alert MUST remain closed until an authoritative highest severity buy gate exists with current budget, risk, plan, tradeability and price evidence.
 - The system MUST baseline already breached positions on rollout and plan replacement. Invalid or boundary quotes MUST NOT advance recovery. A guarded final hold MUST NOT become a sell alert.
-- A critical event MUST carry a stable episode key independent of minor price or body changes, use the message archive before delivery, target one channel, and never retry when the outcome is uncertain.
+- A critical event MUST carry a stable episode key independent of minor price or body changes, use the message archive before delivery, target only QQ, suppress attempts to move the same event to another channel, and never retry when the outcome is uncertain.
+- A critical exit MUST use a provider timestamp for its quote; a batch retrieval timestamp alone MUST NOT arm or trigger the event.
 - Protected snapshots MUST expose bounded policy version, active level, gate status, eligible new event count, criteria and silent reasons without requiring an outbound message.
 
 ### Scenarios

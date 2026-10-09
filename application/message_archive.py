@@ -122,6 +122,28 @@ class MessageArchiveService:
                     or self._decrypt(row[3]) != title or row[4] != source):
                 raise ValueError("message_archive_idempotency_conflict")
             actual_message_id = str(row[0])
+            if idempotency_key and idempotency_key.startswith("critical-stop:"):
+                cur.execute("""SELECT delivery_id,status,attempted_at,acknowledged_at
+                               FROM notification_deliveries
+                               WHERE message_id=? AND channel<>?
+                               ORDER BY channel LIMIT 1""",
+                            (actual_message_id, channel))
+                other_channel = cur.fetchone()
+                if other_channel:
+                    reason = "critical_cross_channel_duplicate"
+                    cur.execute("""UPDATE notification_deliveries
+                                   SET suppressed_count=suppressed_count+1,
+                                       last_suppressed_at=?,suppression_reason=?
+                                   WHERE delivery_id=?""",
+                                (now, reason, other_channel[0]))
+                    conn.commit()
+                    return {"message_id": actual_message_id,
+                            "delivery_id": str(other_channel[0]),
+                            "status": str(other_channel[1]),
+                            "should_send": False,
+                            "suppression_reason": reason,
+                            "attempted_at": other_channel[2],
+                            "acknowledged_at": other_channel[3]}
             delivery_id = uuid4().hex
             cur.execute("""INSERT INTO notification_deliveries
                 (delivery_id,message_id,channel,target_label,final_body_cipher,

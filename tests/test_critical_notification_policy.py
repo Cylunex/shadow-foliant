@@ -95,6 +95,50 @@ def test_invalid_or_boundary_quote_resets_recovery_and_guards_block_action():
     assert not events  # Guarded hold cannot become a delayed sell alert.
 
 
+def test_batch_receipt_time_cannot_arm_a_critical_stop():
+    now = datetime(2026, 10, 9, 9, 40, tzinfo=TZ)
+    state, _ = cycle(row(now, price=8.8), {}, now)
+    for minute in (20, 40):
+        stamp = now + timedelta(minutes=minute)
+        receipt_only = row(stamp, price=9.2)
+        receipt_only["quote_time_source"] = "batch_retrieved_at"
+        state, events = cycle(receipt_only, state, stamp)
+        assert not events
+    assert state["critical_notification_policy"]["states"]["600001"]["armed"] is False
+    stamp = now + timedelta(minutes=60)
+    state, events = cycle(row(stamp, price=8.9), state, stamp)
+    assert not events
+
+    assessed = monitor.assess_quotes(
+        [{"symbol": "600001"}],
+        {"600001": {"price": 9.2, "retrieved_at": stamp.isoformat(),
+                    "source": "provider"}},
+        stamp,
+    )
+    assert assessed["items"]["600001"]["quote_time_source"] == "retrieved_at"
+    invalid = monitor.assess_quotes(
+        [{"symbol": "600001"}],
+        {"600001": {"price": 9.2, "quote_time": "invalid",
+                    "quote_time_source": "provider", "source": "provider"}},
+        stamp,
+    )
+    assert invalid["items"]["600001"]["quote_time_source"] == (
+        "retrieved_at_invalid_provider_time")
+
+
+def test_future_provider_quote_cannot_trigger_critical_stop():
+    now = datetime(2026, 10, 9, 9, 40, tzinfo=TZ)
+    state, _ = cycle(row(now, price=8.8), {}, now)
+    for minute in (20, 40):
+        stamp = now + timedelta(minutes=minute)
+        state, _ = cycle(row(stamp, price=9.2), state, stamp)
+    stamp = now + timedelta(minutes=60)
+    future = row(stamp, price=8.9)
+    future["quote_as_of"] = (stamp + timedelta(minutes=15)).isoformat()
+    state, events = cycle(future, state, stamp)
+    assert not events
+
+
 def test_missing_sellability_fails_closed_and_plan_replacement_changes_identity():
     now = datetime(2026, 10, 9, 9, 40, tzinfo=TZ)
     state, _ = cycle(row(now, price=8.8), {}, now)
@@ -199,7 +243,9 @@ def test_same_critical_event_uses_one_channel_and_one_archived_attempt(monkeypat
               "idempotency_key": "critical-stop:600001:aaaaaaaaaaaa:sell:1",
               "critical_event": event, "only_channels": ["qq", "email"]}
     first = notification_router.send("alert", "最高级止损风险", "示例", **kwargs)
-    repeat = notification_router.send("alert", "最高级止损风险", "示例", **kwargs)
+    repeat = notification_router.send(
+        "alert", "最高级止损风险", "示例",
+        **{**kwargs, "only_channels": ["email"]})
     assert first["qq"][0] is True
     assert repeat["qq"] == (False, "archive_suppressed")
     assert calls == ["qq"]

@@ -269,11 +269,19 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
         symbol = item["symbol"]
         quote = quotes.get(symbol) or quotes.get(str(symbol).zfill(6)) or {}
         price = _finite(quote.get("price")) if isinstance(quote, dict) else None
-        raw_stamp = (quote.get("quote_time") or quote.get("as_of")
-                     or quote.get("retrieved_at")) if isinstance(quote, dict) else None
+        provider_stamp = (quote.get("quote_time") or quote.get("as_of")) if isinstance(quote, dict) else None
+        raw_stamp = (provider_stamp or quote.get("retrieved_at")) if isinstance(quote, dict) else None
         stamp, parsed_source = _parse_quote_time(raw_stamp, now)
         declared_source = str(quote.get("quote_time_source") or "").strip()
-        stamp_source = declared_source or parsed_source
+        if parsed_source == "retrieved_at_invalid_provider_time":
+            stamp_source = parsed_source
+        elif provider_stamp:
+            stamp_source = declared_source or parsed_source
+        else:
+            stamp_source = (
+                declared_source if declared_source and declared_source != "provider"
+                else "retrieved_at" if raw_stamp else "missing"
+            )
         age_minutes = max(0.0, (now - stamp).total_seconds() / 60.0)
         is_stale = bool(raw_stamp) and age_minutes > stale_minutes
         intraday_actionable = bool(
@@ -612,11 +620,17 @@ def _critical_stop_policy(
                          and prior.get("plan_as_of") == row.get("plan_as_of")
                          and prior_stop is not None and stop is not None
                          and abs(prior_stop - stop) < 0.005)
+        try:
+            quote_at = datetime.fromisoformat(str(row.get("quote_as_of") or ""))
+            quote_timestamp_valid = (quote_at.tzinfo is not None
+                                     and quote_at <= now + timedelta(minutes=1))
+        except ValueError:
+            quote_timestamp_valid = False
         quote_current = (row.get("price_actionable") is True
                          and str(row.get("quote_as_of") or "")[:10] == now.date().isoformat()
                          and bool(row.get("quote_provider"))
-                         and row.get("quote_time_source") not in {
-                             "retrieved_at_invalid_provider_time", "missing"})
+                         and row.get("quote_time_source") == "provider"
+                         and quote_timestamp_valid)
         try:
             valid_until = datetime.fromisoformat(str(row.get("plan_valid_until") or ""))
             plan_unexpired = valid_until.tzinfo is not None and valid_until >= now
