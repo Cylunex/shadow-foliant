@@ -81,9 +81,26 @@ def test_native_migration_cas_model_ledger_and_holdout():
         capsule = build_capsule(run_id="r1", metadata={"selection_date": now.date().isoformat(), "policy_hash": "base"},
                                 top15=[{"symbol": "600001", "assigned_lane": "core"}], top5=[{"symbol": "600001"}],
                                 published_at=(now - timedelta(seconds=5)).isoformat(), next_open_date=execution_day)
+        # Repair attachments must be selected through parameterized LIKE queries
+        # on the native driver, as well as the in-memory test adapter.
+        conn = store.connect()
+        store._insert_selection_artifact(conn, "r1", "independent_selection_repair_fixture", {
+            "status": "ready", "top15": [{"symbol": "600001"}],
+        }, {"policy_hash": "base"})
+        store._insert_selection_artifact(conn, "r1", "wencai_strategy_runs_repair_fixture", {
+            "strategies": {"fixture": {"picks": [{"symbol": "600001"}]}},
+        }, {"policy_hash": "base"})
+        conn.commit()
+        conn.close()
         service = DecisionLoopService(store)
         assert service.start_model_cohorts(capsule)["created"] > 0
         assert service.start_model_cohorts(capsule)["created"] == 0
+        conn = store.connect()
+        baselines = {row[0] for row in conn.execute(
+            "SELECT baseline FROM research_model_portfolios"
+        ).fetchall()}
+        conn.close()
+        assert {"source:independent", "source:wencai"} <= baselines
         facts = {("600001", execution_day): {"trade_date": execution_day, "open": 10, "close": 10.2,
                 "volume": 1000000, "limit_up": 11, "limit_down": 9, "adjustment": "raw",
                 "execution_rules": asdict(ExecutionRules()), "corporate_actions_complete": True}}

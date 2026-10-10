@@ -34,6 +34,9 @@ Shadow Foliant 是面向个人投资研究的股票、基金与市场分析工�
 任何行情账号、模型凭据、数据库连接和通知 Token 都不得写入仓库。
 先安装由 Shadow Platform 构建的 `0.8.0` SDK wheel，再安装项目依赖与测试工具。
 `SHADOW_PLATFORM_WHEEL` 指向开发者准备的本地 wheel 文件。
+CI 从 `.github/workflows/ci.yml` 固定的 Platform 提交构建 SDK wheel，通过本地
+`--find-links` 安装；`requirements.txt` 继续校验 `shadow-platform==0.8.0`，并运行
+插件合同测试、PostgreSQL 集成测试和完整回归。更新 SDK 来源时需同步核验版本与合同。
 
 ```bash
 python3.12 -m venv .test-venv

@@ -109,11 +109,11 @@ class DecisionLoopService:
             cur.execute(
                 "SELECT artifact_type,payload FROM selection_artifacts "
                 "WHERE run_id=? AND (artifact_type='independent_selection' "
-                "OR artifact_type LIKE 'independent_selection_repair%' "
+                "OR artifact_type LIKE ? "
                 "OR artifact_type='wencai_strategy_runs' "
-                "OR artifact_type LIKE 'wencai_strategy_runs_repair%') "
+                "OR artifact_type LIKE ?) "
                 "ORDER BY created_at",
-                (capsule["run_id"],),
+                (capsule["run_id"], "independent_selection_repair%", "wencai_strategy_runs_repair%"),
             )
             source_artifacts = {}
             for artifact_type, payload in cur.fetchall():
