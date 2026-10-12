@@ -2766,6 +2766,8 @@ class ScheduledSnapshotService:
                              "matching_qfq_price_basis", "broker_sellable_quantity",
                              "verified_tradeability"],
                 "scheduled_delivery": "silent_monitor_owns_critical_events",
+                "report_delivery": "scheduled_slot_report",
+                "critical_event_delivery": "intraday_monitor_only",
                 "silent_reason": (
                     "critical_input_unverified" if critical_projection.get("delivery_gate")
                     == "disabled_missing_authoritative_inputs" else

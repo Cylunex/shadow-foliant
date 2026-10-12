@@ -15,6 +15,8 @@
 
 QQ 正文固定为 8 行且不超过 900 字，按权威持仓动作、失效条件和风控、现金及买入门、三方有效性、当期差异、盘后与次日缺口排序。其末行明确标为“有界摘要”。完整 57 只等全部持仓、原始计划与失效证据只在受保护快照中读取，不声称 QQ 已覆盖全部持仓。
 
+快照的 `notification_policy.mode=critical_only` 和 `scheduled_delivery=silent_monitor_owns_critical_events` 仅描述盘中最高事件的发送权。`report_delivery=scheduled_slot_report` 与 `critical_event_delivery=intraday_monitor_only` 明确分流：四个正常时点的 QQ `report` 按 slot 发送，允许研究来源和部分计划降级；最高事件只由盘中共用监控以 `alert` 类别发送。`eligible_new_event_count=0` 或执行门禁未核验不取消报告。报告只给观察与受保护 hold，缺少权威价位时暂不给价，不把分析动作写成可执行委托；外部独立研究缺失时标明正式/独立两方短名单和完整三方待恢复。
+
 ## 发送语义与切换
 
 领取 slot 前完成快照、Webhook 存在性及摘要长度校验。`claimed` 且尚无尝试时间可由同槽后续启动恢复；发送前以条件更新写入 `sending/attempted_at`，只有成功更新的调用方才发 HTTP。HTTP 200/204 记 `delivered`，明确 HTTP 拒绝记 `failed`，网络超时、进程中断或落库不确定记 `unknown`。已开始的尝试不自动重发，避免不确定回执造成双发。slot 与外部 overlay 幂等键解耦；同一 slot 最多一次 Webhook 尝试。过往外部 claim 迁入新 ledger，避免发布恰逢旧 slot 时重复发送。

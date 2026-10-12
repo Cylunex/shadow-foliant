@@ -218,6 +218,34 @@ def test_router_is_silent_by_default_and_archive_failure_never_sends(monkeypatch
     assert result["qq"] == (False, "archive_unavailable") and not calls
 
 
+def test_router_allows_only_audited_scheduled_qq_report(monkeypatch):
+    sent = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        sent.append((title, body)) or (True, "HTTP 200")))
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, _payload: (
+        {"message_id": "a" * 32, "delivery_id": "b" * 32,
+         "should_send": True} if action == "prepare" else
+        {"started": True} if action == "start" else {"recorded": True}))
+    kwargs = {
+        "source": "scripts.foliant_scheduled_snapshot",
+        "idempotency_key": "scheduled-qq:2026-10-12T10:15+08:00",
+        "only_channels": ["qq"], "fallback": None,
+        "externally_deduplicated": True,
+    }
+    for changes in (
+        {"source": "jobs.jobs_hub"},
+        {"only_channels": ["email"]},
+        {"externally_deduplicated": False},
+        {"idempotency_key": "scheduled-qq:arbitrary"},
+        {"critical_event": {"level": "critical"}},
+    ):
+        result = notification_router.send("report", "计划摘要", "观察", **(kwargs | changes))
+        assert not result and result.policy_status == "silent_critical_only"
+    result = notification_router.send("report", "计划摘要", "观察", **kwargs)
+    assert result["qq"] == (True, "HTTP 200")
+    assert sent == [("计划摘要", "观察")]
+
+
 def test_same_critical_event_uses_one_channel_and_one_archived_attempt(monkeypatch):
     calls = []
     seen = set()

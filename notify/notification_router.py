@@ -80,6 +80,20 @@ def _certified_critical_event(source: str, key: str | None,
             and key == f"critical-stop:{symbol}:{epoch}:sell:{episode}")
 
 
+def _certified_scheduled_report(category: str, source: str, key: str | None,
+                                channels: Optional[List[str]], fallback: str | None,
+                                externally_deduplicated: bool,
+                                critical_event: dict | None) -> bool:
+    """Permit only the slot-ledger-backed QQ report through the quiet policy."""
+    return (category == "report"
+            and source == "scripts.foliant_scheduled_snapshot"
+            and bool(re.fullmatch(
+                r"scheduled-qq:\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00",
+                key or ""))
+            and channels == ["qq"] and fallback is None
+            and externally_deduplicated and critical_event is None)
+
+
 def _submitted_body(channel: str, title: str, content: str) -> str:
     if channel == "wechat_work":
         return f"## {title}\n\n{content}"
@@ -439,10 +453,13 @@ def send(category: str, title: str, content: str,
             source = str(frame.f_back.f_globals.get("__name__", "unknown")) if frame and frame.f_back else "unknown"
         finally:
             del frame
-    # Routine investment summaries, technical degradation and unverified model
-    # recommendations are intentionally silent across every routed channel.
-    if category != "test" and not _certified_critical_event(source, idempotency_key,
-                                                              critical_event):
+    # Only audited scheduled reports and certified monitor events may pass.
+    if (category != "test"
+            and not _certified_scheduled_report(
+                category, source, idempotency_key, only_channels, fallback,
+                externally_deduplicated, critical_event)
+            and not _certified_critical_event(source, idempotency_key,
+                                              critical_event)):
         silent = DeliveryResults()
         silent.policy_status = "silent_critical_only"
         return silent

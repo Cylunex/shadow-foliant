@@ -21,6 +21,17 @@ NOW = datetime(2026, 9, 10, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
 ROOT = Path(__file__).resolve().parents[1]
 
 
+REPORT_POLICY = {
+    "version": "critical-only-action-required-v1",
+    "mode": "critical_only",
+    "scheduled_delivery": "silent_monitor_owns_critical_events",
+    "report_delivery": "scheduled_slot_report",
+    "critical_event_delivery": "intraday_monitor_only",
+    "eligible_new_event_count": 0,
+    "delivery_gate": "disabled_missing_authoritative_inputs",
+}
+
+
 def close_evidence(day: str) -> dict:
     return {"price_basis": "post_close_cached_qfq",
             "input_cached_at": f"{day}T18:00:00+08:00",
@@ -1635,7 +1646,7 @@ def test_cli_missing_config_is_structured_and_does_not_call_http(monkeypatch):
     get.assert_not_called()
 
 
-def test_cli_auth_failure_and_silent_policy_never_leak_secrets(monkeypatch):
+def test_cli_auth_failure_and_report_receipt_never_leak_secrets(monkeypatch):
     from notify import notification_router
     from scripts import foliant_scheduled_snapshot as cli
 
@@ -1670,8 +1681,7 @@ def test_cli_auth_failure_and_silent_policy_never_leak_secrets(monkeypatch):
         "post_close_review": {"due": False, "status": "pending"},
         "holdings_review": {"status": "pending"},
         "next_session_plan": {"status": "pending"},
-        "notification_policy": {"version": "critical-only-action-required-v1",
-                                "silent_reason": "no_new_critical_event"},
+        "notification_policy": REPORT_POLICY,
     })
     captured = {}
 
@@ -1682,8 +1692,8 @@ def test_cli_auth_failure_and_silent_policy_never_leak_secrets(monkeypatch):
     with patch.object(notification_router, "send", side_effect=send):
         result = cli.send_qq(snapshot)
     assert result["sent"] is False
-    assert result["delivery_status"] == "silent"
-    assert captured == {}
+    assert result["delivery_status"] == "unknown"
+    assert captured["title"] == "ShadowFoliant 计划摘要"
     assert "private.example.invalid" not in str(result)
     assert "super-secret-bearer" not in str(result)
 
@@ -1722,7 +1732,7 @@ def test_cli_truncated_snapshot_never_sends_qq(monkeypatch):
     send.assert_not_called()
 
 
-def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
+def test_cli_incomplete_post_close_review_sends_degraded_report(monkeypatch):
     from notify import notification_router
     from scripts import foliant_scheduled_snapshot as cli
 
@@ -1737,15 +1747,16 @@ def test_cli_incomplete_post_close_review_never_sends_qq(monkeypatch):
         "next_session_plan": {"status": "complete"},
         "as_of": {"captured_at": "2026-09-16T20:45:00+08:00"},
         "quality": {"status": "degraded"},
+        "notification_policy": REPORT_POLICY,
     }
-    with patch.object(notification_router, "send") as send:
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    with patch.object(notification_router, "send", return_value={"qq": (True, "HTTP 200")}) as send:
         notification = cli.send_qq(snapshot)
-    assert notification["sent"] is False
-    assert notification["error_code"] == "post_close_review_incomplete"
-    send.assert_not_called()
+    assert notification["sent"] is True
+    send.assert_called_once()
 
 
-def test_cli_partial_post_close_keeps_report_read_only(monkeypatch):
+def test_cli_partial_post_close_sends_bounded_report(monkeypatch):
     from notify import notification_router
     from scripts import foliant_scheduled_snapshot as cli
 
@@ -1765,18 +1776,53 @@ def test_cli_partial_post_close_keeps_report_read_only(monkeypatch):
                               "unusable_trade_plan_symbols": ["600699", "601919"]},
         "as_of": {"captured_at": "2026-09-18T20:45:00+08:00"},
         "quality": {"status": "degraded"},
-        "notification_policy": {"version": "critical-only-action-required-v1",
-                                "silent_reason": "non_intraday_or_unverified_inputs"},
+        "notification_policy": REPORT_POLICY,
     }
-    with patch.object(notification_router, "send", return_value={"qq": (True, "ok")}) as send:
+    with patch.object(notification_router, "send", return_value={"qq": (True, "HTTP 200")}) as send:
         notification = cli.send_qq(snapshot)
-    assert notification["sent"] is False
-    assert notification["delivery_status"] == "silent"
-    send.assert_not_called()
+    assert notification["sent"] is True
+    assert notification["http_status"] == 200
+    send.assert_called_once()
     body = cli.render_qq_summary(snapshot)[1]
     assert "53/55" in body and "67/69" in body
     assert "600699,601919" in body
     assert "旧价位无效" in body
+    assert "暂不给价" in body
+
+
+def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
+    from scripts import foliant_scheduled_snapshot as cli
+
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
+    snapshot = {
+        "schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
+        "trading_day": {"date": "2026-10-12", "confirmed": True,
+                        "is_trading_day": True},
+        "formal_selection": {"status": "complete", "formal_top5": []},
+        "independent_selection": {"status": "complete", "top5": []},
+        "external_independent_research": {"status": "missing"},
+        "holdings": {"status": "complete", "count": 56},
+        "trade_plans": {"status": "degraded", "portfolio_risk": {},
+                        "holding_actions_authority": {"status": "current"},
+                        "holding_actions": [{"name": "示例", "action": "sell",
+                                             "price_actionable": True}]},
+        "quotes": {"status": "complete"},
+        "post_close_review": {"due": False, "status": "pending"},
+        "holdings_review": {"status": "pending"},
+        "next_session_plan": {"status": "pending"},
+        "as_of": {"captured_at": "2026-10-12T10:15:49+08:00"},
+        "quality": {"status": "degraded"},
+        "notification_policy": REPORT_POLICY | {
+            "active_level": "unverified", "eligible_new_event_count": 0,
+            "silent_reason": "critical_input_unverified"},
+    }
+    assert cli.qq_preflight(snapshot) is None
+    payload = cli.qq_payload(snapshot)
+    assert payload["category"] == "report" and payload["delivered_lines"] == 8
+    assert "暂不给价" in payload["content"]
+    assert "受保护hold" in payload["content"]
+    assert "完整三方待恢复" in payload["content"]
+    assert "最高级止损风险" not in payload["content"]
 
 
 def test_cli_report_appends_due_post_close_conclusion():
@@ -1850,7 +1896,7 @@ def test_cli_external_bundle_is_strict_and_rejects_private_fields(tmp_path):
     assert failure["error"]["code"] == "external_bundle_invalid"
 
 
-def test_cli_external_rejection_preserves_degraded_snapshot_without_notification(
+def test_cli_external_rejection_preserves_degraded_snapshot_and_sends_report(
     tmp_path, monkeypatch, capsys,
 ):
     from copy import deepcopy
@@ -1894,7 +1940,7 @@ def test_cli_external_rejection_preserves_degraded_snapshot_without_notification
     assert cli.main(["--external-bundle", str(path), "--send-qq",
                      "--notification-slot", "10:15"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert events == ["submit", "fetch"]
+    assert events == ["submit", "fetch", "claim", "start", "qq", "finish"]
     assert result["status"] == "degraded"
     assert result["quality"]["status"] == "degraded"
     assert result["external_submission"]["error_code"] == "external_evidence_dedupe_conflict"
@@ -1903,8 +1949,8 @@ def test_cli_external_rejection_preserves_degraded_snapshot_without_notification
     assert result["source_comparison"]["availability"]["external_independent"] is False
     for section in ("formal_selection", "holdings", "trade_plans"):
         assert result[section] == original[section]
-    assert result["notification"]["sent"] is False
-    assert result["notification"]["delivery_status"] == "silent"
+    assert result["notification"]["sent"] is True
+    assert result["notification"]["delivery_status"] == "delivered"
     assert "本次提交未通过" in cli.render_qq_report(result)[1]
     assert "a500_constituents_missing" in cli.render_qq_report(result)[1]
     assert "外部独立：" not in cli.render_qq_report(result)[1]
@@ -1949,7 +1995,7 @@ def test_cli_external_post_preserves_public_rejection_code(monkeypatch):
     assert "private server text" not in str(failure)
 
 
-def test_cli_submits_external_before_snapshot_without_claiming_quiet_slot(tmp_path, monkeypatch, capsys):
+def test_cli_submits_external_before_claiming_report_slot(tmp_path, monkeypatch, capsys):
     from copy import deepcopy
     from scripts import foliant_scheduled_snapshot as cli
 
@@ -1991,10 +2037,10 @@ def test_cli_submits_external_before_snapshot_without_claiming_quiet_slot(tmp_pa
         "--external-bundle", str(path), "--send-qq",
         "--notification-slot", "20:45",
     ]) == 0
-    assert [name for name, _ in events] == ["submit", "fetch"]
+    assert [name for name, _ in events] == ["submit", "fetch", "claim", "start", "qq", "finish"]
     first_output = json.loads(capsys.readouterr().out)
-    assert first_output["notification"]["sent"] is False
-    assert first_output["notification"]["delivery_status"] == "silent"
+    assert first_output["notification"]["sent"] is True
+    assert first_output["notification"]["delivery_status"] == "delivered"
 
     events.clear()
     def replay(action, _body):
@@ -2008,11 +2054,11 @@ def test_cli_submits_external_before_snapshot_without_claiming_quiet_slot(tmp_pa
         "--notification-slot", "20:45",
     ]) == 0
     output = json.loads(capsys.readouterr().out)
-    assert [name for name, _ in events] == ["submit", "fetch"]
-    assert output["notification"].get("prior_sent") is not True
+    assert [name for name, _ in events] == ["submit", "fetch", "claim"]
+    assert output["notification"].get("prior_sent") is True
     assert output["notification"]["sent"] is False
     assert output["notification"]["suppressed"] is True
-    assert output["notification"]["delivery_status"] == "silent"
+    assert output["notification"]["delivery_status"] == "delivered"
 
 
 def test_cli_notification_slot_boundaries_cover_all_four_planned_times():
@@ -2058,7 +2104,7 @@ def test_cli_never_claims_or_sends_closed_or_unknown_day(day):
     send.assert_not_called()
 
 
-def test_cli_without_current_bundle_degrades_old_overlay_and_stays_silent(monkeypatch, capsys):
+def test_cli_without_current_bundle_degrades_old_overlay_and_sends_report(monkeypatch, capsys):
     from scripts import foliant_scheduled_snapshot as cli
 
     snapshot = build_service().read(owner_id="scheduled-agent")["data"]
@@ -2081,13 +2127,13 @@ def test_cli_without_current_bundle_degrades_old_overlay_and_stays_silent(monkey
     result = json.loads(capsys.readouterr().out)
     assert result["external_independent_research"]["status"] == "degraded"
     assert result["external_independent_research"]["top5"] == []
-    assert captured == {}
-    assert result["notification"]["delivery_status"] == "silent"
+    assert "旧排名不采用" in captured["body"]
+    assert result["notification"]["delivery_status"] == "delivered"
     assert "旧排名不采用" in cli.render_qq_summary(result)[1]
     assert "600999" not in cli.render_qq_summary(result)[1]
 
 
-def test_cli_absolute_path_from_external_cwd_stays_silent(tmp_path):
+def test_cli_absolute_path_from_external_cwd_is_read_only(tmp_path):
     hook_dir = tmp_path / "hooks"
     hook_dir.mkdir()
     marker = tmp_path / "qq-post.json"
@@ -2116,7 +2162,10 @@ def fake_get(*_args, **_kwargs):
         "holdings": {"status": "complete", "count": 2},
         "trade_plans": {"status": "degraded", "portfolio_risk": {}},
         "notification_policy": {"version": "critical-only-action-required-v1",
-                                "silent_reason": "no_new_critical_event"},
+                                "scheduled_delivery": "silent_monitor_owns_critical_events",
+                                "report_delivery": "scheduled_slot_report",
+                                "critical_event_delivery": "intraday_monitor_only",
+                                "eligible_new_event_count": 0},
         "quotes": {"status": "degraded"},
         "post_close_review": {"due": False, "status": "pending"},
         "holdings_review": {"status": "pending"},
@@ -2152,8 +2201,7 @@ requests.post = fake_post
         "SHADOW_LOG_TIMESTAMPS": "false",
     })
     completed = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "foliant_scheduled_snapshot.py"),
-         "--send-qq"],
+        [sys.executable, str(ROOT / "scripts" / "foliant_scheduled_snapshot.py")],
         cwd=tmp_path,
         env=env,
         text=True,
@@ -2165,7 +2213,7 @@ requests.post = fake_post
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     assert payload["notification"]["sent"] is False
-    assert payload["notification"]["delivery_status"] == "silent"
+    assert payload["notification"]["requested"] is False
     assert not marker.exists()
     assert "external-cwd-test-token" not in completed.stdout
 

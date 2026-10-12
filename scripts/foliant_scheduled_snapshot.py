@@ -626,7 +626,7 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
     if post_close.get("due"):
         actions = review.get("rows") or []
         authority_text = "当日收盘复盘" if review.get("status") in {"complete", "degraded"} else "盘后动作不可用"
-        action_label = "复盘动作"
+        action_label = "复盘观察"
     else:
         actions = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
         critical_ready = authority.get("critical_alert_gate") == "ready"
@@ -636,14 +636,14 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
             "同批行情持仓动作" if authority.get("status") == "current" else
             "当期动作不可用，旧信号不作依据"
         )
-        action_label = "持仓观察" if not critical_ready else "权威动作"
+        action_label = "持仓观察" if not critical_ready else "持仓分析"
     sells = [row for row in actions if row.get("action") in {"sell", "reduce"}]
     sell_labels = [short(row.get("name") or row.get("symbol") or row.get("code"), 14)
                    for row in sells[:3]]
     remainder = f"等{len(sells)}只" if len(sells) > 3 else ""
     action_text = ("、".join(sell_labels) + remainder) if sells else "无卖出/减仓信号"
-    action_line = (f"{action_label}（{authority_text}）：卖出/减仓{len(sells)}只，{action_text}；"
-                   f"持仓{holdings.get('count', '未知')}只。")
+    action_line = (f"{action_label}（{authority_text}）：卖出/减仓观察{len(sells)}只，{action_text}；"
+                   f"持仓{holdings.get('count', '未知')}只，仅观察/受保护hold。")
     if post_close.get("due"):
         invalid = sorted(set((review.get("unusable_trade_plan_symbols") or [])
                              + (next_plan.get("unusable_trade_plan_symbols") or [])))
@@ -653,7 +653,9 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
         condition = ("失效条件：若行情批次/计划不匹配，停止使用上述动作。"
                      if authority.get("status") == "current" else
                      "失效条件：行情或计划未绑定当期，停止使用旧动作。")
-    condition = f"风控{short((plans.get('portfolio_risk') or {}).get('summary'), 25)}；{condition}"
+    condition = ("执行门禁未逐项核实则不可执行、暂不给价；"
+                 f"风控{short((plans.get('portfolio_risk') or {}).get('summary'), 25)}；"
+                 f"{condition}")
     if budget.get("status") == "complete":
         cash_text = (f"股票预算可用¥{float(budget.get('available_cash_cny') or 0):,.0f}；"
                      f"现金口径{short(budget.get('as_of') or '未知', 25)}；"
@@ -664,12 +666,16 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
         cash_text += "买入不放行。"
     external_status = external.get("status")
     if external_status == "complete":
-        external_text = f"外部独立当期锁定{len(external.get('top5') or [])}只"
+        picks = (f"三方：正式{formal.get('status') or 'missing'} TOP5={len(formal.get('formal_top5') or [])}；"
+                 f"独立{independent.get('status') or 'missing'} TOP5={len(independent.get('top5') or [])}；"
+                 f"外部独立当期锁定{len(external.get('top5') or [])}只。")
     else:
-        external_text = "外部独立当期无效，旧排名不采用"
-    picks = (f"三方：正式{formal.get('status') or 'missing'} TOP5={len(formal.get('formal_top5') or [])}；"
-             f"独立{independent.get('status') or 'missing'} TOP5={len(independent.get('top5') or [])}；"
-             f"{external_text}。")
+        reason = (external.get("error_code") or
+                  ",".join(external.get("stale_reason_codes") or []) or
+                  external_status or "missing")
+        picks = (f"正式/独立两方短名单，完整三方待恢复（外部缺口{short(reason, 30)}）；"
+                 f"正式TOP5={len(formal.get('formal_top5') or [])}，"
+                 f"独立TOP5={len(independent.get('top5') or [])}；旧排名不采用。")
     pairs = comparison.get("pairwise") or {}
     fi = pairs.get("formal_independent") or {}
     overlap = len(fi.get("intersection") or []) if fi else None
@@ -682,7 +688,7 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
     difference = (f"正式/独立交集{overlap}只；{external_difference}"
                   f"差异正式{len(fi.get('formal_only') or [])}只、"
                   f"独立{len(fi.get('independent_only') or [])}只。"
-                  if overlap is not None else "三方差异：当期对比不可用。")
+                  if overlap is not None else "短名单差异：当期对比不可用。")
     if post_close.get("due"):
         plan_count = int(next_plan.get("count") or 0)
         ready_count = int(next_plan.get("ready_count") or 0)
@@ -722,24 +728,19 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if day.get("confirmed") is not True or day.get("is_trading_day") is not True:
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "trading_day_not_confirmed_open"}
-    if (snapshot["post_close_review"].get("due")
-            and (snapshot["post_close_review"].get("status") not in {"complete", "degraded"}
-                 or snapshot["holdings_review"].get("status") not in {"complete", "degraded"}
-                 or snapshot["next_session_plan"].get("status") not in {"complete", "degraded"}
-                 or not snapshot["post_close_review"].get("conclusion"))):
-        return {"requested": True, "sent": False, "channel": "qq",
-                "error_code": "post_close_review_incomplete"}
     policy = snapshot.get("notification_policy") or {}
-    if policy.get("version") != "critical-only-action-required-v1":
+    if (policy.get("version") != "critical-only-action-required-v1"
+            or policy.get("report_delivery") != "scheduled_slot_report"
+            or policy.get("critical_event_delivery") != "intraday_monitor_only"
+            or policy.get("scheduled_delivery") != "silent_monitor_owns_critical_events"):
         return {"requested": True, "sent": False, "channel": "qq",
-                "error_code": "critical_notification_policy_unverified"}
-    # Four scheduled slots remain analysis-only. The intraday monitor owns
-    # critical event delivery; a routine or degraded summary never claims a
-    # slot or makes an HTTP attempt.
-    return {"requested": False, "sent": False, "channel": "qq",
-            "delivery_status": "silent", "suppressed": True,
-            "suppression_reason": str(policy.get("silent_reason") or
-                                      "critical_event_monitor_owned")[:80]}
+                "error_code": "scheduled_report_policy_unverified"}
+    if not os.getenv("QQ_WEBHOOK_URL", "").strip():
+        return {"requested": True, "sent": False, "channel": "qq",
+                "error_code": "qq_webhook_unavailable"}
+    # The monitor owns critical alerts; this slot owns the bounded report.
+    # Its delivery does not depend on the monitor's eligible event count.
+    return None
 
 
 def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -779,9 +780,7 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
                 only_channels=["qq"], fallback=None,
                 source="scripts.foliant_scheduled_snapshot",
                 source_run_id=str(snapshot.get("run_id") or "") or None,
-                idempotency_key="scheduled-qq:" + hashlib.sha256(
-                    (notification_slot or payload["payload_hash"]).encode("utf-8")
-                ).hexdigest(),
+                idempotency_key="scheduled-qq:" + str(notification_slot or ""),
                 business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
                 original_body=render_qq_report(snapshot)[1],
                 externally_deduplicated=True,
@@ -805,13 +804,13 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
     return ({"requested": True, "sent": True, "channel": "qq",
              "delivery_status": "delivered", "http_status": http_status,
              "message_archive_status": archive_status,
-             "message_archive_id": archive_message_id} if sent else
+             "message_archive_id": archive_message_id} if sent and http_status in {200, 204} else
             {"requested": True, "sent": False, "channel": "qq",
-             "delivery_status": "failed" if http_status else "unknown",
+             "delivery_status": "failed" if http_status and not sent else "unknown",
              "http_status": http_status,
              "message_archive_status": archive_status,
              "message_archive_id": archive_message_id,
-             "error_code": "qq_http_rejected" if http_status else "qq_delivery_unknown"})
+             "error_code": "qq_http_rejected" if http_status and not sent else "qq_delivery_unknown"})
 
 
 def delivery_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
