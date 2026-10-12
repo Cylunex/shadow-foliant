@@ -331,8 +331,14 @@ class ResearchSynchronizer:
             raise
 
     def refresh_calendar_for_day(self, trade_date: str) -> dict:
-        """Refresh calendar evidence, falling back only to complete same-day cache."""
+        """Refresh same-day and near-future evidence for the next-session plan."""
         day = pd.Timestamp(trade_date).date()
+        try:
+            forward_days = min(
+                31, max(7, int(os.getenv("RESEARCH_CALENDAR_FORWARD_DAYS", "14")))
+            )
+        except (TypeError, ValueError):
+            forward_days = 14
         try:
             attempts = min(
                 3, max(1, int(os.getenv("RESEARCH_CALENDAR_REFRESH_ATTEMPTS", "3")))
@@ -351,7 +357,8 @@ class ResearchSynchronizer:
         for attempt in range(attempts):
             try:
                 return self.sync_calendar(
-                    (day - timedelta(days=14)).isoformat(), day.isoformat()
+                    (day - timedelta(days=14)).isoformat(),
+                    (day + timedelta(days=forward_days)).isoformat(),
                 )
             except Exception as exc:
                 last_error = exc

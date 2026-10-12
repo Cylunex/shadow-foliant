@@ -69,6 +69,15 @@ class SourceContractTest(unittest.TestCase):
         self.assertEqual(result['refresh_error_type'], 'RuntimeError')
         self.assertEqual(store.called, ('2026-08-24', True))
 
+    def test_calendar_refresh_captures_future_sessions_for_next_day_plans(self):
+        syncer = ResearchSynchronizer(store=object())
+        with patch.object(
+            syncer, 'sync_calendar', return_value={'quality_status': 'ok'},
+        ) as refresh:
+            result = syncer.refresh_calendar_for_day('2026-08-24')
+        self.assertEqual(result['quality_status'], 'ok')
+        refresh.assert_called_once_with('2026-08-10', '2026-09-07')
+
     def test_daily_sync_rejects_stale_calendar_cache(self):
         class Store:
             def calendar_consensus(self, *_args, **_kwargs):
