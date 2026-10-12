@@ -626,15 +626,23 @@ def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
     if post_close.get("due"):
         actions = review.get("rows") or []
         authority_text = "当日收盘复盘" if review.get("status") in {"complete", "degraded"} else "盘后动作不可用"
+        action_label = "复盘动作"
     else:
         actions = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
-        authority_text = "同批行情持仓动作" if authority.get("status") == "current" else "当期动作不可用，旧信号不作依据"
+        critical_ready = authority.get("critical_alert_gate") == "ready"
+        authority_text = (
+            "同批行情持仓观察，最高提醒门禁未核验"
+            if authority.get("status") == "current" and not critical_ready else
+            "同批行情持仓动作" if authority.get("status") == "current" else
+            "当期动作不可用，旧信号不作依据"
+        )
+        action_label = "持仓观察" if not critical_ready else "权威动作"
     sells = [row for row in actions if row.get("action") in {"sell", "reduce"}]
     sell_labels = [short(row.get("name") or row.get("symbol") or row.get("code"), 14)
                    for row in sells[:3]]
     remainder = f"等{len(sells)}只" if len(sells) > 3 else ""
     action_text = ("、".join(sell_labels) + remainder) if sells else "无卖出/减仓信号"
-    action_line = (f"权威动作（{authority_text}）：卖出/减仓{len(sells)}只，{action_text}；"
+    action_line = (f"{action_label}（{authority_text}）：卖出/减仓{len(sells)}只，{action_text}；"
                    f"持仓{holdings.get('count', '未知')}只。")
     if post_close.get("due"):
         invalid = sorted(set((review.get("unusable_trade_plan_symbols") or [])

@@ -319,9 +319,10 @@ def assess_quotes(pool: Iterable[dict[str, Any]], quotes: dict[str, dict[str, An
             "quote_age_minutes": round(age_minutes, 2),
             "freshness": freshness,
             "price_actionable": intraday_actionable,
+            "price_actionability_scope": "research_threshold_only",
             "price_usable": usable,
             "price_context": (
-                "intraday_execution" if intraday_actionable else
+                "intraday_threshold_observation" if intraday_actionable else
                 "post_close_mark" if closing_current else
                 "unusable"
             ),

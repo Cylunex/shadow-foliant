@@ -166,6 +166,33 @@ def _action_plan(value: Any) -> dict[str, Any]:
     return clean_json({key: value.get(key) for key in allowed if key in value})
 
 
+def _critical_input_gaps(rows: Any, now: datetime) -> dict[str, int]:
+    """Count missing alert authority without changing the portfolio preview verdict."""
+    holdings = [row for row in rows or [] if isinstance(row, dict)]
+    gaps = {
+        "explicit_plan_valid_until": 0,
+        "matching_qfq_price_basis": 0,
+        "broker_sellable_quantity": 0,
+        "verified_tradeability": 0,
+    }
+    for row in holdings:
+        valid_until = _parse_datetime(row.get("plan_valid_until"))
+        if valid_until is None or valid_until.tzinfo is None or valid_until < now:
+            gaps["explicit_plan_valid_until"] += 1
+        if (row.get("plan_adjustment") != "qfq"
+                or row.get("quote_adjustment") != "qfq"
+                or "trade_plan" not in str(row.get("price_basis") or "")):
+            gaps["matching_qfq_price_basis"] += 1
+        sellable = _finite_number(row.get("sellable_quantity"))
+        if (sellable is None or sellable <= 0
+                or row.get("sellability_source") != "broker"
+                or str(row.get("sellability_as_of") or "")[:10] != now.date().isoformat()):
+            gaps["broker_sellable_quantity"] += 1
+        if row.get("tradeable") is not True:
+            gaps["verified_tradeability"] += 1
+    return gaps
+
+
 def _finite_number(value: Any) -> float | None:
     try:
         number = float(value)
@@ -2365,12 +2392,34 @@ class ScheduledSnapshotService:
             if row.get("trade_plan") or persisted_plans.get(row.get("symbol"))
         ]
         plan_projection = _action_plan(account_plan)
+        critical_projection = (
+            intraday.get("critical_notification_policy") or {}
+            if phase == "intraday" and intraday_quote_binding == "same_snapshot_quote_batch"
+            else {}
+        )
+        critical_input_gaps = (
+            _critical_input_gaps(intraday.get("holdings"), pricing_at)
+            if critical_projection else {}
+        )
+        critical_alert_blockers = [
+            key for key, count in critical_input_gaps.items() if count
+        ]
+        if not critical_projection or critical_projection.get("delivery_gate") != "ready":
+            critical_alert_blockers.insert(0, "critical_notification_policy_unverified")
         raw_plan_blockers = list(plan_projection.get("blockers") or [])
         buy_blockers = [item for item in raw_plan_blockers if item == "cash_unknown"]
         operational_blockers = [item for item in raw_plan_blockers if item != "cash_unknown"]
         plan_projection["blockers"] = operational_blockers
+        plan_projection["blocker_scope"] = "portfolio_risk_preview_only"
         plan_projection["buy_blockers"] = buy_blockers
-        plan_projection["sell_blockers"] = operational_blockers
+        plan_projection["sell_blockers"] = list(dict.fromkeys(
+            operational_blockers + critical_alert_blockers
+        ))
+        plan_projection["critical_alert_gate"] = (
+            critical_projection.get("delivery_gate") or "unverified"
+        )
+        plan_projection["critical_alert_blockers"] = critical_alert_blockers
+        plan_projection["critical_input_gap_counts"] = critical_input_gaps
         plan_state = str(plan_projection.get("status") or "complete")
         if plan_projection.get("error_code") or operational_blockers:
             plan_state = "degraded" if plan_state not in {"missing", "stale"} else plan_state
@@ -2463,6 +2512,9 @@ class ScheduledSnapshotService:
                     if phase == "intraday" else
                     "intraday_decisions_are_not_authoritative_after_close"
                 ),
+                "scope": "same_batch_research_decisions_only",
+                "critical_alert_gate": plan_projection["critical_alert_gate"],
+                "critical_alert_blockers": critical_alert_blockers,
             },
             "intraday_as_of": intraday.get("generated_at"),
             "intraday_plan_binding": {
@@ -2489,6 +2541,9 @@ class ScheduledSnapshotService:
                 "sell_side": {
                     "status": "available",
                     "blockers": operational_blockers,
+                    "scope": "conservative_reduction_preview_only",
+                    "critical_alert_gate": plan_projection["critical_alert_gate"],
+                    "critical_alert_blockers": critical_alert_blockers,
                 },
                 "affects_snapshot_quality": False,
                 "broker_cash_source": "unavailable",
@@ -2678,11 +2733,6 @@ class ScheduledSnapshotService:
         ]
         healthy = not blocking_sections
         captured_at = pricing_at.isoformat(timespec="seconds")
-        critical_projection = (
-            intraday.get("critical_notification_policy") or {}
-            if phase == "intraday" and intraday_quote_binding == "same_snapshot_quote_batch"
-            else {}
-        )
         snapshot = {
             "schema_version": "scheduled-agent-snapshot-v1",
             "status": "complete" if healthy else "degraded",

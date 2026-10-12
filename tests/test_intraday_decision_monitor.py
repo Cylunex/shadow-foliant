@@ -254,6 +254,8 @@ def test_batch_retrieved_at_keeps_existing_price_fresh_when_provider_omits_row_t
     )
     assert quality["status"] == "success"
     assert quality["items"]["510300"]["price_actionable"] is True
+    assert quality["items"]["510300"]["price_context"] == "intraday_threshold_observation"
+    assert quality["items"]["510300"]["price_actionability_scope"] == "research_threshold_only"
     assert quality["items"]["510300"]["quote_time_source"] == "batch_retrieved_at"
 
 

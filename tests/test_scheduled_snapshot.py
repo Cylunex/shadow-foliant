@@ -530,6 +530,58 @@ def test_intraday_actions_are_recomputed_after_quotes_and_bound_to_same_batch():
     assert snapshot["trade_plans"]["portfolio_action_guard"]["guarded_count"] == 1
 
 
+def test_current_research_actions_expose_missing_critical_alert_authority():
+    def projector(**kwargs):
+        return {
+            "status": "success",
+            "trade_date": kwargs["now"].date().isoformat(),
+            "generated_at": kwargs["now"].isoformat(timespec="seconds"),
+            "selection_run_id": "formal-run",
+            "holdings": [{
+                "symbol": "000001", "action": "sell", "decision_source": "hard_risk",
+                "price_actionable": True, "plan_valid_until": None,
+                "plan_adjustment": "qfq", "quote_adjustment": "",
+                "price_basis": "trade_plan；正式manifest qfq日线",
+                "sellable_quantity": None, "sellability_source": "",
+                "tradeable": False,
+            }],
+            "critical_notification_policy": {
+                "delivery_gate": "disabled_missing_authoritative_inputs",
+                "eligible_new_event_count": 0,
+                "silent_reasons": {"plan_or_price_basis_unverified": 1},
+            },
+        }
+
+    snapshot = build_service(intraday_projector=projector).read(
+        owner_id="scheduled-agent"
+    )["data"]
+    plans = snapshot["trade_plans"]
+    risk = plans["portfolio_risk"]
+    assert plans["holding_actions_authority"]["status"] == "current"
+    assert plans["holding_actions_authority"]["scope"] == "same_batch_research_decisions_only"
+    assert risk["blocker_scope"] == "portfolio_risk_preview_only"
+    assert risk["blockers"] == []
+    assert risk["critical_alert_gate"] == "disabled_missing_authoritative_inputs"
+    assert risk["critical_input_gap_counts"] == {
+        "explicit_plan_valid_until": 1,
+        "matching_qfq_price_basis": 1,
+        "broker_sellable_quantity": 1,
+        "verified_tradeability": 1,
+    }
+    assert set(risk["sell_blockers"]) == {
+        "critical_notification_policy_unverified",
+        *risk["critical_input_gap_counts"],
+    }
+    assert plans["cash_policy"]["sell_side"]["scope"] == (
+        "conservative_reduction_preview_only"
+    )
+    assert snapshot["notification_policy"]["eligible_new_event_count"] == 0
+    from scripts.foliant_scheduled_snapshot import render_qq_summary
+    _, summary = render_qq_summary(snapshot)
+    assert "持仓观察" in summary
+    assert "最高提醒门禁未核验" in summary
+
+
 def test_intraday_projection_failure_is_optional_when_fixed_budget_risk_is_complete():
     old = {
         "selection_run_id": "formal-run",
