@@ -483,7 +483,6 @@ def send(category: str, title: str, content: str,
         source = "notification_event"
     results = DeliveryResults()
     message_id = uuid4().hex
-    results.message_id = message_id
 
     def attempt(ch: str, *, fallback_from: Optional[str] = None) -> None:
         sender = CHANNELS.get(ch)

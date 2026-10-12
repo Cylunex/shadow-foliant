@@ -76,6 +76,39 @@ def test_same_slot_cannot_be_resent_or_changed(tmp_path):
         prepare(svc, final="changed")
 
 
+def test_scheduled_shanghai_slot_archives_once_with_timezone_offset(tmp_path, monkeypatch):
+    svc, _ = service(tmp_path)
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, body: (
+        svc.prepare(**body) if action == "prepare" else
+        {"started": svc.start(body["delivery_id"])} if action == "start" else
+        {"recorded": svc.finish(**body)}))
+    calls = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        calls.append(body) or (True, "HTTP 200")))
+    kwargs = dict(only_channels=["qq"], fallback=None,
+                  source="scripts.foliant_scheduled_snapshot",
+                  idempotency_key="scheduled-qq:2026-10-12T14:35+08:00",
+                  externally_deduplicated=True, original_body="完整原稿")
+
+    first = notification_router.send("report", "定时报", "有界摘要", **kwargs)
+    second = notification_router.send("report", "定时报", "有界摘要", **kwargs)
+
+    assert first["qq"] == (True, "HTTP 200")
+    assert first.archive_status == "recorded"
+    assert second["qq"] == (False, "archive_suppressed")
+    assert calls == ["有界摘要"]
+    detail = svc.detail(first.message_id)
+    assert detail["original_body"] == "完整原稿"
+    assert detail["deliveries"][0]["status"] == "accepted"
+    assert detail["deliveries"][0]["suppressed_count"] == 1
+
+
+def test_archive_idempotency_key_still_rejects_unsafe_characters(tmp_path):
+    svc, _ = service(tmp_path)
+    with pytest.raises(ValueError, match="message_archive_idempotency_invalid"):
+        prepare(svc, key="scheduled-qq:2026-10-12T14:35+08:00\nunsafe")
+
+
 def test_critical_event_cannot_move_to_another_channel(tmp_path):
     svc, _ = service(tmp_path)
     key = "critical-stop:600001:aaaaaaaaaaaa:sell:1"
@@ -139,6 +172,7 @@ def test_archive_unavailable_still_sends_alert(monkeypatch):
     result = notification_router.send("alert", "告警", "正文", only_channels=["qq"])
     assert result["qq"][0] is True
     assert result.archive_status == "unrecorded"
+    assert result.message_id is None
 
 
 def test_identical_alert_from_two_paths_is_suppressed_and_changed_quote_delivers(tmp_path, monkeypatch):

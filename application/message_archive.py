@@ -21,6 +21,7 @@ from cryptography.fernet import Fernet
 ARCHIVE_VERSION = "message-archive-v1"
 DEFAULT_KEY_FILE = Path("/data/project/shadow-foliant-ops/secrets/message-archive.key")
 SAFE_CODE = re.compile(r"^[a-zA-Z0-9._:-]{1,160}$")
+SAFE_IDEMPOTENCY_KEY = re.compile(r"^[a-zA-Z0-9._:+-]{1,160}$")
 CHANNELS = {"qq", "email", "dingtalk", "feishu", "wechat_work",
             "telegram", "discord", "slack", "webhook"}
 STATUSES = {"accepted", "failed", "unknown"}
@@ -91,7 +92,7 @@ class MessageArchiveService:
         if not source or len(source) > 200 or not category or len(category) > 60:
             raise ValueError("message_archive_metadata_invalid")
         if idempotency_key and (len(idempotency_key) > 160
-                                or not SAFE_CODE.fullmatch(idempotency_key)):
+                                or not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key)):
             raise ValueError("message_archive_idempotency_invalid")
         if any(len(value.encode("utf-8")) > 16 * 1024 * 1024
                for value in (title, original_body, final_body)):
