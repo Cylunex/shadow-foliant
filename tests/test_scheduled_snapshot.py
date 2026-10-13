@@ -589,8 +589,9 @@ def test_current_research_actions_expose_missing_critical_alert_authority():
     assert snapshot["notification_policy"]["eligible_new_event_count"] == 0
     from scripts.foliant_scheduled_snapshot import render_qq_summary
     _, summary = render_qq_summary(snapshot)
-    assert "持仓观察" in summary
-    assert "最高提醒门禁未核验" in summary
+    assert "操作观察" in summary
+    assert "000001｜名称待核验｜¥10.00｜卖出观察" in summary
+    assert "执行条件待核验" in summary
 
 
 def test_intraday_projection_failure_is_optional_when_fixed_budget_risk_is_complete():
@@ -1783,11 +1784,12 @@ def test_cli_partial_post_close_sends_bounded_report(monkeypatch):
     assert notification["sent"] is True
     assert notification["http_status"] == 200
     send.assert_called_once()
+    assert send.call_args.kwargs["compact"] is False
+    assert "original_body" in send.call_args.kwargs
     body = cli.render_qq_summary(snapshot)[1]
-    assert "53/55" in body and "67/69" in body
-    assert "600699,601919" in body
-    assert "旧价位无效" in body
-    assert "暂不给价" in body
+    assert "当期无可用选股候选" in body
+    assert "当期无须单列的风险动作" in body
+    assert "53/55" not in body
 
 
 def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
@@ -1818,10 +1820,9 @@ def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
     }
     assert cli.qq_preflight(snapshot) is None
     payload = cli.qq_payload(snapshot)
-    assert payload["category"] == "report" and payload["delivered_lines"] == 8
-    assert "暂不给价" in payload["content"]
-    assert "受保护hold" in payload["content"]
-    assert "完整三方待恢复" in payload["content"]
+    assert payload["category"] == "report" and payload["delivered_lines"] == 4
+    assert "当期无可用选股候选" in payload["content"]
+    assert "当期无须单列的风险动作" in payload["content"]
     assert "最高级止损风险" not in payload["content"]
 
 
@@ -2127,9 +2128,10 @@ def test_cli_without_current_bundle_degrades_old_overlay_and_sends_report(monkey
     result = json.loads(capsys.readouterr().out)
     assert result["external_independent_research"]["status"] == "degraded"
     assert result["external_independent_research"]["top5"] == []
-    assert "旧排名不采用" in captured["body"]
+    assert "600999" not in captured["body"]
+    assert "600001｜候选1｜¥10.00｜正式+独立量化" in captured["body"]
     assert result["notification"]["delivery_status"] == "delivered"
-    assert "旧排名不采用" in cli.render_qq_summary(result)[1]
+    assert "600999" not in cli.render_qq_summary(result)[1]
     assert "600999" not in cli.render_qq_summary(result)[1]
 
 

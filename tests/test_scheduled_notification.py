@@ -96,13 +96,13 @@ def test_summary_keeps_risk_cash_sources_and_close_plan_for_57_holdings():
     }
     title, body = cli.render_qq_summary(snapshot)
     assert title == "ShadowFoliant 计划摘要"
-    assert len(body.splitlines()) == 8
-    assert len(body) <= 900
-    assert compact_notification("report", body) == body
-    for expected in ("11只", "持仓57只", "旧价位无效", "买入侧关闭", "旧排名不采用",
-                     "正式/独立交集0只", "46/57", "61/72", "缺口11", "未覆盖全部持仓"):
+    assert len(body.splitlines()) <= 24
+    assert len(body) <= 1500
+    for expected in ("编号｜名称｜现价｜来源", "编号｜名称｜现价｜操作｜原因",
+                     "600001｜", "600002｜", "600010｜持仓10｜现价待核验｜卖出观察"):
         assert expected in body
-    assert "600010" not in body
+    assert "旧价位无效" not in body
+    assert "正式/独立交集" not in body
 
 
 def test_slot_window_refuses_historical_backfill(tmp_path):

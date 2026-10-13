@@ -51,7 +51,7 @@ NOTIFICATION_REJECTION_HINTS = {
     "scheduled_notification_slot_invalid": "Use one of the four planned Shanghai slots.",
 }
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
-QQ_SUMMARY_VERSION = "scheduled-qq-v2"
+QQ_SUMMARY_VERSION = "scheduled-qq-v3"
 DELIVERY_RECEIPT_VERSION = "scheduled-delivery-receipt-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
@@ -604,109 +604,8 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
 
 
 def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
-    """Eight priority-ordered lines. The protected snapshot remains the full report."""
-    from notify.plain_language import plain_text
-
-    def short(value: Any, limit: int = 100) -> str:
-        return plain_text(str(value or "未知").replace("\n", " "), limit)
-
-    day = snapshot.get("trading_day") or {}
-    holdings = snapshot.get("holdings") or {}
-    plans = snapshot.get("trade_plans") or {}
-    review = snapshot.get("holdings_review") or {}
-    next_plan = snapshot.get("next_session_plan") or {}
-    post_close = snapshot.get("post_close_review") or {}
-    cash = plans.get("cash_policy") or {}
-    budget = cash.get("stock_budget") or {}
-    formal = snapshot.get("formal_selection") or {}
-    independent = snapshot.get("independent_selection") or {}
-    external = snapshot.get("external_independent_research") or {}
-    comparison = snapshot.get("source_comparison") or {}
-    authority = plans.get("holding_actions_authority") or {}
-    if post_close.get("due"):
-        actions = review.get("rows") or []
-        authority_text = "当日收盘复盘" if review.get("status") in {"complete", "degraded"} else "盘后动作不可用"
-        action_label = "复盘观察"
-    else:
-        actions = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
-        critical_ready = authority.get("critical_alert_gate") == "ready"
-        authority_text = (
-            "同批行情持仓观察，最高提醒门禁未核验"
-            if authority.get("status") == "current" and not critical_ready else
-            "同批行情持仓动作" if authority.get("status") == "current" else
-            "当期动作不可用，旧信号不作依据"
-        )
-        action_label = "持仓观察" if not critical_ready else "持仓分析"
-    sells = [row for row in actions if row.get("action") in {"sell", "reduce"}]
-    sell_labels = [short(row.get("name") or row.get("symbol") or row.get("code"), 14)
-                   for row in sells[:3]]
-    remainder = f"等{len(sells)}只" if len(sells) > 3 else ""
-    action_text = ("、".join(sell_labels) + remainder) if sells else "无卖出/减仓信号"
-    action_line = (f"{action_label}（{authority_text}）：卖出/减仓观察{len(sells)}只，{action_text}；"
-                   f"持仓{holdings.get('count', '未知')}只，仅观察/受保护hold。")
-    if post_close.get("due"):
-        invalid = sorted(set((review.get("unusable_trade_plan_symbols") or [])
-                             + (next_plan.get("unusable_trade_plan_symbols") or [])))
-        condition = (f"失效：{len(invalid)}只权威计划不可用，旧价位无效（例：{','.join(invalid[:3])}）。"
-                     if invalid else "失效条件：次日行情、现金及可卖量须重新确认。")
-    else:
-        condition = ("失效条件：若行情批次/计划不匹配，停止使用上述动作。"
-                     if authority.get("status") == "current" else
-                     "失效条件：行情或计划未绑定当期，停止使用旧动作。")
-    condition = ("执行门禁未逐项核实则不可执行、暂不给价；"
-                 f"风控{short((plans.get('portfolio_risk') or {}).get('summary'), 25)}；"
-                 f"{condition}")
-    if budget.get("status") == "complete":
-        cash_text = (f"股票预算可用¥{float(budget.get('available_cash_cny') or 0):,.0f}；"
-                     f"现金口径{short(budget.get('as_of') or '未知', 25)}；"
-                     "仅预览，不允许自动买入。")
-    else:
-        cash_text = "股票预算/现金质量不完整；买入侧关闭，卖出复核继续。"
-    if cash.get("buy_side", {}).get("status") == "blocked" or cash.get("new_or_add_positions_allowed") is False:
-        cash_text += "买入不放行。"
-    external_status = external.get("status")
-    if external_status == "complete":
-        picks = (f"三方：正式{formal.get('status') or 'missing'} TOP5={len(formal.get('formal_top5') or [])}；"
-                 f"独立{independent.get('status') or 'missing'} TOP5={len(independent.get('top5') or [])}；"
-                 f"外部独立当期锁定{len(external.get('top5') or [])}只。")
-    else:
-        reason = (external.get("error_code") or
-                  ",".join(external.get("stale_reason_codes") or []) or
-                  external_status or "missing")
-        picks = (f"正式/独立两方短名单，完整三方待恢复（外部缺口{short(reason, 30)}）；"
-                 f"正式TOP5={len(formal.get('formal_top5') or [])}，"
-                 f"独立TOP5={len(independent.get('top5') or [])}；旧排名不采用。")
-    pairs = comparison.get("pairwise") or {}
-    fi = pairs.get("formal_independent") or {}
-    overlap = len(fi.get("intersection") or []) if fi else None
-    formal_symbols = {str(row.get("symbol")) for row in formal.get("formal_top5") or []
-                      if row.get("symbol")}
-    external_symbols = {str(row.get("symbol")) for row in external.get("top5") or []
-                        if row.get("symbol")}
-    external_difference = (f"正式/外部交集{len(formal_symbols & external_symbols)}只；"
-                           if external_status == "complete" and formal_symbols else "")
-    difference = (f"正式/独立交集{overlap}只；{external_difference}"
-                  f"差异正式{len(fi.get('formal_only') or [])}只、"
-                  f"独立{len(fi.get('independent_only') or [])}只。"
-                  if overlap is not None else "短名单差异：当期对比不可用。")
-    if post_close.get("due"):
-        plan_count = int(next_plan.get("count") or 0)
-        ready_count = int(next_plan.get("ready_count") or 0)
-        blocked_count = int(next_plan.get("blocked_count") or max(0, plan_count - ready_count))
-        close_line = (f"盘后：{short(post_close.get('conclusion'), 65)}；"
-                      f"持仓复盘{review.get('reviewed_count') or 0}/{review.get('count') or 0}；"
-                      f"次日计划{ready_count}/{plan_count}可用，缺口{blocked_count}。")
-    else:
-        close_line = f"盘后/次日计划：{short(snapshot.get('phase'), 25)}阶段未到期；下一时点复核。"
-    lines = [
-        f"{day.get('date') or '未知日期'} {short(snapshot.get('phase'), 25)}；质量{short(snapshot.get('status'), 15)}。",
-        action_line, condition, cash_text, picks, difference, close_line,
-        "QQ仅为有界摘要，未覆盖全部持仓；完整持仓与失效证据请走受保护快照。",
-    ]
-    # Every priority category has its own line; trim within each line before
-    # the generic router's eight-line/900-character transport limit applies.
-    lines = [short(line, 108) for line in lines]
-    return "ShadowFoliant 计划摘要", "\n".join(lines)
+    from scripts.scheduled_qq_format import render
+    return render(snapshot)
 
 
 def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -744,16 +643,15 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
-    from notify.plain_language import compact_notification
+    from scripts.scheduled_qq_format import MAX_CHARS, MAX_LINES
     title, content = render_qq_summary(snapshot)
-    delivered = compact_notification("report", content)
-    if delivered != content or len(delivered.splitlines()) != 8 or len(delivered) > 900:
+    if len(content.splitlines()) > MAX_LINES or len(content) > MAX_CHARS:
         raise ValueError("qq_summary_exceeds_transport_budget")
     return {
         "title": title, "content": content,
-        "payload_hash": hashlib.sha256((title + "\n" + delivered).encode("utf-8")).hexdigest(),
+        "payload_hash": hashlib.sha256((title + "\n" + content).encode("utf-8")).hexdigest(),
         "original_lines": len(render_qq_report(snapshot)[1].splitlines()),
-        "delivered_lines": len(delivered.splitlines()),
+        "delivered_lines": len(content.splitlines()),
         "category": "report", "version": QQ_SUMMARY_VERSION,
     }
 
@@ -783,6 +681,7 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
                 idempotency_key="scheduled-qq:" + str(notification_slot or ""),
                 business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
                 original_body=render_qq_report(snapshot)[1],
+                compact=False,
                 externally_deduplicated=True,
             )
     except Exception:

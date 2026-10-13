@@ -15,9 +15,11 @@
 
 无发送检查：不带参数读取完整快照，`--summary-only` 读取有界概览；`--audit-notifications` 只读取最近 14 天、最多 56 条脱敏审计，不能与发送或 bundle 参数并用。直接调用 CLI 时，`--delivery-receipt` 必须与 `--send-qq` 同用；启动器自动传递此参数。审计包括计划 slot、claim/尝试/确认时间、标题及有界正文的 SHA-256、压缩前后行数、类别、HTTP 状态、错误码、最终状态、版本、去重原因和次数。不返回消息正文、Webhook、Token、持仓内容或账户地址。2026-09-24 前的旧 claim 只迁移已知状态；当时未保存的哈希、HTTP 与压缩计数以零值或空值表示，不能反推为成功。工作日没有任何 ledger 行的计划 slot 标为 `unobserved`，表示历史证据缺口，不等于未发送；节假日也只标观察缺口，不推断原调度一定执行。
 
-QQ 正文固定为 8 行且不超过 900 字，按权威持仓动作、失效条件和风控、现金及买入门、三方有效性、当期差异、盘后与次日缺口排序。其末行明确标为“有界摘要”。完整 57 只等全部持仓、原始计划与失效证据只在受保护快照中读取，不声称 QQ 已覆盖全部持仓。
+QQ 正文优先逐只展示当期正式 TOP5 与独立量化 TOP5 的去重结果，格式为“编号｜名称｜现价｜来源”；有意义的持仓风险另列“编号｜名称｜现价｜操作｜原因”。编号固定六位、保留前导零。来源仅标正式、独立量化或两者交集；外部独立研究和问财不冒充这两条榜单。现价只来自同批受保护快照中经新鲜度与交易日核验的 quotes，并附行情时点；现价并非可执行触发价。缺失或过期写“现价待核验”，名称冲突写“名称待核验”。只有权威执行条件齐备才直接写卖出/减仓；其他风险写观察，组合保护后的 hold 写受保护观察。普通 hold 不逐只发送。
 
-快照的 `notification_policy.mode=critical_only` 和 `scheduled_delivery=silent_monitor_owns_critical_events` 仅描述盘中最高事件的发送权。`report_delivery=scheduled_slot_report` 与 `critical_event_delivery=intraday_monitor_only` 明确分流：四个正常时点的 QQ `report` 按 slot 发送，允许研究来源和部分计划降级；最高事件只由盘中共用监控以 `alert` 类别发送。`eligible_new_event_count=0` 或执行门禁未核验不取消报告。报告只给观察与受保护 hold，缺少权威价位时暂不给价，不把分析动作写成可执行委托；外部独立研究缺失时标明正式/独立两方短名单和完整三方待恢复。
+正文最多 24 行、1500 字；超限时保留完整行并明确还有几条未展示，不做静默尾部截断。完整持仓、TOP15、风险与失效条件、归因及未压缩原稿仍在受保护快照和消息正文存档；QQ 仅展示有界结果。常规质量状态、预算、榜单数量、交集计数、内部错误码和盘后未到期状态不占正文。
+
+快照的 `notification_policy.mode=critical_only` 和 `scheduled_delivery=silent_monitor_owns_critical_events` 仅描述盘中最高事件的发送权。`report_delivery=scheduled_slot_report` 与 `critical_event_delivery=intraday_monitor_only` 明确分流：四个正常时点的 QQ `report` 按 slot 发送，允许研究来源和部分计划降级；最高事件只由盘中共用监控以 `alert` 类别发送。`eligible_new_event_count=0` 或执行门禁未核验不取消报告。执行价位未核验只影响操作栏，不能遮蔽有效的同批行情现价。外部独立研究缺失时，正文仍展示正式与独立量化的当期名单。
 
 ## 发送语义与切换
 
