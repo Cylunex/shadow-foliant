@@ -95,7 +95,7 @@ def test_summary_keeps_risk_cash_sources_and_close_plan_for_57_holdings():
             "intersection": [], "formal_only": ["600001"], "independent_only": ["600002"]}}},
     }
     title, body = cli.render_qq_summary(snapshot)
-    assert title == "ShadowFoliant 计划摘要"
+    assert title.startswith("选股与操作｜09-24 ")
     assert len(body.splitlines()) <= 24
     assert len(body) <= 1500
     for expected in ("编号｜名称｜现价｜来源", "编号｜名称｜现价｜操作｜原因",

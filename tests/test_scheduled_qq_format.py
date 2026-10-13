@@ -28,7 +28,8 @@ def snapshot():
 
 
 def test_ten_distinct_picks_with_prices_and_six_digit_codes():
-    _, body = render(snapshot())
+    title, body = render(snapshot())
+    assert title == "选股与操作｜10-13 10:15行情"
     assert sum(line.endswith("｜正式") for line in body.splitlines()) == 5
     assert sum(line.endswith("｜独立量化") for line in body.splitlines()) == 5
     assert "000001｜正式1｜¥10.00｜正式" in body

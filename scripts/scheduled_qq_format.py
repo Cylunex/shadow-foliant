@@ -160,4 +160,5 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
     omitted = len(lines) - len(selected)
     if omitted:
         selected.append(f"另有{omitted}条未展示")
-    return "ShadowFoliant 计划摘要", "\n".join(selected)
+    market_label = "收盘行情" if post_close else "行情"
+    return f"选股与操作｜{day[5:] or '当期'} {time_label}{market_label}", "\n".join(selected)

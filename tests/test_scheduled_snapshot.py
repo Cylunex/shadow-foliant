@@ -1694,7 +1694,7 @@ def test_cli_auth_failure_and_report_receipt_never_leak_secrets(monkeypatch):
         result = cli.send_qq(snapshot)
     assert result["sent"] is False
     assert result["delivery_status"] == "unknown"
-    assert captured["title"] == "ShadowFoliant 计划摘要"
+    assert captured["title"].startswith("选股与操作｜09-10 11:30行情")
     assert "private.example.invalid" not in str(result)
     assert "super-secret-bearer" not in str(result)
 
