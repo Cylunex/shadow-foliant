@@ -623,7 +623,7 @@ def test_current_research_actions_expose_missing_critical_alert_authority():
     assert snapshot["notification_policy"]["eligible_new_event_count"] == 0
     from scripts.foliant_scheduled_snapshot import render_qq_summary
     _, summary = render_qq_summary(snapshot)
-    assert "操作观察" in summary
+    assert "持仓操作与风险观察" in summary
     assert "000001｜名称待核验｜¥10.00｜卖出观察" in summary
     assert "执行条件待核验" in summary
 
@@ -1969,7 +1969,8 @@ def test_cli_external_rejection_preserves_degraded_snapshot_and_sends_report(
     monkeypatch.setattr(cli, "notification_ledger", ledger)
     monkeypatch.setattr(cli, "send_qq", lambda snapshot, **_kwargs: (
         events.append("qq") or {"requested": True, "sent": True, "channel": "qq",
-                                "delivery_status": "delivered"}
+                                "delivery_status": "delivered",
+                                "message_archive_status": "recorded"}
     ))
 
     assert cli.main(["--external-bundle", str(path), "--send-qq",
@@ -2065,7 +2066,8 @@ def test_cli_submits_external_before_claiming_report_slot(tmp_path, monkeypatch,
     monkeypatch.setattr(cli, "notification_ledger", ledger)
     monkeypatch.setattr(cli, "send_qq", lambda _snapshot, **_kwargs: (
         events.append(("qq", None)) or {"requested": True, "sent": True,
-                                        "channel": "qq", "delivery_status": "delivered"}
+                                        "channel": "qq", "delivery_status": "delivered",
+                                        "message_archive_status": "recorded"}
     ))
 
     assert cli.main([
@@ -2156,7 +2158,7 @@ def test_cli_without_current_bundle_degrades_old_overlay_and_sends_report(monkey
     def send(value, **kwargs):
         captured["body"] = kwargs["payload"]["content"]
         return {"requested": True, "sent": True, "channel": "qq",
-                "delivery_status": "delivered"}
+                "delivery_status": "delivered", "message_archive_status": "recorded"}
     monkeypatch.setattr(cli, "send_qq", send)
     assert cli.main(["--send-qq", "--notification-slot", "10:15"]) == 0
     result = json.loads(capsys.readouterr().out)

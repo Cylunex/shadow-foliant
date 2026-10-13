@@ -88,7 +88,7 @@ def _certified_scheduled_report(category: str, source: str, key: str | None,
     return (category == "report"
             and source == "scripts.foliant_scheduled_snapshot"
             and bool(re.fullmatch(
-                r"scheduled-qq:\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00",
+                r"scheduled-qq:\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00(?::[0-9a-f]{16}:[1-9][0-9]?)?",
                 key or ""))
             and channels == ["qq"] and fallback is None
             and externally_deduplicated and critical_event is None)
@@ -525,7 +525,9 @@ def send(category: str, title: str, content: str,
                 results[ch] = (False, "archive_unavailable")
                 results.archive_outcomes[ch] = "unknown"
                 return
-            if idempotency_key and not externally_deduplicated and category != "alert":
+            if (idempotency_key and category != "alert"
+                    and (not externally_deduplicated or
+                         source == "scripts.foliant_scheduled_snapshot")):
                 results[ch] = (False, "archive_unavailable")
                 results.archive_outcomes[ch] = "unknown"
                 return

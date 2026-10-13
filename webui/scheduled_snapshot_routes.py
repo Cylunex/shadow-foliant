@@ -7,7 +7,8 @@ from typing import Any, Callable, Literal
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from application.scheduled_report_contract import REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES
+from application.scheduled_report_contract import (REPORT_MAX_DELIVERED_LINES,
+    REPORT_MAX_ORIGINAL_LINES, REPORT_MAX_PARTS)
 
 
 class NotificationClaimReq(BaseModel):
@@ -15,7 +16,8 @@ class NotificationClaimReq(BaseModel):
     notification_slot: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00$")
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     original_lines: int = Field(ge=1, le=REPORT_MAX_ORIGINAL_LINES)
-    delivered_lines: int = Field(ge=1, le=REPORT_MAX_LINES)
+    delivered_lines: int = Field(ge=1, le=REPORT_MAX_DELIVERED_LINES)
+    part_count: int = Field(default=1, ge=1, le=REPORT_MAX_PARTS)
     category: Literal["report"]
     version: str = Field(pattern=r"^[A-Za-z0-9._-]{1,80}$")
 
@@ -27,9 +29,12 @@ class NotificationStartReq(BaseModel):
 
 
 class NotificationFinishReq(NotificationStartReq):
-    status: Literal["delivered", "failed", "unknown"]
+    status: Literal["delivered", "failed", "partial", "unknown"]
     http_status: int | None = None
     error_code: str | None = None
+    accepted_part_count: int = Field(default=0, ge=0, le=REPORT_MAX_PARTS)
+    message_archive_status: str | None = Field(default=None, pattern=r"^(recorded|partial|unknown|unrecorded|suppressed)$")
+    message_archive_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 def register_scheduled_snapshot_routes(
@@ -77,7 +82,7 @@ def register_scheduled_snapshot_routes(
             return agent_result({"status": "complete", "data": ScheduledNotificationService().claim(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
                 original_lines=req.original_lines, delivered_lines=req.delivered_lines,
-                category=req.category, version=req.version,
+                category=req.category, version=req.version, part_count=req.part_count,
                 actor_id=str(request.state.agent_identity.agent_id))})
         except Exception as exc:
             return agent_error(exc)
@@ -101,6 +106,9 @@ def register_scheduled_snapshot_routes(
             return agent_result({"status": "complete", "data": ScheduledNotificationService().finish(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
                 actor_id=str(request.state.agent_identity.agent_id), status=req.status,
-                http_status=req.http_status, error_code=req.error_code)})
+                http_status=req.http_status, error_code=req.error_code,
+                accepted_part_count=req.accepted_part_count,
+                message_archive_status=req.message_archive_status,
+                message_archive_id=req.message_archive_id)})
         except Exception as exc:
             return agent_error(exc)

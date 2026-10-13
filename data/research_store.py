@@ -408,7 +408,11 @@ class ResearchStore:
                 version TEXT NOT NULL, claimed_at TEXT NOT NULL,
                 attempted_at TEXT, delivered_at TEXT, http_status INTEGER,
                 error_code TEXT, delivery_status TEXT NOT NULL,
-                suppression_reason TEXT, suppressed_count INTEGER NOT NULL DEFAULT 0
+                suppression_reason TEXT, suppressed_count INTEGER NOT NULL DEFAULT 0,
+                part_count INTEGER NOT NULL DEFAULT 1,
+                accepted_part_count INTEGER NOT NULL DEFAULT 0,
+                message_archive_status TEXT,
+                message_archive_id TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS notification_messages (
                 message_id TEXT PRIMARY KEY, source TEXT NOT NULL,
@@ -504,6 +508,15 @@ class ResearchStore:
             "ON CONFLICT(version) DO NOTHING",
             ("19-message-channel-archive", datetime.now().astimezone().isoformat()),
         )
+        version = "20-scheduled-report-parts"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "scheduled_notification_deliveries", "part_count", "INTEGER NOT NULL DEFAULT 1")
+            self._add_column(cur, "scheduled_notification_deliveries", "accepted_part_count", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column(cur, "scheduled_notification_deliveries", "message_archive_status", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "message_archive_id", "TEXT")
+            cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                        (version, datetime.now().astimezone().isoformat()))
         version = "4-reproducible-inputs"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():

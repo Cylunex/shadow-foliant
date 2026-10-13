@@ -16,7 +16,8 @@ from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from application.scheduled_notification import ScheduledNotificationService
-from application.scheduled_report_contract import REPORT_MAX_LINES
+from application.message_archive import MessageArchiveService
+from application.scheduled_report_contract import REPORT_MAX_DELIVERED_LINES
 from data.research_store import ResearchStore
 from jobs.automation_config import REGISTRY
 from jobs.task_health import effective_task_run, summarize_task_health
@@ -83,7 +84,7 @@ def test_rendered_full_report_claims_through_real_http_route_and_deduplicates(re
                                        agent_error=lambda exc: {"error": str(exc)})
     client = TestClient(app)
     payload = qq_payload(_report())
-    assert payload["delivered_lines"] == REPORT_MAX_LINES
+    assert payload["delivered_lines"] > 24
     claim = {key: payload[key] for key in (
         "payload_hash", "original_lines", "delivered_lines", "category", "version")}
     claim["notification_slot"] = "2026-10-13T11:25+08:00"
@@ -98,11 +99,138 @@ def test_rendered_full_report_claims_through_real_http_route_and_deduplicates(re
         "status": "delivered", "http_status": 200}).json()["data"]["recorded"] is True
     replay = client.post(base + "claim", json=claim).json()["data"]
     assert replay["prior_sent"] is True and replay["should_send"] is False
-    claim["delivered_lines"] = REPORT_MAX_LINES + 1
+    claim["delivered_lines"] = REPORT_MAX_DELIVERED_LINES + 1
     assert client.post(base + "claim", json=claim).status_code == 422
     with pytest.raises(ValueError, match="line_count_invalid"):
         service.claim(slot=start["notification_slot"], actor_id="fixture",
                       **{key: claim[key] for key in payload if key in claim})
+
+
+def test_rendered_parts_archive_and_partial_slot_never_replays(report_store, monkeypatch):
+    from cryptography.fernet import Fernet
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    snapshot = _report()
+    snapshot["trade_plans"]["holding_actions"] = [
+        {"symbol": f"601{i:03d}", "name": f"观察{i}", "action": "sell",
+         "decision_source": "hard_risk" if i == 59 else "portfolio_risk",
+         "reason": "止损" if i == 59 else "组合风险"} for i in range(60)]
+    snapshot["quotes"] = {"captured_at": "2026-10-13T11:25:00+08:00", "rows": []}
+    snapshot["as_of"] = {"captured_at": "2026-10-13T11:25:00+08:00"}
+    snapshot["run_id"] = "fixture-run"
+    payload = qq_payload(snapshot)
+    assert payload["part_count"] >= 2
+    assert payload["parts"][0][1].index("601059｜") < payload["parts"][0][1].index("601000｜")
+    assert all(len(body.encode("utf-8")) <= 4096 for _, body in payload["parts"])
+
+    archive = MessageArchiveService(store=report_store, key=Fernet.generate_key())
+    def archive_action(action, data):
+        if action == "prepare":
+            return archive.prepare(**data)
+        if action == "start":
+            return {"started": archive.start(data["delivery_id"])}
+        return {"recorded": archive.finish(**data)}
+    monkeypatch.setattr(notification_router, "archive_action", archive_action)
+    monkeypatch.setattr(cli, "qq_preflight", lambda _: None)
+    sent = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        sent.append(body) or (True, "HTTP 200")))
+    slot = "2026-10-13T11:25+08:00"
+    service = ScheduledNotificationService(store=report_store,
+        clock=lambda: datetime.fromisoformat("2026-10-13T11:25:00+08:00"))
+    claim = service.claim(slot=slot, payload_hash=payload["payload_hash"],
+        original_lines=payload["original_lines"], delivered_lines=payload["delivered_lines"],
+        part_count=payload["part_count"], category="report", version=payload["version"],
+        actor_id="fixture")
+    assert claim["should_send"]
+    assert service.start(slot=slot, payload_hash=payload["payload_hash"], actor_id="fixture")["started"]
+    result = cli.send_qq(snapshot, payload=payload, notification_slot=slot)
+    assert result["delivery_status"] == "delivered"
+    assert result["message_archive_status"] == "recorded"
+    assert result["accepted_part_count"] == payload["part_count"] == len(sent)
+    for index in range(1, len(sent) + 1):
+        message = archive.detail(result["message_archive_id"] if index == len(sent) else
+            _message_id_for_part(report_store, slot, payload["payload_hash"], index))
+        assert message["original_body"] == cli.render_qq_report(snapshot)[1]
+        assert message["deliveries"][0]["final_body"] == sent[index - 1]
+        assert message["deliveries"][0]["status"] == "accepted"
+    assert service.finish(slot=slot, payload_hash=payload["payload_hash"], actor_id="fixture",
+        status=result["delivery_status"], http_status=result["http_status"],
+        accepted_part_count=result["accepted_part_count"],
+        message_archive_status=result["message_archive_status"],
+        message_archive_id=result["message_archive_id"])["recorded"]
+    replay = service.claim(slot=slot, payload_hash=payload["payload_hash"],
+        original_lines=payload["original_lines"], delivered_lines=payload["delivered_lines"],
+        part_count=payload["part_count"], category="report", version=payload["version"],
+        actor_id="fixture")
+    assert not replay["should_send"]
+    assert replay["message_archive_status"] == "recorded"
+    assert replay["accepted_part_count"] == payload["part_count"]
+
+
+def _message_id_for_part(store, slot, batch_hash, index):
+    conn = store.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT message_id FROM notification_messages WHERE idempotency_key=?",
+                    (f"scheduled-qq:{slot}:{batch_hash[:16]}:{index}",))
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_second_part_failure_stays_partial_and_blocks_same_slot(report_store, monkeypatch):
+    from cryptography.fernet import Fernet
+    from notify import notification_router
+    from scripts import foliant_scheduled_snapshot as cli
+
+    snapshot = _report()
+    snapshot["trade_plans"]["holding_actions"] *= 4
+    # Distinct symbols are required because the renderer deduplicates holdings.
+    snapshot["trade_plans"]["holding_actions"] = [
+        {"symbol": f"603{i:03d}", "name": f"风险{i}", "action": "reduce",
+         "reason": "组合风险"} for i in range(65)]
+    payload = qq_payload(snapshot)
+    assert payload["part_count"] >= 2
+    archive = MessageArchiveService(store=report_store, key=Fernet.generate_key())
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, data: (
+        archive.prepare(**data) if action == "prepare" else
+        {"started": archive.start(data["delivery_id"])} if action == "start" else
+        {"recorded": archive.finish(**data)}))
+    monkeypatch.setattr(cli, "qq_preflight", lambda _: None)
+    calls = []
+    def sender(_title, body):
+        calls.append(body)
+        return (True, "HTTP 200") if len(calls) == 1 else (False, "HTTP 503")
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", sender)
+    slot = "2026-10-13T11:25+08:00"
+    service = ScheduledNotificationService(store=report_store,
+        clock=lambda: datetime.fromisoformat("2026-10-13T11:25:00+08:00"))
+    metadata = {"slot": slot, "payload_hash": payload["payload_hash"],
+        "original_lines": payload["original_lines"],
+        "delivered_lines": payload["delivered_lines"], "part_count": payload["part_count"],
+        "category": "report", "version": payload["version"], "actor_id": "fixture"}
+    assert service.claim(**metadata)["should_send"]
+    assert service.start(slot=slot, payload_hash=payload["payload_hash"], actor_id="fixture")["started"]
+    result = cli.send_qq(snapshot, payload=payload, notification_slot=slot)
+    assert result["delivery_status"] == "partial"
+    assert result["sent"] is False and result["accepted_part_count"] == 1
+    assert len(calls) == 2
+    assert service.finish(slot=slot, payload_hash=payload["payload_hash"], actor_id="fixture",
+        status=result["delivery_status"], http_status=result["http_status"],
+        error_code=result["error_code"],
+        accepted_part_count=result["accepted_part_count"],
+        message_archive_status=result["message_archive_status"],
+        message_archive_id=result["message_archive_id"])["recorded"]
+    replay = service.claim(**metadata)
+    assert replay["should_send"] is False and replay["delivery_status"] == "partial"
+    assert replay["accepted_part_count"] == 1
+    assert replay["message_archive_status"] == "partial"
+    assert archive.detail(_message_id_for_part(report_store, slot, payload["payload_hash"], 1))[
+        "deliveries"][0]["status"] == "accepted"
+    assert archive.detail(_message_id_for_part(report_store, slot, payload["payload_hash"], 2))[
+        "deliveries"][0]["status"] == "failed"
 
 
 def test_paused_optional_jobs_are_visible_without_false_failure():

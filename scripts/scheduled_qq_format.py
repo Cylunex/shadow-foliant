@@ -7,10 +7,54 @@ import re
 from typing import Any
 
 from notify.plain_language import plain_text
-from application.scheduled_report_contract import REPORT_MAX_CHARS, REPORT_MAX_LINES
+from application.scheduled_report_contract import (REPORT_MAX_BYTES, REPORT_MAX_CHARS,
+    REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES, REPORT_MAX_PARTS)
 
 MAX_LINES = REPORT_MAX_LINES
 MAX_CHARS = REPORT_MAX_CHARS
+
+
+def _fits(body: str) -> bool:
+    return (len(body) <= MAX_CHARS and len(body.encode("utf-8")) <= REPORT_MAX_BYTES
+            and len(body.splitlines()) <= MAX_LINES)
+
+
+def render_parts(title: str, body: str) -> list[tuple[str, str]]:
+    """Pack complete report lines, in priority order, into one or more QQ messages."""
+    if _fits(body):
+        return [(title, body)]
+    lines = body.splitlines()
+    if len(lines) > REPORT_MAX_ORIGINAL_LINES:
+        raise ValueError("qq_report_too_many_lines")
+    # Reserve the widest part marker before packing, so numbering cannot make a
+    # previously fitted part overflow. The same report title is kept on each part.
+    groups: list[list[str]] = []
+    current: list[str] = []
+    marker = f"{title}｜{REPORT_MAX_PARTS}/{REPORT_MAX_PARTS}"
+    in_selection = False
+    for line in lines:
+        if line.startswith("选股（"):
+            in_selection = True
+        candidate = "\n".join([marker, *current, line])
+        if not _fits(candidate):
+            if not current:
+                raise ValueError("qq_report_line_exceeds_budget")
+            groups.append(current)
+            header = ("编号｜名称｜现价｜来源" if in_selection else
+                      "编号｜名称｜现价｜操作｜原因")
+            current = ([header] if re.match(r"^\d{6}｜", line) else []) + [line]
+            if not _fits("\n".join([marker, *current])):
+                raise ValueError("qq_report_line_exceeds_budget")
+        else:
+            current.append(line)
+    if current:
+        groups.append(current)
+    if len(groups) > REPORT_MAX_PARTS:
+        raise ValueError("qq_report_exceeds_part_budget")
+    total = len(groups)
+    return [(f"{title}｜{index}/{total}",
+             "\n".join([f"{title}｜{index}/{total}", *group]))
+            for index, group in enumerate(groups, 1)]
 
 
 def _code(row: dict[str, Any]) -> str:
@@ -88,7 +132,8 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
     else:
         authority = plans.get("holding_actions_authority") or {}
         action_rows = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
-    operations = []
+    operations: list[tuple[tuple[int, float, str], str]] = []
+    protected_counts = {"sell": 0, "reduce": 0}
     seen_actions = set()
     for row in action_rows:
         if not isinstance(row, dict) or not (symbol := _code(row)) or symbol in seen_actions:
@@ -125,12 +170,16 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
             and str(row.get("sellability_as_of") or "")[:10] == day
             and valid_until and valid_until.tzinfo and valid_until >= captured_at
         )
+        raw_reason = str((row.get("requested_reason") if guarded else row.get("reason")) or "")
+        hard_risk = (row.get("requested_source") if guarded else row.get("decision_source")) == "hard_risk"
         if guarded:
-            action, reason = "受保护观察", "原始风险触发；组合保护后保持观察"
+            protected_counts[requested] += 1
+            if not hard_risk:
+                continue
+            action, reason = "止损受保护观察", "原始止损触发；组合保护后保持观察；执行未核验"
         elif final in {"sell", "reduce"}:
             action = {"sell": "卖出", "reduce": "减仓"}[final] + ("" if executable else "观察")
-            raw_reason = str(row.get("reason") or "")
-            reason = ("触及止损" if "止损" in raw_reason else
+            reason = ("触及止损" if hard_risk or "止损" in raw_reason else
                       "触及目标价" if "目标" in raw_reason or "止盈" in raw_reason else
                       "组合风险信号" if row.get("decision_source") == "portfolio_risk" else
                       "计划风险信号")
@@ -140,26 +189,36 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
             action, reason = ("买入观察" if final == "buy" else "加仓观察"), "候选信号；买入条件待核验"
         row_name = _field(row.get("name"))
         names = {row_name} if row_name and row_name != symbol else set()
-        operations.append(f"{symbol}｜{name(symbol, names)}｜{price}｜{action}｜{reason}")
+        try:
+            impact = float(row.get("market_value") or row.get("position_value") or 0)
+            impact = impact if math.isfinite(impact) and impact > 0 else 0
+        except (TypeError, ValueError):
+            impact = 0
+        if not impact and price != "现价待核验":
+            try:
+                quantity = float(row.get("quantity") or 0)
+                impact = quantity * float(price.removeprefix("¥")) if quantity > 0 else 0
+            except (TypeError, ValueError):
+                pass
+        priority = (0 if executable and final in {"sell", "reduce"} and hard_risk else
+                    1 if executable and final in {"sell", "reduce"} else
+                    2 if hard_risk else
+                    3 if final in {"sell", "reduce"} else 4)
+        operations.append(((priority, -impact, symbol),
+                           f"{symbol}｜{name(symbol, names)}｜{price}｜{action}｜{reason}"))
 
     time_label = min(quote_times).strftime("%H:%M") if quote_times else (
         captured_at.strftime("%H:%M") if captured_at else "待核验")
-    lines = [f"选股（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
-             "编号｜名称｜现价｜来源", *(selection_rows or ["当期无可用选股候选"])]
+    lines = []
     if operations:
-        lines.extend(["操作观察", "编号｜名称｜现价｜操作｜原因", *operations])
+        lines.extend([f"持仓操作与风险观察（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
+                      "编号｜名称｜现价｜操作｜原因",
+                      *(line for _, line in sorted(operations))])
     else:
         lines.append("操作：当期无须单列的风险动作")
-    selected = []
-    for index, line in enumerate(lines):
-        remaining = len(lines) - index - 1
-        suffix = f"另有{remaining}条未展示" if remaining else ""
-        candidate = selected + [line] + ([suffix] if suffix else [])
-        if len(candidate) > MAX_LINES or len("\n".join(candidate)) > MAX_CHARS:
-            break
-        selected.append(line)
-    omitted = len(lines) - len(selected)
-    if omitted:
-        selected.append(f"另有{omitted}条未展示")
+    if any(protected_counts.values()):
+        lines.append(f"组合保护后继续观察：原始卖出{protected_counts['sell']}只、减仓{protected_counts['reduce']}只；风险未解除")
+    lines.extend([f"选股（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
+                  "编号｜名称｜现价｜来源", *(selection_rows or ["当期无可用选股候选"])])
     market_label = "收盘行情" if post_close else "行情"
-    return f"选股与操作｜{day[5:] or '当期'} {time_label}{market_label}", "\n".join(selected)
+    return f"选股与操作｜{day[5:] or '当期'} {time_label}{market_label}", "\n".join(lines)

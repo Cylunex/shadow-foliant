@@ -51,7 +51,7 @@ NOTIFICATION_REJECTION_HINTS = {
     "scheduled_notification_slot_invalid": "Use one of the four planned Shanghai slots.",
 }
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
-QQ_SUMMARY_VERSION = "scheduled-qq-v3"
+QQ_SUMMARY_VERSION = "scheduled-qq-v4"
 DELIVERY_RECEIPT_VERSION = "scheduled-delivery-receipt-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
@@ -643,15 +643,18 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
-    from scripts.scheduled_qq_format import MAX_CHARS, MAX_LINES
+    from scripts.scheduled_qq_format import render_parts
     title, content = render_qq_summary(snapshot)
-    if len(content.splitlines()) > MAX_LINES or len(content) > MAX_CHARS:
-        raise ValueError("qq_summary_exceeds_transport_budget")
+    parts = render_parts(title, content)
     return {
-        "title": title, "content": content,
-        "payload_hash": hashlib.sha256((title + "\n" + content).encode("utf-8")).hexdigest(),
+        "title": title, "content": content, "parts": parts,
+        "payload_hash": hashlib.sha256(json.dumps({
+            "version": QQ_SUMMARY_VERSION, "run_id": snapshot.get("run_id"),
+            "category": "report", "parts": parts,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "original_lines": len(render_qq_report(snapshot)[1].splitlines()),
-        "delivered_lines": len(content.splitlines()),
+        "delivered_lines": sum(len(body.splitlines()) for _, body in parts),
+        "part_count": len(parts),
         "category": "report", "version": QQ_SUMMARY_VERSION,
     }
 
@@ -671,45 +674,53 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
     except (ImportError, ModuleNotFoundError):
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "qq_router_unavailable"}
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            result = notification_router.send(
-                "report", payload["title"], payload["content"],
-                only_channels=["qq"], fallback=None,
-                source="scripts.foliant_scheduled_snapshot",
-                source_run_id=str(snapshot.get("run_id") or "") or None,
-                idempotency_key="scheduled-qq:" + str(notification_slot or ""),
-                business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
-                original_body=render_qq_report(snapshot)[1],
-                compact=False,
-                externally_deduplicated=True,
-            )
-    except Exception:
-        return {"requested": True, "sent": False, "channel": "qq",
-                "error_code": "qq_router_error"}
-    if not isinstance(result, dict) or not isinstance(result.get("qq"), tuple):
-        return {"requested": True, "sent": False, "channel": "qq",
-                "error_code": "qq_router_result_invalid"}
-    try:
-        sent = bool(result["qq"][0])
-    except Exception:
-        return {"requested": True, "sent": False, "channel": "qq",
-                "error_code": "qq_router_result_invalid"}
-    detail = str(result["qq"][1] or "")
-    match = re.fullmatch(r"HTTP (\d{3})", detail)
-    http_status = int(match.group(1)) if match else None
-    archive_status = getattr(result, "archive_status", "unobserved")
-    archive_message_id = getattr(result, "message_id", None)
-    return ({"requested": True, "sent": True, "channel": "qq",
-             "delivery_status": "delivered", "http_status": http_status,
-             "message_archive_status": archive_status,
-             "message_archive_id": archive_message_id} if sent and http_status in {200, 204} else
-            {"requested": True, "sent": False, "channel": "qq",
-             "delivery_status": "failed" if http_status and not sent else "unknown",
-             "http_status": http_status,
-             "message_archive_status": archive_status,
-             "message_archive_id": archive_message_id,
-             "error_code": "qq_http_rejected" if http_status and not sent else "qq_delivery_unknown"})
+    parts = payload.get("parts") or [(payload["title"], payload["content"])]
+    original = render_qq_report(snapshot)[1]
+    outcomes = []
+    for index, (title, body) in enumerate(parts, 1):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = notification_router.send(
+                    "report", title, body, only_channels=["qq"], fallback=None,
+                    source="scripts.foliant_scheduled_snapshot",
+                    source_run_id=str(snapshot.get("run_id") or "") or None,
+                    idempotency_key=("scheduled-qq:" + str(notification_slot or "")
+                                     + ":" + payload["payload_hash"][:16] + f":{index}"),
+                    business_as_of=str((snapshot.get("as_of") or {}).get("captured_at") or "") or None,
+                    original_body=original, compact=False, externally_deduplicated=True,
+                )
+            channel = result.get("qq") if isinstance(result, dict) else None
+            detail = str(channel[1] or "") if isinstance(channel, tuple) and len(channel) == 2 else ""
+            match = re.fullmatch(r"HTTP (\d{3})", detail)
+            status = int(match.group(1)) if match else None
+            accepted = bool(channel[0]) and status in {200, 204} if isinstance(channel, tuple) else False
+            archive_status = getattr(result, "archive_status", "unknown")
+            message_id = getattr(result, "message_id", None)
+        except Exception:
+            accepted, status, archive_status, message_id = False, None, "unknown", None
+        outcomes.append({"part_index": index, "accepted": accepted, "http_status": status,
+                         "archive_status": archive_status, "message_id": message_id})
+        # An unconfirmed attempt must not be followed by more Webhook attempts.
+        if not accepted or archive_status != "recorded":
+            break
+    accepted_count = sum(bool(row["accepted"]) for row in outcomes)
+    total = len(parts)
+    last = outcomes[-1]
+    fully_recorded = accepted_count == total and all(
+        row["archive_status"] == "recorded" for row in outcomes)
+    status = ("delivered" if fully_recorded else
+              "partial" if accepted_count and accepted_count < total else
+              "unknown" if accepted_count or last["http_status"] is None else "failed")
+    return {"requested": True, "sent": accepted_count == total, "channel": "qq",
+            "delivery_status": status, "http_status": last["http_status"],
+            "message_archive_status": ("recorded" if fully_recorded else
+                                       "partial" if any(row["archive_status"] == "recorded" for row in outcomes)
+                                       else last["archive_status"]),
+            "message_archive_id": last["message_id"], "part_count": total,
+            "accepted_part_count": accepted_count,
+            "error_code": None if fully_recorded else
+                          "qq_part_delivery_partial" if status == "partial" else
+                          "qq_http_rejected" if status == "failed" else "qq_delivery_unknown"}
 
 
 def delivery_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -743,6 +754,8 @@ def delivery_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
         "http_status": bounded_int(notification.get("http_status")),
         "original_lines": bounded_int(notification.get("original_lines")),
         "delivered_lines": bounded_int(notification.get("delivered_lines")),
+        "part_count": bounded_int(notification.get("part_count")),
+        "accepted_part_count": bounded_int(notification.get("accepted_part_count")),
     })
     return {
         "schema_version": DELIVERY_RECEIPT_VERSION,
@@ -839,7 +852,8 @@ def main(argv: list[str] | None = None) -> int:
                     "notification_slot": notification_slot,
                     **{key: payload[key] for key in (
                         "payload_hash", "original_lines", "delivered_lines",
-                        "category", "version")},
+                            "category", "version")},
+                        "part_count": payload.get("part_count", 1),
                 })
                 claim_data = (claim or {}).get("data") or {}
                 if claim_failure:
@@ -852,7 +866,14 @@ def main(argv: list[str] | None = None) -> int:
                         "suppressed": True, "notification_slot": notification_slot,
                         "delivery_status": claim_data.get("delivery_status") or "unknown",
                         "suppression_reason": claim_data.get("suppression_reason"),
-                        "delivered_at": claim_data.get("delivered_at")}
+                        "delivered_at": claim_data.get("delivered_at"),
+                        "payload_hash": payload["payload_hash"],
+                        "summary_version": payload["version"],
+                        "part_count": claim_data.get("part_count"),
+                        "accepted_part_count": claim_data.get("accepted_part_count"),
+                        "message_archive_status": claim_data.get("message_archive_status"),
+                        "message_archive_id": claim_data.get("message_archive_id"),
+                        "delivery_recorded": True}
                 else:
                     start, start_failure = notification_ledger("start", {
                         "notification_slot": notification_slot,
@@ -873,6 +894,9 @@ def main(argv: list[str] | None = None) -> int:
                             "status": status,
                             "http_status": notification.get("http_status"),
                             "error_code": notification.get("error_code"),
+                            "accepted_part_count": notification.get("accepted_part_count", 0),
+                            "message_archive_status": notification.get("message_archive_status"),
+                            "message_archive_id": notification.get("message_archive_id"),
                         })
                         notification.update({
                             "notification_slot": notification_slot,
@@ -880,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
                             "summary_version": payload["version"],
                             "original_lines": payload["original_lines"],
                             "delivered_lines": payload["delivered_lines"],
+                            "part_count": payload.get("part_count", 1),
                             "delivery_recorded": finish_failure is None and bool(
                                 ((finish or {}).get("data") or {}).get("recorded")),
                         })
@@ -894,7 +919,9 @@ def main(argv: list[str] | None = None) -> int:
         args.send_qq and not (
             notification.get("delivery_status") == "silent" or
             notification.get("prior_sent") or
-            (notification.get("sent") and notification.get("delivery_recorded"))
+            (notification.get("delivery_status") == "delivered"
+             and notification.get("delivery_recorded")
+             and notification.get("message_archive_status") == "recorded")
         )
     )
     return 0 if snapshot.get("status") in {"complete", "degraded"} and not notification_failed else 2
