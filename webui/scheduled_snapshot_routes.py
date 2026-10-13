@@ -7,13 +7,15 @@ from typing import Any, Callable, Literal
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from application.scheduled_report_contract import REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES
+
 
 class NotificationClaimReq(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     notification_slot: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00$")
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    original_lines: int = Field(ge=1, le=1000)
-    delivered_lines: int = Field(ge=1, le=8)
+    original_lines: int = Field(ge=1, le=REPORT_MAX_ORIGINAL_LINES)
+    delivered_lines: int = Field(ge=1, le=REPORT_MAX_LINES)
     category: Literal["report"]
     version: str = Field(pattern=r"^[A-Za-z0-9._-]{1,80}$")
 

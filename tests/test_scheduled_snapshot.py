@@ -185,6 +185,40 @@ def cockpit(**_kwargs):
     }}
 
 
+@pytest.mark.parametrize("state", ("degraded", "partial", "timeout", "interrupted"))
+def test_job_projection_preserves_observed_terminal_failure_state(state):
+    from application.scheduled_snapshot import _job_run
+    row = _job_run({"job_name": "eod_outcomes", "status": state,
+                    "started_at": "2026-10-13T18:50:00+08:00",
+                    "finished_at": "2026-10-13T19:00:00+08:00"})
+    assert row["status"] == state
+    assert row["terminal_verified"] is True
+
+
+def test_intraday_post_close_pending_is_explicitly_expected():
+    snapshot = build_service().read(owner_id="fixture")["data"]
+    assert snapshot["phase"] == "intraday"
+    assert snapshot["post_close_review"]["status"] == "pending"
+    assert snapshot["quality"]["pending_is_normal"] is True
+    assert "post_close_review" not in snapshot["quality"]["blocking_sections"]
+
+
+def test_post_close_jobs_choose_latest_actual_instant_across_timezones():
+    now = datetime.fromisoformat("2026-10-13T20:45:00+08:00")
+    service = build_service(job_runs_reader=lambda **_kwargs: [
+        {"job_name": "eod_outcomes", "status": "error",
+         "started_at": "2026-10-13T18:50:00+08:00",
+         "finished_at": "2026-10-13T19:00:00+08:00"},
+        {"job_name": "eod_outcomes", "status": "success",
+         "started_at": "2026-10-13T11:10:00Z", "finished_at": "2026-10-13T11:20:00Z"},
+        {"job_name": "eod_outcomes", "status": "error",
+         "started_at": "2026-10-14T11:10:00Z", "finished_at": "2026-10-14T11:20:00Z"},
+    ])
+    review, _ = service._post_close_review(now, {"confirmed": True, "is_trading_day": True})
+    actual = next(row for row in review["jobs"] if row["job_name"] == "eod_outcomes")
+    assert actual["status"] == "success" and actual["finished_at"] == "2026-10-13T11:20:00Z"
+
+
 def context():
     return {"watermark": "same-watermark", "holdings": [
         {"code": "600001", "name": "持仓甲", "cost_price": 9, "quantity": 100},

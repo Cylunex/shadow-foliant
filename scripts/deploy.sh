@@ -153,7 +153,7 @@ trap rollback ERR
 
 supervisorctl restart stock-webui stock-jobs-hub
 supervisorctl status stock-webui stock-jobs-hub
-curl --fail --silent --show-error "$health_base/healthz" >/dev/null
+curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "$health_base/healthz" >/dev/null
 ready_headers=()
 ready_bearer_file="${FOLIANT_READY_BEARER_FILE:?FOLIANT_READY_BEARER_FILE is required}"
 if [[ ! -r "$ready_bearer_file" ]]; then
@@ -161,16 +161,17 @@ if [[ ! -r "$ready_bearer_file" ]]; then
   false
 fi
 ready_headers=(-H "Authorization: Bearer $(<"$ready_bearer_file")")
-ready_payload="$(curl --fail --silent --show-error "${ready_headers[@]}" "$health_base/readyz")"
-if [[ "$ready_payload" != *"$EXPECTED_COMMIT"* ]]; then
-  echo "runtime revision does not match EXPECTED_COMMIT" >&2
+ready_payload="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "${ready_headers[@]}" "$health_base/readyz")"
+if ! "$python_bin" "$validation_dir/scripts/verify_release_readiness.py" \
+     --expected-revision "$EXPECTED_COMMIT" <<< "$ready_payload"; then
+  echo "runtime readiness or revision verification failed" >&2
   false
 fi
 # Research readiness may legitimately be degraded while a fresh bootstrap is in
 # progress, but both protected contracts must respond with valid JSON semantics.
 for path in data-readyz selection-readyz; do
-  payload="$(curl --silent --show-error "${ready_headers[@]}" "$health_base/$path")"
-  if [[ "$payload" != *'"ready"'* || "$payload" != *'"checks"'* ]]; then
+  payload="$(curl --silent --show-error --connect-timeout 5 --max-time 15 "${ready_headers[@]}" "$health_base/$path")"
+  if ! "$python_bin" "$validation_dir/scripts/verify_release_readiness.py" <<< "$payload"; then
     echo "$path did not return a readiness contract" >&2
     false
   fi

@@ -208,13 +208,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     'weekend_portfolio': {
         'cn': '📊 周末持仓深度合并(周报+压力情景)',
         'schedule': f"周日 {WEEKEND_TIMES['weekend_portfolio'][1]}",
-        'category': '核心', 'default': True, 'core': True,
+        'category': '可选研判', 'default': True, 'core': False,
         'description': 'F 合并:顺序跑 ①8情景压力AI(最脆弱情景/减仓对冲)→ ②持仓综合周报(评级/减仓加仓Top5/4象限/已实现盈亏)。合 portfolio_stress_ai+weekly_analysis',
     },
     'weekly_analysis': {
         'cn': '📊 周日持仓综合周报',
         'schedule': f"已并入 weekend_portfolio(周日{WEEKEND_TIMES['weekend_portfolio'][1]})第①步",
-        'category': '核心', 'default': True, 'core': True,
+        'category': '可选研判', 'default': True, 'core': False,
         'description': '评级变化/减仓加仓Top5/4象限体检/已实现盈亏/周末新闻',
     },
     'weekly_db_cleanup': {

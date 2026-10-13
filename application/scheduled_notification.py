@@ -7,6 +7,8 @@ import re
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from application.scheduled_report_contract import REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES
+
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SLOT_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T(?:10:15|11:25|14:35|20:45)\+08:00$")
@@ -41,7 +43,9 @@ class ScheduledNotificationService:
             raise ValueError("scheduled_notification_slot_outside_window")
         if not HASH_PATTERN.fullmatch(payload_hash or ""):
             raise ValueError("scheduled_notification_hash_invalid")
-        if not (1 <= original_lines <= 1000 and 1 <= delivered_lines <= 8):
+        if (type(original_lines) is not int or type(delivered_lines) is not int
+                or not (1 <= original_lines <= REPORT_MAX_ORIGINAL_LINES
+                        and 1 <= delivered_lines <= REPORT_MAX_LINES)):
             raise ValueError("scheduled_notification_line_count_invalid")
         if category != "report" or not VERSION_PATTERN.fullmatch(version or ""):
             raise ValueError("scheduled_notification_metadata_invalid")

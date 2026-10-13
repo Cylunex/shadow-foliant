@@ -211,6 +211,14 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _job_datetime(value: Any) -> datetime | None:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return None
+    zone = ZoneInfo("Asia/Shanghai")
+    return parsed.replace(tzinfo=zone) if parsed.tzinfo is None else parsed.astimezone(zone)
+
+
 def _plan_rebuild_evidence(plan: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Separate plan generation time from its underlying daily-bar date."""
     generated_at = plan.get("plan_generated_at") or plan.get("_snapshot_generated_at")
@@ -265,6 +273,7 @@ def _job_run(row: Any) -> dict[str, Any]:
     raw_status = str(row.get("status") or "missing").lower()
     status = raw_status if raw_status in {
         "success", "error", "failed", "skipped", "running", "pending",
+        "timeout", "interrupted", "degraded", "partial", "not_applicable",
     } else "missing"
     metrics: dict[str, Any] = {}
     detail = str(row.get("error") or "")
@@ -328,7 +337,8 @@ def _job_run(row: Any) -> dict[str, Any]:
             partial_failures.append("closing_plan_coverage_incomplete")
             if status == "success":
                 status = "degraded"
-    terminal = raw_status in {"success", "error", "failed", "skipped"}
+    terminal = raw_status in {"success", "error", "failed", "skipped", "timeout",
+                             "interrupted", "degraded", "partial", "not_applicable"}
     terminal_verified = bool(terminal and row.get("finished_at"))
     if terminal and not terminal_verified:
         partial_failures.append("terminal_timestamp_missing")
@@ -869,6 +879,7 @@ class ScheduledSnapshotService:
                     if isinstance(row, dict)
                 ],
                 "disabled_core": list(tasks.get("disabled_core") or [])[:20],
+                "paused": list(tasks.get("paused") or [])[:100],
                 "running_manual": [
                     {key: row.get(key) for key in ("task_name", "run_id", "status")}
                     for row in (tasks.get("running_manual") or [])[:10]
@@ -1944,13 +1955,15 @@ class ScheduledSnapshotService:
             if not isinstance(row, dict):
                 continue
             job_name = str(row.get("job_name") or "")
-            run_day = str(row.get("started_at") or row.get("finished_at") or "")[:10]
-            if job_name not in (*POST_CLOSE_JOBS, "research_data_sync") or run_day != today:
+            started = _job_datetime(row.get("started_at") or row.get("finished_at"))
+            if (job_name not in (*POST_CLOSE_JOBS, "research_data_sync")
+                    or not started or started.date().isoformat() != today
+                    or started > now):
                 continue
             prior = latest_rows.get(job_name) or {}
-            stamp = str(row.get("finished_at") or row.get("started_at") or "")
-            prior_stamp = str(prior.get("finished_at") or prior.get("started_at") or "")
-            if stamp >= prior_stamp:
+            stamp = _job_datetime(row.get("finished_at")) or started
+            prior_stamp = _job_datetime(prior.get("finished_at") or prior.get("started_at"))
+            if not prior_stamp or stamp >= prior_stamp:
                 latest_rows[job_name] = row
         latest = {name: _job_run(row) for name, row in latest_rows.items()}
         jobs = [latest.get(name) or {"job_name": name, "status": "missing"}
@@ -2816,7 +2829,7 @@ class ScheduledSnapshotService:
                     row.get("source")
                     for row in cockpit.get("optional_provider_degradations") or []
                 ],
-                "pending_is_normal": phase == "post_close_pending",
+                "pending_is_normal": phase in {"intraday", "post_close_pending"},
             },
         }
         snapshot = _redact(snapshot)

@@ -7,9 +7,10 @@ import re
 from typing import Any
 
 from notify.plain_language import plain_text
+from application.scheduled_report_contract import REPORT_MAX_CHARS, REPORT_MAX_LINES
 
-MAX_LINES = 24
-MAX_CHARS = 1500
+MAX_LINES = REPORT_MAX_LINES
+MAX_CHARS = REPORT_MAX_CHARS
 
 
 def _code(row: dict[str, Any]) -> str:

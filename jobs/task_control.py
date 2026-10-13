@@ -748,17 +748,9 @@ def enrich_task_catalog(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def effective_task_run(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """取调度/手动运行中时间更新的一条；排队或运行中的手动任务优先。"""
-    manual = task.get('manual_run')
-    scheduled = task.get('last_run')
-    if manual and manual.get('status') in ('queued', 'running'):
-        return manual
-    manual_at = manual and (
-        manual.get('finished_at') or manual.get('started_at') or manual.get('requested_at'))
-    scheduled_at = scheduled and (scheduled.get('finished_at') or scheduled.get('started_at'))
-    if manual_at and (not scheduled_at or str(manual_at) >= str(scheduled_at)):
-        return manual
-    return scheduled
+    """Compare actual instants; queued/running manual work keeps precedence."""
+    from jobs.task_health import effective_task_run as select_run
+    return select_run(task)
 
 
 def latest_selection_artifact() -> Dict[str, Any]:
@@ -912,31 +904,13 @@ def agent_cockpit(recent_limit: int = 5, compact: bool = True) -> Dict[str, Any]
     try:
         from automation_config import list_all
         jobs = enrich_task_catalog(list_all())
-        failed = []
-        disabled_core = []
-        for job in jobs:
-            last = effective_task_run(job)
-            if last and last.get('status') in (
-                    'error', 'failed', 'timeout', 'interrupted', 'degraded', 'partial'):
-                failed.append({
-                    'name': job['name'], 'status': last.get('status'),
-                    'error': last.get('error'), 'at': last.get('finished_at') or last.get('started_at'),
-                })
-            if job.get('core') and not job.get('enabled'):
-                disabled_core.append(job['name'])
-        data['tasks'] = {
-            'total': len(jobs),
-            'failed_recent': failed[:recent_limit],
-            'disabled_core': disabled_core,
-            'running_manual': [
-                j['manual_run'] for j in jobs
-                if j.get('manual_run') and j['manual_run'].get('status') in ('queued', 'running')
-            ],
-        }
-        if failed:
-            warn(f'{len(failed)} 个任务最近一次运行失败', 'recent_task_failures')
-        if disabled_core:
-            warn(f'{len(disabled_core)} 个核心任务已关闭', 'disabled_core_tasks')
+        from jobs.task_health import summarize_task_health
+        health = summarize_task_health(jobs, recent_limit=recent_limit)
+        data['tasks'] = health
+        if health['failed_count']:
+            warn(f"{health['failed_count']} 个启用任务最近一次运行失败", 'recent_task_failures')
+        if health['disabled_core']:
+            warn(f"{len(health['disabled_core'])} 个核心任务已关闭", 'disabled_core_tasks')
     except Exception as exc:
         warn(f'任务状态读取失败: {exc}', 'task_status_unavailable')
 
