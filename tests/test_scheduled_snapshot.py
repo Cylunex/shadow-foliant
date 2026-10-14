@@ -1718,6 +1718,11 @@ def test_cli_auth_failure_and_report_receipt_never_leak_secrets(monkeypatch):
         "next_session_plan": {"status": "pending"},
         "notification_policy": REPORT_POLICY,
     })
+    snapshot["trade_plans"].update({
+        "holding_actions_authority": {"status": "current"},
+        "holding_actions": [{"symbol": "600001", "name": "观察标的",
+                             "action": "sell", "reason": "止损"}],
+    })
     captured = {}
 
     def send(_category, title, body, **_kwargs):
@@ -1728,7 +1733,7 @@ def test_cli_auth_failure_and_report_receipt_never_leak_secrets(monkeypatch):
         result = cli.send_qq(snapshot)
     assert result["sent"] is False
     assert result["delivery_status"] == "unknown"
-    assert captured["title"].startswith("选股与操作｜09-10 11:30行情")
+    assert captured["title"].startswith("持仓操作｜09-10 11:30行情")
     assert "private.example.invalid" not in str(result)
     assert "super-secret-bearer" not in str(result)
 
@@ -1821,9 +1826,9 @@ def test_cli_partial_post_close_sends_bounded_report(monkeypatch):
     assert send.call_args.kwargs["compact"] is False
     assert "original_body" in send.call_args.kwargs
     body = cli.render_qq_summary(snapshot)[1]
-    assert "当期无可用选股候选" in body
-    assert "当期无须单列的风险动作" in body
-    assert "53/55" not in body
+    assert "当期无可用选股候选" not in body
+    assert "当期无须单列的风险动作" not in body
+    assert "盘后复盘：持仓复核53/55；次日计划67/69可用" in body
 
 
 def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
@@ -1840,7 +1845,7 @@ def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
         "holdings": {"status": "complete", "count": 56},
         "trade_plans": {"status": "degraded", "portfolio_risk": {},
                         "holding_actions_authority": {"status": "current"},
-                        "holding_actions": [{"name": "示例", "action": "sell",
+                        "holding_actions": [{"symbol": "600001", "name": "示例", "action": "sell",
                                              "price_actionable": True}]},
         "quotes": {"status": "complete"},
         "post_close_review": {"due": False, "status": "pending"},
@@ -1854,9 +1859,9 @@ def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
     }
     assert cli.qq_preflight(snapshot) is None
     payload = cli.qq_payload(snapshot)
-    assert payload["category"] == "report" and payload["delivered_lines"] == 4
-    assert "当期无可用选股候选" in payload["content"]
-    assert "当期无须单列的风险动作" in payload["content"]
+    assert payload["category"] == "report" and payload["delivered_lines"] == 3
+    assert "当期无可用选股候选" not in payload["content"]
+    assert "600001｜示例｜现价待核验｜卖出观察" in payload["content"]
     assert "最高级止损风险" not in payload["content"]
 
 
@@ -1961,6 +1966,7 @@ def test_cli_external_rejection_preserves_degraded_snapshot_and_sends_report(
     monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
         events.append("fetch") or deepcopy(original)
     ))
+    monkeypatch.setattr(cli, "fetch_selection_state", lambda _slot: ({"policy_version": "morning-picks-change-only-v1"}, None))
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     def ledger(action, _body):
         events.append(action)
@@ -2051,6 +2057,11 @@ def test_cli_submits_external_before_claiming_report_slot(tmp_path, monkeypatch,
         "decision_as_of": bundle["decision_as_of"],
         "ranking_locked_at": "2026-09-15T20:45:01+08:00",
     }
+    snapshot["post_close_review"] = {"due": True, "status": "degraded"}
+    snapshot["holdings_review"] = {"status": "degraded", "count": 2,
+                                   "reviewed_count": 2}
+    snapshot["next_session_plan"] = {"status": "degraded", "count": 2,
+                                     "ready_count": 0}
     events = []
     monkeypatch.setattr(cli, "submit_external_bundle", lambda value: (
         events.append(("submit", value["idempotency_key"])) or submission, None
@@ -2058,6 +2069,7 @@ def test_cli_submits_external_before_claiming_report_slot(tmp_path, monkeypatch,
     monkeypatch.setattr(cli, "fetch_snapshot", lambda: (
         events.append(("fetch", None)) or deepcopy(snapshot)
     ))
+    monkeypatch.setattr(cli, "fetch_selection_state", lambda _slot: ({"policy_version": "morning-picks-change-only-v1"}, None))
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     def ledger(action, body):
         events.append((action, body["notification_slot"]))
@@ -2151,6 +2163,7 @@ def test_cli_without_current_bundle_degrades_old_overlay_and_sends_report(monkey
     }
     monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/qq")
     monkeypatch.setattr(cli, "fetch_snapshot", lambda: deepcopy(snapshot))
+    monkeypatch.setattr(cli, "fetch_selection_state", lambda _slot: ({"policy_version": "morning-picks-change-only-v1"}, None))
     monkeypatch.setattr(cli, "notification_ledger", lambda action, _body: (
         {"data": {"should_send": True, "payload_matches": True,
                   "started": True, "recorded": True}}, None))
@@ -2268,7 +2281,8 @@ def test_delivery_receipt_is_bounded_and_preserves_read_only_snapshot(monkeypatc
     monkeypatch.setattr(cli, "_degrade_external_submission", lambda snapshot, *_args, **_kwargs: snapshot)
     monkeypatch.setattr(cli, "scheduled_notification_slot", lambda *_args, **_kwargs: "2026-09-24T14:35+08:00")
     monkeypatch.setattr(cli, "qq_preflight", lambda *_args: None)
-    monkeypatch.setattr(cli, "qq_payload", lambda *_args: {
+    monkeypatch.setattr(cli, "fetch_selection_state", lambda _slot: ({"policy_version": "morning-picks-change-only-v1"}, None))
+    monkeypatch.setattr(cli, "qq_payload", lambda *_args, **_kwargs: {
         "payload_hash": "a" * 64, "original_lines": 17, "delivered_lines": 8,
         "category": "report", "version": cli.QQ_SUMMARY_VERSION})
     monkeypatch.setattr(cli, "notification_ledger", lambda action, _body: (
@@ -2311,7 +2325,8 @@ def test_delivery_receipt_reports_unknown_and_suppressed_without_second_send(mon
     monkeypatch.setattr(cli, "_degrade_external_submission", lambda snapshot, *_args, **_kwargs: snapshot)
     monkeypatch.setattr(cli, "scheduled_notification_slot", lambda *_args, **_kwargs: "2026-09-24T14:35+08:00")
     monkeypatch.setattr(cli, "qq_preflight", lambda *_args: None)
-    monkeypatch.setattr(cli, "qq_payload", lambda *_args: {
+    monkeypatch.setattr(cli, "fetch_selection_state", lambda _slot: ({"policy_version": "morning-picks-change-only-v1"}, None))
+    monkeypatch.setattr(cli, "qq_payload", lambda *_args, **_kwargs: {
         "payload_hash": "a" * 64, "original_lines": 17, "delivered_lines": 8,
         "category": "report", "version": cli.QQ_SUMMARY_VERSION})
     sends = []

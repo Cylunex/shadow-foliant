@@ -68,7 +68,12 @@ def _field(value: Any, limit: int = 28) -> str:
     return plain_text(value, limit)
 
 
-def render(snapshot: dict[str, Any]) -> tuple[str, str]:
+def _count(value: Any) -> int:
+    return min(value, 9999) if type(value) is int and value >= 0 else 0
+
+
+def render(snapshot: dict[str, Any], *, include_selection: bool = True,
+           selection_updated: bool = False) -> tuple[str, str]:
     day = str((snapshot.get("trading_day") or {}).get("date") or "")
     quotes = snapshot.get("quotes") or {}
     quote_rows = {_code(row): row for row in quotes.get("rows") or []
@@ -104,19 +109,21 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
         return next(iter(names)) if len(names) == 1 else "名称待核验"
 
     picks: dict[str, dict[str, Any]] = {}
-    for source, section, key in (("正式", snapshot.get("formal_selection") or {}, "formal_top5"),
-                                 ("独立量化", snapshot.get("independent_selection") or {}, "top5")):
-        if section.get("status") != "complete":
-            continue
-        for row in (section.get(key) or [])[:5]:
-            if not isinstance(row, dict) or not (symbol := _code(row)):
+    if include_selection:
+        from application.scheduled_pick_policy import SOURCES
+        for source, section_name, key in SOURCES:
+            section = snapshot.get(section_name) or {}
+            if section.get("status") != "complete":
                 continue
-            entry = picks.setdefault(symbol, {"sources": [], "names": set()})
-            if source not in entry["sources"]:
-                entry["sources"].append(source)
-            row_name = _field(row.get("name"))
-            if row_name and row_name != symbol:
-                entry["names"].add(row_name)
+            for row in (section.get(key) or [])[:5]:
+                if not isinstance(row, dict) or not (symbol := _code(row)):
+                    continue
+                entry = picks.setdefault(symbol, {"sources": [], "names": set()})
+                if source not in entry["sources"]:
+                    entry["sources"].append(source)
+                row_name = _field(row.get("name"))
+                if row_name and row_name != symbol:
+                    entry["names"].add(row_name)
 
     selection_rows = []
     for symbol, entry in picks.items():
@@ -214,11 +221,27 @@ def render(snapshot: dict[str, Any]) -> tuple[str, str]:
         lines.extend([f"持仓操作与风险观察（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
                       "编号｜名称｜现价｜操作｜原因",
                       *(line for _, line in sorted(operations))])
-    else:
-        lines.append("操作：当期无须单列的风险动作")
     if any(protected_counts.values()):
         lines.append(f"组合保护后继续观察：原始卖出{protected_counts['sell']}只、减仓{protected_counts['reduce']}只；风险未解除")
-    lines.extend([f"选股（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
-                  "编号｜名称｜现价｜来源", *(selection_rows or ["当期无可用选股候选"])])
+    if selection_rows:
+        if selection_updated:
+            lines.append("选股更新：已核验候选或有效来源结果变化")
+        lines.extend([f"选股（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
+                      "编号｜名称｜现价｜来源", *selection_rows])
+    if post_close:
+        review = snapshot.get("holdings_review") or {}
+        next_plan = snapshot.get("next_session_plan") or {}
+        if review.get("status") in {"complete", "degraded"}:
+            reviewed = f"持仓复核{_count(review.get('reviewed_count'))}/{_count(review.get('count'))}"
+        else:
+            reviewed = "持仓复核待核验"
+        if next_plan.get("status") in {"complete", "degraded"}:
+            planning = f"次日计划{_count(next_plan.get('ready_count'))}/{_count(next_plan.get('count'))}可用"
+        else:
+            planning = "次日计划待核验"
+        lines.append(f"盘后复盘：{reviewed}；{planning}。")
+    if not lines:
+        return "", ""
     market_label = "收盘行情" if post_close else "行情"
-    return f"选股与操作｜{day[5:] or '当期'} {time_label}{market_label}", "\n".join(lines)
+    title_label = "选股与操作" if selection_rows else "持仓操作与复盘" if post_close else "持仓操作"
+    return f"{title_label}｜{day[5:] or '当期'} {time_label}{market_label}", "\n".join(lines)

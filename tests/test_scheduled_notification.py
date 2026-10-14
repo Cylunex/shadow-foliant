@@ -121,7 +121,10 @@ def test_audit_is_read_scoped_and_slot_mutations_require_writer_capability():
     base = "/api/machine/v1/agent/scheduled-snapshot/notification-"
     assert MACHINE_CAPABILITIES[("GET", base + "audit")] == "foliant.scheduled-report.read"
     assert MACHINE_SCOPES[("GET", base + "audit")] == "stock.portfolio.read"
-    for action in ("claim", "start", "finish"):
+    state = "/api/machine/v1/agent/scheduled-snapshot/selection-state"
+    assert MACHINE_CAPABILITIES[("GET", state)] == "foliant.scheduled-report.read"
+    assert MACHINE_SCOPES[("GET", state)] == "stock.portfolio.read"
+    for action in ("claim", "start", "finish", "silent"):
         assert MACHINE_CAPABILITIES[("POST", base + action)] == "foliant.selection.preview"
         assert MACHINE_SCOPES[("POST", base + action)] == "stock.research"
 
@@ -144,6 +147,10 @@ def test_protected_routes_wrap_claim_attempt_receipt_and_audit_in_data(tmp_path,
     client = TestClient(app)
     base = "/api/machine/v1/agent/scheduled-snapshot/notification-"
     slot = "2026-09-24T11:25+08:00"
+    state = client.get("/api/machine/v1/agent/scheduled-snapshot/selection-state",
+                       params={"notification_slot": slot}).json()
+    assert state["data"]["notification_slot"] == slot
+    assert state["data"]["policy_version"] == "morning-picks-change-only-v1"
     claimed = client.post(base + "claim", json={
         "notification_slot": slot, "payload_hash": HASH,
         "original_lines": 24, "delivered_lines": 8,
@@ -158,3 +165,28 @@ def test_protected_routes_wrap_claim_attempt_receipt_and_audit_in_data(tmp_path,
     audit = client.get(base + "audit").json()
     assert audit["data"]["rows"][0]["http_status"] == 204
     assert audit["data"]["rows"][0]["notification_slot"] == slot
+
+
+def test_pick_claim_http_model_accepts_only_bounded_metadata():
+    from pydantic import ValidationError
+    from webui.scheduled_snapshot_routes import NotificationClaimReq
+
+    base = {"notification_slot": "2026-10-14T10:15+08:00",
+            "payload_hash": HASH, "original_lines": 12,
+            "delivered_lines": 12, "category": "report",
+            "version": cli.QQ_SUMMARY_VERSION,
+            "pick_fingerprint": "b" * 64,
+            "pick_origin_fingerprint": "c" * 64,
+            "pick_selection_run_id": "formal-1",
+            "pick_sources": "正式+独立量化+外部研究",
+            "pick_included": True}
+    assert NotificationClaimReq.model_validate(base).pick_included is True
+    for bad in (base | {"pick_fingerprint": "invalid"},
+                base | {"pick_sources": "未知来源"},
+                base | {"message_body": "private"}):
+        try:
+            NotificationClaimReq.model_validate(bad)
+        except ValidationError:
+            pass
+        else:
+            assert False, "invalid pick claim metadata accepted"

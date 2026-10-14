@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from application.scheduled_report_contract import (REPORT_MAX_DELIVERED_LINES,
     REPORT_MAX_ORIGINAL_LINES, REPORT_MAX_PARTS)
+from application.scheduled_pick_policy import PICK_POLICY_VERSION, decide_selection
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -36,7 +37,12 @@ class ScheduledNotificationService:
 
     def claim(self, *, slot: str, payload_hash: str, original_lines: int,
               delivered_lines: int, category: str, version: str,
-              actor_id: str, part_count: int = 1) -> dict[str, Any]:
+              actor_id: str, part_count: int = 1,
+              pick_fingerprint: str | None = None,
+              pick_origin_fingerprint: str | None = None,
+              pick_selection_run_id: str | None = None,
+              pick_research_id: str | None = None,
+              pick_sources: str = "", pick_included: bool = False) -> dict[str, Any]:
         slot = self._slot(slot)
         now = self._now()
         planned = datetime.fromisoformat(slot)
@@ -53,16 +59,40 @@ class ScheduledNotificationService:
             raise ValueError("scheduled_notification_metadata_invalid")
         if not actor_id:
             raise PermissionError("actor_required")
+        if pick_fingerprint is not None and not HASH_PATTERN.fullmatch(pick_fingerprint):
+            raise ValueError("scheduled_notification_pick_fingerprint_invalid")
+        if pick_origin_fingerprint is not None and not HASH_PATTERN.fullmatch(pick_origin_fingerprint):
+            raise ValueError("scheduled_notification_pick_origin_invalid")
+        for identifier in (pick_selection_run_id, pick_research_id):
+            if identifier is not None and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identifier):
+                raise ValueError("scheduled_notification_pick_run_invalid")
+        if (pick_sources and (not re.fullmatch(
+                r"正式\+独立量化(?:\+外部研究)?", pick_sources)
+                or pick_fingerprint is None)) or (pick_included and not (
+                pick_fingerprint and pick_origin_fingerprint and pick_selection_run_id)):
+            raise ValueError("scheduled_notification_pick_metadata_invalid")
+        if pick_included and ("外部研究" in pick_sources) != bool(pick_research_id):
+            raise ValueError("scheduled_notification_pick_research_invalid")
+        if pick_included and not decide_selection(slot, {
+                "verified": True, "fingerprint": pick_fingerprint,
+                "origin_fingerprint": pick_origin_fingerprint,
+                "sources": pick_sources}, self.selection_state(slot=slot, actor_id=actor_id)):
+            raise ValueError("scheduled_notification_pick_policy_rejected")
         conn = self.store.connect()
         try:
             cur = conn.cursor()
             cur.execute("""INSERT INTO scheduled_notification_deliveries
                 (notification_slot,actor_id,payload_hash,original_lines,delivered_lines,
-                 category,version,part_count,claimed_at,delivery_status)
-                VALUES (?,?,?,?,?,?,?,?,?,'claimed')
+                 category,version,part_count,claimed_at,delivery_status,
+                 pick_fingerprint,pick_origin_fingerprint,pick_selection_run_id,
+                 pick_research_id,pick_sources,pick_included)
+                VALUES (?,?,?,?,?,?,?,?,?,'claimed',?,?,?,?,?,?)
                 ON CONFLICT(notification_slot) DO NOTHING""",
                 (slot, actor_id, payload_hash, original_lines, delivered_lines,
-                 category, version, part_count, now.isoformat(timespec="seconds")))
+                 category, version, part_count, now.isoformat(timespec="seconds"),
+                 pick_fingerprint, pick_origin_fingerprint,
+                 pick_selection_run_id, pick_research_id,
+                 pick_sources, int(pick_included)))
             cur.execute("""SELECT actor_id,payload_hash,delivery_status,attempted_at,
                                delivered_at,http_status,error_code,part_count,accepted_part_count,
                                message_archive_status,message_archive_id
@@ -97,6 +127,91 @@ class ScheduledNotificationService:
                 "part_count": row[7], "accepted_part_count": row[8],
                 "message_archive_status": row[9], "message_archive_id": row[10],
             }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def selection_state(self, *, slot: str, actor_id: str) -> dict[str, Any]:
+        slot = self._slot(slot)
+        if not actor_id:
+            raise PermissionError("actor_required")
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""SELECT notification_slot,pick_fingerprint,pick_origin_fingerprint,
+                                  pick_selection_run_id,pick_research_id,pick_sources,
+                                  pick_included,delivery_status,part_count,
+                                  accepted_part_count,http_status
+                           FROM scheduled_notification_deliveries
+                           WHERE notification_slot>=? AND notification_slot<?
+                           ORDER BY notification_slot""", (slot[:10], slot))
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        accepted = None
+        morning = None
+        uncertain = False
+        for (prior_slot, fingerprint, origin, run_id, research_id, sources,
+             included, status, total, count, http) in rows:
+            if prior_slot.endswith("T10:15+08:00"):
+                morning = (fingerprint, origin, run_id)
+            if not included or not fingerprint:
+                continue
+            if count == total and http in {200, 204}:
+                accepted = (fingerprint, origin, sources, prior_slot, run_id, research_id)
+            elif status in {"sending", "unknown", "partial"} or count:
+                uncertain = True
+        return {"policy_version": PICK_POLICY_VERSION,
+                "notification_slot": slot,
+                "accepted_fingerprint": accepted[0] if accepted else None,
+                "accepted_origin_fingerprint": accepted[1] if accepted else None,
+                "accepted_sources": accepted[2] if accepted else None,
+                "accepted_slot": accepted[3] if accepted else None,
+                "accepted_selection_run_id": accepted[4] if accepted else None,
+                "accepted_research_id": accepted[5] if accepted else None,
+                "morning_fingerprint": morning[0] if morning else None,
+                "morning_origin_fingerprint": morning[1] if morning else None,
+                "morning_selection_run_id": morning[2] if morning else None,
+                "uncertain_pick_attempt": uncertain}
+
+    def record_silent(self, *, slot: str, actor_id: str) -> dict[str, Any]:
+        slot = self._slot(slot)
+        now = self._now()
+        if not timedelta(0) <= now - datetime.fromisoformat(slot) <= timedelta(minutes=60):
+            raise ValueError("scheduled_notification_slot_outside_window")
+        if slot.endswith("T10:15+08:00"):
+            raise ValueError("scheduled_notification_morning_cannot_be_silent")
+        if not actor_id:
+            raise PermissionError("actor_required")
+        conn = self.store.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""SELECT delivery_status,delivered_at,message_archive_status,
+                                  message_archive_id
+                           FROM scheduled_notification_deliveries
+                           WHERE notification_slot=?""", (slot,))
+            existing = cur.fetchone()
+            if existing:
+                return {"recorded": False, "notification_slot": slot,
+                        "delivery_status": existing[0],
+                        "prior_sent": existing[0] == "delivered",
+                        "delivered_at": existing[1],
+                        "message_archive_status": existing[2],
+                        "message_archive_id": existing[3]}
+            cur.execute("""INSERT INTO scheduled_notification_silent_slots
+                           (notification_slot,actor_id,recorded_at,reason)
+                           SELECT ?,?,?,? WHERE NOT EXISTS (
+                               SELECT 1 FROM scheduled_notification_deliveries
+                               WHERE notification_slot=?)
+                           ON CONFLICT(notification_slot) DO NOTHING""",
+                        (slot, actor_id, now.isoformat(timespec="seconds"),
+                         "no_meaningful_report_content", slot))
+            recorded = int(cur.rowcount or 0) == 1
+            conn.commit()
+            return {"recorded": recorded, "notification_slot": slot,
+                    "delivery_status": "silent" if recorded else "unobserved"}
         except Exception:
             conn.rollback()
             raise
@@ -194,7 +309,9 @@ class ScheduledNotificationService:
                                   http_status,error_code,delivery_status,version,
                                   suppression_reason,suppressed_count,part_count,
                                   accepted_part_count,message_archive_status,
-                                  message_archive_id
+                                  message_archive_id,pick_fingerprint,
+                                  pick_origin_fingerprint,pick_selection_run_id,
+                                  pick_research_id,pick_sources,pick_included
                            FROM scheduled_notification_deliveries
                            WHERE notification_slot>=?
                            ORDER BY notification_slot DESC LIMIT 56""", (cutoff,))
@@ -205,8 +322,33 @@ class ScheduledNotificationService:
                       "error_code", "delivery_status", "version",
                       "suppression_reason", "suppressed_count", "part_count",
                       "accepted_part_count", "message_archive_status",
-                      "message_archive_id")
+                      "message_archive_id", "pick_fingerprint",
+                      "pick_origin_fingerprint", "pick_selection_run_id",
+                      "pick_research_id", "pick_sources", "pick_included")
             by_slot = {row[0]: dict(zip(fields, row)) for row in rows}
+            cur.execute("""SELECT notification_slot,recorded_at,reason
+                           FROM scheduled_notification_silent_slots
+                           WHERE notification_slot>=?
+                           ORDER BY notification_slot DESC LIMIT 56""", (cutoff,))
+            for silent_slot, recorded_at, reason in cur.fetchall():
+                if silent_slot not in by_slot:
+                    by_slot[silent_slot] = {
+                        "notification_slot": silent_slot,
+                        "claimed_at": None, "attempted_at": None,
+                        "delivered_at": None, "payload_hash": None,
+                        "original_lines": None, "delivered_lines": None,
+                        "category": "report", "http_status": None,
+                        "error_code": None, "delivery_status": "silent",
+                        "version": PICK_POLICY_VERSION,
+                        "suppression_reason": reason, "suppressed_count": 0,
+                        "part_count": None, "accepted_part_count": None,
+                        "message_archive_status": None, "message_archive_id": None,
+                        "pick_fingerprint": None,
+                        "pick_origin_fingerprint": None,
+                        "pick_selection_run_id": None,
+                        "pick_research_id": None,
+                        "pick_sources": None, "pick_included": False,
+                    }
             for offset in range(days):
                 date = current.date() - timedelta(days=offset)
                 if date.weekday() >= 5:
@@ -227,6 +369,11 @@ class ScheduledNotificationService:
                         "suppressed_count": 0,
                         "part_count": None, "accepted_part_count": None,
                         "message_archive_status": None, "message_archive_id": None,
+                        "pick_fingerprint": None,
+                        "pick_origin_fingerprint": None,
+                        "pick_selection_run_id": None,
+                        "pick_research_id": None,
+                        "pick_sources": None, "pick_included": False,
                     }
             return [by_slot[slot] for slot in sorted(by_slot, reverse=True)[:56]]
         finally:

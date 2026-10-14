@@ -51,7 +51,7 @@ NOTIFICATION_REJECTION_HINTS = {
     "scheduled_notification_slot_invalid": "Use one of the four planned Shanghai slots.",
 }
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
-QQ_SUMMARY_VERSION = "scheduled-qq-v4"
+QQ_SUMMARY_VERSION = "scheduled-qq-v5"
 DELIVERY_RECEIPT_VERSION = "scheduled-delivery-receipt-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
@@ -280,7 +280,7 @@ def submit_external_bundle(bundle: dict[str, Any]):
 
 
 def notification_ledger(action: str, body: dict[str, Any]):
-    if action not in {"claim", "start", "finish"}:
+    if action not in {"claim", "start", "finish", "silent"}:
         raise ValueError("notification_action_invalid")
     return _external_post(NOTIFICATION_ENDPOINT + action, body,
                           "notification_ledger_unavailable")
@@ -308,6 +308,32 @@ def fetch_notification_audit() -> dict[str, Any]:
         return _failure("notification_audit_unavailable",
                         "Inspect the protected audit endpoint and authorization.",
                         status="degraded")
+
+
+def fetch_selection_state(slot: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    client, failure = _configured_client()
+    if failure:
+        return None, failure
+    url, token, timeout = client
+    try:
+        response = requests.get(
+            url.replace(ENDPOINT, ENDPOINT + "/selection-state"),
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            params={"notification_slot": slot}, timeout=timeout,
+        )
+        if response.status_code != 200:
+            raise ValueError("selection_state_response_failed")
+        result = response.json()
+        data = result.get("data") or {}
+        from application.scheduled_pick_policy import PICK_POLICY_VERSION
+        if (data.get("policy_version") != PICK_POLICY_VERSION
+                or data.get("notification_slot") != slot):
+            raise ValueError("selection_policy_version_mismatch")
+        return data, None
+    except (requests.RequestException, ValueError, AttributeError, TypeError):
+        return None, _failure("selection_state_unavailable",
+                              "Verify the deployed selection policy before sending.",
+                              status="degraded")
 
 
 def scheduled_notification_slot(
@@ -603,9 +629,11 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
     return "ShadowFoliant 计划报告", "\n".join(lines)
 
 
-def render_qq_summary(snapshot: dict[str, Any]) -> tuple[str, str]:
+def render_qq_summary(snapshot: dict[str, Any], *, include_selection: bool = True,
+                      selection_updated: bool = False) -> tuple[str, str]:
     from scripts.scheduled_qq_format import render
-    return render(snapshot)
+    return render(snapshot, include_selection=include_selection,
+                  selection_updated=selection_updated)
 
 
 def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -642,9 +670,13 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+def qq_payload(snapshot: dict[str, Any], *, include_selection: bool = True,
+               selection_updated: bool = False) -> dict[str, Any]:
     from scripts.scheduled_qq_format import render_parts
-    title, content = render_qq_summary(snapshot)
+    title, content = render_qq_summary(snapshot, include_selection=include_selection,
+                                       selection_updated=selection_updated)
+    if not content:
+        return {"silent": True}
     parts = render_parts(title, content)
     return {
         "title": title, "content": content, "parts": parts,
@@ -656,6 +688,7 @@ def qq_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "delivered_lines": sum(len(body.splitlines()) for _, body in parts),
         "part_count": len(parts),
         "category": "report", "version": QQ_SUMMARY_VERSION,
+        "pick_included": include_selection,
     }
 
 
@@ -669,6 +702,10 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
     except Exception:
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "qq_summary_invalid"}
+    if payload.get("silent"):
+        return {"requested": True, "sent": False, "channel": "qq",
+                "delivery_status": "silent",
+                "suppression_reason": "no_meaningful_report_content"}
     try:
         from notify import notification_router
     except (ImportError, ModuleNotFoundError):
@@ -841,19 +878,59 @@ def main(argv: list[str] | None = None) -> int:
         elif failed:
             snapshot["notification"] = failed | {"notification_slot": notification_slot}
         else:
+            from application.scheduled_pick_policy import (PICK_POLICY_VERSION,
+                selection_result, decide_selection)
+            state, state_failure = fetch_selection_state(notification_slot)
+            current_picks = selection_result(snapshot)
+            include_picks = bool(state and decide_selection(
+                notification_slot, current_picks, state))
             try:
-                payload = qq_payload(snapshot)
+                payload = qq_payload(snapshot, include_selection=include_picks,
+                                     selection_updated=include_picks and
+                                     not notification_slot.endswith("T10:15+08:00"))
             except Exception:
                 snapshot["notification"] = {"requested": True, "sent": False,
                     "notification_slot": notification_slot,
                     "error_code": "qq_summary_invalid"}
             else:
+                if state_failure:
+                    snapshot["notification"] = {"requested": True, "sent": False,
+                        "notification_slot": notification_slot,
+                        "error_code": "selection_state_unavailable"}
+                elif payload.get("silent"):
+                    quiet, quiet_failure = notification_ledger("silent", {
+                        "notification_slot": notification_slot})
+                    quiet_data = ((quiet or {}).get("data") or {}) if not quiet_failure else {}
+                    recorded = bool(quiet_data.get("recorded"))
+                    prior_sent = bool(quiet_data.get("prior_sent"))
+                    snapshot["notification"] = {"requested": True, "sent": False,
+                        "notification_slot": notification_slot,
+                        "delivery_status": "silent" if recorded else
+                                           quiet_data.get("delivery_status") or "unknown",
+                        "delivery_recorded": recorded or prior_sent,
+                        "prior_sent": prior_sent,
+                        "delivered_at": quiet_data.get("delivered_at"),
+                        "message_archive_status": quiet_data.get("message_archive_status"),
+                        "message_archive_id": quiet_data.get("message_archive_id"),
+                        "error_code": None if recorded or prior_sent else
+                                      "notification_silent_unconfirmed",
+                        "suppression_reason": "no_meaningful_report_content",
+                        "selection_policy_version": PICK_POLICY_VERSION}
+                else:
+                    snapshot["notification"] = None
+            if snapshot.get("notification") is None:
                 claim, claim_failure = notification_ledger("claim", {
                     "notification_slot": notification_slot,
                     **{key: payload[key] for key in (
                         "payload_hash", "original_lines", "delivered_lines",
                             "category", "version")},
-                        "part_count": payload.get("part_count", 1),
+                    "part_count": payload.get("part_count", 1),
+                    "pick_fingerprint": current_picks.get("fingerprint"),
+                    "pick_origin_fingerprint": current_picks.get("origin_fingerprint"),
+                    "pick_selection_run_id": current_picks.get("selection_run_id"),
+                    "pick_research_id": current_picks.get("research_id"),
+                    "pick_sources": current_picks.get("sources") or "",
+                    "pick_included": include_picks,
                 })
                 claim_data = (claim or {}).get("data") or {}
                 if claim_failure:

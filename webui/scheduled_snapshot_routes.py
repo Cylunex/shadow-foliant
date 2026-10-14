@@ -20,12 +20,23 @@ class NotificationClaimReq(BaseModel):
     part_count: int = Field(default=1, ge=1, le=REPORT_MAX_PARTS)
     category: Literal["report"]
     version: str = Field(pattern=r"^[A-Za-z0-9._-]{1,80}$")
+    pick_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    pick_origin_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    pick_selection_run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    pick_research_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    pick_sources: str = Field(default="", pattern=r"^(?:|正式\+独立量化(?:\+外部研究)?)$")
+    pick_included: bool = False
 
 
 class NotificationStartReq(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     notification_slot: str
     payload_hash: str
+
+
+class NotificationSilentReq(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    notification_slot: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T(?:11:25|14:35|20:45)\+08:00$")
 
 
 class NotificationFinishReq(NotificationStartReq):
@@ -74,6 +85,30 @@ def register_scheduled_snapshot_routes(
         except Exception as exc:
             return agent_error(exc)
 
+    @app.get("/api/machine/v1/agent/scheduled-snapshot/selection-state",
+             operation_id="get_agent_scheduled_selection_state")
+    def selection_state(notification_slot: str, request: Request):
+        try:
+            from application.scheduled_notification import ScheduledNotificationService
+            return agent_result({"status": "complete", "data":
+                ScheduledNotificationService().selection_state(
+                    slot=notification_slot,
+                    actor_id=str(request.state.agent_identity.agent_id))})
+        except Exception as exc:
+            return agent_error(exc)
+
+    @app.post("/api/machine/v1/agent/scheduled-snapshot/notification-silent",
+              operation_id="record_agent_scheduled_notification_silent")
+    def notification_silent(req: NotificationSilentReq, request: Request):
+        try:
+            from application.scheduled_notification import ScheduledNotificationService
+            return agent_result({"status": "complete", "data":
+                ScheduledNotificationService().record_silent(
+                    slot=req.notification_slot,
+                    actor_id=str(request.state.agent_identity.agent_id))})
+        except Exception as exc:
+            return agent_error(exc)
+
     @app.post("/api/machine/v1/agent/scheduled-snapshot/notification-claim",
               operation_id="claim_agent_scheduled_notification")
     def notification_claim(req: NotificationClaimReq, request: Request):
@@ -83,6 +118,11 @@ def register_scheduled_snapshot_routes(
                 slot=req.notification_slot, payload_hash=req.payload_hash,
                 original_lines=req.original_lines, delivered_lines=req.delivered_lines,
                 category=req.category, version=req.version, part_count=req.part_count,
+                pick_fingerprint=req.pick_fingerprint,
+                pick_origin_fingerprint=req.pick_origin_fingerprint,
+                pick_selection_run_id=req.pick_selection_run_id,
+                pick_research_id=req.pick_research_id,
+                pick_sources=req.pick_sources, pick_included=req.pick_included,
                 actor_id=str(request.state.agent_identity.agent_id))})
         except Exception as exc:
             return agent_error(exc)

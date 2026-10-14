@@ -210,6 +210,7 @@ _add(
     "/api/machine/v1/agent/portfolio/trade-records",
     "/api/machine/v1/agent/scheduled-snapshot",
     "/api/machine/v1/agent/scheduled-snapshot/notification-audit",
+    "/api/machine/v1/agent/scheduled-snapshot/selection-state",
     "/api/machine/v1/agent/message-archive",
     "/api/machine/v1/agent/message-archive/export",
     "/api/machine/v1/agent/message-archive/{message_id}",
@@ -230,6 +231,7 @@ _add(
     "/api/machine/v1/agent/scheduled-snapshot/notification-claim",
     "/api/machine/v1/agent/scheduled-snapshot/notification-start",
     "/api/machine/v1/agent/scheduled-snapshot/notification-finish",
+    "/api/machine/v1/agent/scheduled-snapshot/notification-silent",
     "/api/machine/v1/agent/message-archive/prepare",
     "/api/machine/v1/agent/message-archive/start",
     "/api/machine/v1/agent/message-archive/finish",
@@ -259,6 +261,7 @@ MACHINE_SCOPES = {
     ("GET", "/api/machine/v1/agent/portfolio/trade-records"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/scheduled-snapshot"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/scheduled-snapshot/notification-audit"): "stock.portfolio.read",
+    ("GET", "/api/machine/v1/agent/scheduled-snapshot/selection-state"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/message-archive"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/message-archive/export"): "stock.portfolio.read",
     ("GET", "/api/machine/v1/agent/message-archive/{message_id}"): "stock.portfolio.read",
@@ -271,6 +274,7 @@ MACHINE_SCOPES = {
     ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-claim"): "stock.research",
     ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-start"): "stock.research",
     ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-finish"): "stock.research",
+    ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-silent"): "stock.research",
     ("POST", "/api/machine/v1/agent/message-archive/prepare"): "stock.research",
     ("POST", "/api/machine/v1/agent/message-archive/start"): "stock.research",
     ("POST", "/api/machine/v1/agent/message-archive/finish"): "stock.research",
@@ -305,6 +309,8 @@ MACHINE_CAPABILITIES = {
     ("GET", "/api/machine/v1/agent/scheduled-snapshot"): "foliant.scheduled-report.read",
     ("GET", "/api/machine/v1/agent/scheduled-snapshot/notification-audit"):
         "foliant.scheduled-report.read",
+    ("GET", "/api/machine/v1/agent/scheduled-snapshot/selection-state"):
+        "foliant.scheduled-report.read",
     ("GET", "/api/machine/v1/agent/message-archive"):
         "foliant.scheduled-report.read",
     ("GET", "/api/machine/v1/agent/message-archive/export"):
@@ -323,6 +329,8 @@ MACHINE_CAPABILITIES = {
     ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-start"):
         "foliant.selection.preview",
     ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-finish"):
+        "foliant.selection.preview",
+    ("POST", "/api/machine/v1/agent/scheduled-snapshot/notification-silent"):
         "foliant.selection.preview",
     ("POST", "/api/machine/v1/agent/message-archive/prepare"):
         "foliant.selection.preview",

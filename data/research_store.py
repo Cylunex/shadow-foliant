@@ -412,7 +412,13 @@ class ResearchStore:
                 part_count INTEGER NOT NULL DEFAULT 1,
                 accepted_part_count INTEGER NOT NULL DEFAULT 0,
                 message_archive_status TEXT,
-                message_archive_id TEXT
+                message_archive_id TEXT,
+                pick_fingerprint TEXT,
+                pick_origin_fingerprint TEXT,
+                pick_selection_run_id TEXT,
+                pick_research_id TEXT,
+                pick_sources TEXT,
+                pick_included INTEGER NOT NULL DEFAULT 0
             )""",
             """CREATE TABLE IF NOT EXISTS notification_messages (
                 message_id TEXT PRIMARY KEY, source TEXT NOT NULL,
@@ -422,6 +428,10 @@ class ResearchStore:
                 business_as_of TEXT, idempotency_key TEXT UNIQUE,
                 sensitivity TEXT NOT NULL, version TEXT NOT NULL,
                 status TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS scheduled_notification_silent_slots (
+                notification_slot TEXT PRIMARY KEY, actor_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL, reason TEXT NOT NULL
             )""",
             """CREATE TABLE IF NOT EXISTS notification_deliveries (
                 delivery_id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
@@ -515,6 +525,17 @@ class ResearchStore:
             self._add_column(cur, "scheduled_notification_deliveries", "accepted_part_count", "INTEGER NOT NULL DEFAULT 0")
             self._add_column(cur, "scheduled_notification_deliveries", "message_archive_status", "TEXT")
             self._add_column(cur, "scheduled_notification_deliveries", "message_archive_id", "TEXT")
+            cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                        (version, datetime.now().astimezone().isoformat()))
+        version = "21-scheduled-pick-baseline"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_fingerprint", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_origin_fingerprint", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_selection_run_id", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_research_id", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_sources", "TEXT")
+            self._add_column(cur, "scheduled_notification_deliveries", "pick_included", "INTEGER NOT NULL DEFAULT 0")
             cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
                         (version, datetime.now().astimezone().isoformat()))
         version = "4-reproducible-inputs"
