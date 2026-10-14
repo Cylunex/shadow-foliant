@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
@@ -17,6 +18,7 @@ from analysis.price_levels import analyze_levels
 from analysis.stress_testing import analyze_risk
 from analysis.technical_state import analyze_technical_state
 from core.action_decision import resolve_action
+from analysis.decision_evaluation import equity_rules
 
 
 ACTION_CN = {
@@ -99,7 +101,6 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
     if near_support is not None:
         entry_low = max(entry_low, near_support)
     entry_low = min(entry_low, entry_high)
-    entry_mid = (entry_low + entry_high) / 2
 
     # 止损至少留一个 ATR，最多容忍约 8%；结构位存在时放在结构位下方。
     atr_stop = close - min(atr * 2.0, close * 0.08)
@@ -129,9 +130,22 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
                       and measured_pattern_target is not None
                       and measured_pattern_target > target_price else None)
 
-    risk_amount = entry_mid - stop_loss
-    reward_amount = (target_price - entry_mid) if target_price is not None else None
-    rr = (reward_amount / risk_amount) if reward_amount is not None and risk_amount > 0 else None
+    # Known equity profiles use cents; other instruments remain reference-only
+    # and preserve sub-cent input resolution. This does not infer an asset class
+    # or supply the instrument metadata needed for execution.
+    digits = 2 if equity_rules(code) is not None else max(
+        3, min(4, -Decimal(str(close)).normalize().as_tuple().exponent),
+    )
+    entry_low, entry_high = round(entry_low, digits), round(entry_high, digits)
+    stop_loss = round(stop_loss, digits)
+    target_price = round(target_price, digits) if target_price is not None else None
+    target_price_2 = round(target_price_2, digits) if target_price_2 is not None else None
+    # The RR gate uses exactly the published levels, not hidden unrounded values.
+    published_mid = (Decimal(str(entry_low)) + Decimal(str(entry_high))) / 2
+    risk_amount = published_mid - Decimal(str(stop_loss))
+    reward_amount = Decimal(str(target_price)) - published_mid if target_price is not None else None
+    rr = (float((reward_amount / risk_amount).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+          if reward_amount is not None and risk_amount > 0 else None)
 
     risk = analyze_risk(df)
     var95 = _finite(risk.get("var_hist")) if isinstance(risk, dict) else None
@@ -163,12 +177,14 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         evidence.append(f"组合环境允许{market.get('action_cn') or '买入'}")
     elif market_action in {"reduce", "sell"}:
         blockers.append(f"组合环境要求{market.get('action_cn') or '降低仓位'}")
+    else:
+        blockers.append("组合环境尚未核验，保留观察，不形成买入动作")
     evidence.extend(str(x) for x in (technical.get("positives") or [])[:4])
     blockers.extend(str(x) for x in (technical.get("risks") or [])[:4])
 
     candidate_action = "watch"
     if (timeframe.get("resonance") == "confirmed" and rr is not None and rr >= 2.0
-            and market_action not in {"reduce", "sell"}
+            and market_action in {"strong_buy", "buy"}
             and technical.get("grade") != "caution"):
         candidate_action = "buy"
     if timeframe.get("resonance") == "blocked":
@@ -204,18 +220,20 @@ def build_trade_plan(code: str, df: pd.DataFrame, *, name: str = "",
         "action_cn": action_decision["action_text"],
         "action_decision": action_decision,
         "candidate_action": candidate_action,
-        "entry_low": round(entry_low, 2),
-        "entry_high": round(entry_high, 2),
-        "stop_loss": round(stop_loss, 2),
-        "target_price": round(target_price, 2) if target_price is not None else None,
-        "target_price_2": round(target_price_2, 2) if target_price_2 is not None else None,
-        "measured_pattern_target": (round(measured_pattern_target, 2)
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "stop_loss": stop_loss,
+        "target_price": target_price,
+        "target_price_2": target_price_2,
+        "measured_pattern_target": (round(measured_pattern_target, digits)
                                     if measured_pattern_target is not None else None),
         "risk_reward_ratio": round(rr, 2) if rr is not None else None,
+        "risk_reward_ratio_basis": "published_levels_conservative_2dp",
         "suggested_position_pct": position_pct if action == "add" else 0.0,
         "horizon": "swing",
         "horizon_cn": "波段（约 2～4 周）",
-        "current_price": round(close, 2),
+        "current_price": round(close, digits),
+        "reference_price_decimals": digits,
         "atr14": round(atr, 3),
         "var95_pct": round(var95 * 100, 2) if var95 is not None else None,
         "multi_timeframe": timeframe,

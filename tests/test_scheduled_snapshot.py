@@ -1276,6 +1276,14 @@ def test_post_close_missing_plans_are_bounded_and_do_not_gain_price_authority():
     assert review["rows"][0]["stop_loss"] is None
     assert plan["rows"][0]["planned_action"] is None
     assert plan["rows"][0]["sell_levels"]["stop_loss"] is None
+    malformed = {"600699": {"stop_loss": 9, "target_price": 11,
+        "plan_as_of": "2026-09-10", "plan_generated_at": "2026-09-10T20:45:00+08:00",
+        **close_evidence("2026-09-10")}}
+    unverified = ScheduledSnapshotService._next_session_plan(
+        **(kwargs | {"plans": malformed}), formal={"formal_top15": []})
+    assert unverified["rows"][0]["planned_action"] is None
+    assert unverified["rows"][0]["sell_levels"]["stop_loss"] is None
+    assert "trade_plan_unavailable" in unverified["rows"][0]["blockers"]
 
     snapshot = build_service(
         clock=lambda: NOW.replace(hour=20, minute=46),
@@ -1316,10 +1324,85 @@ def test_next_session_plan_does_not_label_intraday_prior_session_plan_ready():
     assert row["plan_input_market_as_of"] == "2026-09-18"
     assert row["plan_rebuild_status"] == "historical_reference"
     assert row["plan_authority"] == "historical_reference"
+    assert row["buy_zone"] is None
+    assert row["sell_levels"]["stop_loss"] is None
+    assert row["planned_action"] is None
+    assert row["historical_reference_plan"]["stop_loss"] == 6.8
     assert row["blockers"] == [
         "trade_plan_generation_time_missing",
         "trade_plan_input_market_date_not_current",
     ]
+
+
+def test_daily_review_is_available_before_post_close_jobs_and_with_partial_quotes():
+    evening = NOW.replace(hour=19, minute=55)
+    snapshot = build_service(clock=lambda: evening, quote_time=evening.replace(hour=15),
+        missing_quote_symbols=["600001"],
+        outcome_stats_reader=lambda **kwargs: pytest.fail("posterior not due"),
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["post_close_review"]["status"] == "pending"
+    assert snapshot["holdings_review"]["status"] == "pending"
+    assert snapshot["daily_review"]["status"] == "partial"
+    assert snapshot["daily_review"]["holding_observed_count"] == 1
+    assert snapshot["daily_review"]["candidate_observed_count"] == 14
+
+
+def test_post_close_report_keeps_original_trigger_when_new_stop_moves_lower():
+    from scripts.foliant_scheduled_snapshot import qq_payload
+    evening = NOW.replace(hour=20, minute=46)
+    prior_at = NOW.replace(hour=14, minute=35).isoformat()
+    old = {"trade_date": NOW.date().isoformat(), "generated_at": prior_at,
+        "selection_run_id": "formal-run", "holdings": [{"symbol": "000001",
+            "quote_as_of": prior_at, "action": "hold", "requested_action": "sell",
+            "requested_source": "hard_risk", "stop_loss": 10.5}],
+        "trigger_state": {"000001:stop": {"active": False, "last_alerted_at": prior_at}}}
+    new_plan = {"available": True, "action": "hold", "stop_loss": 8.8,
+        "plan_as_of": NOW.date().isoformat(), "plan_generated_at": evening.isoformat(),
+        **close_evidence(NOW.date().isoformat())}
+    snapshot = build_service(clock=lambda: evening, quote_time=evening.replace(hour=15),
+        intraday_value={"data": old},
+        closing_plan_reader=lambda: {"schema_version": "closing-trade-plans-v1",
+            "trade_date": NOW.date().isoformat(), "selection_run_id": "formal-run",
+            "plans": {"000001": new_plan}},
+    ).read(owner_id="scheduled-agent")["data"]
+    assert snapshot["daily_review"]["operations"][0]["action"] == "hold"
+    new = next(row for row in snapshot["next_session_plan"]["rows"] if row["symbol"] == "000001")
+    assert new["sell_levels"]["stop_loss"] == 8.8
+    payload = qq_payload(snapshot, include_selection=False)
+    body = "\n".join(part[1] for part in payload["parts"])
+    assert "止损受保护观察" in body
+    assert "保留日内触发" in body
+    assert "当日数据复盘：持仓2/2；候选15/15" in body
+    assert "｜卖出｜" not in body
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_holdings_only_close_plan_requires_exact_current_account_binding(changed):
+    from application.daily_review import holdings_fingerprint
+    evening = NOW.replace(hour=20, minute=46)
+    value = selection()
+    value["data"]["selection_date"] = "2026-09-09"
+    held = context()["holdings"]
+    plan = {"available": True, "action": "hold", "stop_loss": 8.8,
+        "plan_as_of": NOW.date().isoformat(), "plan_generated_at": evening.isoformat(),
+        **close_evidence(NOW.date().isoformat())}
+    closing = {"schema_version": "closing-trade-plans-v1", "trade_date": NOW.date().isoformat(),
+        "selection_run_id": None, "pool_scope": "holdings_only",
+        "holdings_fingerprint": holdings_fingerprint(held),
+        "plans": {"000001": plan, "600001": plan, "600999": plan}}
+    current = context()
+    if changed:
+        current["holdings"][0]["quantity"] += 100
+    snapshot = build_service(clock=lambda: evening, quote_time=evening.replace(hour=15),
+        context_reader=lambda: current, selection_value=value,
+        closing_plan_reader=lambda: closing,
+    ).read(owner_id="scheduled-agent")["data"]
+    next_plan = snapshot["next_session_plan"]
+    assert next_plan["closing_plan_binding"] == ("missing_or_mismatched" if changed else
+                                                "same_session_and_holdings")
+    assert next_plan["ready_count"] == (0 if changed else 2)
+    assert all(row["symbol"] != "600999" for row in next_plan["rows"])
+    assert next_plan["count"] == 2  # stale formal candidates never join next-session plans
 
 
 def test_closing_plans_override_old_holding_and_candidate_plans():

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import math
 import re
 from typing import Any
 
 from notify.plain_language import plain_text
+from application.market_prices import current_day_price, format_reference_price
+from application.daily_review import DAILY_REVIEW_SCHEMA
 from application.scheduled_report_contract import (REPORT_MAX_BYTES, REPORT_MAX_CHARS,
     REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES, REPORT_MAX_PARTS)
 
@@ -81,6 +84,8 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
     captured = str(quotes.get("captured_at") or (snapshot.get("as_of") or {}).get("captured_at") or "")
     try:
         captured_at = datetime.fromisoformat(captured)
+        if captured_at.tzinfo is not None:
+            captured_at = captured_at.astimezone(ZoneInfo("Asia/Shanghai"))
         if captured_at.tzinfo is None or captured_at.date().isoformat() != day:
             captured_at = None
     except ValueError:
@@ -89,18 +94,17 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
 
     def current_quote(symbol: str) -> str:
         row = quote_rows.get(symbol) or {}
+        if captured_at is None:
+            return "现价待核验"
+        price = current_day_price(row, captured_at)
+        if price is None:
+            return "现价待核验"
         try:
-            price = float(row.get("price"))
             as_of = datetime.fromisoformat(str(row.get("as_of") or ""))
         except (TypeError, ValueError):
             return "现价待核验"
-        if (not math.isfinite(price) or price <= 0 or not captured_at
-                or not as_of.tzinfo or as_of.date().isoformat() != day
-                or as_of > captured_at
-                or row.get("freshness") not in {"actionable", "closing_current"}):
-            return "现价待核验"
-        quote_times.append(as_of)
-        return f"¥{price:.2f}"
+        quote_times.append(as_of.astimezone(ZoneInfo("Asia/Shanghai")))
+        return format_reference_price(price)
 
     def name(symbol: str, names: set[str]) -> str:
         value = _field((quote_rows.get(symbol) or {}).get("name"))
@@ -134,8 +138,12 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
     formal = snapshot.get("formal_selection") or {}
     post_close = (snapshot.get("post_close_review") or {}).get("due") is True
     if post_close:
-        review = snapshot.get("holdings_review") or {}
-        action_rows = review.get("rows") or [] if review.get("status") in {"complete", "degraded"} else []
+        daily = snapshot.get("daily_review") or {}
+        if daily.get("schema_version") == DAILY_REVIEW_SCHEMA:
+            action_rows = daily.get("operations") or []
+        else:
+            review = snapshot.get("holdings_review") or {}
+            action_rows = review.get("rows") or [] if review.get("status") in {"complete", "degraded"} else []
     else:
         authority = plans.get("holding_actions_authority") or {}
         action_rows = plans.get("holding_actions") or [] if authority.get("status") == "current" else []
@@ -148,7 +156,8 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
         final = str(row.get("action") or "")
         requested = str(row.get("requested_action") or final)
         guarded = requested in {"sell", "reduce"} and final == "hold"
-        if final not in {"buy", "add", "sell", "reduce"} and not guarded:
+        recorded = post_close and row.get("observation_only") is True and row.get("historical_trigger")
+        if final not in {"buy", "add", "sell", "reduce"} and not guarded and not recorded:
             continue
         seen_actions.add(symbol)
         price = current_quote(symbol)
@@ -179,7 +188,16 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
         )
         raw_reason = str((row.get("requested_reason") if guarded else row.get("reason")) or "")
         hard_risk = (row.get("requested_source") if guarded else row.get("decision_source")) == "hard_risk"
-        if guarded:
+        if recorded:
+            hard_risk = row.get("historical_trigger") == "stop"
+            if row.get("protected"):
+                protected_counts[requested] += 1
+            action = ("止损受保护观察" if hard_risk and row.get("protected") else
+                      "日内止损复核" if hard_risk else
+                      "日内止盈复核" if row.get("historical_trigger") == "target" else
+                      "受保护观察" if row.get("protected") else "日内风险复核")
+            reason = "保留日内触发；新行情与有效计划复核；未核验成交"
+        elif guarded:
             protected_counts[requested] += 1
             if not hard_risk:
                 continue
@@ -221,8 +239,13 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
         lines.extend([f"持仓操作与风险观察（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
                       "编号｜名称｜现价｜操作｜原因",
                       *(line for _, line in sorted(operations))])
+    daily_post_close = post_close and (snapshot.get("daily_review") or {}).get("schema_version") == DAILY_REVIEW_SCHEMA
+    if daily_post_close:
+        recorded_counts = snapshot["daily_review"].get("recorded_protected_counts") or {}
+        protected_counts = {action: _count(recorded_counts.get(action)) for action in ("sell", "reduce")}
     if any(protected_counts.values()):
-        lines.append(f"组合保护后继续观察：原始卖出{protected_counts['sell']}只、减仓{protected_counts['reduce']}只；风险未解除")
+        prefix = "日内组合保护记录" if daily_post_close else "组合保护后继续观察"
+        lines.append(f"{prefix}：原始卖出{protected_counts['sell']}只、减仓{protected_counts['reduce']}只；风险未解除")
     if selection_rows:
         if selection_updated:
             lines.append("选股更新：已核验候选或有效来源结果变化")
@@ -240,6 +263,14 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
         else:
             planning = "次日计划待核验"
         lines.append(f"盘后复盘：{reviewed}；{planning}。")
+        daily = snapshot.get("daily_review") or {}
+        if daily.get("schema_version") == DAILY_REVIEW_SCHEMA:
+            daily_holdings = (f"持仓{_count(daily.get('holding_observed_count'))}/{_count(daily.get('holding_count'))}"
+                              if daily.get("holdings_available") is not False else "持仓待核验")
+            daily_candidates = (f"候选{_count(daily.get('candidate_observed_count'))}/{_count(daily.get('candidate_count'))}"
+                                if daily.get("formal_selection_available") is not False else "候选待核验")
+            lines.append(f"当日数据复盘：{daily_holdings}；{daily_candidates}；"
+                         f"保留日内风险记录{_count(daily.get('recorded_operation_count'))}只。")
     if not lines:
         return "", ""
     market_label = "收盘行情" if post_close else "行情"

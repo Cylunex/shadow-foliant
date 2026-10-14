@@ -14,6 +14,7 @@ from application.account_preview import (
     build_account_preview,
 )
 from application.results import clean_json, payload_hash, provenance, tool_result
+from application.daily_review import DAILY_REVIEW_POLICY, build_daily_review, holdings_fingerprint
 from application.industry_classification import classify_holdings
 from application.stock_budget import (
     STOCK_BUDGET_BASIS,
@@ -47,14 +48,6 @@ REQUIRED_SCORE_BUCKETS = ("high", "medium", "low")
 MIN_STRATEGY_FEEDBACK_SAMPLES = 30
 MIN_PERFORMANCE_FACTOR_DEVIATION = 0.05
 MAX_STRATEGY_MULTIPLIER_STEP = 0.05
-DAILY_REVIEW_POLICY = {
-    "requires_current_day_evidence": True,
-    "posterior_completeness_required": False,
-    "minimum_mature_samples": 0,
-    "missing_inputs_block_only_dependent_adjustments": True,
-    "execution_gates_unchanged": True,
-    "auto_execution": False,
-}
 _SENSITIVE_TEXT = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|"
     r"(?:token|secret|password|cookie)\s*[:=]\s*\S+|"
@@ -1627,6 +1620,8 @@ class ScheduledSnapshotService:
         base = {
             "review_date": trading_day.get("date"),
             "pricing_snapshot": pricing_snapshot,
+            "purpose": "new_plan_close_reference_check_not_session_trigger_history",
+            "session_trigger_history_source": "daily_review",
             "preview_only": True,
             "auto_execution": False,
         }
@@ -1651,7 +1646,7 @@ class ScheduledSnapshotService:
             )
             plan = plans.get(symbol) or {}
             rebuild = _plan_rebuild_evidence(plan, str(trading_day.get("date") or ""))
-            plan_usable = bool(plan and plan.get("available") is not False
+            plan_usable = bool(plan and plan.get("available") is True
                                and rebuild["status"] == "current_close_rebuild")
             stop = _finite_number(plan.get("stop_loss")) if plan_usable else None
             target = _finite_number(plan.get("target_price")) if plan_usable else None
@@ -1674,7 +1669,7 @@ class ScheduledSnapshotService:
                 blockers.append("closing_quote_unavailable")
             if not plan:
                 blockers.append("trade_plan_missing")
-            elif plan.get("available") is False:
+            elif plan.get("available") is not True:
                 blockers.append("trade_plan_unavailable")
                 blockers.extend(code for code in plan.get("blockers") or []
                                 if isinstance(code, str) and code.startswith("closing_"))
@@ -1754,7 +1749,10 @@ class ScheduledSnapshotService:
         if trading_day.get("confirmed") and not trading_day.get("is_trading_day"):
             return base | {"status": "not_applicable", "rows": []}
         quote_by_symbol = {str(row.get("symbol") or ""): row for row in quote_rows}
-        candidates = {str(row.get("symbol") or ""): row for row in formal.get("formal_top15") or []}
+        formal_current = (formal.get("status") in {"complete", "success"}
+                          and formal.get("selection_date") == trading_day.get("date"))
+        candidates = {str(row.get("symbol") or ""): row
+                      for row in (formal.get("formal_top15") or []) if formal_current}
         items: dict[str, dict[str, Any]] = {}
         for holding in holdings:
             symbol = str(holding.get("symbol") or holding.get("code") or "")
@@ -1779,22 +1777,23 @@ class ScheduledSnapshotService:
                              item, str(trading_day.get("date") or "")
                          )["status"] == "current_close_rebuild"), None)
             plan = plan or candidate.get("trade_plan") or plans.get(symbol) or {}
-            plan_usable = bool(plan and plan.get("available") is not False)
+            plan_usable = bool(plan and plan.get("available") is True)
             rebuild = _plan_rebuild_evidence(plan, str(trading_day.get("date") or ""))
+            plan_current = plan_usable and rebuild.get("status") == "current_close_rebuild"
             quote = quote_by_symbol.get(symbol) or {}
             freshness = str(quote.get("freshness") or "stale_or_missing")
             close_price = (
                 _finite_number(quote.get("price"))
                 if freshness in {"actionable", "closing_current"} else None
             )
-            entry_low = _finite_number(plan.get("entry_low")) if plan_usable else None
-            entry_high = _finite_number(plan.get("entry_high")) if plan_usable else None
+            entry_low = _finite_number(plan.get("entry_low")) if plan_current else None
+            entry_high = _finite_number(plan.get("entry_high")) if plan_current else None
             blockers = []
             if close_price is None:
                 blockers.append("closing_quote_unavailable")
             if not plan:
                 blockers.append("trade_plan_missing")
-            elif plan.get("available") is False:
+            elif plan.get("available") is not True:
                 blockers.append("trade_plan_unavailable")
                 blockers.extend(code for code in plan.get("blockers") or []
                                 if isinstance(code, str) and code.startswith("closing_"))
@@ -1810,13 +1809,14 @@ class ScheduledSnapshotService:
                     if entry_low is not None and entry_high is not None else None
                 ),
                 "sell_levels": {
-                    "stop_loss": _finite_number(plan.get("stop_loss")) if plan_usable else None,
-                    "first_target": _finite_number(plan.get("target_price")) if plan_usable else None,
-                    "second_target": _finite_number(plan.get("target_price_2")) if plan_usable else None,
+                    "stop_loss": _finite_number(plan.get("stop_loss")) if plan_current else None,
+                    "first_target": _finite_number(plan.get("target_price")) if plan_current else None,
+                    "second_target": _finite_number(plan.get("target_price_2")) if plan_current else None,
                 },
-                "planned_action": (plan.get("action") or "hold") if plan_usable else None,
-                "planned_action_cn": (plan.get("action_cn") or "不动") if plan_usable else "待核验",
-                "plan_reason": str(plan.get("reason") or "")[:300] if plan_usable else "",
+                "planned_action": (plan.get("action") or "hold") if plan_current else None,
+                "planned_action_cn": (plan.get("action_cn") or "不动") if plan_current else "待核验",
+                "plan_reason": str(plan.get("reason") or "")[:300] if plan_current else "",
+                "historical_reference_plan": _trade_plan(plan) if plan_usable and not plan_current else None,
                 "plan_price_basis": plan.get("price_basis") if plan_usable else None,
                 "plan_generated_at": rebuild.get("plan_generated_at") if plan_usable else None,
                 "plan_input_market_as_of": (
@@ -2413,7 +2413,9 @@ class ScheduledSnapshotService:
         }
         for candidate in formal.get("formal_top15") or []:
             symbol = str(candidate.get("symbol") or "")
-            if isinstance(candidate.get("trade_plan"), dict):
+            if (formal.get("status") in {"complete", "success"}
+                    and formal.get("selection_date") == today
+                    and isinstance(candidate.get("trade_plan"), dict)):
                 review_plans[symbol] = dict(candidate["trade_plan"])
         formal_plans = [
             {"symbol": row.get("symbol"),
@@ -2664,6 +2666,11 @@ class ScheduledSnapshotService:
         }
 
         post_close_review, adjustment_proposals = self._post_close_review(now, trading_day)
+        daily_review = build_daily_review(
+            now=pricing_at, trading_day=trading_day, holdings=holding_rows,
+            quotes=quote_rows, formal=formal, previous=intraday,
+            holdings_available=holdings.get("status") == "complete",
+        )
         review_due = bool(post_close_review.get("due"))
         next_plans = dict(review_plans)
         closing_binding = "not_due"
@@ -2675,14 +2682,22 @@ class ScheduledSnapshotService:
             if not isinstance(closing, dict):
                 closing = {}
             closing_binding = "missing_or_mismatched"
+            closing_holdings_match = bool(
+                holding_rows and closing.get("pool_scope") == "holdings_only"
+                and closing.get("holdings_fingerprint") == holdings_fingerprint(holding_rows)
+            )
+            closing_selection_match = bool(formal.get("run_id")
+                and closing.get("selection_run_id") == formal["run_id"])
             if (closing.get("schema_version") == "closing-trade-plans-v1"
                     and closing.get("trade_date") == today
-                    and formal.get("run_id")
                     and isinstance(closing.get("plans"), dict)
-                    and closing.get("selection_run_id") == formal["run_id"]):
+                    and (closing_selection_match or closing_holdings_match)):
+                holding_symbols = _source_symbols(holding_rows)
                 next_plans.update({symbol: plan for symbol, plan in (closing.get("plans") or {}).items()
-                                   if isinstance(plan, dict)})
-                closing_binding = "same_session_and_selection"
+                                   if isinstance(plan, dict)
+                                   and (closing_selection_match or symbol in holding_symbols)})
+                closing_binding = ("same_session_and_selection" if closing_selection_match
+                                   else "same_session_and_holdings")
                 # Positions recorded after the 20:20 batch are absent from its
                 # immutable pool. Rebuild only those positions from local cached
                 # bars; the builder rejects prior-day bars and pre-close caches.
@@ -2693,7 +2708,7 @@ class ScheduledSnapshotService:
                     try:
                         from jobs.closing_trade_plans import build_closing_plans
                         late = build_closing_plans(
-                            formal={"run_id": formal["run_id"], "selection_date": today},
+                            formal={"run_id": formal.get("run_id"), "selection_date": today},
                             holdings=missing_holdings, now=now,
                             budget_seconds=10,
                         )
@@ -2813,6 +2828,7 @@ class ScheduledSnapshotService:
             "quotes": quotes,
             "post_close_review": post_close_review,
             "holdings_review": holdings_review,
+            "daily_review": daily_review,
             "next_session_plan": next_session_plan,
             "source_comparison": source_comparison,
             "strategy_adjustment_proposals": adjustment_proposals,

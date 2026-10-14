@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from application.results import clean_json, payload_hash
+from application.daily_review import holdings_fingerprint
 from jobs.intraday_decision_monitor import build_monitor_pool
 
 SNAPSHOT_KEY = 'closing_trade_plans'
@@ -28,13 +29,15 @@ def build_closing_plans(*, formal, holdings, now=None, bar_loader=None,
     day = now.date().isoformat()
     if (now.hour, now.minute) < (15, 0):
         return {'status': 'skipped', 'reason': 'before_market_close', 'plans': {}}
-    if not formal.get('run_id') or str(formal.get('selection_date') or '')[:10] != day:
+    holdings = list(holdings or [])
+    formal_current = bool(formal.get('run_id') and str(formal.get('selection_date') or '')[:10] == day)
+    if not formal_current and not holdings:
         return {'status': 'skipped', 'reason': 'today_formal_selection_unavailable', 'plans': {}}
     if plan_builder is None:
         from analysis.trade_plan import build_trade_plan
         plan_builder = build_trade_plan
     bar_loader = bar_loader or _cached_bars
-    pool = build_monitor_pool(formal, holdings)
+    pool = build_monitor_pool(formal if formal_current else {}, holdings)
     deadline = monotonic() + max(0, min(120, budget_seconds))
     plans = {}
     for item in pool[:115]:
@@ -94,7 +97,9 @@ def build_closing_plans(*, formal, holdings, now=None, bar_loader=None,
     available = sum(plan.get('available') is True for plan in plans.values())
     return {'schema_version': 'closing-trade-plans-v1',
             'status': 'complete' if pool and available == len(pool) else 'degraded',
-            'trade_date': day, 'selection_run_id': formal['run_id'],
+            'trade_date': day, 'selection_run_id': formal['run_id'] if formal_current else None,
+            'pool_scope': 'holdings_and_formal' if formal_current else 'holdings_only',
+            'holdings_fingerprint': holdings_fingerprint(holdings),
             'generated_at': now.isoformat(timespec='seconds'),
             'requested_count': len(pool), 'available_count': available,
             'omitted_symbols': [item['symbol'] for item in pool[115:]],

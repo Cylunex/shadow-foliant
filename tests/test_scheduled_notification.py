@@ -190,3 +190,92 @@ def test_pick_claim_http_model_accepts_only_bounded_metadata():
             pass
         else:
             assert False, "invalid pick claim metadata accepted"
+
+
+def test_maximum_daily_review_payload_passes_http_delivery_and_duplicate_suppression(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+    from application.message_archive import MessageArchiveService
+    from notify import notification_router
+    from application.daily_review import build_daily_review
+    from application import scheduled_notification as module
+    from webui.scheduled_snapshot_routes import register_scheduled_snapshot_routes
+
+    service = _service(tmp_path, 20, 45)
+    now = datetime(2026, 9, 24, 20, 45, tzinfo=SHANGHAI)
+    at = "2026-09-24T14:35:00+08:00"
+    holdings = [{"symbol": f"600{i:03d}", "name": f"风险样例{i}", "quantity": 100,
+                 "cost_price": 10} for i in range(100)]
+    quotes = [{"symbol": row["symbol"], "name": row["name"], "price": 9,
+               "as_of": "2026-09-24T15:00:00+08:00", "freshness": "closing_current"}
+              for row in holdings]
+    previous = {"trade_date": "2026-09-24", "generated_at": at, "holdings": [
+        {**row, "quote_as_of": at, "action": "hold", "requested_action": "sell",
+         "requested_source": "hard_risk"} for row in holdings]}
+    day = {"date": "2026-09-24", "confirmed": True, "is_trading_day": True}
+    formal = {"status": "complete", "selection_date": day["date"], "formal_top15": []}
+    daily = build_daily_review(now=now, trading_day=day, holdings=holdings, quotes=quotes,
+                               formal=formal, previous=previous)
+    snapshot = {"schema_version": "scheduled-agent-snapshot-v1", "status": "degraded",
+        "trading_day": day, "formal_selection": formal, "trade_plans": {},
+        "holdings": {"status": "complete", "count": 100},
+        "quotes": {"captured_at": now.isoformat(), "rows": quotes},
+        "as_of": {"captured_at": now.isoformat()}, "quality": {"status": "degraded"},
+        "daily_review": daily, "holdings_review": {"status": "degraded", "count": 100},
+        "next_session_plan": {"status": "missing"}, "post_close_review": {"due": True},
+        "notification_policy": {"version": "critical-only-action-required-v1",
+            "report_delivery": "scheduled_slot_report", "critical_event_delivery": "intraday_monitor_only",
+            "scheduled_delivery": "silent_monitor_owns_critical_events"}}
+    payload = cli.qq_payload(snapshot, include_selection=False)
+    joined = "\n".join(body for _, body in payload["parts"])
+    assert all(joined.count(row["symbol"] + "｜") == 1 for row in holdings)
+    assert payload["part_count"] > 1
+    assert all(len(body.encode("utf-8")) <= 4096 for _, body in payload["parts"])
+
+    monkeypatch.setattr(module, "ScheduledNotificationService", lambda: service)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identity(request, call_next):
+        request.state.agent_identity = SimpleNamespace(agent_id="writer")
+        return await call_next(request)
+
+    register_scheduled_snapshot_routes(app, agent_result=lambda value, **kwargs: value,
+                                       agent_error=lambda exc: {"error": str(exc)})
+    client = TestClient(app)
+    base = "/api/machine/v1/agent/scheduled-snapshot/notification-"
+    slot = "2026-09-24T20:45+08:00"
+    claim = {"notification_slot": slot, **{key: payload[key] for key in
+        ("payload_hash", "original_lines", "delivered_lines", "part_count", "category", "version")}}
+    assert client.post(base + "claim", json=claim).json()["data"]["should_send"] is True
+    start = {"notification_slot": slot, "payload_hash": payload["payload_hash"]}
+    assert client.post(base + "start", json=start).json()["data"]["started"] is True
+    archive = MessageArchiveService(store=service.store, key=Fernet.generate_key(), clock=lambda: now)
+    monkeypatch.setattr(notification_router, "archive_action", lambda action, data: (
+        archive.prepare(**data) if action == "prepare" else
+        {"started": archive.start(data["delivery_id"])} if action == "start" else
+        {"recorded": archive.finish(**data)}))
+    channel_calls = []
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
+        channel_calls.append((title, body)) or (True, "HTTP 200")))
+    monkeypatch.setenv("QQ_WEBHOOK_URL", "https://example.invalid/unused")
+    delivered = cli.send_qq(snapshot, payload=payload, notification_slot=slot)
+    assert delivered["delivery_status"] == "delivered"
+    assert delivered["message_archive_status"] == "recorded"
+    channel_body = "\n".join(body for _, body in channel_calls)
+    assert all(channel_body.count(row["symbol"] + "｜") == 1 for row in holdings)
+    archived = archive.list_messages()
+    assert len(archived) == payload["part_count"]
+    assert all(archive.detail(row["message_id"])["deliveries"][0]["status"] == "accepted"
+               for row in archived)
+    finish = {**start, "status": delivered["delivery_status"], "http_status": 200,
+        "accepted_part_count": delivered["accepted_part_count"],
+        "message_archive_status": delivered["message_archive_status"]}
+    assert client.post(base + "finish", json=finish).json()["data"]["recorded"] is True
+    assert client.post(base + "claim", json=claim).json()["data"]["should_send"] is False
+    audit = client.get(base + "audit").json()["data"]["rows"][0]
+    assert audit["accepted_part_count"] == payload["part_count"]
+    assert audit["message_archive_status"] == "recorded"
+    assert audit["original_lines"] == payload["original_lines"]
+    repeat = cli.send_qq(snapshot, payload=payload, notification_slot=slot)
+    assert repeat["sent"] is False
+    assert len(channel_calls) == payload["part_count"]

@@ -79,6 +79,24 @@ def test_one_failed_symbol_does_not_discard_other_plans():
     assert 'private' not in str(result)
 
 
+def test_missing_formal_only_blocks_candidates_not_current_holdings():
+    result = build_closing_plans(formal={}, holdings=[{'code': '510300', 'quantity': 100}],
+        now=NOW, bar_loader=lambda _: bars(), plan_builder=plan_builder)
+    assert result['status'] == 'complete'
+    assert result['pool_scope'] == 'holdings_only'
+    assert result['selection_run_id'] is None
+    assert set(result['plans']) == {'510300'}
+    assert len(result['holdings_fingerprint']) == 64
+
+
+def test_stale_formal_members_do_not_enter_holdings_only_plan():
+    result = build_closing_plans(formal=dict(formal(), selection_date='2026-09-21'),
+        holdings=[{'code': '510300', 'quantity': 100}], now=NOW,
+        bar_loader=lambda _: bars(), plan_builder=plan_builder)
+    assert set(result['plans']) == {'510300'}
+    assert result['pool_scope'] == 'holdings_only'
+
+
 def test_budget_expiry_records_gaps_without_loading_bars():
     result = build_closing_plans(formal=formal(), holdings=[], now=NOW, budget_seconds=0,
                                 bar_loader=lambda _: pytest.fail('budget exhausted'))
