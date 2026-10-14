@@ -47,6 +47,14 @@ REQUIRED_SCORE_BUCKETS = ("high", "medium", "low")
 MIN_STRATEGY_FEEDBACK_SAMPLES = 30
 MIN_PERFORMANCE_FACTOR_DEVIATION = 0.05
 MAX_STRATEGY_MULTIPLIER_STEP = 0.05
+DAILY_REVIEW_POLICY = {
+    "requires_current_day_evidence": True,
+    "posterior_completeness_required": False,
+    "minimum_mature_samples": 0,
+    "missing_inputs_block_only_dependent_adjustments": True,
+    "execution_gates_unchanged": True,
+    "auto_execution": False,
+}
 _SENSITIVE_TEXT = re.compile(
     r"(?i)(bearer\s+\S+|postgres(?:ql)?://\S+|https?://\S+|"
     r"(?:token|secret|password|cookie)\s*[:=]\s*\S+|"
@@ -1681,6 +1689,8 @@ class ScheduledSnapshotService:
                 "quote_as_of": quote.get("as_of"),
                 "quote_freshness": freshness,
                 "holding_pnl_pct": pnl,
+                "daily_observation_available": close_price is not None,
+                "plan_review_available": close_price is not None and plan_usable,
                 "status": "degraded" if blockers else state,
                 "action": action,
                 "action_cn": {
@@ -1698,6 +1708,9 @@ class ScheduledSnapshotService:
             "status": "complete" if complete else "degraded",
             "count": len(rows),
             "reviewed_count": len(rows) - len(blocked),
+            "daily_observed_count": sum(
+                row["daily_observation_available"] for row in rows
+            ),
             "blocked_count": len(blocked),
             "unusable_trade_plan_symbols": [
                 row["symbol"] for row in blocked
@@ -1900,6 +1913,7 @@ class ScheduledSnapshotService:
             "blocked_strategy_count": len(blocked_strategies),
             "blocked_strategies": blocked_strategies[:100],
             "guardrails": {
+                "scope": "long_term_strategy_parameters",
                 "minimum_directional_samples": MIN_STRATEGY_FEEDBACK_SAMPLES,
                 "minimum_performance_factor_deviation": MIN_PERFORMANCE_FACTOR_DEVIATION,
                 "maximum_multiplier_step": MAX_STRATEGY_MULTIPLIER_STEP,
@@ -1917,6 +1931,7 @@ class ScheduledSnapshotService:
             "due": due,
             "available_after": "20:45 Asia/Shanghai",
             "review_date": now.date().isoformat(),
+            "daily_review_policy": dict(DAILY_REVIEW_POLICY),
         }
         if not due:
             pending = base | {
@@ -2010,9 +2025,11 @@ class ScheduledSnapshotService:
         )
         conclusion = (
             f"盘后闭环完成：后验有效分桶 {evaluated} 个，"
-            f"策略调整建议 {proposals.get('proposal_count') or 0} 项，均需人工审核。"
+            f"长期参数调整建议 {proposals.get('proposal_count') or 0} 项，均需人工审核；"
+            "每日选股和操作计划按当日证据另行复盘。"
             if status == "complete" else
-            "盘后闭环不完整：任务、交易日证据或后验数据存在缺口；不应用策略调整。"
+            "盘后闭环不完整：按当日已有有效数据逐项复盘和调整建议；"
+            "缺失输入仅限制相关项目，长期参数另按后验门槛审核。"
         )
         review = base | {
             "status": status,
@@ -2695,6 +2712,9 @@ class ScheduledSnapshotService:
         )
         next_session_plan["closing_plan_binding"] = closing_binding
         post_close_review["holdings_review_status"] = holdings_review.get("status")
+        post_close_review["daily_observed_holding_count"] = holdings_review.get(
+            "daily_observed_count", 0,
+        )
         post_close_review["next_session_plan_status"] = next_session_plan.get("status")
         post_close_review["source_comparison_status"] = source_comparison.get("status")
         if phase == "post_close_review":

@@ -1011,6 +1011,37 @@ def test_post_close_review_uses_posterior_threshold_and_never_auto_applies():
     assert proposals["guardrails"]["evidence_complete_required"] is True
     assert proposals["blocked_strategy_count"] == 1
     assert proposals["guardrails"]["auto_apply"] is False
+    assert proposals["guardrails"]["scope"] == "long_term_strategy_parameters"
+    assert snapshot["post_close_review"]["daily_review_policy"][
+        "posterior_completeness_required"
+    ] is False
+    assert "逐项复盘" in snapshot["post_close_review"]["conclusion"]
+
+
+@pytest.mark.parametrize("freshness", ("closing_current", "stale_or_missing"))
+def test_daily_holding_observation_survives_missing_plan_but_requires_valid_quote(freshness):
+    review = ScheduledSnapshotService._holdings_review(
+        due=True,
+        trading_day={"confirmed": True, "is_trading_day": True, "date": "2026-09-10"},
+        holdings=[{"symbol": "000001", "cost_price": 10},
+                  {"symbol": "000002", "cost_price": 10}],
+        quote_rows=[{"symbol": "000001", "price": 9, "freshness": freshness}],
+        plans={}, pricing_snapshot={},
+    )
+    observed = freshness == "closing_current"
+    assert review["status"] == "degraded"
+    assert review["reviewed_count"] == 0
+    assert review["daily_observed_count"] == int(observed)
+    first, missing = review["rows"]
+    assert first["daily_observation_available"] is observed
+    assert first["holding_pnl_pct"] == (-10 if observed else None)
+    assert first["plan_review_available"] is False
+    assert first["stop_loss"] is None
+    assert first["target_price"] is None
+    assert first["action"] == "data_insufficient"
+    assert missing["daily_observation_available"] is False
+    assert missing["holding_pnl_pct"] is None
+    assert review["auto_execution"] is False
 
 
 def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs():
@@ -1065,6 +1096,9 @@ def test_post_close_snapshot_uses_closing_marks_and_exposes_next_session_outputs
         "external_independent": False,
     }
     assert snapshot["post_close_review"]["holdings_review_status"] == "complete"
+    assert snapshot["post_close_review"]["daily_observed_holding_count"] == 2
+    assert snapshot["holdings_review"]["daily_observed_count"] == 2
+    assert all(row["plan_review_available"] for row in snapshot["holdings_review"]["rows"])
     assert snapshot["post_close_review"]["next_session_plan_status"] == "complete"
     assert snapshot["trade_plans"]["intraday_plan_binding"]["status"] == "historical_reference"
     assert snapshot["trade_plans"]["holding_actions_authority"]["status"] == "historical_reference"
