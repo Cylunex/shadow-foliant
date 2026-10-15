@@ -67,6 +67,15 @@ Claim 的片段必须有 source_id、quote、locator、published_at、first_seen
 数字由 Decimal 重算。明确不同口径不能相减；自然语言推断/因果关系不因数字算对而自动得到证明。
 Coverage、freshness、conclusion、use 分开显示，不压成一个虚假精确置信分。
 
+2026-10-15 起，草稿服务端冻结 `evidence_as_of`，要求发布时间不晚于首次观测、首次观测
+不晚于草稿时点。`validity.claim_checks` 逐条列出数字重算、时间、声明口径与待核实原因；
+`arithmetic_coverage` 只代表数字可重算，`coverage` 表示文字支持程度，当前没有自动文字
+核验器，因此不能因算式正确而把文字结论标为 supported。人工锁定保留此边界。
+旧记录在查询时重新评估且不改历史；旧锁定缺少原草稿时点时明确 unknown。完整数字匹配
+支持普通小数、负号及千分位，不接受数字后缀冒充完整引用，也不自动换算单位或认证来源。
+近期项目比较、实现方案与验收范围见
+[研究论断核验调研](plans/2026-10-15-research-claim-verification.md)。
+
 TOP5 自动生成核查待办；重大/未知事件和财务修订也生成复核。每天最多 3 个 Case，
 每个最多 12 个工具准入、1 次综合模型调用。当前固定流程读取档案、事件和缓存估值 3 项；
 一次模型请求最多 600 输出 token、30 秒，不在该工作流无限跨源 fallback。

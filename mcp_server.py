@@ -1154,8 +1154,10 @@ def research_thesis_draft(symbol: str, text: str, claims: list, expected_revisio
     claims 可为空（会标未核实）；每项必须有 text/passages/expires_at。
     passages 每段需 source_id/quote/published_at/first_seen_at/locator。
     数字计算的片段另需 unit/currency/basis/period_kind，不同口径不能混算。
+    发布时间不得晚于首次观测，首次观测不得晚于服务端草稿时点；时间均需时区。
     计算可用 calculation={operation:sum|difference|ratio|growth_pct,
     operands:[{value:数字字符串,passage_index:0}]}，数字必须在对应片段出现。
+    返回 validity.claim_checks 分列数字重算、时间与文字结论；重算成功不证明因果或来源真实性。
     更新已有草稿需传读取到的 expected_revision；锁定只能由用户在 Web 确认。
     """
     from application.research_cases import ResearchCases

@@ -4,10 +4,10 @@ Evidence, freshness and conclusion validity are separate. New risk can trigger a
 review without a pre-existing thesis and never blocks deterministic risk exits.
 """
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 import math
 import re
 from application.results import payload_hash
+from application.research_claims import CLAIM_FIELDS, compile_claim, validity
 from data.reliability_store import ReliabilityStore, utcnow, canonical_time
 
 QUESTIONS = {
@@ -19,71 +19,6 @@ QUESTIONS = {
     "core": "基本面和趋势是否仍支持入选，关键字段有没有缺口？",
     "timing": "技术信号是否已失效，是否出现追高或趋势衰竭？",
 }
-
-
-def validity(claims, *, now):
-    coverage = sum(c.get("state") == "supported" for c in claims) / len(claims) if claims else 0
-    stale = any(not c.get("expires_at") or canonical_time(c["expires_at"]) <= canonical_time(now) for c in claims)
-    contradicted = any(c.get("state") == "contradicted" for c in claims)
-    return {"coverage": coverage, "freshness": "stale" if stale or not claims else "current",
-            "conclusion": "contradicted" if contradicted else "supported" if coverage == 1 else "unverified",
-            "use": "review_required" if stale or contradicted or coverage < 1 else "research_support_only"}
-
-
-def compile_claim(text, passages, *, calculation=None, expires_at):
-    if not isinstance(text, str) or not text.strip() or len(text) > 4000 or not 1 <= len(passages) <= 12:
-        raise ValueError("claim_requires_bounded_evidence")
-    expires_at = canonical_time(expires_at)
-    for p in passages:
-        if not all(p.get(k) for k in ("source_id", "quote", "published_at", "first_seen_at", "locator")):
-            raise ValueError("passage_provenance_required")
-        if len(p["quote"]) > 4000:
-            raise ValueError("passage_too_large")
-        for key in ("published_at", "first_seen_at"):
-            canonical_time(p[key])
-    result = None
-    if calculation:
-        operands = calculation.get("operands", [])
-        if not 1 <= len(operands) <= 12:
-            raise ValueError("bounded_operands_required")
-        values = []
-        semantics = set()
-        for operand in operands:
-            index = operand.get("passage_index")
-            if type(index) is not int or not 0 <= index < len(passages):
-                raise ValueError("operand_source_required")
-            # Numbers must be extractable from the exact cited fragment; no eval.
-            token = str(operand.get("value"))
-            passage = passages[index]
-            definition = tuple(passage.get(k) for k in ("unit", "currency", "basis", "period_kind"))
-            if not all(definition):
-                raise ValueError("calculation_semantics_required")
-            semantics.add(definition)
-            if not re.search(r"(?<![\d.+−-])" + re.escape(token) + r"(?![\d.])", passages[index]["quote"]):
-                raise ValueError("operand_not_in_passage")
-            number = Decimal(token)
-            if not number.is_finite():
-                raise ValueError("nonfinite_operand")
-            values.append(number)
-        if len(semantics) != 1:
-            raise ValueError("incompatible_calculation_semantics")
-        operation = calculation.get("operation")
-        if operation == "sum":
-            result = sum(values)
-        elif operation == "difference" and len(values) == 2:
-            result = values[0] - values[1]
-        elif operation in {"ratio", "growth_pct"} and len(values) == 2 and values[1]:
-            result = values[0] / values[1]
-            if operation == "growth_pct":
-                result = (result - 1) * 100
-        else:
-            raise ValueError("unsupported_calculation")
-        if "expected" in calculation and Decimal(str(calculation["expected"])) != result:
-            raise ValueError("claim_number_mismatch")
-    return {"text": text, "passages": passages, "calculation": calculation,
-            "computed_value": str(result) if result is not None else None,
-            "state": "supported" if calculation else "unverified", "expires_at": expires_at,
-            "semantic_entailment": "not_automatically_proven"}
 
 
 class ResearchCases:
@@ -116,12 +51,20 @@ class ResearchCases:
         return results
 
     def draft(self, symbol, *, owner, text, claims, expected_revision=0):
-        if not re.fullmatch(r"\d{6}", symbol) or not text or len(text) > 8000 or len(claims) > 20:
+        if (not re.fullmatch(r"\d{6}", symbol) or not isinstance(text, str) or not text.strip()
+                or len(text) > 8000 or not isinstance(claims, list) or len(claims) > 20
+                or any(not isinstance(c, dict) for c in claims)):
             raise ValueError("invalid_thesis")
-        fields = {"text", "passages", "calculation", "expires_at"}
-        compiled = [compile_claim(**{k: v for k, v in c.items() if k in fields}) for c in claims]
-        return self.repo.put("thesis_draft", symbol, {"text": text, "claims": compiled,
-            "status": "draft", "created_at": utcnow()}, owner=owner, expected_revision=expected_revision)
+        now = utcnow()
+        compiled = [compile_claim(**{k: v for k, v in c.items() if k in CLAIM_FIELDS}, as_of=now) for c in claims]
+        saved = self.repo.put("thesis_draft", symbol, {"text": text, "claims": compiled,
+            "status": "draft", "created_at": now, "evidence_as_of": now}, owner=owner, expected_revision=expected_revision)
+        return self._thesis_view(saved, now=now)
+
+    @staticmethod
+    def _thesis_view(thesis, *, now):
+        return {**thesis, "validity": validity(thesis.get("claims") or [], now=now,
+            as_of=thesis.get("evidence_as_of") or thesis.get("created_at"))}
 
     def lock(self, symbol, *, owner, draft_revision, human_confirmed=False):
         # Human provenance is supplied by the authenticated browser handler, never
@@ -134,11 +77,13 @@ class ResearchCases:
                 raise ValueError("stale_thesis_draft")
             old = self.repo.read(cur, "thesis_lock", symbol, owner)
             if old and old.get("draft_revision") == draft_revision:
-                return old
-            return self.repo.append(cur, "thesis_lock", symbol, owner,
+                return self._thesis_view(old, now=utcnow())
+            saved = self.repo.append(cur, "thesis_lock", symbol, owner,
                 {"draft_revision": draft_revision, "text": draft["text"], "claims": draft["claims"],
+                 "evidence_as_of": draft.get("evidence_as_of") or draft.get("created_at"),
                  "locked_at": utcnow(), "status": "locked", "actor": "authenticated_human",
                  "next_check": min((canonical_time(c["expires_at"]) for c in draft["claims"]), default=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat())}, old)
+            return self._thesis_view(saved, now=utcnow())
 
     def event(self, symbol, event):
         if not event.get("source_id") or not event.get("published_at") or not event.get("event_id"):
@@ -265,8 +210,8 @@ class ResearchCases:
                     attention[index] = event
         return {"cases": cases, "attention_top5": sorted(attention, key=lambda e: e["review"] != "urgent")[:5],
                 "execution_runs": self.repo.list("case_execution", owner=owner) if owner else [],
-                "theses": [{**t, "validity": validity(t["claims"], now=now)} for t in theses],
-                "drafts": self.repo.list("thesis_draft", owner=owner) if owner else [],
+                "theses": [self._thesis_view(t, now=now) for t in theses],
+                "drafts": [self._thesis_view(t, now=now) for t in self.repo.list("thesis_draft", owner=owner)] if owner else [],
                 "investigations": [{k: r[k] for k in ("object_id", "symbol", "event_id", "status", "summary", "missing", "verified_conclusion") if k in r}
                                    for r in self.repo.list("case_investigation", limit=30)],
                 "acknowledgements": acknowledgements,
