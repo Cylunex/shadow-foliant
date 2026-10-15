@@ -248,7 +248,11 @@ class LLMRouter:
                      ⚠️ 关键:openai SDK 默认超时 ~10min, 无超时会让"挂起的 provider"阻塞调用方主路径
                      (选股 job/持仓建议/离场)。这里强制有界:超时即抛错 → 降级下一 provider。
         """
-        bounded = call_type in {'case_review', 'research_process_eval', 'strategy_policy_committee'}
+        # 晨报已有规则版兜底，单次模型调用必须遵守调用方的 25 秒预算；
+        # 不能让 Platform SDK 的注册表重试/候选源耗尽 09:00 任务的 600 秒硬上限。
+        bounded = call_type in {
+            'case_review', 'research_process_eval', 'strategy_policy_committee', 'morning'
+        }
         try:
             import platform_llm
             if platform_llm.configured():
@@ -264,6 +268,12 @@ class LLMRouter:
                     )
                 except Exception as exc:
                     if bounded:
+                        if call_type == 'morning':
+                            reason = ('timeout' if 'timeout' in type(exc).__name__.lower()
+                                      else 'provider_unavailable')
+                            print(f'[LLM-Router] 晨报有界调用失败({type(exc).__name__})，'
+                                  '使用已采集数据生成规则版', flush=True)
+                            return f'API调用失败: {reason}', 'none'
                         print(f'[LLM-Router] 有界研究调用失败({type(exc).__name__})，'
                               '保留待核实状态，不重复请求其他 provider', flush=True)
                         return '', 'none'

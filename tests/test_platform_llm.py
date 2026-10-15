@@ -78,6 +78,38 @@ class PlatformLLMTests(unittest.TestCase):
         self.assertEqual(platform.call.call_args.kwargs['timeout'], 20)
         self.assertTrue(platform.call.call_args.kwargs['single_attempt'])
 
+    def test_morning_router_passes_25_second_deadline_and_keeps_timeout_reason(self):
+        from core.llm_router import LLMRouter
+        platform = SimpleNamespace(configured=lambda: True,
+                                   call=Mock(side_effect=TimeoutError('slow provider')))
+        router = object.__new__(LLMRouter)
+        router.providers = [object()]
+        with patch.dict(sys.modules, {'platform_llm': platform}):
+            result = router.call([{'role': 'user', 'content': 'public facts'}],
+                                 call_type='morning', max_tokens=1600, timeout=25)
+        self.assertEqual(result, ('API调用失败: timeout', 'none'))
+        self.assertEqual(platform.call.call_count, 1)
+        self.assertEqual(platform.call.call_args.kwargs['timeout'], 25)
+        self.assertEqual(platform.call.call_args.kwargs['max_tokens'], 1600)
+        self.assertTrue(platform.call.call_args.kwargs['single_attempt'])
+
+    def test_morning_client_uses_rule_fallback_without_second_request(self):
+        with patch.dict(os.environ, {
+            'DEEPSEEK_BASE_URL': 'https://example.invalid/v1',
+            'DEEPSEEK_API_KEY': 'test-only',
+        }):
+            from core.deepseek_client import DeepSeekClient
+            client = DeepSeekClient()
+        client.client.chat.completions.create = Mock()
+        router = SimpleNamespace(providers=[object()],
+                                 call=Mock(return_value=('API调用失败: timeout', 'none')))
+        with patch.dict(sys.modules, {'llm_router': SimpleNamespace(get_router=lambda: router)}):
+            result = client.call_api([{'role': 'user', 'content': 'public facts'}],
+                                     timeout=25, call_type='morning')
+        self.assertEqual(result, 'API调用失败: timeout')
+        client.client.chat.completions.create.assert_not_called()
+        router.call.assert_called_once()
+
     def test_bounded_sdk_has_one_target_no_retry_and_request_timeout(self):
         from dataclasses import dataclass
         @dataclass(frozen=True)

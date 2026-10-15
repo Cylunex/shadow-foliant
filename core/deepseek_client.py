@@ -141,7 +141,13 @@ class DeepSeekClient:
                     if text and not text.startswith('[LLM-Router]'):
                         self.last_used_provider = used
                         return text
+                    if call_type == 'morning':
+                        # 晨报的规则版已能独立收尾；路由器失败后不再追加一次直连请求。
+                        return text or 'API调用失败: provider_unavailable'
             except Exception as e:
+                if call_type == 'morning':
+                    return ('API调用失败: timeout' if 'timeout' in type(e).__name__.lower()
+                            else 'API调用失败: provider_unavailable')
                 print(f"[deepseek_client] router 异常，退回直连: {e}")
 
         try:
