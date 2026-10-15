@@ -10,6 +10,7 @@ from typing import Any
 from notify.plain_language import plain_text
 from application.market_prices import current_day_price, format_reference_price
 from application.daily_review import DAILY_REVIEW_SCHEMA
+from application.market_risk_notice import account_risk, market_lines, risk_level
 from application.scheduled_report_contract import (REPORT_MAX_BYTES, REPORT_MAX_CHARS,
     REPORT_MAX_LINES, REPORT_MAX_ORIGINAL_LINES, REPORT_MAX_PARTS)
 
@@ -235,6 +236,41 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
     time_label = min(quote_times).strftime("%H:%M") if quote_times else (
         captured_at.strftime("%H:%M") if captured_at else "待核验")
     lines = []
+    market = snapshot.get("market_risk") or {}
+    reference = snapshot.get("market_risk_reference") or {}
+    current = {row.get("name"): row.get("change_pct") for row in market.get("rows") or []
+               if isinstance(row, dict)}
+    prior = reference.get("indices") or {}
+    account = account_risk(snapshot)
+    previous_account = reference.get("account") or {}
+    account_changed = bool(
+        account.get("status") == "current" and previous_account.get("status") == "current"
+        and (account["down"] >= previous_account.get("down", 0) + 2
+             or (account.get("risk_observations") is not None
+                 and previous_account.get("risk_observations") is not None
+                 and account["risk_observations"] > previous_account["risk_observations"])))
+    changed_market = (risk_level(market) > 0 and
+                      (not prior or any(name in prior and pct <= prior[name] - 1.0
+                                        for name, pct in current.items())))
+    morning = bool(captured_at and captured_at.hour == 10)
+    if morning or post_close or changed_market or account_changed:
+        lines.extend(market_lines(market))
+        if account.get("status") == "current":
+            account_line = (f"账户：已核验{account['covered']}/{account['total']}只持仓当日涨跌，"
+                            f"其中下跌{account['down']}只"
+                            + ("；其余待核验" if account["covered"] < account["total"] else ""))
+            if account.get("largest_decline"):
+                worst = account["largest_decline"]
+                account_line += (f"；跌幅最大{_field(worst['name'] or worst['symbol'])}"
+                                 f"{worst['change_pct']:+.2f}%（非实际盈亏）")
+            if account.get("day_change_estimate_cny") is not None:
+                account_line += (f"；估算日内变动¥{account['day_change_estimate_cny']:+,.0f}"
+                                 "（非成本浮盈亏/实际盈亏）")
+            if account.get("risk_observations"):
+                account_line += f"；止损/风险观察{account['risk_observations']}只"
+            lines.append(account_line)
+        else:
+            lines.append("账户：持仓当日涨跌待核验")
     if operations:
         lines.extend([f"持仓操作与风险观察（{day or '日期待核验'} {'收盘行情' if post_close else '行情'}{time_label}）",
                       "编号｜名称｜现价｜操作｜原因",
@@ -254,6 +290,15 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
     if post_close:
         review = snapshot.get("holdings_review") or {}
         next_plan = snapshot.get("next_session_plan") or {}
+        comparable = [(name, pct - prior[name]) for name, pct in current.items()
+                      if name in prior and isinstance(pct, (int, float))
+                      and isinstance(prior[name], (int, float))]
+        if comparable:
+            name, difference = min(comparable, key=lambda item: item[1])
+            lines.append(f"市场复盘：较前次已接受提示，{name}"
+                         f"{'跌幅扩大' if difference < 0 else '回升'}{abs(difference):.2f}个百分点")
+        else:
+            lines.append("市场复盘：前次已接受市场基线待核验，不推定原判断变化")
         if review.get("status") in {"complete", "degraded"}:
             reviewed = f"持仓复核{_count(review.get('reviewed_count'))}/{_count(review.get('count'))}"
         else:
@@ -264,6 +309,10 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
             planning = "次日计划待核验"
         lines.append(f"盘后复盘：{reviewed}；{planning}。")
         daily = snapshot.get("daily_review") or {}
+        adjustment = ("已记录风险观察保留" if _count(daily.get("recorded_operation_count"))
+                      else "无已核验的账户动作调整")
+        lines.append(f"当日调整：{adjustment}，未核验成交不作实际盈亏；"
+                     "次日关注有效行情、原风险触发和新参考计划。")
         if daily.get("schema_version") == DAILY_REVIEW_SCHEMA:
             daily_holdings = (f"持仓{_count(daily.get('holding_observed_count'))}/{_count(daily.get('holding_count'))}"
                               if daily.get("holdings_available") is not False else "持仓待核验")

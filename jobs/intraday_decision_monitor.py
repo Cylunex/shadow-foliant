@@ -936,8 +936,48 @@ def _overflow_alert(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> t
     return "盘中提醒：其余风险汇总", "\n".join(lines)
 
 
+def _market_information_cycle(current: datetime, previous: dict[str, Any],
+                              snapshot_loader: Callable, market_loader: Callable | None,
+                              notify_fn: Callable | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    from application.market_risk_notice import (
+        accepted, current_indices, market_lines, newer_reference, transition,
+    )
+    market = (current_indices(current, market_loader)
+              if market_loader is not None or notify_fn is None
+              else {"status": "unavailable", "rows": []})
+    try:
+        report_reference = snapshot_loader("_scheduled_market_risk_reference") or {}
+    except Exception:
+        report_reference = {}
+    old = newer_reference(previous.get("market_risk_state") or {}, report_reference,
+                          current.date().isoformat())
+    state, event = transition(market, old, current)
+    if not event:
+        return market, state
+    body = "\n".join([*market_lines(market),
+                      "市场信息提示；请结合账户风险复核，未发生交易"])
+    try:
+        if notify_fn is not None:
+            receipt = notify_fn("市场风险提示", body)
+        else:
+            from notify.notification_router import send
+            receipt = send(
+                "market_risk", "市场风险提示", body, only_channels=["qq"], fallback=None,
+                source="jobs.intraday_decision_monitor",
+                idempotency_key=f"market-risk:{event['trade_date']}:{event['episode']}",
+                business_as_of=event["as_of"], market_event=event)
+        if (isinstance(receipt, dict) and receipt.get("qq") in
+                {(True, "HTTP 200"), (True, "HTTP 204")}
+                and getattr(receipt, "archive_status", None) == "recorded"):
+            state = accepted(state, event, current)
+    except Exception:
+        LOGGER.exception("market information notification failed")
+    return market, state
+
+
 def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
               notify_changes: bool = True, quote_loader: Callable | None = None,
+              market_loader: Callable | None = None,
               formal_loader: Callable | None = None, holdings_loader: Callable | None = None,
               snapshot_loader: Callable | None = None, snapshot_saver: Callable | None = None,
               notify_fn: Callable | None = None,
@@ -963,16 +1003,28 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         snapshot_loader = snapshot_loader or jobs_hub.get_indicator_snapshot
         snapshot_saver = snapshot_saver or jobs_hub.save_indicator_snapshot
 
+    previous = snapshot_loader(SNAPSHOT_KEY) or {}
+    market = {"status": "unavailable", "rows": []}
+    market_state = previous.get("market_risk_state") or {}
+    if notify_changes:
+        market, market_state = _market_information_cycle(
+            current, previous, snapshot_loader, market_loader, notify_fn)
+    def early_skip(reason: str) -> dict[str, Any]:
+        if notify_changes:
+            snapshot_saver(SNAPSHOT_KEY, {**previous,
+                "market_risk": market, "market_risk_state": market_state})
+        return {"status": "skipped", "reason": reason,
+                "market_risk": market, "market_risk_state": market_state}
+
     formal = formal_loader() or {}
     if str(formal.get("selection_date") or "")[:10] != current.date().isoformat():
-        return {"status": "skipped", "reason": "today_formal_selection_unavailable"}
+        return early_skip("today_formal_selection_unavailable")
     pool = build_monitor_pool(formal, holdings_loader() or [])
-    previous = snapshot_loader(SNAPSHOT_KEY) or {}
     plans = _plans_from_previous(previous, str(formal.get("run_id") or ""))
     if allow_plan_build:
         _build_missing_plans(formal, pool, plans, snapshot_loader)
     if not allow_plan_build and any(row["symbol"] not in plans for row in pool):
-        return {"status": "skipped", "reason": "awaiting_fixed_node_trade_plans"}
+        return early_skip("awaiting_fixed_node_trade_plans")
 
     # 一个调用覆盖全池；此后不逐股回退。
     quotes = quote_loader([row["symbol"] for row in pool]) or {}
@@ -1193,6 +1245,8 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         "trigger_state": states,
         "events": [{key: value for key, value in event.items() if key != "item"} for event in events],
         "critical_notification_policy": critical_policy,
+        "market_risk": market,
+        "market_risk_state": market_state,
         "portfolio_action_guard": {
             "status": "applied",
             "reason_version": ACTION_REASON_VERSION,

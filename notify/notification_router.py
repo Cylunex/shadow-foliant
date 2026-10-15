@@ -94,6 +94,22 @@ def _certified_scheduled_report(category: str, source: str, key: str | None,
             and externally_deduplicated and critical_event is None)
 
 
+def _certified_market_event(category: str, source: str, key: str | None,
+                            event: dict | None) -> bool:
+    if (category != "market_risk" or source != "jobs.intraday_decision_monitor"
+            or not isinstance(event, dict)):
+        return False
+    from application.market_risk_notice import VERSION
+    day = str(event.get("trade_date") or "")
+    episode = event.get("episode")
+    return (event.get("policy_version") == VERSION
+            and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", day))
+            and type(episode) is int and episode > 0
+            and event.get("level") in {1, 2}
+            and isinstance(event.get("indices"), dict)
+            and key == f"market-risk:{day}:{episode}")
+
+
 def _submitted_body(channel: str, title: str, content: str) -> str:
     if channel == "wechat_work":
         return f"## {title}\n\n{content}"
@@ -432,7 +448,8 @@ def send(category: str, title: str, content: str,
          business_as_of: Optional[str] = None, original_body: Optional[str] = None,
          planned_at: Optional[str] = None, sensitivity: str = "private",
          compact: bool = True, externally_deduplicated: bool = False,
-         critical_event: Optional[dict] = None) -> Dict[str, Tuple[bool, str]]:
+         critical_event: Optional[dict] = None,
+         market_event: Optional[dict] = None) -> Dict[str, Tuple[bool, str]]:
     """统一发送入口(所有业务推送都应走这里,不要在业务代码里直连 webhook)
 
     Args:
@@ -459,12 +476,14 @@ def send(category: str, title: str, content: str,
                 category, source, idempotency_key, only_channels, fallback,
                 externally_deduplicated, critical_event)
             and not _certified_critical_event(source, idempotency_key,
-                                              critical_event)):
+                                              critical_event)
+            and not _certified_market_event(category, source, idempotency_key,
+                                            market_event)):
         silent = DeliveryResults()
         silent.policy_status = "silent_critical_only"
         return silent
     targets = only_channels or _get_routes_for(category, title)
-    if critical_event:
+    if critical_event or market_event:
         # Critical investment events have one stable destination. A changed
         # route configuration must not create a second channel attempt.
         targets = ["qq"]
@@ -521,7 +540,7 @@ def send(category: str, title: str, content: str,
         except Exception:
             # Alerts and externally serialized reports may continue with a visible
             # archive gap. Other idempotent calls stop when the outcome is unknown.
-            if critical_event:
+            if critical_event or market_event:
                 results[ch] = (False, "archive_unavailable")
                 results.archive_outcomes[ch] = "unknown"
                 return

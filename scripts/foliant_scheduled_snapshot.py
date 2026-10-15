@@ -51,7 +51,7 @@ NOTIFICATION_REJECTION_HINTS = {
     "scheduled_notification_slot_invalid": "Use one of the four planned Shanghai slots.",
 }
 SCHEDULED_NOTIFICATION_TIMES = ("10:15", "11:25", "14:35", "20:45")
-QQ_SUMMARY_VERSION = "scheduled-qq-v5"
+QQ_SUMMARY_VERSION = "scheduled-qq-v6"
 DELIVERY_RECEIPT_VERSION = "scheduled-delivery-receipt-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SECRET_PATTERN = re.compile(
@@ -684,7 +684,7 @@ def qq_payload(snapshot: dict[str, Any], *, include_selection: bool = True,
             "version": QQ_SUMMARY_VERSION, "run_id": snapshot.get("run_id"),
             "category": "report", "parts": parts,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
-        "original_lines": len(render_qq_report(snapshot)[1].splitlines()),
+        "original_lines": len(content.splitlines()),
         "delivered_lines": sum(len(body.splitlines()) for _, body in parts),
         "part_count": len(parts),
         "category": "report", "version": QQ_SUMMARY_VERSION,
@@ -712,7 +712,7 @@ def send_qq(snapshot: dict[str, Any], *, payload: dict[str, Any] | None = None,
         return {"requested": True, "sent": False, "channel": "qq",
                 "error_code": "qq_router_unavailable"}
     parts = payload.get("parts") or [(payload["title"], payload["content"])]
-    original = render_qq_report(snapshot)[1]
+    original = payload["content"]
     outcomes = []
     for index, (title, body) in enumerate(parts, 1):
         try:
@@ -965,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                         notification = send_qq(snapshot, payload=payload,
                                                notification_slot=notification_slot)
                         status = notification.get("delivery_status") or "unknown"
+                        from application.market_risk_notice import account_risk
                         finish, finish_failure = notification_ledger("finish", {
                             "notification_slot": notification_slot,
                             "payload_hash": payload["payload_hash"],
@@ -974,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
                             "accepted_part_count": notification.get("accepted_part_count", 0),
                             "message_archive_status": notification.get("message_archive_status"),
                             "message_archive_id": notification.get("message_archive_id"),
+                            "market_context": snapshot.get("market_risk"),
+                            "account_context": account_risk(snapshot),
                         })
                         notification.update({
                             "notification_slot": notification_slot,

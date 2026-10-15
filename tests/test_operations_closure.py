@@ -152,7 +152,7 @@ def test_rendered_parts_archive_and_partial_slot_never_replays(report_store, mon
     for index in range(1, len(sent) + 1):
         message = archive.detail(result["message_archive_id"] if index == len(sent) else
             _message_id_for_part(report_store, slot, payload["payload_hash"], index))
-        assert message["original_body"] == cli.render_qq_report(snapshot)[1]
+        assert message["original_body"] == payload["content"]
         assert message["deliveries"][0]["final_body"] == sent[index - 1]
         assert message["deliveries"][0]["status"] == "accepted"
     assert service.finish(slot=slot, payload_hash=payload["payload_hash"], actor_id="fixture",

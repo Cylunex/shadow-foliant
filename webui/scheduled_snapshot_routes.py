@@ -46,6 +46,8 @@ class NotificationFinishReq(NotificationStartReq):
     accepted_part_count: int = Field(default=0, ge=0, le=REPORT_MAX_PARTS)
     message_archive_status: str | None = Field(default=None, pattern=r"^(recorded|partial|unknown|unrecorded|suppressed)$")
     message_archive_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    market_context: dict[str, Any] | None = None
+    account_context: dict[str, Any] | None = None
 
 
 def register_scheduled_snapshot_routes(
@@ -149,6 +151,8 @@ def register_scheduled_snapshot_routes(
                 http_status=req.http_status, error_code=req.error_code,
                 accepted_part_count=req.accepted_part_count,
                 message_archive_status=req.message_archive_status,
-                message_archive_id=req.message_archive_id)})
+                message_archive_id=req.message_archive_id,
+                market_context=req.market_context,
+                account_context=req.account_context)})
         except Exception as exc:
             return agent_error(exc)

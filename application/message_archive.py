@@ -123,7 +123,7 @@ class MessageArchiveService:
                     or self._decrypt(row[3]) != title or row[4] != source):
                 raise ValueError("message_archive_idempotency_conflict")
             actual_message_id = str(row[0])
-            if idempotency_key and idempotency_key.startswith("critical-stop:"):
+            if idempotency_key and idempotency_key.startswith(("critical-stop:", "market-risk:")):
                 cur.execute("""SELECT delivery_id,status,attempted_at,acknowledged_at
                                FROM notification_deliveries
                                WHERE message_id=? AND channel<>?

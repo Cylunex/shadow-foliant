@@ -1976,7 +1976,8 @@ def test_cli_critical_event_gate_does_not_suppress_degraded_report(monkeypatch):
     }
     assert cli.qq_preflight(snapshot) is None
     payload = cli.qq_payload(snapshot)
-    assert payload["category"] == "report" and payload["delivered_lines"] == 3
+    assert payload["category"] == "report" and payload["delivered_lines"] >= 5
+    assert "市场：当前宽基行情待核验" in payload["content"]
     assert "当期无可用选股候选" not in payload["content"]
     assert "600001｜示例｜现价待核验｜卖出观察" in payload["content"]
     assert "最高级止损风险" not in payload["content"]

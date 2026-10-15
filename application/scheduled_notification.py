@@ -245,7 +245,9 @@ class ScheduledNotificationService:
                status: str, http_status: int | None = None,
                error_code: str | None = None, accepted_part_count: int = 0,
                message_archive_status: str | None = None,
-               message_archive_id: str | None = None) -> dict[str, Any]:
+               message_archive_id: str | None = None,
+               market_context: dict[str, Any] | None = None,
+               account_context: dict[str, Any] | None = None) -> dict[str, Any]:
         slot = self._slot(slot)
         if status not in {"delivered", "failed", "partial", "unknown"}:
             raise ValueError("scheduled_notification_status_invalid")
@@ -288,7 +290,23 @@ class ScheduledNotificationService:
                          accepted_part_count))
             recorded = int(cur.rowcount or 0) == 1
             conn.commit()
-            return {"recorded": recorded, "delivery_status": status}
+            market_recorded = False
+            if (recorded and status == "delivered" and message_archive_status == "recorded"
+                    and market_context):
+                from application.market_risk_notice import report_reference
+                reference = report_reference(market_context, slot[:10], self._now(),
+                                             account_context)
+                if reference:
+                    try:
+                        from jobs.jobs_hub import save_indicator_snapshot
+                        save_indicator_snapshot("_scheduled_market_risk_reference", reference)
+                        market_recorded = True
+                    except Exception:
+                        # Delivery is already final; expose the state gap without
+                        # claiming a second attempt or sending a duplicate.
+                        market_recorded = False
+            return {"recorded": recorded, "delivery_status": status,
+                    "market_reference_recorded": market_recorded}
         except Exception:
             conn.rollback()
             raise

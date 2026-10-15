@@ -114,7 +114,7 @@ def _quote(symbol: str, row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         row = {}
     allowed = (
-        "name", "price", "change_pct", "open", "high", "low", "volume", "amount_wan",
+        "name", "price", "last_close", "change_pct", "open", "high", "low", "volume", "amount_wan",
         "quote_time", "observed_at", "retrieved_at", "quote_time_source", "source",
         "suspended", "limit_up", "limit_down",
     )
@@ -681,6 +681,8 @@ class ScheduledSnapshotService:
         intraday_projector: Callable[..., dict[str, Any]] | None = None,
         external_research_reader: Callable[[], dict[str, Any]] | None = None,
         quote_loader: Callable[[list[str]], dict[str, Any]] | None = None,
+        market_loader: Callable | None = None,
+        market_reference_loader: Callable | None = None,
         job_runs_reader: Callable[..., list[dict[str, Any]]] | None = None,
         outcome_stats_reader: Callable[..., dict[str, Any]] | None = None,
         strategy_evidence_reader: Callable[..., dict[str, Any]] | None = None,
@@ -699,6 +701,9 @@ class ScheduledSnapshotService:
         self.intraday_projector = intraday_projector
         self.external_research_reader = external_research_reader
         self.quote_loader = quote_loader
+        self.market_loader = market_loader
+        self.market_reference_loader = market_reference_loader
+        self._quote_loader_injected = quote_loader is not None
         self.job_runs_reader = job_runs_reader
         self.outcome_stats_reader = outcome_stats_reader
         self.strategy_evidence_reader = strategy_evidence_reader
@@ -2240,6 +2245,22 @@ class ScheduledSnapshotService:
             row["symbol"] for row in quote_rows if row.get("price") is None
         ]
         quotes["missing_count"] = len(quotes["missing_symbols"])
+        from application.market_risk_notice import current_indices
+        market_risk = (current_indices(pricing_at, self.market_loader,
+                                      post_close=quote_mode == "post_close")
+                       if self.market_loader is not None or not self._quote_loader_injected
+                       else {"status": "unavailable", "rows": []})
+        market_risk_reference = {}
+        if self.market_reference_loader is not None or not self._quote_loader_injected:
+            try:
+                if self.market_reference_loader is not None:
+                    market_risk_reference = self.market_reference_loader() or {}
+                else:
+                    from jobs.jobs_hub import get_indicator_snapshot
+                    market_risk_reference = (
+                        get_indicator_snapshot("_scheduled_market_risk_reference") or {})
+            except Exception:
+                pass
         quote_by_symbol = {row["symbol"]: row for row in quote_rows}
         quotes["source_coverage"] = {
             source: _source_quote_coverage(source_symbols, quote_by_symbol)
@@ -2305,6 +2326,10 @@ class ScheduledSnapshotService:
         stock_budget = derive_stock_budget(
             holding_rows, quote_rows, security_metadata,
         )
+        classifications = stock_budget.get("classifications") or {}
+        for row in holding_rows:
+            row["asset_class"] = classifications.get(str(row.get("symbol") or "").zfill(6),
+                                                      "unknown")
         portfolio_industry = classify_holdings(
             holding_rows, stock_budget.get("classifications") or {}, as_of=now.isoformat(),
             expected_market_date=(
@@ -2398,6 +2423,16 @@ class ScheduledSnapshotService:
                     == str(formal.get("run_id") or "")):
                 intraday = projected_intraday
                 intraday_quote_binding = "same_snapshot_quote_batch"
+        monitor_market = intraday.get("market_risk_state") or {}
+        if (monitor_market.get("trade_date") == today
+                and monitor_market.get("accepted_indices")
+                and str(monitor_market.get("accepted_at") or "") >
+                    str(market_risk_reference.get("accepted_at") or "")):
+            market_risk_reference = {
+                "trade_date": today, "indices": monitor_market["accepted_indices"],
+                "level": monitor_market.get("accepted_level"),
+                "accepted_at": monitor_market.get("accepted_at"),
+            }
         plan_run_matches = bool(
             formal.get("status") == "complete"
             and formal.get("selection_date") == today
@@ -2826,6 +2861,8 @@ class ScheduledSnapshotService:
                 ),
             },
             "quotes": quotes,
+            "market_risk": market_risk,
+            "market_risk_reference": market_risk_reference,
             "post_close_review": post_close_review,
             "holdings_review": holdings_review,
             "daily_review": daily_review,
