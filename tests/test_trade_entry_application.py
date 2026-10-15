@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import sqlite3
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from application.run_repository import RunRepository
 from application.services import ApplicationError, PortfolioAccessService, TradeEntryService
+from portfolio.portfolio_db_pg import PortfolioDBPG, _trade_time_for_pg
 
 
 class FakePortfolioDB:
@@ -119,6 +121,97 @@ def test_trade_entry_requires_matching_preview_and_is_idempotent(service) -> Non
     assert result == repeated
     assert result["imported"] == 1
     assert db.import_calls == 1
+
+
+def test_utc_db_session_preview_confirm_keeps_shanghai_execution_time(tmp_path, monkeypatch) -> None:
+    """Exercise the application boundary and PG INSERT binding without production data."""
+    from portfolio import portfolio_db_pg as pg
+
+    stored = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            if 'INSERT INTO trade_records' in sql:
+                assert 'COALESCE(%s::timestamptz, NOW())' in sql
+                bound = params[9]
+                assert isinstance(bound, datetime) and bound.utcoffset() is not None
+                stored.append({
+                    'trade_time': bound.astimezone(timezone.utc),
+                    'external_fingerprint': params[20],
+                })
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pg, 'get_conn', Connection)
+    db = PortfolioDBPG.__new__(PortfolioDBPG)
+    db.get_all_stocks = lambda: []
+    db.get_trades = lambda *_args: []
+    db.existing_trade_execution_keys = lambda keys, **_kwargs: [
+        key for key in keys if key in {item['external_fingerprint'] for item in stored}
+    ]
+    db.stage_trade_import_batch = lambda **_kwargs: None
+    db.mark_trade_import_batch = lambda *_args: None
+
+    database = tmp_path / 'trade-time-actions.db'
+
+    def connect(_name=''):
+        conn = sqlite3.connect(database)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    entry = TradeEntryService(RunRepository(connect_fn=connect, is_postgres=False),
+                              portfolio_db=db)
+    row = {**_row(), 'trade_time': '2026-09-18 13:26:46'}
+    preview = entry.preview(rows=[row], update_position=False)
+    assert preview['status'] == 'ready'
+    first = entry.confirm(
+        actor_id='user-1', idempotency_key='trade-time-naive-1',
+        preview_hash=preview['preview_hash'], rows=[row],
+        update_position=False, confirmed=True,
+    )
+    assert first['imported'] == 1
+    assert stored[0]['trade_time'].isoformat() == '2026-09-18T05:26:46+00:00'
+    assert stored[0]['trade_time'].astimezone(ZoneInfo('Asia/Shanghai')).strftime(
+        '%Y-%m-%d %H:%M:%S') == '2026-09-18 13:26:46'
+
+    repeated = entry.confirm(
+        actor_id='user-1', idempotency_key='trade-time-naive-2',
+        preview_hash=preview['preview_hash'], rows=[row],
+        update_position=False, confirmed=True,
+    )
+    assert repeated['status'] == 'noop'
+    assert repeated['skipped_existing'] == 1
+    assert len(stored) == 1
+
+    offset_row = {**row, 'trade_time': '2026-09-18 13:26:46+00:00'}
+    offset_preview = entry.preview(rows=[offset_row], update_position=False)
+    offset = entry.confirm(
+        actor_id='user-1', idempotency_key='trade-time-offset-1',
+        preview_hash=offset_preview['preview_hash'], rows=[offset_row],
+        update_position=False, confirmed=True,
+    )
+    assert offset['imported'] == 1
+    assert stored[1]['trade_time'].isoformat() == '2026-09-18T13:26:46+00:00'
+    assert stored[0]['external_fingerprint'] != stored[1]['external_fingerprint']
+
+
+def test_trade_timestamp_absent_keeps_now_fallback() -> None:
+    assert _trade_time_for_pg(None) is None
+    assert _trade_time_for_pg('') is None
 
 
 def test_trade_preview_rejects_invalid_fees(service) -> None:

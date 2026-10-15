@@ -4,6 +4,7 @@ from unittest.mock import patch
 import _bootstrap  # noqa: F401  保持与 MCP 入口相同的扁平模块路径
 from portfolio.trade_import_service import (
     import_trade_records, parse_markdown_table, prepare_trades, preview_position_effects,
+    trade_execution_key,
 )
 from portfolio.portfolio_db_pg import PortfolioDBPG
 
@@ -92,6 +93,117 @@ class TradeImportServiceTests(unittest.TestCase):
         self.assertEqual(result['status'], 'noop')
         self.assertEqual(result['skipped_existing'], 1)
         self.assertEqual(db.imported_rows, [])
+
+    def test_explicit_offsets_use_instant_not_raw_wall_time_for_fingerprint(self):
+        base = {'code': '600519', 'trade_type': '买入', 'quantity': 100,
+                'price': 1500, 'source': 'web:trade-entry'}
+        naive = trade_execution_key({**base, 'trade_time': '2026-09-18 13:26:46'})
+        same_instant = trade_execution_key({**base, 'trade_time': '2026-09-18 05:26:46Z'})
+        different_instant = trade_execution_key({**base, 'trade_time': '2026-09-18 13:26:46Z'})
+        self.assertEqual(naive, same_instant)
+        self.assertNotEqual(naive, different_instant)
+
+    def test_historical_explicit_offset_fingerprint_is_checked_with_instant(self):
+        class RecordingDB(_FakePortfolioDB):
+            def existing_trade_execution_keys(self, keys, **kwargs):
+                self.lookup = (keys, kwargs)
+                return keys[:1]
+
+        db = RecordingDB()
+        row = {'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+               'quantity': 100, 'price': 1500,
+               'trade_time': '2026-09-18 13:26:46+00:00'}
+        result = import_trade_records(rows=[row], portfolio_db=db)
+        self.assertEqual(result['status'], 'noop')
+        historical = db.lookup[1]['historical_fingerprints']
+        self.assertEqual(len(historical), 1)
+        self.assertNotEqual(historical[0][0], historical[0][1])
+        self.assertEqual(historical[0][3], '2026-09-18T13:26:46+00:00')
+        self.assertEqual(db.lookup[1]['legacy_utc_keys'], [])
+
+    def test_only_naive_market_time_requests_legacy_utc_comparison(self):
+        class RecordingDB(_FakePortfolioDB):
+            def existing_trade_execution_keys(self, keys, **kwargs):
+                self.lookup = kwargs
+                return []
+
+        db = RecordingDB()
+        row = {'code': '600519', 'name': '贵州茅台', 'trade_type': '买入',
+               'quantity': 100, 'price': 1500,
+               'trade_time': '2026-09-18 13:26:46'}
+        import_trade_records(rows=[row], portfolio_db=db)
+        self.assertEqual(len(db.lookup['legacy_utc_keys']), 1)
+        row['trade_time'] = '2026-09-18 13:26:46+00:00'
+        import_trade_records(rows=[row], portfolio_db=db)
+        self.assertEqual(db.lookup['legacy_utc_keys'], [])
+
+    def test_postgres_legacy_lookup_is_zone_explicit_and_instant_scoped(self):
+        from portfolio import portfolio_db_pg as pg
+
+        candidate = ('600519', '2026-09-18 13:26:46', '买入', 100, 1500.0)
+        responses = [[], [], [candidate], [('fp:new',)]]
+
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return responses.pop(0)
+
+            def close(self):
+                pass
+
+        class Connection:
+            def __init__(self):
+                self.cur = Cursor()
+
+            def cursor(self):
+                return self.cur
+
+            def close(self):
+                pass
+
+        conn = Connection()
+        with patch.object(pg, 'get_conn', return_value=conn):
+            found = PortfolioDBPG.__new__(PortfolioDBPG).existing_trade_execution_keys(
+                ['fp:new'], legacy_keys=[candidate], legacy_utc_keys=[candidate],
+                historical_fingerprints=[
+                    ('fp:old', 'fp:new', '600519', '2026-09-18T13:26:46+00:00',
+                     '买入', 100, 1500.0),
+                ],
+            )
+        self.assertIn(candidate, found)
+        self.assertIn('fp:new', found)
+        self.assertIn("AT TIME ZONE 'Asia/Shanghai'", conn.cur.calls[1][0])
+        self.assertIn("AT TIME ZONE 'UTC'", conn.cur.calls[2][0])
+        self.assertIn("t.trade_time=w.instant::timestamptz", conn.cur.calls[3][0])
+        self.assertNotIn("current_setting('TIMEZONE')", ''.join(c[0] for c in conn.cur.calls))
+
+    def test_change_log_binds_naive_time_with_shanghai_offset(self):
+        from datetime import datetime, timedelta
+
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+
+        cur = Cursor()
+        db = PortfolioDBPG.__new__(PortfolioDBPG)
+        db._log_change(
+            '600519', '贵州茅台', 'add', None,
+            {'quantity': 100, 'cost_price': 1500},
+            conn=object(), cur=cur, trade_time='2026-09-18 13:26:46',
+        )
+        bound = next(params[-1] for sql, params in cur.calls
+                     if 'INSERT INTO trade_records' in sql)
+        self.assertIsInstance(bound, datetime)
+        self.assertEqual(bound.utcoffset(), timedelta(hours=8))
+        self.assertEqual(bound.strftime('%Y-%m-%d %H:%M:%S'), '2026-09-18 13:26:46')
 
     def test_duplicate_sell_is_removed_before_position_validation(self):
         existing = [{'code': '600519', 'name': '贵州茅台', 'trade_type': '卖出',

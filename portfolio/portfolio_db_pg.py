@@ -8,8 +8,9 @@
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
@@ -25,6 +26,30 @@ DB_CONFIG = {
 
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)
+
+
+_TRADE_TIMEZONE = ZoneInfo('Asia/Shanghai')
+
+
+def _trade_time_for_pg(value):
+    """Bind trade time with an explicit zone, independent of the PG session zone.
+
+    Missing values retain the SQL NOW() fallback. Invalid strings are left for
+    PostgreSQL to reject inside the existing row savepoint/atomic transaction.
+    """
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace('/', '-').replace('Z', '+00:00'))
+        except ValueError:
+            return text
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=_TRADE_TIMEZONE)
+    return parsed
 
 
 class PortfolioDBPG:
@@ -101,7 +126,7 @@ class PortfolioDBPG:
                         %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, NOW()))
             """, (code, name, change_type,
                    pos_qty, pos_cost, delta_qty, source, note,
-                   (str(trade_time) if trade_time else None)))
+                   _trade_time_for_pg(trade_time)))
             if own_conn:
                 conn.commit()
         except Exception as e:
@@ -428,7 +453,9 @@ class PortfolioDBPG:
                 'price': price, 'amount': amount, 'tt': (str(tt) if tt else None), 'extra': extra}
 
     def existing_trade_execution_keys(
-        self, keys: List[str], *, legacy_keys: Optional[List[tuple]] = None
+        self, keys: List[str], *, legacy_keys: Optional[List[tuple]] = None,
+        legacy_utc_keys: Optional[List[tuple]] = None,
+        historical_fingerprints: Optional[List[tuple]] = None,
     ) -> List[Any]:
         """Look up execution identities directly, including identity-less legacy rows.
 
@@ -459,13 +486,13 @@ class PortfolioDBPG:
                            VALUES {values_sql}
                          )
                          SELECT DISTINCT t.stock_code,
-                           to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
+                           to_char(t.trade_time AT TIME ZONE 'Asia/Shanghai',
                                    'YYYY-MM-DD HH24:MI:SS'),
                            t.trade_type,t.quantity,round(t.price::numeric,4)
                          FROM trade_records t JOIN wanted w
                            ON t.stock_code=w.stock_code AND t.trade_type=w.trade_type
                           AND t.quantity=w.quantity AND round(t.price::numeric,4)=w.price
-                          AND to_char(t.trade_time AT TIME ZONE current_setting('TIMEZONE'),
+                          AND to_char(t.trade_time AT TIME ZONE 'Asia/Shanghai',
                                       'YYYY-MM-DD HH24:MI:SS')=w.wall_time
                          WHERE t.external_fingerprint IS NULL""",
                     tuple(params),
@@ -474,6 +501,59 @@ class PortfolioDBPG:
                     (str(row[0]), str(row[1]), str(row[2]), int(row[3]), round(float(row[4]), 4))
                     for row in cur.fetchall()
                 )
+            # Older identity-less imports sometimes stored a naive Shanghai
+            # wall time through a UTC-session ::timestamptz cast. Only accept
+            # that interpretation for import sources and regular A-share hours;
+            # an actual different fill with the same five columns must not be
+            # silently merged by a broad UTC/Shanghai OR condition.
+            old_utc = sorted(set(legacy_utc_keys or []))
+            if old_utc:
+                values_sql = ','.join(['(%s,%s,%s,%s,%s)'] * len(old_utc))
+                params = [part for item in old_utc for part in item]
+                cur.execute(
+                    f"""WITH wanted(stock_code,wall_time,trade_type,quantity,price) AS (
+                           VALUES {values_sql}
+                         )
+                         SELECT DISTINCT w.stock_code,w.wall_time,w.trade_type,
+                           w.quantity,w.price
+                         FROM trade_records t JOIN wanted w
+                           ON t.stock_code=w.stock_code AND t.trade_type=w.trade_type
+                          AND t.quantity=w.quantity AND round(t.price::numeric,4)=w.price
+                          AND to_char(t.trade_time AT TIME ZONE 'UTC',
+                                      'YYYY-MM-DD HH24:MI:SS')=w.wall_time
+                         WHERE t.external_fingerprint IS NULL
+                           AND (t.source IS NULL OR t.source IN
+                                ('import_trades','mcp:import_trades','web:trade-entry'))
+                           AND substring(w.wall_time from 12 for 8)::time
+                               BETWEEN TIME '09:15' AND TIME '15:00'
+                           AND (t.trade_time AT TIME ZONE 'Asia/Shanghai')::time
+                               > TIME '15:00'""",
+                    tuple(params),
+                )
+                found.extend(
+                    (str(row[0]), str(row[1]), str(row[2]), int(row[3]), round(float(row[4]), 4))
+                    for row in cur.fetchall()
+                )
+            # Old fingerprints for explicit offsets were based on their raw
+            # wall clock. Verify the stored instant and fill fields before
+            # mapping one to the new canonical fingerprint.
+            historical = sorted(set(historical_fingerprints or []))
+            if historical:
+                values_sql = ','.join(['(%s,%s,%s,%s,%s,%s,%s)'] * len(historical))
+                params = [part for item in historical for part in item]
+                cur.execute(
+                    f"""WITH wanted(old_fp,new_fp,stock_code,instant,trade_type,quantity,price) AS (
+                           VALUES {values_sql}
+                         )
+                         SELECT DISTINCT w.new_fp
+                         FROM trade_records t JOIN wanted w
+                           ON t.external_fingerprint=w.old_fp
+                          AND t.stock_code=w.stock_code AND t.trade_type=w.trade_type
+                          AND t.quantity=w.quantity AND round(t.price::numeric,4)=w.price
+                          AND t.trade_time=w.instant::timestamptz""",
+                    tuple(params),
+                )
+                found.extend(str(row[0]) for row in cur.fetchall() if row and row[0])
             return found
         finally:
             cur.close()
@@ -666,7 +746,11 @@ class PortfolioDBPG:
                 norm.append(n)
             else:
                 failed += 1
-        norm.sort(key=lambda x: x['tt'] or '')
+        def execution_order(item):
+            bound = _trade_time_for_pg(item['tt'])
+            return bound.astimezone(timezone.utc).isoformat() if isinstance(bound, datetime) else str(bound or '')
+
+        norm.sort(key=execution_order)
 
         if atomic and failed:
             return {
@@ -721,7 +805,7 @@ class PortfolioDBPG:
                                 COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s, %s, %s,
                                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (n['code'], n['name'], n['ttype'], n['qty'], n['price'], n['amount'],
-                          pos_q, pos_c, delta, n['tt'], n['extra'].get('source'),
+                          pos_q, pos_c, delta, _trade_time_for_pg(n['tt']), n['extra'].get('source'),
                           n['extra'].get('note'), n['extra'].get('commission'),
                           n['extra'].get('tax'), json.dumps(n['extra'], ensure_ascii=False), pl,
                           n['extra'].get('broker_order_id'),

@@ -10,12 +10,14 @@ import re
 import math
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, time, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 
 _BUY = {'买入', '买', 'buy', 'b', '申购', '加仓'}
 _SELL = {'卖出', '卖', 'sell', 's', '赎回', '减仓'}
+_SHANGHAI = ZoneInfo('Asia/Shanghai')
 
 
 def _clean_text(value: Any) -> str:
@@ -56,18 +58,41 @@ def _trade_type(value: Any) -> str:
     return ''
 
 
+def _parsed_time(value: Any) -> datetime | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    normalized = text.replace('/', '-').replace('T', ' ')
+    try:
+        return datetime.fromisoformat(normalized.replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+
 def _time_key(value: Any) -> str:
     text = _clean_text(value)
     if not text:
         return ''
-    normalized = text.replace('/', '-').replace('T', ' ')
-    try:
-        dt = datetime.fromisoformat(normalized.replace('Z', '+00:00'))
-        # 兼容历史 PG 口径：用户输入的北京时间被 ::timestamptz 按数据库会话时区落库，
-        # 但列表/API 一直展示原始时分秒；幂等键也必须比较“墙上时间”，不能二次换区。
-        return dt.strftime('%Y-%m-%d %H:%M:%S')
-    except (TypeError, ValueError):
-        return normalized[:19]
+    parsed = _parsed_time(value)
+    if parsed is None:
+        return text.replace('/', '-').replace('T', ' ')[:19]
+    # Naive user input is a Shanghai wall time; an aware input is first
+    # converted to Shanghai so equivalent instants share one identity.
+    if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+        parsed = parsed.astimezone(_SHANGHAI)
+    return parsed.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _old_wall_time_key(value: Any) -> str:
+    """Historical fingerprint/UTC-session comparison, never used for new identity."""
+    parsed = _parsed_time(value)
+    return parsed.strftime('%Y-%m-%d %H:%M:%S') if parsed else ''
+
+
+def _naive_market_time(value: Any) -> bool:
+    parsed = _parsed_time(value)
+    return bool(parsed and (parsed.tzinfo is None or parsed.utcoffset() is None)
+                and time(9, 15) <= parsed.time() <= time(15, 0))
 
 
 def parse_markdown_table(table: str) -> List[Dict[str, str]]:
@@ -121,7 +146,7 @@ def _known_names(portfolio_db) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     return by_name, by_code
 
 
-def trade_execution_key(row: Dict[str, Any]) -> str:
+def _trade_execution_key(row: Dict[str, Any], *, historical_wall: bool = False) -> str:
     """Return a stable fill identity without depending on a recent-row scan.
 
     Broker execution identifiers are authoritative.  The fallback intentionally includes order,
@@ -144,7 +169,8 @@ def trade_execution_key(row: Dict[str, Any]) -> str:
             _pick(row, 'broker_order_id', 'order_id', '委托编号', '合同编号')
         ),
         'code': _code(row.get('code') or row.get('stock_code')),
-        'trade_time': _time_key(row.get('trade_time') or row.get('成交时间')),
+        'trade_time': (_old_wall_time_key if historical_wall else _time_key)(
+            row.get('trade_time') or row.get('成交时间')),
         'trade_type': _trade_type(
             row.get('trade_type') or row.get('交易类型') or row.get('方向')
         ),
@@ -155,6 +181,10 @@ def trade_execution_key(row: Dict[str, Any]) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return 'fp:' + hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def trade_execution_key(row: Dict[str, Any]) -> str:
+    return _trade_execution_key(row)
 
 
 def _legacy_dedupe_key(row: Dict[str, Any]) -> Tuple[str, str, str, int, float]:
@@ -460,9 +490,31 @@ def import_trade_records(rows: Optional[List[Dict[str, Any]]] = None, table: str
                     if not (row.get('broker_execution_id') or row.get('broker_order_id')
                             or row.get('account_ref'))
                 ]
+                legacy_utc_candidates = [
+                    _legacy_dedupe_key(row) for row in rows_to_import
+                    if not (row.get('broker_execution_id') or row.get('broker_order_id')
+                            or row.get('account_ref'))
+                    and _naive_market_time(row.get('trade_time'))
+                ]
+                historical_fingerprints = []
+                for row in rows_to_import:
+                    parsed = _parsed_time(row.get('trade_time'))
+                    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+                        continue
+                    old_key = _trade_execution_key(row, historical_wall=True)
+                    new_key = trade_execution_key(row)
+                    if old_key != new_key:
+                        historical_fingerprints.append((
+                            old_key, new_key, _code(row.get('code')),
+                            parsed.isoformat(), _trade_type(row.get('trade_type')),
+                            int(_number(row.get('quantity')) or 0),
+                            round(float(_number(row.get('price')) or 0), 4),
+                        ))
                 try:
                     found = portfolio_db.existing_trade_execution_keys(
-                        keys, legacy_keys=legacy_candidates
+                        keys, legacy_keys=legacy_candidates,
+                        legacy_utc_keys=legacy_utc_candidates,
+                        historical_fingerprints=historical_fingerprints,
                     )
                 except TypeError:
                     found = portfolio_db.existing_trade_execution_keys(keys)
@@ -474,6 +526,19 @@ def import_trade_records(rows: Optional[List[Dict[str, Any]]] = None, table: str
                 old_rows = portfolio_db.get_trades(None, 10000) or []
                 existing = {trade_execution_key(row) for row in old_rows}
                 existing.update(_legacy_dedupe_key(row) for row in old_rows)
+                for row in old_rows:
+                    parsed = _parsed_time(row.get('trade_time'))
+                    source = _clean_text(row.get('source'))
+                    if (not row.get('external_fingerprint') and parsed is not None
+                            and parsed.tzinfo is not None
+                            and parsed.utcoffset() == timezone.utc.utcoffset(None)
+                            and source in ('', 'import_trades', 'mcp:import_trades',
+                                           'web:trade-entry')
+                            and time(9, 15) <= parsed.time() <= time(15, 0)
+                            and parsed.astimezone(_SHANGHAI).time() > time(15, 0)):
+                        old_key = list(_legacy_dedupe_key(row))
+                        old_key[1] = _old_wall_time_key(row.get('trade_time'))
+                        existing.add(tuple(old_key))
             except Exception:
                 existing = set()
         unique_rows = []
