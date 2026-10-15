@@ -1494,6 +1494,9 @@ def monitor_notifications(limit: int = 20):
 
 
 # ============================ 基金 ============================
+from webui.fund_routes import router as fund_v2_router
+app.include_router(fund_v2_router)
+
 # ⚠️ 路由顺序:静态路径(holdings/transactions/plans)必须在 `/api/fund/{code}` 之前定义,
 #    否则 `{code}` 会把 "holdings" 当成基金代码捕获(FastAPI 按定义顺序匹配)。
 #    故 fund_info(/api/fund/{code})放到本组最后,见文件下方。
@@ -1514,8 +1517,10 @@ def fund_nav(code: str):
 @app.get("/api/fund/{code}/score")
 def fund_score(code: str, extras: bool = False):
     try:
-        import fund_analysis
-        return _ok(fund_analysis.score_fund(code, with_extras=extras))
+        import fund_db
+        from fund.fund_service import score
+        fund_db.init_db()
+        return _ok(score(code,with_extras=extras))
     except Exception as e:
         return _err(e)
 
@@ -1526,17 +1531,29 @@ class DcaReq(BaseModel):
     period: str = "monthly"
     day: int = 5
     strategy: str = "normal"
+    start: str | None = None
+    end: str | None = None
+    fee_rate: float = .0015
+    anchor_date: str | None = None
+    total_budget: float | None = None
+    max_period_amount: float | None = None
+    valuation_series: list[dict] | None = None
+    dividend_mode: str = 'cash'
+    redemption_fee: float = 0.
+    redemption_fee_schedule: list[dict] | None = None
+    fee_basis: str = 'gross'
+    open_dates: list[str] | None = None
 
 
 @app.post("/api/fund/dca-backtest")
 def fund_dca(req: DcaReq):
     try:
-        import fund_data, fund_dca
-        df = fund_data.get_nav_history(req.code)
-        if df is None or df.empty:
-            return _err("净值获取失败")
-        r = fund_dca.dca_backtest(df, req.amount, req.period, day=req.day, strategy=req.strategy)
-        r.pop("trades", None)  # 列表大,前端不需要逐期
+        import fund_db
+        from fund.fund_service import run_experiment
+        fund_db.init_db()
+        values=req.model_dump()
+        code=values.pop('code')
+        r=run_experiment(code,**values)
         return _ok(r)
     except Exception as e:
         return _err(e)
@@ -1561,7 +1578,7 @@ def fund_dca_compare(req: DcaCompareReq):
         keep = ("total_invested", "final_value", "profit_pct", "annualized_irr",
                 "max_drawdown", "dca_beats_lump", "n_invests", "lump_sum", "start", "end")
         out = []
-        for strat in ("normal", "valuation", "value_avg"):
+        for strat in ("normal", "price_position", "value_avg"):
             try:
                 r = fund_dca.dca_backtest(df, req.amount, req.period, day=req.day, strategy=strat)
                 if r.get("error"):
@@ -1580,72 +1597,10 @@ def fund_holdings(realtime: bool = False):
     """我的基金持有。净值**优先读库**(fund_nav 表)→ 秒开;库里缺的才现抓一次并落库。
     realtime=1 时额外抓盘中估值(慢,盘后无意义,默认关)。"""
     try:
-        import fund_db, fund_data
-        from concurrent.futures import ThreadPoolExecutor
+        import fund_db
+        from fund.fund_service import holdings_snapshot
         fund_db.init_db()
-        holdings = fund_db.get_holdings()
-        if not holdings:
-            return _ok([])
-        codes = [str(h.get("code")) for h in holdings]
-        db_navs = fund_db.get_latest_navs(codes)            # 一次查库拿全部最新净值
-
-        name_of = {str(h.get("code")): (h.get("name") or "") for h in holdings}
-
-        def fetch_nav(code):
-            """库里没有该基金净值 → 现抓一次并落库(下次直接读库)。
-            货币基金净值恒为1 且 latest_nav 抓不到(会拖慢) → 直接按1落库。"""
-            if "货币" in name_of.get(code, ""):
-                try:
-                    fund_db.upsert_nav(code, None, 1.0)
-                except Exception:
-                    pass
-                return {"unit_nav": 1.0, "nav_date": None}
-            row = fund_data.latest_nav(code)
-            if row and row.get("unit_nav"):
-                try:
-                    fund_db.upsert_nav(code, row.get("date"), row["unit_nav"],
-                                       row.get("acc_nav"), row.get("daily_return"))
-                except Exception:
-                    pass
-                return {"unit_nav": float(row["unit_nav"]), "nav_date": row.get("date")}
-            return None
-
-        missing = [c for c in codes if c not in db_navs]
-        if missing:
-            with ThreadPoolExecutor(max_workers=min(12, len(missing))) as ex:
-                for c, r in zip(missing, ex.map(fetch_nav, missing)):
-                    if r:
-                        db_navs[c] = r
-
-        def est_of(code, nav):
-            if not realtime:
-                return nav
-            rt = _cache_or(f"fundgsz:{code}", 120, lambda: fund_data.get_realtime_estimate(code),
-                           keep=lambda v: isinstance(v, dict) and v.get("gsz"))
-            return float((rt or {}).get("gsz") or 0) or nav
-
-        out = []
-        for h in holdings:
-            code = str(h.get("code"))
-            shares = float(h.get("shares") or 0)
-            cost_nav = float(h.get("cost_nav") or 0)
-            info = db_navs.get(code) or {}
-            nav = float(info.get("unit_nav") or cost_nav or 0)
-            daily_return = float(info.get("daily_return") or 0) if info.get("daily_return") is not None else None
-            est = est_of(code, nav)
-            mv = round(shares * est, 2)
-            cost = shares * cost_nav
-            out.append({
-                "code": code, "name": h.get("name"), "shares": round(shares, 2),
-                "cost_nav": cost_nav, "nav": nav, "est_nav": round(est, 4),
-                "nav_date": info.get("nav_date"),
-                "mv": mv, "cost": round(cost, 2),
-                "pnl": round(mv - cost, 2),
-                "pnl_pct": round((est - cost_nav) / cost_nav, 4) if cost_nav else None,
-                "daily_return": daily_return, "today_pnl": round(mv * daily_return / 100, 2) if daily_return else None,
-            })
-        out.sort(key=lambda x: x["mv"], reverse=True)
-        return _ok(out)
+        return _ok(holdings_snapshot()['holdings'])
     except Exception as e:
         return _err(e)
 
@@ -1662,17 +1617,11 @@ def fund_nav_refresh():
             return _ok({"updated": 0})
 
         def one(code):
-            row = fund_data.latest_nav(code)
-            if row and row.get("unit_nav"):
-                try:
-                    fund_db.upsert_nav(code, row.get("date"), row["unit_nav"],
-                                       row.get("acc_nav"), row.get("daily_return"))
-                    return 1
-                except Exception:
-                    return 0
-            return 0
+            frame=fund_data.get_nav_history(code)
+            if frame is None or frame.empty: return 0
+            return 1 if fund_db.save_nav(code,frame) else 0
 
-        with ThreadPoolExecutor(max_workers=12) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:
             n = sum(ex.map(one, codes))
         return _ok({"updated": n, "total": len(codes)})
     except Exception as e:
@@ -1689,6 +1638,16 @@ class FundTxnReq(BaseModel):
     trade_date: str | None = None
     name: str | None = None
     note: str | None = None
+    account: str = 'default'
+    channel: str = 'default'
+    external_id: str | None = None
+    application_date: str | None = None
+    confirmation_date: str | None = None
+    settlement_date: str | None = None
+    nav_date: str | None = None
+    occurrence_id: str | None = None
+    reverses: str | None = None
+    ratio: float | None = None
 
 
 @app.post("/api/fund/transaction")
@@ -1697,9 +1656,7 @@ def fund_add_transaction(req: FundTxnReq):
     try:
         import fund_db
         fund_db.init_db()
-        r = fund_db.add_transaction(
-            code=req.code, txn_type=req.txn_type, nav=req.nav, amount=req.amount,
-            shares=req.shares, fee=req.fee, trade_date=req.trade_date, name=req.name, note=req.note)
+        r = fund_db.add_transaction(**req.model_dump())
         return _ok(r)
     except Exception as e:
         return _err(e)
@@ -1745,6 +1702,11 @@ class FundPlanReq(BaseModel):
     name: str | None = None
     target_profit_pct: float | None = None
     auto_record: bool = False
+    anchor_date: str | None = None
+    account: str = 'default'
+    channel: str = 'default'
+    calendar_id: str = 'CN'
+    open_dates: list[str] | None = None
 
 
 @app.post("/api/fund/plan")
@@ -1752,9 +1714,8 @@ def fund_add_plan(req: FundPlanReq):
     try:
         import fund_db
         fund_db.init_db()
-        pid = fund_db.add_plan(code=req.code, amount=req.amount, period=req.period,
-                               day_of=req.day_of, strategy=req.strategy, name=req.name,
-                               target_profit_pct=req.target_profit_pct, auto_record=req.auto_record)
+        values={k:v for k,v in req.model_dump().items() if v is not None}
+        pid = fund_db.add_plan(**values)
         return _ok({"id": pid})
     except Exception as e:
         return _err(e)
@@ -1763,7 +1724,9 @@ def fund_add_plan(req: FundPlanReq):
 class FundTxnsImportReq(BaseModel):
     rows: list
     update_position: bool = True
-    skip_existing: bool = False
+    skip_existing: bool = True
+    preview_only: bool = False
+    expected_version: str | None = None
 
 
 @app.post("/api/fund/transactions/import")
@@ -1773,7 +1736,7 @@ def fund_import_transactions(req: FundTxnsImportReq):
     try:
         import fund_db
         return _ok(fund_db.import_transactions(req.rows, update_position=req.update_position,
-                                               skip_existing=req.skip_existing))
+                                               skip_existing=req.skip_existing, preview_only=req.preview_only, expected_version=req.expected_version))
     except Exception as e:
         return _err(e)
 
@@ -1902,29 +1865,18 @@ def fund_diagnose(overlap: bool = False):
     try:
         import fund_db, fund_portfolio
         fund_db.init_db()
-        holdings = fund_db.get_holdings()
-        if not holdings:
-            return _ok({"error": "无持有基金"})
-        # 用库内净值算市值,避免 diagnose 内逐只 latest_nav 联网(53只省~7s)
-        codes = [str(h.get("code")) for h in holdings]
-        navs = fund_db.get_latest_navs(codes)
-        enriched = []
-        for h in holdings:
-            code = str(h.get("code"))
-            shares = float(h.get("shares") or 0)
-            unit = float((navs.get(code) or {}).get("unit_nav") or h.get("cost_nav") or 0)
-            enriched.append({**h, "code": code, "market_value": round(shares * unit, 2)})
-        return _ok(fund_portfolio.diagnose(enriched, with_overlap=overlap))
+        from fund.fund_service import holdings_snapshot
+        return _ok(fund_portfolio.diagnose(holdings_snapshot()['holdings'], with_overlap=overlap))
     except Exception as e:
         return _err(e)
 
 
 @app.get("/api/fund/combined-view")
-def fund_combined_view():
+def fund_combined_view(basis: str = "cost"):
     """股票 + 基金 大类资产合并视图(成本口径,offline)。各大类金额与占比。"""
     try:
         import fund_portfolio
-        return _ok(fund_portfolio.combined_asset_view())
+        return _ok(fund_portfolio.combined_market_view() if basis=="market" else fund_portfolio.combined_asset_view())
     except Exception as e:
         return _err(e)
 

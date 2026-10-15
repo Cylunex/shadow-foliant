@@ -1,0 +1,176 @@
+{
+  "observed_on": "2026-10-15",
+  "upstream": "eastmoney",
+  "scope": "two_latest_observations_not_full_history",
+  "catalog_source": "https://fund.eastmoney.com/js/fundcode_search.js",
+  "funds": [
+    {
+      "code": "000001",
+      "name": "华夏成长混合",
+      "fund_type": "混合型-灵活",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=000001&pageIndex=1&pageSize=2",
+      "source_total": 6022,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "1.1260",
+          "LJJZ": "3.6990",
+          "JZZZL": "-3.01"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "1.1610",
+          "LJJZ": "3.7340",
+          "JZZZL": "1.13"
+        }
+      ]
+    },
+    {
+      "code": "110011",
+      "name": "易方达优质精选混合(QDII)",
+      "fund_type": "QDII-混合偏股",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=110011&pageIndex=1&pageSize=2",
+      "source_total": 4415,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "4.0062",
+          "LJJZ": "5.7962",
+          "JZZZL": "0.04"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "4.0047",
+          "LJJZ": "5.7947",
+          "JZZZL": "-0.24"
+        }
+      ]
+    },
+    {
+      "code": "161606",
+      "name": "融通行业景气混合A",
+      "fund_type": "混合型-灵活",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=161606&pageIndex=1&pageSize=2",
+      "source_total": 5461,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "2.5730",
+          "LJJZ": "4.5430",
+          "JZZZL": "-3.81"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "2.6750",
+          "LJJZ": "4.6450",
+          "JZZZL": "2.29"
+        }
+      ]
+    },
+    {
+      "code": "002746",
+      "name": "汇添富多策略定开混合",
+      "fund_type": "混合型-灵活",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=002746&pageIndex=1&pageSize=2",
+      "source_total": 2234,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "1.7270",
+          "LJJZ": "1.7270",
+          "JZZZL": "-1.54"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "1.7540",
+          "LJJZ": "1.7540",
+          "JZZZL": "0.00"
+        }
+      ]
+    },
+    {
+      "code": "160213",
+      "name": "国泰纳斯达克100指数",
+      "fund_type": "指数型-海外股票",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=160213&pageIndex=1&pageSize=2",
+      "source_total": 3923,
+      "rows": [
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "4.6020",
+          "LJJZ": "10.9020",
+          "JZZZL": "-0.35"
+        },
+        {
+          "FSRQ": "2026-10-12",
+          "DWJZ": "4.6180",
+          "LJJZ": "10.9180",
+          "JZZZL": "-0.73"
+        }
+      ]
+    },
+    {
+      "code": "000009",
+      "name": "易方达天天理财货币A",
+      "fund_type": "货币型-普通货币",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=000009&pageIndex=1&pageSize=2",
+      "source_total": 4782,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "0.3109",
+          "LJJZ": "1.1520",
+          "JZZZL": "0.00"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "0.3125",
+          "LJJZ": "1.1520",
+          "JZZZL": "0.00"
+        }
+      ]
+    },
+    {
+      "code": "000005",
+      "name": "嘉实增强信用定期债券",
+      "fund_type": "债券型-混合一级",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=000005&pageIndex=1&pageSize=2",
+      "source_total": 3312,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "1.0286",
+          "LJJZ": "1.5685",
+          "JZZZL": "0.02"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "1.0284",
+          "LJJZ": "1.5683",
+          "JZZZL": "0.03"
+        }
+      ]
+    },
+    {
+      "code": "000051",
+      "name": "华夏沪深300ETF联接A",
+      "fund_type": "指数型-股票",
+      "source_url": "https://api.fund.eastmoney.com/f10/lsjz?fundCode=000051&pageIndex=1&pageSize=2",
+      "source_total": 4195,
+      "rows": [
+        {
+          "FSRQ": "2026-10-14",
+          "DWJZ": "1.6224",
+          "LJJZ": "1.6224",
+          "JZZZL": "-1.30"
+        },
+        {
+          "FSRQ": "2026-10-13",
+          "DWJZ": "1.6437",
+          "LJJZ": "1.6437",
+          "JZZZL": "-0.26"
+        }
+      ]
+    }
+  ]
+}

@@ -27,65 +27,80 @@ def _lin(x, x0, x1):
     return _clip((x - x0) / (x1 - x0) * 100)
 
 
-def score_fund(code: str, nav_df=None, rf: float = 0.02, with_extras: bool = False) -> dict:
-    """长期/定投视角综合打分(0-100)+ 等级 + 一句话建议。
-    基础 5 维:年化收益(35%)+ 回撤控制(25%)+ 夏普(20%)+ 卡玛(10%)+ 低波动(10%)。
-    with_extras=True 时额外接入 **同类排名分位**(雪球,需联网,慢)并重新归一化权重;
-    取不到该维则自动忽略(借鉴 eastmoney 5 维诊断思路,经理任期维待稳定字段映射后再补)。"""
-    code = str(code).zfill(6)
-    if nav_df is None:
-        nav_df = fund_data.get_nav_history(code)
-    if nav_df is None or len(nav_df) < 30:
-        return {'code': code, 'error': '净值数据不足,无法评分', 'n_points': 0 if nav_df is None else len(nav_df)}
-
-    m = fund_metrics.evaluate(nav_df, rf)
-    sub = {
-        'annualized_return': _lin(m['annualized_return'], -0.10, 0.25),   # -10%→0,25%→100
-        'drawdown_control': _lin(m['max_drawdown'], 0.50, 0.05),          # 回撤越小越好
-        'sharpe': _lin(m['sharpe'], -0.5, 2.0),
-        'calmar': _lin(m['calmar'], 0.0, 3.0),
-        'low_volatility': _lin(m['annualized_volatility'], 0.40, 0.05),   # 波动越小越好
-    }
-    weights = {'annualized_return': 0.35, 'drawdown_control': 0.25,
-               'sharpe': 0.20, 'calmar': 0.10, 'low_volatility': 0.10}
-    peer = None
-    if with_extras:
-        peer = fund_data.get_peer_rank_percentile(code)  # {period,rank,total,percentile}
-        if peer:
-            sub['peer_rank'] = float(peer['percentile'])  # 已是 0-100
-            weights['peer_rank'] = 0.15                    # 占 15%,其余按比例缩放
-    valid = {k: v for k, v in sub.items() if v is not None}
-    if not valid:
-        return {'code': code, 'error': '指标不可计算'}
-    wsum = sum(weights[k] for k in valid)
-    total = sum(valid[k] * weights[k] for k in valid) / wsum
-
-    grade = ('A+' if total >= 85 else 'A' if total >= 75 else 'B' if total >= 60
-             else 'C' if total >= 45 else 'D')
-    advice = {
-        'A+': '业绩与风控俱佳,适合作为定投核心标的长期持有。',
-        'A': '综合优秀,可纳入定投组合。',
-        'B': '中规中矩,适合搭配,关注回撤与稳定性。',
-        'C': '一般,定投需谨慎,建议结合估值择时。',
-        'D': '风险收益不佳,不建议作为定投主力。',
-    }[grade]
-
-    return {
-        'code': code, 'name': fund_data.fund_name(code), 'ftype': fund_data.fund_type(code),
-        'score': round(total, 1), 'grade': grade, 'advice': advice,
-        'subscores': {k: round(v, 1) for k, v in sub.items() if v is not None},
-        'peer_rank': peer,
-        'metrics': m,
-    }
+def score_fund(code, nav_df=None, rf=.02, with_extras=False, profile=None, benchmark_df=None):
+    from fund.fund_contracts import audit_nav, product
+    from fund.fund_returns import return_frame
+    import pandas as pd
+    code=str(code).zfill(6)
+    frame=fund_data.get_nav_history(code) if nav_df is None else nav_df
+    if frame is None or len(frame)<2: return {'code':code,'status':'partial','error':'净值不足','grade':None}
+    profile=profile or product(code,fund_data.fund_name(code),fund_data.fund_type(code))
+    m=fund_metrics.evaluate(frame,rf)
+    quality=audit_nav(frame)
+    basis=return_frame(frame).attrs['return_basis']
+    category=profile['category']
+    base={'code':code,'name':profile.get('name'),'ftype':profile.get('ftype'),'category':category,
+          'metrics':m,'quality':quality,'score':None,'grade':None,'subscores':{},'peer_rank':None,
+          'status':'partial','advice':'历史、权益事件或必要基准不足，仅展示已知区间表现。'}
+    if category=='money':
+        return {**base,'status':'ready' if 'income_per_10000' in frame and quality['status']=='ready' else 'partial',
+                'income':{'date':str(frame.iloc[-1]['date'])[:10],'per_10000':float(frame.iloc[-1]['income_per_10000']) if 'income_per_10000' in frame else None,
+                          'yield_7d':float(frame.iloc[-1]['yield_7d']) if 'yield_7d' in frame else None},
+                'advice':'货币基金展示万份收益和收益结转，不套用权益评分。'}
+    if not m['long_history_ready'] or quality['status']!='ready' or basis=='unadjusted_unit_nav': return base
+    excess=None
+    if benchmark_df is not None and audit_nav(benchmark_df)['status']=='ready' and return_frame(benchmark_df).attrs['return_basis']!='unadjusted_unit_nav':
+        fund=return_frame(frame).set_index('date').total_return_nav
+        bench=return_frame(benchmark_df).set_index('date').total_return_nav
+        pair=pd.concat([fund,bench],axis=1,join='inner').dropna()
+        if len(pair)>=200 and (pair.index[-1]-pair.index[0]).days>=365:
+            active=pair.iloc[:,0].pct_change()-pair.iloc[:,1].pct_change()
+            excess={'total_excess':float(pair.iloc[-1,0]/pair.iloc[0,0]-pair.iloc[-1,1]/pair.iloc[0,1]),
+                    'tracking_error':float(active.std()*252**.5),
+                    'rolling_win_rate':float((pair.iloc[:,0].pct_change(60).iloc[60:]>pair.iloc[:,1].pct_change(60).iloc[60:]).mean()),
+                    'start':str(pair.index[0].date()),'end':str(pair.index[-1].date())}
+    if category in ('index','qdii') and (excess is None or not profile.get('benchmark') or not profile.get('currency')):
+        return {**base,'benchmark_metrics':excess,'advice':'指数/QDII 评价需同币种基准、跟踪数据及足够历史。'}
+    limits={'bond':(-.03,.08,.15,.005,.12,.01),
+            'equity':(-.1,.25,.5,.05,.4,.05),
+            'index':(-.1,.20,.5,.05,.35,.05),
+            'qdii':(-.1,.20,.5,.05,.4,.05),'allocation':(-.05,.15,.3,.03,.25,.03)}
+    if category not in limits: return base
+    a,b,c,d,e,f=limits[category]
+    sub={'annualized_return':_lin(m['annualized_return'],a,b),
+         'drawdown_control':_lin(m['max_drawdown'],c,d),
+         'sharpe':_lin(m['sharpe'],-.5,2.),'low_volatility':_lin(m['annualized_volatility'],e,f)}
+    if category=='index':
+        sub={'tracking_error':_lin(excess['tracking_error'],.1,0.),
+             'tracking_difference':_lin(abs(excess['total_excess']),.15,0.)}
+    if any(v is None for v in sub.values()):return {**base,'subscores':sub,'advice':'必要风险收益指标不可计算，暂不评级。'}
+    model_weights={'bond':[.15,.35,.25,.25],'equity':[.35,.25,.25,.15],'index':[.5,.5],
+                   'qdii':[.3,.3,.2,.2],'allocation':[.25,.3,.25,.2]}
+    weights=dict(zip(sub,model_weights[category]))
+    score=sum(sub[k]*w for k,w in weights.items())
+    curve=return_frame(frame).set_index('date').total_return_nav
+    rolling={str(n): {'observations':int(curve.pct_change(n).notna().sum()),
+                     'positive_rate':float((curve.pct_change(n).dropna()>0).mean()) if len(curve)>n else None}
+             for n in (60,120,252)}
+    peer=fund_data.get_peer_rank_percentile(code) if with_extras else None
+    return {**base,'status':'ready','score':round(score,1) if score is not None else None,
+            'grade':('A' if score>=75 else 'B' if score>=60 else 'C') if score is not None else None,
+            'subscores':sub,'weights':weights,'scoring_version':'fund-category-v2','peer_rank':peer,'benchmark_metrics':excess,'rolling':rolling,
+            'advice':'同类型历史表现参考，须结合经理任期、费用、账户约束与最新披露复核；不直接生成买入结论。',
+            'limitations':['未披露的久期/信用或风格数据保持未知','历史评分不代表未来收益']}
 
 
 def _build_context(code: str, nav_df=None) -> dict:
     """汇集 AI 研判所需的结构化上下文(尽量离线/少抓)。"""
+    if nav_df is None:nav_df=fund_data.get_nav_history(code)
     sc = score_fund(code, nav_df)
     ctx = {
         'code': code,
         'name': fund_data.fund_name(code),
         'type': fund_data.fund_type(code),
+        'quality':sc.get('quality'),
+        'snapshot_id':sc.get('quality',{}).get('snapshot_id'),
+        'data_basis':'当前已观察资料，公开时间未知的资料不能认定历史可用',
         'score_card': {k: sc.get(k) for k in ('score', 'grade', 'subscores', 'metrics')} if 'score' in sc else sc,
     }
     try:
@@ -95,11 +110,19 @@ def _build_context(code: str, nav_df=None) -> dict:
     return ctx
 
 
+_AI_CACHE = {}
+
+
 def ai_research(code: str, nav_df=None, temperature: float = 0.5) -> dict:
     """基金 AI 研判。返回 {code, opinion, provider, context}。
     opinion 为大模型给出的「是否适合长期/定投 + 风险点 + 定投节奏建议」文本。"""
     code = str(code).zfill(6)
     ctx = _build_context(code, nav_df)
+    from fund.fund_contracts import fingerprint
+    import time
+    key=fingerprint({'context':ctx,'temperature':temperature,'version':'fund-ai-v2'})
+    cached=_AI_CACHE.get(key)
+    if cached and time.monotonic()-cached[0]<3600:return dict(cached[1])
     try:
         from llm_router import get_router
     except Exception as e:
@@ -120,7 +143,9 @@ def ai_research(code: str, nav_df=None, temperature: float = 0.5) -> dict:
             temperature=temperature, max_tokens=900)
     except Exception as e:
         text, provider = f'[LLM 调用失败] {type(e).__name__}: {e}', 'none'
-    return {'code': code, 'opinion': text, 'provider': provider, 'context': ctx}
+    result={'code': code, 'opinion': text, 'provider': provider, 'context': ctx, 'context_hash':key}
+    if provider!='none':_AI_CACHE[key]=(time.monotonic(),result)
+    return result
 
 
 def compare_funds(codes, lookback_days: Optional[int] = None, rf: float = 0.02,
@@ -140,7 +165,12 @@ def compare_funds(codes, lookback_days: Optional[int] = None, rf: float = 0.02,
         df = fund_data.get_nav_history(c)
         if df is None or len(df) < 30 or 'date' not in df.columns:
             return c, None, None
-        s = pd.to_numeric(df.set_index('date')['unit_nav'], errors='coerce').dropna()
+        from fund.fund_returns import return_frame
+        from fund.fund_contracts import audit_nav
+        returns = return_frame(df)
+        if audit_nav(df)['status']!='ready' or returns.attrs['return_basis']=='unadjusted_unit_nav':
+            return c,None,None
+        s = returns.set_index('date')['total_return_nav']
         s.index = pd.to_datetime(s.index)
         s = s.sort_index()
         if len(s) < 2:
@@ -163,9 +193,14 @@ def compare_funds(codes, lookback_days: Optional[int] = None, rf: float = 0.02,
     if common_start >= common_end:
         return {'error': '各基金无重叠时间区间(成立时间差异过大)', 'funds': [], 'skipped': skipped}
 
+    common_dates = None
+    for s in navs.values():
+        dates=s.index[(s.index>=common_start)&(s.index<=common_end)]
+        common_dates=dates if common_dates is None else common_dates.intersection(dates)
+    if len(common_dates)<2: return {'error':'无足够共同观测日期','funds':[],'skipped':skipped}
     funds = []
     for c, s in navs.items():
-        w = s[(s.index >= common_start) & (s.index <= common_end)]
+        w = s.reindex(common_dates)
         if len(w) < 2 or w.iloc[0] <= 0:
             skipped.append(c)
             continue
@@ -183,12 +218,13 @@ def compare_funds(codes, lookback_days: Optional[int] = None, rf: float = 0.02,
             'curve': [{'date': d.strftime('%Y-%m-%d'), 'nav': round(float(v), 4)} for d, v in pts],
         })
     # 按窗口总收益降序(最能赚的排前)
-    funds.sort(key=lambda f: (f['metrics'].get('total_return') or -1), reverse=True)
+    funds.sort(key=lambda f: f['metrics'].get('total_return') if f['metrics'].get('total_return') is not None else float('-inf'), reverse=True)
     return {
         'common_start': common_start.strftime('%Y-%m-%d'),
         'common_end': common_end.strftime('%Y-%m-%d'),
         'n_days': int((common_end - common_start).days),
-        'funds': funds, 'skipped': skipped,
+        'funds': funds, 'skipped': skipped, 'common_observations':len(common_dates),
+        'comparison_basis':'共同日期总回报；跨类型仅供观察，不构成同类排名',
     }
 
 

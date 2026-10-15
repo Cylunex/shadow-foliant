@@ -19,7 +19,9 @@ def _to_series(nav) -> pd.Series:
     if isinstance(nav, pd.Series):
         s = nav.copy()
     elif isinstance(nav, pd.DataFrame):
-        col = 'unit_nav' if 'unit_nav' in nav.columns else nav.columns[-1]
+        from fund.fund_returns import return_frame
+        nav = return_frame(nav)
+        col = 'total_return_nav'
         idx = 'date' if 'date' in nav.columns else None
         s = nav.set_index(idx)[col] if idx else nav[col]
     else:
@@ -95,10 +97,8 @@ def downside_deviation(nav, mar: float = 0.0) -> Optional[float]:
     if len(s) < 3:
         return None
     ret = s.pct_change().dropna()
-    downside = ret[ret < mar]
-    if downside.empty:
-        return 0.0
-    return float(np.sqrt((downside ** 2).mean()) * np.sqrt(TRADING_DAYS))
+    shortfall = (ret - mar).clip(upper=0)
+    return float(np.sqrt((shortfall ** 2).mean()) * np.sqrt(TRADING_DAYS))
 
 
 def total_return(nav) -> Optional[float]:
@@ -124,6 +124,20 @@ def evaluate(nav, rf: float = 0.02) -> dict:
         'calmar': calmar_ratio(s),
         'downside_deviation': downside_deviation(s),
     }
+    span = (s.index[-1]-s.index[0]).days if len(s)>1 else 0
+    out['long_history_ready'] = len(s)>=200 and span>=365
+    if not out['long_history_ready']:
+        for key in ('annualized_return','annualized_volatility','sharpe','calmar','downside_deviation'):
+            out[key] = None
+    if isinstance(nav,pd.DataFrame):
+        from fund.fund_returns import return_frame
+        out['return_basis'] = return_frame(nav).attrs['return_basis']
+        if out['return_basis']=='unadjusted_unit_nav':
+            out['unit_nav_change']=out['total_return']
+            for key in ('total_return','max_drawdown','annualized_return','annualized_volatility','sharpe','calmar','downside_deviation'):
+                out[key]=None
+            out['status']='partial'
+            out['reason']='权益事件及披露总回报不足，仅保留未复权净值变化'
     return out
 
 

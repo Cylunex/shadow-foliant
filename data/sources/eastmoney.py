@@ -119,28 +119,53 @@ def convertible_bonds() -> List[dict]:
 _LSJZ_URL = "https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize={ps}"
 
 
-def fund_nav(code: str) -> pd.DataFrame:
+def fund_nav(code: str, checkpoint=None) -> pd.DataFrame:
     """东财 f10/lsjz JSON 翻页拉全部历史净值(纯 HTTP,无 JS exec)。
     返回标准列 DataFrame[date, unit_nav, acc_nav, daily_return] 升序;空/异常 → 空 DF。
     ⚠️ lsjz 必须带 Referer(否则返空,实测)。"""
     code = str(code).zfill(6)
     ref = f'http://fundf10.eastmoney.com/jjjz_{code}.html'
+    from fund.fund_contracts import now
     rows: List[dict] = []
-    ps = 200
+    ps, total, reasons, seen = 200, None, [], set()
+    deadline = time.monotonic() + 25
+    complete = False
+    next_page = 1
     try:
-        for page in range(1, 200):     # 200*200=40000 条,远超任何基金历史
+        pages = iter(range(1,201))
+        for page in pages:
+            if time.monotonic() >= deadline:
+                reasons.append('fetch_budget_exhausted'); break
             C.throttle('eastmoney')
             d = C.http_get_json(_LSJZ_URL.format(code=code, page=page, ps=ps),
-                                headers={'Referer': ref}, timeout=8)
+                                headers={'Referer': ref}, timeout=min(8, max(1, deadline-time.monotonic())))
+            total = d.get('TotalCount', total)
+            total = int(total) if total is not None else None
             lst = ((d.get('Data') or {}).get('LSJZList')) or []
             if not lst:
+                complete = total is not None and len(seen) >= total
+                if not complete: reasons.append('unexpected_empty_page')
                 break
-            rows.extend(lst)
-            if len(lst) < ps:
-                break
+            if page==1 and checkpoint and checkpoint.get('rows'):
+                prior=checkpoint['rows']
+                if lst[0].get('FSRQ')==prior[0].get('FSRQ') and total==checkpoint.get('total'):
+                    rows=list(prior); seen={r.get('FSRQ') for r in rows}
+                    next_page=checkpoint['next_page']
+                    for _ in range(max(0,next_page-2)): next(pages,None)
+                    continue
+            fresh = [r for r in lst if r.get('FSRQ') not in seen]
+            if not fresh:
+                reasons.append('pagination_no_progress'); break
+            rows.extend(fresh)
+            seen.update(r.get('FSRQ') for r in fresh)
+            next_page=page+1
+            # Page number uses upstream's effective page size, never requested size.
+            if total is not None and len(seen) >= total:
+                complete = True; break
+        else:
+            reasons.append('page_budget_exhausted')
     except Exception:
-        if not rows:
-            return pd.DataFrame()
+        reasons.append('source_exception')
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).rename(columns={
@@ -155,8 +180,14 @@ def fund_nav(code: str) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
     if 'acc_nav' not in df.columns:
-        df['acc_nav'] = df['unit_nav']
-    return df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+        df['acc_nav'] = None
+    df = df.sort_values('date').reset_index(drop=True)
+    if not complete:
+        df.attrs['pagination_checkpoint']={'rows':rows,'next_page':next_page,'total':total}
+    df.attrs.update(source='eastmoney_lsjz', upstream='eastmoney', retrieved_at=now(),
+                    published_at=None, quality={'status': 'ready' if complete else 'partial',
+                    'reasons': reasons or ([] if complete else ['unknown_total']), 'total': total})
+    return df
 
 
 # ── 批量实时行情(push2 ulist.np)───────────────────────────────────────────

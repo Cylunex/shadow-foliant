@@ -1241,32 +1241,46 @@ def _fund_gate(job: str) -> bool:
 
 def task_fund_nav_refresh():
     """🏦 盘后拉基金净值 + 计算基金单日总收益存表(开关 fund_nav_refresh,需手动开启)。"""
+    from zoneinfo import ZoneInfo
     job = 'fund_nav_refresh'
     if _fund_gate(job):
         return
-    started = datetime.now().isoformat()
+    started = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
     try:
         import fund_db, fund_data
         fund_db.init_db()
         codes = {h['code'] for h in fund_db.get_holdings()}
         codes |= {p['code'] for p in fund_db.get_plans(only_enabled=True)}
+        from fund.fund_ledger import list_saved, save as save_fund_workspace
+        import time as fund_refresh_time
+        ordered=sorted(codes)
+        checkpoint=next(iter(list_saved('nav_refresh_cursor')), {})
+        offset=int(checkpoint.get('offset',0))%len(ordered) if ordered else 0
+        ordered=ordered[offset:]+ordered[:offset]
+        deadline=fund_refresh_time.monotonic()+240
         saved = 0
-        for code in sorted(codes):
+        for index,code in enumerate(ordered):
+            if fund_refresh_time.monotonic()>=deadline:break
             df = fund_data.get_nav_history(code)
             if df is not None and not df.empty:
-                saved += fund_db.save_nav(code, df.tail(120))
+                saved += fund_db.save_nav(code, df)
+            save_fund_workspace('nav_refresh_cursor','default',{'offset':offset+index+1})
         # 网络局部失败时沿用库内最近净值计市值；只有净值日期=今天且存在上一期
         # 净值的基金才进入当日收益，避免把滞后 QDII/失联源冒充成今日涨跌。
         nav_cache = fund_db.get_nav_pairs(codes)
         # 落组合净值快照
         snap = fund_db.save_portfolio_snapshot(
-            datetime.now().strftime('%Y-%m-%d'),
+            datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d'),
             nav_lookup=lambda c: (nav_cache.get(c) or {}).get('unit_nav'))
         # ─── 计算基金单日总收益并写入 daily_pnl_snapshots ───
         # 只纳入当日净值已出的基金，避免混入不同日期的日增长率
-        snap_date = datetime.now().strftime('%Y-%m-%d')
+        snap_date = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
         holdings = fund_db.get_holdings()
         from portfolio.daily_pnl import calculate_fund_pnl, upsert_fund_pnl
+        from fund.fund_ledger import read as read_fund_ledger
+        events=read_fund_ledger()['transactions']
+        for holding in holdings:
+            holding['day_transactions']=[e for e in events if e['code']==holding['code'] and e['confirmation_date']==snap_date]
         fund_result = calculate_fund_pnl(holdings, nav_cache, snap_date)
         try:
             upsert_fund_pnl(
@@ -1280,52 +1294,42 @@ def task_fund_nav_refresh():
             )
         except Exception:
             pass
-        _log_run(job, 'success',
+        _log_run(job, 'success' if fund_result['fund_fresh_count']==fund_result['fund_total_count'] else 'partial',
                  error=f'funds={len(codes)} nav_rows={saved} snap={snap} '
                        f'fund_pnl={fund_result["fund_daily_pnl"]:.0f} '
                        f'fresh={fund_result["fund_fresh_count"]}/{fund_result["fund_total_count"]}',
-                 started_at=started, finished_at=datetime.now().isoformat())
+                 started_at=started, finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
+                 started_at=started, finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
 
 
 def task_fund_dca_reminder():
-    """🏦 到期定投处理:开了 auto_record 的计划**自动记账**(按最新确认净值,幂等防重);
-    其余只提醒,需手动申购+记账(开关 fund_dca_reminder,默认开)。"""
+    """🏦 到期定投处理：生成计划级待确认事项，按计划与日期幂等；
+    到期只创建待确认事项，确认实际成交后更新持仓。"""
+    from zoneinfo import ZoneInfo
     job = 'fund_dca_reminder'
     if _fund_gate(job):
         return
-    started = datetime.now().isoformat()
+    started = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
     try:
         import fund_db, fund_dca
         fund_db.init_db()
-        today = datetime.now()
-        # 1) 自动记账(开了 auto_record 的到期计划)
-        recorded = fund_dca.auto_record_due_plans(today)
-        recorded_codes = {r['code'] for r in recorded}
-        # 2) 仅提醒(到期但未开自动记账的)
-        remind = [p for p in fund_db.get_plans(only_enabled=True)
-                  if fund_dca.is_due(p, today) and not p.get('auto_record')]
-        parts = []
-        if recorded:
-            parts.append("✅ 已自动记账:\n" + "\n".join(
-                f"· {r['code']} 定投 {r['amount']:.0f} 元 → 持仓 {r['pos_shares']:.2f} 份" for r in recorded))
-        if remind:
-            parts.append("🔔 待手动定投:\n" + "\n".join(
-                f"· {p['code']} {p.get('name') or ''} 定投 {p['amount']:.0f} 元({p['strategy']})" for p in remind))
-        if parts:
-            text = "🏦 今日定投\n" + "\n\n".join(parts)
-            try:
-                from notification_router import send
-                send('report', '基金定投', text)
-            except Exception as ne:
-                print(f'[fund_dca_reminder] 推送失败: {ne}\n{text}')
-        _log_run(job, 'success', error=f'auto={len(recorded)} remind={len(remind)}',
-                 started_at=started, finished_at=datetime.now().isoformat())
+        today = datetime.now(ZoneInfo('Asia/Shanghai'))
+        from fund.fund_service import process_due_plans, render_due
+        from fund.fund_contracts import fingerprint
+        created = process_due_plans(today)
+        text = render_due(created)
+        if text:
+            from notification_router import send
+            send('report','基金定投待确认',text,source='fund.plan_due',
+                 idempotency_key='fund-due:'+fingerprint([r['occurrence_id'] for r in created]),
+                 business_as_of=today.date().isoformat(),original_body=text,compact=False)
+        _log_run(job,'success',error=f'pending={len(created)} confirmed=0',
+                 started_at=started,finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
     except Exception as e:
         _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
+                 started_at=started, finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
 
 
 def task_daily_pnl_snapshot():
@@ -1445,6 +1449,19 @@ def task_fund_evening():
         task_fund_target_check()     # ② 再查止盈(读 ① 刷出的新净值)
     except Exception as e:
         print(f'[fund_evening] 止盈检查异常: {type(e).__name__}: {str(e)[:80]}')
+
+    try:
+        if not _fund_gate(job):
+            import fund_db
+            from fund.fund_service import review_week
+            from fund.fund_contracts import now as fund_now
+            fund_db.init_db()
+            reviews=review_week(fund_now()[:10])
+            if reviews:
+                _log_run('fund_weekly_review','partial' if any(r['status']!='ready' for r in reviews) else 'success',
+                         error=f'reviewed={len(reviews)}')
+    except Exception as e:
+        _log_run('fund_weekly_review','partial',error=type(e).__name__)
 
 
 def task_fund_valuation_signal():

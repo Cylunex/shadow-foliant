@@ -88,46 +88,21 @@ def _init_db_once():
 def calculate_fund_pnl(holdings: List[Dict], nav_cache: Dict[str, Dict],
                        snap_date: str) -> Dict:
     """按份额×净值差精算；滞后净值只计市值，不冒充当日收益。"""
+    from fund.fund_contracts import daily_result
     total_count = valued_count = fresh_count = 0
-    fund_mv = fund_daily_pnl = fund_prev_mv = 0.0
-    for holding in holdings or []:
-        try:
-            shares = float(holding.get('shares') or 0)
-        except (TypeError, ValueError):
-            shares = 0.0
-        if shares <= 0:
-            continue
-        total_count += 1
-        code = str(holding.get('code') or '').zfill(6)
-        info = nav_cache.get(code) or {}
-        try:
-            unit_nav = float(info.get('unit_nav'))
-        except (TypeError, ValueError):
-            continue
-        if unit_nav <= 0:
-            continue
-        valued_count += 1
-        fund_mv += shares * unit_nav
-        if str(info.get('nav_date') or '')[:10] != str(snap_date)[:10]:
-            continue
-        try:
-            prev_nav = float(info.get('prev_nav'))
-        except (TypeError, ValueError):
-            prev_nav = 0.0
-        if prev_nav <= 0:
-            continue
-        fresh_count += 1
-        fund_prev_mv += shares * prev_nav
-        fund_daily_pnl += shares * (unit_nav - prev_nav)
-    fund_daily_pct = (fund_daily_pnl / fund_prev_mv * 100) if fund_prev_mv > 0 else 0
-    return {
-        'fund_count': valued_count,
-        'fund_total_count': total_count,
-        'fund_fresh_count': fresh_count,
-        'fund_mv': round(fund_mv, 2),
-        'fund_daily_pnl': round(fund_daily_pnl, 2),
-        'fund_daily_pct': round(fund_daily_pct, 4),
-    }
+    fund_mv = fund_daily_pnl = fund_prev_mv = 0.
+    for h in holdings or []:
+        if float(h.get('shares') or 0)<=0 and not h.get('day_transactions'): continue
+        total_count+=1
+        code=str(h.get('code') or '').zfill(6)
+        transactions=h.get('day_transactions',[])
+        r=daily_result(h,nav_cache.get(code,{}),snap_date,transactions)
+        if r['mv'] is not None: valued_count+=1; fund_mv+=r['mv']
+        if r['today_pnl'] is not None:
+            fresh_count+=1; fund_daily_pnl+=r['today_pnl']; fund_prev_mv+=r['previous_value'] or 0
+    return {'fund_count':valued_count,'fund_total_count':total_count,'fund_fresh_count':fresh_count,
+            'fund_mv':round(fund_mv,2),'fund_daily_pnl':round(fund_daily_pnl,2),
+            'fund_daily_pct':round(fund_daily_pnl/fund_prev_mv*100,4) if fund_prev_mv else 0.}
 
 
 def merge_save(snap_date: str) -> Optional[Dict]:

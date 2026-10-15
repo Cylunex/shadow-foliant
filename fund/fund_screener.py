@@ -50,19 +50,25 @@ def screen_funds(fund_type: str = '股票型', sort_by: str = 'r_1y', top_n: int
     """
     df = fund_data.get_rank(fund_type)
     if df is None or df.empty:
-        return []
+        raise ValueError('筛选数据源不可用，不能判断是否存在候选')
     n = _normalize_rank(df)
     if n.empty or 'code' not in n.columns:
         return []
+    required = [key for key,value in [('r_1y',min_1y),('r_3y',min_3y),('fee',max_fee)] if value is not None]
+    missing = [key for key in required if key not in n.columns]
+    if missing: raise ValueError('筛选条件无法判定，缺少字段: '+','.join(missing))
+    if sort_by not in n.columns: raise ValueError('排序字段缺失')
+    if not 1<=int(top_n)<=200: raise ValueError('top_n 必须在 1～200')
     if min_1y is not None and 'r_1y' in n.columns:
         n = n[n['r_1y'] >= min_1y]
     if min_3y is not None and 'r_3y' in n.columns:
         n = n[n['r_3y'] >= min_3y]
     if max_fee is not None and 'fee' in n.columns:
-        n = n[(n['fee'].isna()) | (n['fee'] <= max_fee)]
+        n = n[n['fee'].notna() & (n['fee'] <= max_fee)]
     if sort_by in n.columns:
         n = n.sort_values(sort_by, ascending=False, na_position='last')
-    return n.head(top_n).where(pd.notna(n), None).to_dict('records')
+    result=n.head(top_n).astype(object)
+    return result.where(result.notna(),None).to_dict('records')
 
 
 if __name__ == '__main__':

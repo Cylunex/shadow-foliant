@@ -85,7 +85,8 @@ def list_funds(force: bool = False) -> pd.DataFrame:
                 return pd.DataFrame()
             try:
                 throttle('akshare')
-                df = ak.fund_name_em()
+                from data.akshare_safe import call
+                df = call(ak.fund_name_em,timeout=15)
             except Exception as e:
                 print(f'[fund_data] list_funds 失败: {e}')
                 return pd.DataFrame()
@@ -122,8 +123,22 @@ def get_nav_history(code: str, start: str = None, end: str = None) -> Optional[p
     """历史净值(瘦封装,实际走 datahub.fund_nav_history)。
     返回标准 DataFrame[date, unit_nav, acc_nav, daily_return](升序),失败 None。
     start/end: 'YYYY-MM-DD' 可选区间过滤。"""
-    from data.datahub import fund_nav_history
-    return fund_nav_history(str(code).zfill(6), start=start, end=end)
+    from data.datahub import fund_nav_history, fund_money_history
+    kind=fund_type(code)
+    if '货币' in (kind or ''):
+        df=fund_money_history(str(code).zfill(6))
+        if start: df=df[df['date']>=pd.Timestamp(start)]
+        if end: df=df[df['date']<=pd.Timestamp(end)]
+        return df
+    df = fund_nav_history(str(code).zfill(6), start=start, end=end)
+    if df is None or df.empty:
+        return df
+    actions = get_corporate_actions(code)
+    df = attach_actions(df, actions)
+    if not kind:
+        df.attrs['quality']={**df.attrs.get('quality',{}),'status':'partial',
+            'reasons':list(df.attrs.get('quality',{}).get('reasons',[]))+['product_type_unknown']}
+    return df
 
 
 def latest_nav(code: str) -> Optional[dict]:
@@ -134,11 +149,13 @@ def latest_nav(code: str) -> Optional[dict]:
         est = get_realtime_estimate(code)  # 兜底:fundgz dwjz
         if est and est.get('dwjz'):
             return {'date': est.get('jzrq'), 'unit_nav': est['dwjz'],
-                    'acc_nav': est['dwjz'], 'daily_return': None}
+                    'acc_nav':None, 'daily_return':None,'source':est.get('source'),'upstream':'eastmoney'}
         return None
     row = df.iloc[-1]
     return {
         'date': row['date'].strftime('%Y-%m-%d'),
+        'quality':df.attrs.get('quality'), 'actions_status':df.attrs.get('actions_status'),
+        'unit_nav_kind':df.attrs.get('unit_nav_kind'), 'source':df.attrs.get('source'),
         'unit_nav': float(row['unit_nav']) if pd.notna(row['unit_nav']) else None,
         'acc_nav': float(row['acc_nav']) if pd.notna(row.get('acc_nav')) else None,
         'daily_return': float(row['daily_return']) if pd.notna(row.get('daily_return')) else None,
@@ -185,7 +202,8 @@ def get_fund_basic(code: str) -> Optional[dict]:
         return None
     try:
         throttle('akshare')
-        df = ak.fund_individual_basic_info_xq(symbol=str(code).zfill(6))
+        from data.akshare_safe import call
+        df = call(ak.fund_individual_basic_info_xq,timeout=15,symbol=str(code).zfill(6))
         if df is None or df.empty:
             return None
         # 雪球返回 item/value 两列
@@ -339,7 +357,8 @@ def get_stock_holdings(code: str, year: str = None,
                        cache_only: bool = False) -> Optional[pd.DataFrame]:
     """持股穿透(前十大重仓股,季报)。year 形如 '2024',缺省最近。失败 None。
     cache_only=True:只读缓存、缓存冷不现拉东财(返回过期缓存或 None)——组合重仓穿透盘中用,防逐只封 IP。"""
-    code6 = str(code).zfill(6)
+    from fund.fund_contracts import code6 as normalize_code
+    code6 = normalize_code(code)
     cf = _os.path.join(_HOLD_CACHE_DIR, f"{code6}_{year or 'latest'}.pkl")
     # ① 新鲜缓存命中(TTL 内)
     try:
@@ -361,9 +380,12 @@ def get_stock_holdings(code: str, year: str = None,
         kwargs = {'symbol': code6}
         if year:
             kwargs['date'] = year
-        df = ak.fund_portfolio_hold_em(**kwargs)
+        from data.akshare_safe import call
+        df = call(ak.fund_portfolio_hold_em,timeout=15,**kwargs)
         if isinstance(df, pd.DataFrame) and not df.empty:
             try:
+                from fund.fund_contracts import now
+                df.attrs['first_seen_at']=now()
                 _os.makedirs(_HOLD_CACHE_DIR, exist_ok=True)
                 df.to_pickle(cf)
             except Exception:
@@ -379,6 +401,10 @@ def top_holdings(code: str, n: int = 10) -> dict:
     df = get_stock_holdings(code)
     if df is None or len(df) == 0:
         return {'quarter': None, 'holdings': []}
+    return normalize_holdings(df,n)
+
+
+def normalize_holdings(df, n=10):
     q_col = next((c for c in df.columns if '季度' in c), None)
     name_col = next((c for c in df.columns if '股票名称' in c), None)
     code_col = next((c for c in df.columns if '股票代码' in c), None)
@@ -401,7 +427,8 @@ def top_holdings(code: str, n: int = 10) -> dict:
             'pct': _to_float(r.get(pct_col)) if pct_col else None,
             'mv': _to_float(r.get(mv_col)) if mv_col else None,
         })
-    return {'quarter': latest, 'holdings': out}
+    from fund.fund_contracts import now
+    return {'quarter':latest,'holdings':out,'published_at':None,'first_seen_at':df.attrs.get('first_seen_at') or now(),'source':'eastmoney','coverage':'top_holdings_only'}
 
 
 def rating_summary(code: str) -> dict:
@@ -455,3 +482,70 @@ if __name__ == '__main__':
     nav = get_nav_history('000001')
     print('净值行数:', None if nav is None else len(nav))
     print('最新净值:', latest_nav('000001'))
+
+
+_ACTION_CACHE = {}
+_ACTION_LOCK = threading.Lock()
+
+
+def get_corporate_actions(code: str, force=False) -> dict:
+    """Fetch bounded distribution/split facts; unavailable never means no events."""
+    import re
+    import time
+    from fund.fund_contracts import now, code6
+    code = code6(code)
+    with _ACTION_LOCK:
+        cached = _ACTION_CACHE.get(code)
+        if cached and not force and time.monotonic() - cached[0] < 3600:
+            return cached[1]
+    events, errors = [], []
+    ak = _ak()
+    if ak is None:
+        return {'status': 'error', 'events': [], 'reasons': ['actions_source_unavailable']}
+    from data.akshare_safe import call
+    for indicator, kind, date_col, value_col in (
+        ('分红送配详情', 'dividend', '除息日', '每份分红'),
+        ('拆分详情', 'split', '拆分折算日', '拆分折算比例')):
+        try:
+            throttle('akshare')
+            df = call(ak.fund_open_fund_info_em, timeout=12, symbol=code, indicator=indicator)
+            if df is None: raise ValueError('empty response')
+            if not df.empty and not {date_col, value_col}.issubset(df): raise ValueError('schema changed')
+            for row in df.to_dict('records'):
+                raw = str(row[value_col])
+                if kind == 'split':
+                    parts = re.findall(r'[0-9]+(?:\.[0-9]+)?', raw)
+                    if len(parts) != 2: raise ValueError('invalid split ratio')
+                    value = float(parts[1]) / float(parts[0])
+                else:
+                    parts = re.findall(r'[0-9]+(?:\.[0-9]+)?', raw)
+                    if len(parts) != 1: raise ValueError('invalid dividend')
+                    value = float(parts[0])
+                from fund.fund_contracts import day, number
+                number(value,positive=(kind=='split'))
+                events.append({'date':day(row[date_col]), 'kind': kind, 'value': value,
+                               'payment_date': str(row.get('分红发放日') or '')[:10] or None,
+                               'source': 'eastmoney', 'published_at': None})
+        except Exception:
+            errors.append(kind + '_unavailable')
+    result = {'status': 'partial' if errors else 'ready', 'events': events,
+              'reasons': errors, 'source': 'akshare', 'upstream': 'eastmoney', 'retrieved_at': now()}
+    with _ACTION_LOCK: _ACTION_CACHE[code] = (time.monotonic(), result)
+    return result
+
+
+def attach_actions(frame, actions):
+    from fund.fund_contracts import fingerprint
+    out = frame.copy()
+    out['cash_dividend'], out['split_ratio'] = 0., 1.
+    out['date'] = pd.to_datetime(out['date'])
+    for event in actions['events']:
+        mask = out['date'] == pd.Timestamp(event['date'])
+        if event['kind'] == 'dividend': out.loc[mask, 'cash_dividend'] += event['value']
+        elif event['kind'] == 'split': out.loc[mask, 'split_ratio'] *= event['value']
+    out.attrs.update(frame.attrs)
+    out.attrs.update(actions_status=actions['status'], actions=actions,
+                     actions_snapshot=fingerprint(actions['events']))
+    # Do not let initialized zero columns turn an unavailable source into a no-events assertion.
+    if actions['status'] != 'ready': out = out.drop(columns=['cash_dividend','split_ratio'])
+    return out

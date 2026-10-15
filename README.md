@@ -47,6 +47,8 @@ python3.12 -m venv .test-venv
 
 ## 文档
 
+基金的确认收益、账务迁移、定投实验和组合配置见 [基金研究与定投使用说明](docs/FUND_RESEARCH.md)。
+
 详细功能与研究口径位于 [docs](docs/) 和 [openspec](openspec/)；Agent 插件边界见
 [docs/SHADOW_PLUGIN_INTEGRATION.md](docs/SHADOW_PLUGIN_INTEGRATION.md)。项目内示例只使用脱敏数据。
 研究闭环、数据源预算、实验边界和升级说明见

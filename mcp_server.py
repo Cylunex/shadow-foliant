@@ -581,17 +581,19 @@ def fund_metrics(code: str) -> Dict[str, Any]:
 def fund_score(code: str, with_extras: bool = False) -> Dict[str, Any]:
     """基金综合评价打分卡(0-100 + 等级 + 建议),长期/定投视角(业绩+风控+稳定性)。
     with_extras=True 额外接入同类排名分位(雪球,需联网较慢)。"""
-    import fund_analysis
-    return fund_analysis.score_fund(code, with_extras=with_extras)
+    import fund_db
+    from fund.fund_service import score
+    fund_db.init_db()
+    return score(code,with_extras)
 
 
 @mcp.tool()
 def import_fund_transactions(rows: List[Dict[str, Any]], update_position: bool = True,
-                             skip_existing: bool = False) -> Dict[str, Any]:
+                             skip_existing: bool = True) -> Dict[str, Any]:
     """批量导入基金申赎/定投流水(按日期升序应用→移动加权成本正确)。rows 每项键(中英任一):
     code/代码(必), txn_type/类型(申购|定投|赎回|买入|卖出,默认申购), nav/净值(必),
     amount/金额 或 shares/份额(买入给amount,赎回给shares), fee/费用, trade_date/日期, name/名称, note/备注。
-    skip_existing=True 按(code,日期,source)跳过已存在防重复。⚠️ 默认增量叠加,勿对同批重复导入。
+    所有确认导入按外部 ID 或规范指纹幂等；同日不同账户、渠道和成交分别保留。
     返回 {imported, skipped, errors}。"""
     import fund_db
     return fund_db.import_transactions(rows, update_position=update_position, skip_existing=skip_existing)
@@ -603,7 +605,7 @@ def import_fund_plans(rows: List[Dict[str, Any]], dedup: bool = True) -> Dict[st
     period/周期(monthly|weekly|daily,默认monthly), day_of/扣款日(默认1),
     strategy/策略(normal|valuation|value_avg,默认normal), name/名称(缺则按code补),
     target_profit_pct/止盈%(可选), auto_record/自动记账(可选), note/备注(可选)。
-    dedup=True 跳过已存在同 code 的计划。返回 {imported, skipped, errors}。"""
+    dedup=True 仅跳过规则、金额、账户、渠道及起始日相同的计划。返回 {imported, skipped, errors}。"""
     import fund_db
     return fund_db.import_plans(rows, dedup=dedup)
 
@@ -611,15 +613,22 @@ def import_fund_plans(rows: List[Dict[str, Any]], dedup: bool = True) -> Dict[st
 @mcp.tool()
 def fund_dca_backtest(code: str, amount: float = 1000, period: str = 'monthly',
                       day: int = 1, fee_rate: float = 0.0015, strategy: str = 'normal',
-                      start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
+                      start: Optional[str] = None, end: Optional[str] = None,
+                      anchor_date: Optional[str] = None, total_budget: Optional[float] = None,
+                      max_period_amount: Optional[float] = None,
+                      valuation_series: Optional[List[Dict[str,Any]]] = None,
+                      redemption_fee_schedule: Optional[List[Dict[str,Any]]] = None,
+                      fee_basis: str = 'gross', open_dates: Optional[List[str]] = None) -> Dict[str, Any]:
     """定投回测:历史净值上模拟定投,输出投入/份额/市值/收益/年化IRR/最大回撤,对比一次性买入。
     period: daily/weekly/biweekly/monthly;strategy: normal(定期定额)/valuation(估值智能定投,
     低估多投高估暂停)/value_avg(价值平均法)。返回不含逐期明细以省篇幅。"""
-    import fund_data, fund_dca
-    df = fund_data.get_nav_history(code, start, end)
-    if df is None or df.empty:
-        return {'error': '净值获取失败', 'code': code}
-    r = fund_dca.dca_backtest(df, amount, period, day=day, fee_rate=fee_rate, strategy=strategy)
+    import fund_db
+    from fund.fund_service import run_experiment
+    fund_db.init_db()
+    r=run_experiment(code,amount=amount,period=period,day=day,fee_rate=fee_rate,strategy=strategy,
+                     start=start,end=end,anchor_date=anchor_date,total_budget=total_budget,
+                     max_period_amount=max_period_amount,valuation_series=valuation_series,
+                     redemption_fee_schedule=redemption_fee_schedule,fee_basis=fee_basis,open_dates=open_dates)
     r.pop('trades', None)
     r.pop('equity_curve', None)
     return r
@@ -648,16 +657,9 @@ def fund_screen(fund_type: str = '股票型', sort_by: str = 'r_1y', top_n: int 
 def fund_portfolio_diagnose(with_overlap: bool = False) -> Dict[str, Any]:
     """诊断我的基金组合:大类/类型配置、集中度(HHI/top1/top3)、(可选)重仓股穿透重叠 + 建议。"""
     import fund_db, fund_portfolio
+    from fund.fund_service import holdings_snapshot
     fund_db.init_db()
-    holdings = fund_db.get_holdings()
-    if not holdings:
-        return {'error': '无持有基金'}
-    # 用库内净值算市值,避免 diagnose 内逐只 latest_nav 联网
-    navs = fund_db.get_latest_navs([str(h.get('code')) for h in holdings])
-    enriched = [{**h, 'market_value': round(float(h.get('shares') or 0) *
-                float((navs.get(str(h.get('code'))) or {}).get('unit_nav') or h.get('cost_nav') or 0), 2)}
-                for h in holdings]
-    return fund_portfolio.diagnose(enriched, with_overlap=with_overlap)
+    return fund_portfolio.diagnose(holdings_snapshot()['holdings'],with_overlap=with_overlap)
 
 
 @mcp.tool()
@@ -691,10 +693,10 @@ def fund_ai_panel(code: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def asset_overview() -> Dict[str, Any]:
+def asset_overview(basis: str = "cost") -> Dict[str, Any]:
     """股票 + 基金 大类资产合并视图(成本口径):各大类金额与占比。跨持仓总览。"""
     import fund_portfolio
-    return fund_portfolio.combined_asset_view()
+    return fund_portfolio.combined_market_view() if basis=="market" else fund_portfolio.combined_asset_view()
 
 
 @mcp.tool()
@@ -765,8 +767,66 @@ def fund_ai_research(code: str) -> Dict[str, Any]:
 def fund_holdings() -> Any:
     """我的基金持有列表(份额/成本净值)。"""
     import fund_db
+    from fund.fund_service import holdings_snapshot
     fund_db.init_db()
-    return fund_db.get_holdings()
+    return holdings_snapshot()
+
+
+@mcp.tool()
+def fund_transaction_preview(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """预览真实成交导入的份额、费用、批次和差异，返回提交所需版本。"""
+    import fund_db
+    from fund.fund_ledger import preview
+    fund_db.init_db()
+    return preview(rows)
+
+
+@mcp.tool()
+def fund_transaction_commit(rows: List[Dict[str, Any]], expected_version: str) -> Dict[str, Any]:
+    """按预览版本原子确认成交，重复交易幂等；计划到期本身不能作为成交。"""
+    import fund_db
+    from fund.fund_ledger import commit
+    fund_db.init_db()
+    return commit(rows,expected_version)
+
+
+@mcp.tool()
+def fund_research_context(code: str, refresh: bool = False) -> Dict[str, Any]:
+    """读取带来源和失效条件的基金档案、分类评分与研究工件。"""
+    import fund_db
+    from fund.fund_service import research_context
+    fund_db.init_db()
+    return research_context(code,refresh)
+
+
+@mcp.tool()
+def fund_rebalance_preview(targets: Dict[str,float], available_cash: float,
+                           fee_rules: Optional[Dict[str,Any]]=None,
+                           allow_redemptions: bool=False) -> Dict[str,Any]:
+    """按目标权重和可用现金预览组合调整，列费用和限制，不执行交易。"""
+    import fund_db
+    from fund.fund_service import rebalance
+    fund_db.init_db()
+    return rebalance(targets,available_cash,fee_rules,allow_redemptions)
+
+
+@mcp.tool()
+def fund_experiment_replay(experiment_id: str) -> Dict[str,Any]:
+    """使用冻结输入离线重放基金定投实验，不重新抓取行情。"""
+    import fund_db
+    from fund.fund_service import replay_experiment
+    fund_db.init_db()
+    return replay_experiment(experiment_id)
+
+
+@mcp.tool()
+def fund_migration_preview(openings: List[Dict[str,Any]]) -> Dict[str,Any]:
+    """预览有明确日期的可核验期初余额，不倒造历史成交。"""
+    import fund_db
+    from fund.fund_ledger import migration_preview
+    fund_db.init_db()
+    return migration_preview(openings)
+
 
 
 # =========================== 向量语义检索(RAG) ===========================

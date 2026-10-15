@@ -1,43 +1,50 @@
 import { reactive, ref, computed, nextTick, onMounted } from 'vue'
 import { api, fmt, fmt4, pct, money, cls, lineChart, useSort } from '../lib.js'
 
+import FundWorkspace from './fund-workspace.js'
+
 const HCOLS = [
   { k:'code', t:'代码' }, { k:'name', t:'名称' }, { k:'shares', t:'份额' },
-  { k:'cost_nav', t:'成本净值' }, { k:'est_nav', t:'最新(估)净值' }, { k:'mv', t:'市值' },
+  { k:'cost_nav', t:'成本净值' }, { k:'est_nav', t:'确认净值' }, { k:'mv', t:'市值' },
   { k:'pnl', t:'浮盈' }, { k:'pnl_pct', t:'浮盈%' },
   { k:'daily_return', t:'日涨跌' }, { k:'today_pnl', t:'日收益' },
 ]
 
 export default {
+  components:{FundWorkspace},
   template: `
   <div>
     <div class="h1">🏦 基金定投</div>
     <p class="sub">我的持有 / 单只查询评分 / 定投回测 / 定投计划。场外开放式基金为主。</p>
     <div class="tabs">
-      <div class="tab" :class="{active:tab==='mine'}" @click="tab='mine'">我的基金</div>
-      <div class="tab" :class="{active:tab==='query'}" @click="tab='query'">查询 · 回测</div>
-      <div class="tab" :class="{active:tab==='screen'}" @click="tab='screen'">基金筛选</div>
-      <div class="tab" :class="{active:tab==='val'}" @click="tab='val'">指数估值</div>
-      <div class="tab" :class="{active:tab==='plans'}" @click="tab='plans'">定投计划</div>
-      <div class="tab" :class="{active:tab==='diag'}" @click="tab='diag'; loadDiag()">组合诊断</div>
-      <div class="tab" :class="{active:tab==='cmp'}" @click="tab='cmp'">基金对比</div>
+      <div class="tab" :class="{active:tab==='mine'}" @click="tab='mine'">总览</div>
+      <div class="tab" :class="{active:tab==='query'}" @click="tab='query'">定投实验</div>
+      <div class="tab" :class="{active:['screen','val','cmp'].includes(tab)}" @click="tab='screen'">选基研究</div>
+      <div class="tab" :class="{active:tab==='plans'}" @click="tab='plans'">流水与计划</div>
+      <div class="tab" :class="{active:tab==='diag'}" @click="tab='diag'; loadDiag()">组合</div>
     </div>
 
+    <FundWorkspace v-if="tab==='mine'" mode="overview" @refresh="loadMine"/>
+    <FundWorkspace v-if="tab==='plans'" mode="plans" @refresh="loadMine"/>
+    <FundWorkspace v-if="tab==='screen'" mode="research"/>
+    <FundWorkspace v-if="tab==='query'" mode="experiments"/>
+    <FundWorkspace v-if="tab==='diag'" mode="portfolio"/>
+    <div class="row" v-if="['screen','val','cmp'].includes(tab)"><button class="ghost" @click="tab='screen'">同类筛选</button><button class="ghost" @click="tab='val'">指数估值</button><button class="ghost" @click="tab='cmp'">基金对比</button></div>
     <!-- ============ 我的基金 ============ -->
     <div v-if="tab==='mine'">
       <div v-if="m.err" class="err">{{m.err}}</div>
       <div class="row stretch">
-        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">总市值</div>
+        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">已估值部分市值</div>
           <div style="font-size:24px;font-weight:700">{{money(totalMv)}}</div></div>
         <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">总成本</div>
           <div style="font-size:24px;font-weight:700">{{money(totalCost)}}</div></div>
-        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">总浮盈</div>
+        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">已估值部分浮盈</div>
           <div style="font-size:24px;font-weight:700" :class="cls(totalPnlPct)">{{money(totalPnl)}} ({{pct(totalPnlPct)}})</div></div>
-        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">今日盈亏</div>
+        <div class="card flex1"><div class="k" style="color:var(--muted);font-size:12px">今日已确认部分收益</div>
           <div style="font-size:24px;font-weight:700" :class="cls(todayPnl)">{{money(todayPnl)}}</div></div>
       </div>
       <div class="card">
-        <h3>持有基金 <span style="color:var(--muted);font-weight:400;font-size:12px">(净值读库,秒开;申赎自动维护移动成本)</span>
+        <h3>持有基金 <span style="color:var(--muted);font-weight:400;font-size:12px">(净值读库,秒开;成交确认后更新账本)</span>
           <button class="ghost" style="float:right;margin-left:8px" :disabled="m.loading||m.navBusy" @click="loadMine">↻ 刷新</button>
           <button class="ghost" style="float:right" :disabled="m.navBusy" @click="navRefresh" title="抓最新净值入库(每日收盘后跑一次即可)">{{m.navBusy?'更新净值中…':'⟳ 更新净值'}}</button></h3>
         <table v-if="m.holdings&&m.holdings.length">
@@ -50,34 +57,10 @@ export default {
             <td><span class="link-del" @click="del(h.code)">移除</span></td>
           </tr></tbody>
         </table>
-        <div v-else class="loading">暂无持有。用下方"记一笔申赎"录入第一笔申购,持有列表会自动生成。</div>
+        <div v-else class="loading">暂无持有。到“流水与计划”录入实际成交回执。</div>
       </div>
 
-      <div class="card">
-        <h3>记一笔申赎 / 定投</h3>
-        <div class="row">
-          <div><label>基金代码</label><input v-model="t.code" placeholder="如 110011" style="width:120px"/></div>
-          <div><label>类型</label><select v-model="t.txn_type"><option>申购</option><option>定投</option><option>赎回</option></select></div>
-          <div><label>成交净值</label><input type="number" step="0.0001" v-model.number="t.nav" style="width:110px"/></div>
-          <div v-if="t.txn_type!=='赎回'"><label>金额(元)</label><input type="number" v-model.number="t.amount" style="width:120px"/></div>
-          <div v-else><label>赎回份额</label><input type="number" v-model.number="t.shares" style="width:120px"/></div>
-          <div><label>日期(可选)</label><input v-model="t.trade_date" placeholder="2026-06-06" style="width:120px"/></div>
-          <button :disabled="t.busy" @click="addTxn">{{t.busy?'记账中…':'记一笔'}}</button>
-        </div>
-        <div v-if="t.msg" :class="t.ok?'ok-msg':'err'" style="margin-top:10px">{{t.msg}}</div>
-        <p class="sub" style="margin:8px 0 0">申购/定投填金额(自动按净值折份额);赎回填份额。成交净值可填基金查询里的最新净值。</p>
-      </div>
 
-      <div class="card" v-if="m.txns&&m.txns.length">
-        <h3>申赎流水(最近)</h3>
-        <table>
-          <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>类型</th><th>净值</th><th>份额</th><th>金额</th><th>持有后份额</th></tr></thead>
-          <tbody><tr v-for="(x,i) in m.txns.slice(0,30)" :key="i">
-            <td>{{(x.trade_date||x.created_at||'').slice(0,10)}}</td><td>{{x.code}}</td><td>{{x.name||'—'}}</td>
-            <td>{{x.txn_type}}</td><td>{{fmt4(x.nav)}}</td><td>{{fmt(x.shares)}}</td><td>{{money(x.amount)}}</td><td>{{fmt(x.pos_shares)}}</td>
-          </tr></tbody>
-        </table>
-      </div>
     </div>
 
     <!-- ============ 查询 · 回测 ============ -->
@@ -138,9 +121,9 @@ export default {
         <h3>定投回测</h3>
         <div class="row" style="flex-wrap:wrap">
           <div><label>每期金额</label><input type="number" v-model.number="d.amount" style="width:100px"/></div>
-          <div><label>周期</label><select v-model="d.period"><option value="monthly">每月</option><option value="biweekly">每两周</option><option value="weekly">每周</option><option value="daily">每日</option></select></div>
+          <div><label>周期</label><select v-model="d.period"><option value="monthly">每月</option><option value="biweekly">每两周</option><option value="weekly">每周</option><option value="biweekly">每两周</option><option value="daily">每日</option></select></div>
           <div v-if="d.period==='monthly'"><label>扣款日</label><input type="number" min="1" max="28" v-model.number="d.day" style="width:70px"/></div>
-          <div><label>策略</label><select v-model="d.strategy"><option value="normal">普通定额</option><option value="valuation">估值智能</option><option value="value_avg">价值平均</option></select></div>
+          <div><label>策略</label><select v-model="d.strategy"><option value="normal">普通定额</option><option value="price_position">价格位置</option><option value="value_avg">价值平均</option></select></div>
           <button :disabled="d.loading" @click="runDca">{{d.loading?'回测中…':'回测'}}</button>
           <button class="ghost" :disabled="d.cmpLoading" @click="runDcaCompare" title="同周期下跑三种策略对比">{{d.cmpLoading?'对比中…':'三策略对比'}}</button>
         </div>
@@ -158,16 +141,17 @@ export default {
               </template>
             </tr></tbody></table>
         </div>
-        <div v-if="d.res" style="margin-top:16px">
+        <div v-if="d.res&&!d.res.error" style="margin-top:16px">
           <div class="metrics">
             <div class="metric"><div class="k">累计投入</div><div class="v">{{money(d.res.total_invested)}}</div></div>
             <div class="metric"><div class="k">期末市值</div><div class="v" :class="cls(d.res.profit_pct)">{{money(d.res.final_value)}}</div></div>
             <div class="metric"><div class="k">收益率</div><div class="v" :class="cls(d.res.profit_pct)">{{pct(d.res.profit_pct)}}</div></div>
             <div class="metric"><div class="k">年化IRR</div><div class="v" :class="cls(d.res.annualized_irr)">{{pct(d.res.annualized_irr)}}</div></div>
-            <div class="metric"><div class="k">最大回撤</div><div class="v green">{{pct(-(d.res.max_drawdown||0))}}</div></div>
+            <div class="metric"><div class="k">最大回撤</div><div class="v green">{{d.res.max_drawdown==null?'—':pct(-d.res.max_drawdown)}}</div></div>
           </div>
-          <div style="margin-top:10px;color:var(--muted)">对比一次性买入收益 {{pct(d.res.lump_sum.profit_pct)}}。
-            <b :class="d.res.dca_beats_lump?'red':''">{{d.res.dca_beats_lump?'✅ 定投跑赢':'一次性买入更优'}}</b></div>
+          <div v-if="d.res.same_cash_baseline" class="sub">相同资金到达计划的普通定投收益 {{pct(d.res.same_cash_baseline.profit_pct)}}</div>
+          <div v-if="d.res.lump_sum" class="sub">另列假设情景：{{d.res.lump_sum.assumption}}，收益 {{pct(d.res.lump_sum.profit_pct)}}。</div>
+          <div class="sub">闲置现金 {{money(d.res.idle_cash)}} · 费用 {{money(d.res.total_fee)}} · 时间加权收益 {{pct(d.res.time_weighted_return)}}</div>
           <div ref="dcac" class="chart" style="height:240px;margin-top:8px"></div>
         </div>
       </div>
@@ -253,13 +237,13 @@ export default {
         <h3 style="margin:0">🩺 基金组合诊断</h3>
         <button class="ghost" :disabled="dg.loading" @click="loadDiag">{{dg.loading?'诊断中…':'↻ 刷新'}}</button>
         <button class="ghost" :disabled="dg.olLoading" @click="loadOverlap" title="逐只穿透重仓股,较慢">{{dg.olLoading?'穿透中…':'🔍 重仓穿透'}}</button>
-        <span class="sub" style="margin-left:auto">市值用库内净值估算·成本口径合并视图</span>
+        <span class="sub" style="margin-left:auto">净值与市值按各自日期展示，未更新部分保留状态</span>
       </div></div>
       <div v-if="dg.err" class="err">{{dg.err}}</div>
 
       <!-- 股+基 合并资产视图 -->
       <div v-if="cv.data&&cv.data.allocation" class="card">
-        <h3>全部资产配置 <span class="sub">(股票+基金,{{cv.data.basis}},合计 {{money(cv.data.total)}})</span></h3>
+        <h3>全部资产配置 <select v-model="cv.basis" @change="loadDiag"><option value="market">市值口径</option><option value="cost">成本口径</option></select> <span class="sub">(股票+基金,{{cv.data.basis}},合计 {{money(cv.data.total)}})</span></h3>
         <div v-for="(w,k) in cv.data.allocation" :key="k" style="margin:6px 0">
           <div style="display:flex;justify-content:space-between;font-size:13px"><span>{{k}}</span><span>{{pct(w)}} · {{money((cv.data.amounts||{})[k])}}</span></div>
           <div style="height:8px;background:var(--panel2);border-radius:4px;overflow:hidden"><div :style="{width:(w*100)+'%',height:'100%',background:barColor(k)}"></div></div>
@@ -292,6 +276,11 @@ export default {
           </div>
         </div>
 
+        <div class="card" v-if="dg.data.exposure"><h3>地域、币种与管理集中度</h3>
+          <div v-for="(label,key) in {region:'地域',currency:'币种',manager:'基金经理',family_id:'基金家族'}" :key="key">
+            <b>{{label}}</b><span v-for="(weight,name) in dg.data.exposure[key]" :key="name" style="margin-left:12px">{{name}} {{pct(weight)}}</span>
+          </div><p class="sub">未核实的分类保留为未知；同家族份额分别记账。</p>
+        </div>
         <div class="card" v-if="dg.data.advice&&dg.data.advice.length">
           <h3>诊断建议</h3>
           <ul style="margin:6px 0;padding-left:20px;line-height:1.9"><li v-for="(a,i) in dg.data.advice" :key="i">{{a}}</li></ul>
@@ -308,6 +297,7 @@ export default {
         </div>
 
         <div class="card" v-if="dg.data.stock_overlap">
+          <p v-if="dg.data.disclosure" class="sub">已披露暴露 {{pct(dg.data.disclosure.disclosed_weight)}} · 未知 {{pct(dg.data.disclosure.unknown_weight)}}；季报前十大持仓不代表全量资产。</p>
           <h3>重仓股穿透重叠 <span class="sub">(被≥2只基金共同重仓,按 基金权重×持仓占比 加权)</span></h3>
           <table v-if="dg.data.stock_overlap.length">
             <thead><tr><th>股票</th><th>出现基金数</th><th>合并权重</th></tr></thead>
@@ -320,19 +310,46 @@ export default {
 
     <!-- ============ 定投计划 ============ -->
     <div v-if="tab==='plans'">
+      <div class="card">
+        <h3>记一笔申赎 / 定投</h3>
+        <div class="row">
+          <div><label>基金代码</label><input v-model="t.code" placeholder="如 110011" style="width:120px"/></div>
+          <div><label>类型</label><select v-model="t.txn_type"><option>申购</option><option>定投</option><option>赎回</option></select></div>
+          <div><label>成交净值</label><input type="number" step="0.0001" v-model.number="t.nav" style="width:110px"/></div>
+          <div v-if="t.txn_type!=='赎回'"><label>金额(元)</label><input type="number" v-model.number="t.amount" style="width:120px"/></div>
+          <div v-else><label>赎回份额</label><input type="number" v-model.number="t.shares" style="width:120px"/></div>
+          <div><label>成交费用</label><input type="number" min="0" step="0.01" v-model.number="t.fee" style="width:100px"/></div>
+          <div><label>日期(可选)</label><input v-model="t.trade_date" placeholder="2026-06-06" style="width:120px"/></div>
+          <button :disabled="t.busy" @click="addTxn">{{t.busy?'记账中…':'记一笔'}}</button>
+        </div>
+        <div v-if="t.msg" :class="t.ok?'ok-msg':'err'" style="margin-top:10px">{{t.msg}}</div>
+        <p class="sub" style="margin:8px 0 0">申购/定投填金额(自动按净值折份额);赎回填份额。成交净值和份额以实际成交回执为准。</p>
+      </div>
+
+      <div class="card" v-if="m.txns&&m.txns.length">
+        <h3>申赎流水(最近)</h3>
+        <table>
+          <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>类型</th><th>净值</th><th>份额</th><th>金额</th><th>持有后份额</th></tr></thead>
+          <tbody><tr v-for="(x,i) in m.txns.slice(0,30)" :key="i">
+            <td>{{(x.trade_date||x.created_at||'').slice(0,10)}}</td><td>{{x.code}}</td><td>{{x.name||'—'}}</td>
+            <td>{{x.txn_type}}</td><td>{{fmt4(x.nav)}}</td><td>{{fmt(x.shares)}}</td><td>{{money(x.amount)}}</td><td>{{fmt(x.pos_shares)}}</td>
+          </tr></tbody>
+        </table>
+      </div>
       <div v-if="pl.err" class="err">{{pl.err}}</div>
       <div class="card">
         <h3>新建定投计划</h3>
         <div class="row">
           <div><label>基金代码</label><input v-model="np.code" placeholder="如 110011" style="width:120px"/></div>
           <div><label>每期金额</label><input type="number" v-model.number="np.amount" style="width:110px"/></div>
-          <div><label>周期</label><select v-model="np.period"><option value="monthly">每月</option><option value="weekly">每周</option><option value="daily">每日</option></select></div>
+          <div><label>周期</label><select v-model="np.period"><option value="monthly">每月</option><option value="weekly">每周</option><option value="biweekly">每两周</option><option value="daily">每日</option></select></div>
+          <div><label>计划起始日</label><input type="date" v-model="np.anchor_date"/></div>
           <div><label>扣款日</label><input type="number" v-model.number="np.day_of" style="width:80px"/></div>
-          <div><label>策略</label><select v-model="np.strategy"><option value="normal">普通定额</option><option value="valuation">估值智能</option><option value="value_avg">价值平均</option></select></div>
+          <div><label>策略</label><select v-model="np.strategy"><option value="normal">普通定额</option><option value="price_position">价格位置</option><option value="value_avg">价值平均</option></select></div>
           <div><label>止盈%</label><input type="number" v-model.number="np.target_profit_pct" placeholder="如 20" style="width:90px"/></div>
           <button :disabled="np.busy" @click="addPlan">{{np.busy?'保存中…':'新建'}}</button>
         </div>
-        <p class="sub" style="margin:8px 0 0">⚠️ 计划需后台 jobs_hub 常驻才会到期自动提醒/记账(本机不跑);止盈%留空=不设。</p>
+        <p class="sub" style="margin:8px 0 0">后台计划任务运行时会生成到期待办，确认实际成交后更新份额；止盈目标留空表示不设。</p>
       </div>
       <div class="card">
         <h3>定投计划列表 <button class="ghost" style="float:right" @click="loadPlans">↻ 刷新</button></h3>
@@ -340,7 +357,7 @@ export default {
           <thead><tr><th>代码</th><th>名称</th><th>金额</th><th>周期</th><th>扣款日</th><th>策略</th><th>止盈%</th><th>启用</th><th>操作</th></tr></thead>
           <tbody><tr v-for="p in pl.plans" :key="p.id">
             <td>{{p.code}}</td><td>{{p.name||'—'}}</td><td>{{money(p.amount)}}</td><td>{{periodCn(p.period)}}</td>
-            <td>{{p.day_of}}</td><td>{{stratCn(p.strategy)}}</td><td>{{p.target_profit_pct?p.target_profit_pct+'%':'—'}}</td>
+            <td>{{p.day_of}}<span v-if="!p.anchor_date" class="sub"> · 起始日待核验</span><div v-if="!p.anchor_date"><input type="date" v-model="p.new_anchor"/><button @click="setAnchor(p)">设置起始日</button></div></td><td>{{stratCn(p.strategy)}}</td><td>{{p.target_profit_pct?p.target_profit_pct+'%':'—'}}</td>
             <td>{{p.enabled?'✅':'⏸'}}</td>
             <td><span class="link" style="cursor:pointer" @click="togglePlan(p)">{{p.enabled?'停用':'启用'}}</span>
               &nbsp;<span class="link-del" style="cursor:pointer" @click="delPlan(p)">删除</span></td>
@@ -355,25 +372,27 @@ export default {
     // —— 我的基金 ——
     const m = reactive({ holdings:null, txns:null, err:'', loading:false, navBusy:false })
     const { sortBy, arrow, sorted: sortedHoldings } = useSort(()=>m.holdings, 'mv', -1)
-    const totalMv = computed(()=> (m.holdings||[]).reduce((s,h)=>s+(h.mv||0),0))
+    const totalMv = computed(()=> (m.holdings||[]).length && !(m.holdings||[]).some(h=>h.mv!=null)?null:(m.holdings||[]).reduce((s,h)=>s+(h.mv||0),0))
     const totalCost = computed(()=> (m.holdings||[]).reduce((s,h)=>s+(h.cost||0),0))
-    const totalPnl = computed(()=> totalMv.value-totalCost.value)
-    const totalPnlPct = computed(()=> totalCost.value? totalPnl.value/totalCost.value : null)
-    const todayPnl = computed(()=> (m.holdings||[]).reduce((s,h)=>s+(Number(h.today_pnl)||0),0))
+    const totalPnl = computed(()=> (m.holdings||[]).some(h=>h.pnl!=null)?(m.holdings||[]).reduce((s,h)=>s+(h.pnl??0),0):null)
+    const totalPnlPct = computed(()=> {const cost=(m.holdings||[]).filter(h=>h.pnl!=null).reduce((s,h)=>s+(h.cost||0),0);return cost&&totalPnl.value!=null?totalPnl.value/cost:null})
+    const todayPnl = computed(()=> (m.holdings||[]).some(h=>h.today_pnl!=null)?(m.holdings||[]).reduce((s,h)=>s+(h.today_pnl||0),0):null)
     async function loadMine(){
       m.loading=true; m.err=''
       try{ m.holdings = await api('/api/fund/holdings') }catch(e){ m.err=''+e }
       try{ m.txns = await api('/api/fund/transactions') }catch(e){}
       m.loading=false
     }
-    const t = reactive({ code:'', txn_type:'申购', nav:null, amount:null, shares:null, trade_date:'', busy:false, ok:false, msg:'' })
+    const t = reactive({ code:'', txn_type:'申购', nav:null, amount:null, shares:null, fee:0, trade_date:'', busy:false, ok:false, msg:'' })
     async function addTxn(){
       if(!t.code || !t.nav){ t.ok=false; t.msg='请填代码和成交净值'; return }
       t.busy=true; t.msg=''
       try{
-        const body={ code:t.code, txn_type:t.txn_type, nav:t.nav, fee:0, trade_date:t.trade_date||null }
+        const body={ code:t.code, txn_type:t.txn_type, nav:t.nav, fee:t.fee, trade_date:t.trade_date||null }
         if(t.txn_type==='赎回') body.shares=t.shares; else body.amount=t.amount
-        const r = await api('/api/fund/transaction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+        const preview = await api('/api/fund/ledger/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows:[body]})})
+        if(!confirm('确认实际成交 '+t.code+'？预览后份额 '+fmt(preview.positions.find(p=>p.code===body.code)?.shares))) return
+        const r = await api('/api/fund/ledger/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows:[body],expected_version:preview.version})})
         t.ok=true; t.msg='已记账:'+t.txn_type+' '+t.code+(r&&r.pos_shares!=null?(' · 持有份额 '+fmt(r.pos_shares)):'')
         t.amount=null; t.shares=null
         await loadMine()
@@ -387,7 +406,7 @@ export default {
       try{ const r = await api('/api/fund/nav-refresh',{method:'POST'}); await loadMine() }
       catch(e){ m.err=''+e }finally{ m.navBusy=false }
     }
-    function useForTxn(){ t.code=f.code; if(f.info&&f.info.latest) t.nav=f.info.latest.unit_nav; tab.value='mine' }
+    function useForTxn(){ t.code=f.code; if(f.info&&f.info.latest) t.nav=f.info.latest.unit_nav; tab.value='plans' }
 
     // —— 查询 · 回测 ——
     const f = reactive({ code:'110011', info:null, score:null, err:'', loading:false })
@@ -419,6 +438,7 @@ export default {
       try{
         d.res = await api('/api/fund/dca-backtest',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({code:f.code, amount:d.amount, period:d.period, strategy:d.strategy, day:d.day})})
+        if(d.res.error){ f.err=d.res.error; return }
         if(d.res.equity_curve){ await nextTick(); lineChart(dcac.value, d.res.equity_curve,'date','value','#f5a623') }
       }catch(e){ f.err=''+e }finally{ d.loading=false }
     }
@@ -433,9 +453,9 @@ export default {
 
     // —— 定投计划 ——
     const pl = reactive({ plans:null, err:'' })
-    const np = reactive({ code:'', amount:1000, period:'monthly', day_of:1, strategy:'normal', target_profit_pct:null, busy:false })
+    const np = reactive({ code:'', amount:1000, period:'monthly', day_of:1, anchor_date:'', strategy:'normal', target_profit_pct:null, busy:false })
     const periodCn = p => ({monthly:'每月',biweekly:'每两周',weekly:'每周',daily:'每日'}[p]||p)
-    const stratCn = s => ({normal:'普通定额',valuation:'估值智能',value_avg:'价值平均'}[s]||s)
+    const stratCn = s => ({normal:'普通定额',valuation:'真实估值',price_position:'价格位置',value_avg:'价值平均'}[s]||s)
     async function loadPlans(){
       pl.err=''
       try{ pl.plans = await api('/api/fund/plans') }catch(e){ pl.err=''+e }
@@ -445,10 +465,13 @@ export default {
       np.busy=true; pl.err=''
       try{
         await api('/api/fund/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-          code:np.code, amount:np.amount, period:np.period, day_of:np.day_of, strategy:np.strategy,
+          code:np.code, amount:np.amount, period:np.period, day_of:np.day_of, anchor_date:np.anchor_date||null, strategy:np.strategy,
           target_profit_pct:np.target_profit_pct||null })})
         await loadPlans()
       }catch(e){ pl.err=''+e }finally{ np.busy=false }
+    }
+    async function setAnchor(p){
+      try{ await api('/api/fund/plan/'+p.id+'/settings',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({fields:{anchor_date:p.new_anchor}})});await loadPlans() }catch(e){pl.err=String(e)}
     }
     async function togglePlan(p){
       pl.err=''
@@ -464,7 +487,7 @@ export default {
 
     // —— 组合诊断 ——
     const dg = reactive({ data:null, err:'', loading:false, olLoading:false })
-    const cv = reactive({ data:null })
+    const cv = reactive({ data:null,basis:'market' })
     const BAR_COLORS = { '权益':'#e0533d', '固收':'#3da35d', '现金':'#888', '配置':'#b07ad0', '其他':'#c0a020', '未知':'#666', '股票':'#e0533d' }
     const barColor = k => { for(const key in BAR_COLORS){ if((k||'').includes(key)) return BAR_COLORS[key] } return '#6aa9ff' }
     async function loadDiag(){
@@ -472,7 +495,7 @@ export default {
       try{
         const [d, c] = await Promise.all([
           api('/api/fund/diagnose'),
-          api('/api/fund/combined-view').catch(()=>null)
+          api('/api/fund/combined-view?basis='+cv.basis).catch(()=>null)
         ])
         dg.data = d; cv.data = c
       }catch(e){ dg.err=''+e }finally{ dg.loading=false }
@@ -537,7 +560,7 @@ export default {
     const scZh = c => SC_ZH[c]||c
     const scCell = (r,c) => { const v=r[c]; if(v==null) return '—'; if(c.startsWith('r_')||c==='fee') return (+v).toFixed(2)+'%'; return v }
     // —— 指数估值 ——
-    const VAL_INDEXES = ['上证50','沪深300','中证500','中证1000','创业板指','科创50']
+    const VAL_INDEXES = ['上证50','沪深300','中证500','中证1000','创业板50']
     const vl = reactive({ index:'沪深300', data:null, err:'', loading:false })
     async function runVal(){
       vl.loading=true; vl.err=''
@@ -549,7 +572,7 @@ export default {
     onMounted(()=>{ loadMine(); loadPlans() })
     return { tab, m, hcols:HCOLS, sortedHoldings, sortBy, arrow, totalMv, totalCost, totalPnl, totalPnlPct, todayPnl,
              loadMine, navRefresh, t, addTxn, del, useForTxn,
-             f, d, navc, dcac, load, runDca, runDcaCompare, pl, np, periodCn, stratCn, loadPlans, addPlan, togglePlan, delPlan,
+             f, d, navc, dcac, load, runDca, runDcaCompare, pl, np, periodCn, stratCn, loadPlans, addPlan, setAnchor, togglePlan, delPlan,
              ap, loadPanel,
              ex, thList, basicOf, stars, feeFmt,
              dg, cv, loadDiag, loadOverlap, barColor,

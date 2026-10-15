@@ -481,7 +481,7 @@ def _dh_cache(domain: str):
                 return hit
             _CACHE_MISS[domain] = _CACHE_MISS.get(domain, 0) + 1
             val = fn(*args, **kwargs)
-            if _nonempty(val):
+            if _nonempty(val) and not (domain=='fund_nav' and isinstance(val,pd.DataFrame) and (val.attrs.get('quality') or {}).get('status')!='ready'):
                 _cache_put(key, val, ttl)
             return val
         return wrap
@@ -2338,7 +2338,12 @@ def _fund_nav_eastmoney(code: str) -> pd.DataFrame:
     维持原行为(此前直连即如此,非本次回归)。"""
     try:
         from data.sources import eastmoney as _em
-        return _em.fund_nav(code)
+        progress_key='fund_nav_progress:'+code
+        checkpoint=_cache_get(progress_key,86400)
+        df=_em.fund_nav(code,checkpoint=checkpoint)
+        progress=df.attrs.pop('pagination_checkpoint',None)
+        if progress: _cache_put(progress_key,progress,86400)
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -2370,33 +2375,74 @@ def _fund_nav_akshare(code: str) -> pd.DataFrame:
         # 累计净值 nice-to-have; unit 已在手, 静默
         pass
     if 'acc_nav' not in df.columns:
-        df['acc_nav'] = df['unit_nav']
+        df['acc_nav'] = None
     df['date'] = pd.to_datetime(df['date'])
     for c in ('unit_nav', 'acc_nav', 'daily_return'):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
-    return df.sort_values('date').reset_index(drop=True)
+    df = df.sort_values('date').reset_index(drop=True)
+    from fund.fund_contracts import now
+    df.attrs.update(source='akshare_fund_em', upstream='eastmoney', retrieved_at=now(),
+                    published_at=None, quality={'status': 'ready', 'reasons': []})
+    return df
 
 
-def fund_nav_history(code: str, start: str = None, end: str = None) -> Optional[pd.DataFrame]:
+def fund_money_history(code):
+    """Dated money-fund income, not a fabricated daily NAV."""
+    def fetch():
+        import akshare as ak
+        from data.akshare_safe import call
+        from fund.fund_contracts import now
+        frame=call(ak.fund_money_fund_info_em,timeout=15,symbol=str(code).zfill(6))
+        if frame is None or not {'净值日期','每万份收益'}.issubset(frame): return pd.DataFrame()
+        frame=frame.rename(columns={'净值日期':'date','每万份收益':'income_per_10000','7日年化收益率':'yield_7d'})
+        frame['date']=pd.to_datetime(frame['date'],errors='coerce')
+        frame['income_per_10000']=pd.to_numeric(frame['income_per_10000'],errors='coerce')
+        frame['unit_nav']=1.  # Accounting denomination; confirmed fact is the dated income.
+        frame['daily_return']=frame['income_per_10000']/100
+        frame=frame.sort_values('date').reset_index(drop=True)
+        frame.attrs.update(source='akshare_money_em',upstream='eastmoney',retrieved_at=now(),
+                           published_at=None,unit_nav_kind='accounting_reference',actions_status='ready',
+                           quality={'status':'ready' if frame['income_per_10000'].notna().all() else 'partial',
+                                    'reasons':[] if frame['income_per_10000'].notna().all() else ['income_missing']})
+        return frame
+    return _route('fund_money', [('akshare',fetch)],empty=pd.DataFrame(),timeout=20)
+
+
+def fund_nav_history(code: str, start: str = None, end: str = None) -> pd.DataFrame | None:
     """基金历史净值。源链:东财 lsjz JSON → akshare PyExecJS 兜底。
     返回 DataFrame[date, unit_nav, acc_nav, daily_return] 升序;两源都失败返回 None。
     start/end='YYYY-MM-DD' 区间过滤。
 
     缓存:'fund_nav' 域(见 _CACHE_TTL);start/end 也参与缓存 key, 不会互相覆盖。
     """
-    code = str(code).zfill(6)
+    from fund.fund_contracts import code6
+    code = code6(code)
+    partial=[]
+    def checked(fetch):
+        frame=fetch()
+        if not frame.empty and (frame.attrs.get('quality') or {}).get('status')=='partial':
+            partial.append(frame)
+            return pd.DataFrame()
+        return frame
     df = _route("fund_nav",
-                [("eastmoney", lambda: _fund_nav_eastmoney(code)),
-                 ("akshare",   lambda: _fund_nav_akshare(code))],
+                [("eastmoney", lambda: checked(lambda: _fund_nav_eastmoney(code))),
+                 ("akshare", lambda: checked(lambda: _fund_nav_akshare(code)))],
                 empty=pd.DataFrame())
+    if (df is None or df.empty) and partial: df=max(partial,key=len)
     if df is None or (hasattr(df, 'empty') and df.empty):
         return None
+    from fund.fund_contracts import audit_nav
+    quality = audit_nav(df, start, end)
+    attrs = dict(df.attrs)
     if start:
         df = df[df['date'] >= pd.to_datetime(start)]
     if end:
         df = df[df['date'] <= pd.to_datetime(end)]
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    df.attrs.update(attrs)
+    df.attrs['quality'] = quality
+    return df
 
 
 # ══════════════════════════════════════════════════════════
@@ -2412,7 +2458,7 @@ for _name in ("quotes", "indices", "capital_flow_minute", "kline_with_indicators
               "stock_reports", "industry_reports",
               "stock_news", "market_news", "announcements", "screen", "convertible_bonds",
               "interactive_qa", "limit_performance", "auction_performance",
-              "fund_nav_history"):
+              "fund_nav_history", "fund_money_history"):
     globals()[_name] = _dh_cache(_name if _name != "fund_nav_history" else "fund_nav")(globals()[_name])
 del _name
 

@@ -36,7 +36,7 @@ psycopg2-binary>=2.9.5
 jieba>=0.42.1
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
-mcp>=1.2.0
+mcp>=1.2.0,<2  # FastMCP v1 API used by mcp_server.py
 
 # WebUI(新前端方案)
 fastapi>=0.110

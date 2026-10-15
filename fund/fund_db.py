@@ -26,6 +26,9 @@ from db_compat import connect, is_postgres
 from fund_dca import moving_cost
 
 _DB_FILE = 'fund.db'
+import threading
+_INIT_LOCK = threading.RLock()
+_INITIALIZED_FOR = None
 
 
 def _conn():
@@ -73,25 +76,39 @@ def _ddl() -> List[str]:
 
 
 def init_db():
-    conn = _conn()
-    cur = conn.cursor()
-    for sql in _ddl():
-        cur.execute(sql)
-    conn.commit()
-    conn.close()
-    _ensure_columns()
+    global _INITIALIZED_FOR
+    if _INITIALIZED_FOR is _conn:return
+    with _INIT_LOCK:
+        if _INITIALIZED_FOR is _conn:return
+        conn = _conn()
+        try:
+            cur = conn.cursor()
+            for sql in _ddl():cur.execute(sql)
+            from fund.fund_ledger import create_schema
+            create_schema(cur)
+            conn.commit()
+        except Exception:
+            conn.rollback();raise
+        finally:conn.close()
+        _ensure_columns()
+        _INITIALIZED_FOR = _conn
 
 
 def _ensure_columns():
-    """幂等补列(老库升级):给 fund_dca_plans 补 auto_record。新库 DDL 已含,这里兜底。"""
-    conn = _conn()
-    cur = conn.cursor()
+    conn=_conn()
     try:
-        cur.execute("ALTER TABLE fund_dca_plans ADD COLUMN auto_record INTEGER DEFAULT 0")
+        cur=conn.cursor()
+        if is_postgres():
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='fund_dca_plans'")
+            names={r[0] for r in cur.fetchall()}
+        else:
+            cur.execute('PRAGMA table_info(fund_dca_plans)')
+            names={r[1] for r in cur.fetchall()}
+        if 'auto_record' not in names:cur.execute('ALTER TABLE fund_dca_plans ADD COLUMN auto_record INTEGER DEFAULT 0')
         conn.commit()
     except Exception:
-        conn.rollback()  # 已存在则忽略
-    conn.close()
+        conn.rollback();raise
+    finally:conn.close()
 
 
 def has_transaction_on(code: str, trade_date: str, source: str) -> bool:
@@ -120,9 +137,13 @@ def get_holdings() -> List[Dict]:
 
 def upsert_holding(code: str, name: str = None, shares: float = None,
                    cost_nav: float = None, note: str = None):
+    init_db()
     code = str(code).zfill(6)
     conn = _conn()
     cur = conn.cursor()
+    cur.execute('SELECT 1 FROM fund_ledger_openings WHERE code=?',(code,))
+    if cur.fetchone():
+        conn.close();raise ValueError('已接入账本的基金须通过期初余额迁移或成交流水修改')
     cur.execute("SELECT code FROM fund_holdings WHERE code=?", (code,))
     exists = cur.fetchone()
     if exists:
@@ -138,8 +159,12 @@ def upsert_holding(code: str, name: str = None, shares: float = None,
 
 
 def delete_holding(code: str):
+    init_db()
     conn = _conn()
     cur = conn.cursor()
+    cur.execute('SELECT 1 FROM fund_ledger_openings WHERE code=?',(str(code).zfill(6),))
+    if cur.fetchone():
+        conn.close();raise ValueError('已接入账本的持仓不能直接移除，请通过实际赎回或冲正处理')
     cur.execute("DELETE FROM fund_holdings WHERE code=?", (str(code).zfill(6),))
     conn.commit()
     conn.close()
@@ -148,60 +173,21 @@ def delete_holding(code: str):
 # --------------------------------------------------------------------------
 # 申赎/定投流水(自动更新持有)
 # --------------------------------------------------------------------------
-def add_transaction(code: str, txn_type: str, nav: float, amount: float = None,
-                    shares: float = None, fee: float = 0.0, trade_date: str = None,
-                    name: str = None, source: str = 'manual', note: str = None,
-                    update_position: bool = True) -> Dict:
-    """记一笔申赎/定投流水。
-    申购/定投:给 amount(申购金额),自动 shares=(amount-fee)/nav;
-    赎回:给 shares(赎回份额)或 amount。
-    update_position=True 时同步更新 fund_holdings(移动加权成本)。"""
-    code = str(code).zfill(6)
-    nav = float(nav)
-    is_buy = txn_type in ('申购', '定投', '买入')
-    if is_buy:
-        if amount is None and shares is not None:
-            amount = shares * nav + (fee or 0)
-        shares = (float(amount) - (fee or 0)) / nav if nav else 0.0
-        delta = shares
-    else:  # 赎回/卖出
-        if shares is None and amount is not None:
-            shares = float(amount) / nav if nav else 0.0
-        amount = (shares * nav) - (fee or 0)
-        delta = -float(shares)
-
-    conn = _conn()
-    cur = conn.cursor()
-    pos_shares, pos_cost = None, None
-    if update_position:
-        cur.execute("SELECT shares, cost_nav FROM fund_holdings WHERE code=?", (code,))
-        row = cur.fetchone()
-        prev_sh = (row[0] if row else 0) or 0
-        prev_cost = (row[1] if row else 0) or 0
-        if is_buy:
-            new_cost = moving_cost(prev_sh, prev_cost, shares, nav)
-            new_sh = prev_sh + shares
-        else:
-            new_sh = max(prev_sh - float(shares), 0.0)
-            new_cost = prev_cost  # 赎回不改成本
-        pos_shares, pos_cost = new_sh, new_cost
-        if row:
-            cur.execute("UPDATE fund_holdings SET shares=?, cost_nav=?, name=COALESCE(?,name) WHERE code=?",
-                        (new_sh, new_cost, name, code))
-        else:
-            cur.execute("INSERT INTO fund_holdings (code, name, shares, cost_nav) VALUES (?,?,?,?)",
-                        (code, name, new_sh, new_cost))
-
-    cur.execute("""INSERT INTO fund_transactions
-        (code, name, txn_type, nav, shares, amount, fee, trade_date,
-         pos_shares, pos_cost_nav, delta_shares, source, note)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (code, name, txn_type, nav, round(float(shares), 4), round(float(amount), 2),
-         fee or 0, trade_date, pos_shares, pos_cost, round(delta, 4), source, note))
-    conn.commit()
-    conn.close()
-    return {'code': code, 'txn_type': txn_type, 'shares': round(float(shares), 4),
-            'amount': round(float(amount), 2), 'pos_shares': pos_shares, 'pos_cost_nav': pos_cost}
+def add_transaction(code: str, txn_type: str, nav: float, amount=None, shares=None,
+                    fee=0., trade_date=None, name=None, source='manual', note=None,
+                    update_position=True, **details):
+    from fund import fund_ledger as ledger
+    row = dict(code=code,txn_type=txn_type,nav=nav,amount=amount,shares=shares,fee=fee,
+               trade_date=trade_date,name=name,source=source,note=note,**details)
+    if not update_position:
+        event=ledger.normalize(row)
+        ledger.save('simulation',event['event_id'],event)
+        return {**event,'status':'simulated','pos_shares':None}
+    result=ledger.commit([row])
+    code=str(code).zfill(6)
+    position=next((p for p in result['positions'] if p['code']==code and p['account']==details.get('account','default') and p['channel']==details.get('channel','default')), {})
+    return {**row,**position,'pos_shares':position.get('shares'),'pos_cost_nav':position.get('cost_nav'),
+            'event_id':ledger.normalize(row)['event_id'],'skipped':result['skipped']}
 
 
 def get_transactions(code: str = None) -> List[Dict]:
@@ -219,7 +205,10 @@ def get_transactions(code: str = None) -> List[Dict]:
             'pos_shares', 'pos_cost_nav', 'delta_shares', 'source', 'note']
     rows = cur.fetchall()
     conn.close()
-    return [dict(zip(cols, r)) for r in rows]
+    old = [{**dict(zip(cols,r)), 'history_status':'legacy_unverified'} for r in rows]
+    from fund.fund_ledger import read
+    new = read([str(code).zfill(6)] if code else None)['transactions']
+    return sorted(old+new,key=lambda r:str(r.get('trade_date') or ''))
 
 
 # --------------------------------------------------------------------------
@@ -228,18 +217,24 @@ def get_transactions(code: str = None) -> List[Dict]:
 def add_plan(code: str, amount: float, period: str = 'monthly', day_of: int = 1,
              strategy: str = 'normal', name: str = None,
              target_profit_pct: float = None, auto_record: bool = False,
-             note: str = None) -> int:
-    conn = _conn()
-    cur = conn.cursor()
-    cur.execute("""INSERT INTO fund_dca_plans
-        (code, name, period, amount, day_of, strategy, enabled, target_profit_pct, auto_record, note)
-        VALUES (?,?,?,?,?,?,1,?,?,?)""",
-        (str(code).zfill(6), name, period, amount, day_of, strategy,
-         target_profit_pct, 1 if auto_record else 0, note))
-    pid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return pid
+             note: str = None, **settings) -> int:
+    from fund.fund_contracts import number, now, code6
+    from fund.fund_calendar import scheduled_dates
+    code6(code); number(amount,positive=True)
+    settings={k:v for k,v in settings.items() if v is not None}
+    anchor = settings.get('anchor_date') or now()[:10]
+    list(scheduled_dates(anchor,anchor,period,day_of,anchor))
+    if strategy not in ('normal','price_position','valuation','value_avg'): raise ValueError('无效策略')
+    from fund.fund_ledger import transaction, _save
+    with transaction(True) as cur:
+        cur.execute('''INSERT INTO fund_dca_plans
+            (code,name,period,amount,day_of,strategy,enabled,target_profit_pct,auto_record,note)
+            VALUES (?,?,?,?,?,?,1,?,?,?)''',
+            (str(code).zfill(6),name,period,amount,day_of,strategy,target_profit_pct,1 if auto_record else 0,note))
+        pid=cur.lastrowid
+        _save(cur,'plan',str(pid),{'id':pid,'anchor_date':anchor,'account':'default','channel':'default',
+                                   'calendar_id':'CN',**settings,'known_at':now()})
+        return pid
 
 
 def get_plans(only_enabled: bool = False) -> List[Dict]:
@@ -256,64 +251,23 @@ def get_plans(only_enabled: bool = False) -> List[Dict]:
             'enabled', 'target_profit_pct', 'auto_record', 'note']
     rows = cur.fetchall()
     conn.close()
-    return [dict(zip(cols, r)) for r in rows]
+    from fund.fund_ledger import list_saved
+    settings = {str(p['id']):p for p in list_saved('plan')}
+    statuses = {str(p['id']):p for p in list_saved('plan_status')}
+    return [{**dict(zip(cols,r)),**settings.get(str(r[0]),{}),
+             'auto_record_semantics':'pending_only','schedule_status':statuses.get(str(r[0]),{}).get('status','needs_calendar' if settings.get(str(r[0])) else 'needs_anchor')} for r in rows]
 
 
-def import_transactions(rows, update_position: bool = True, source: str = 'import',
-                        skip_existing: bool = False) -> Dict:
-    """批量导入基金申赎/定投流水(按日期升序应用 → 移动加权成本正确)。rows 每项键(中英任一):
-      code/代码(必)、txn_type/类型(申购|定投|赎回|买入|卖出,默认申购)、nav/净值(必)、
-      amount/金额 或 shares/份额(买入一般给amount,赎回给shares)、fee/费用、trade_date/日期、
-      name/名称(缺则按code补)、note/备注。
-    skip_existing=True 按(code,日期,source)跳过已存在(防重复导入)。
-    ⚠️ 默认增量叠加到当前持仓:勿对同一批重复导入(要么空仓导全量,要么只导新增)。
-    返回 {imported, skipped, errors:[...]}。"""
+def import_transactions(rows, update_position=True, source='import', skip_existing=True,
+                        preview_only=False, expected_version=None):
+    from fund import fund_ledger as ledger
     init_db()
-
-    def _g(r, *names):
-        for n in names:
-            if r.get(n) not in (None, ''):
-                return r.get(n)
-        return None
-
-    # 先规整 + 按日期升序(同日按原始顺序),保证移动加权成本按时间正确累计
-    items = []
-    for i, r in enumerate(rows or []):
-        items.append((str(_g(r, 'trade_date', '日期', 'date') or ''), i, r))
-    items.sort(key=lambda x: (x[0], x[1]))
-
-    imported = skipped = 0
-    errors = []
-    for trade_date, i, r in items:
-        try:
-            code = str(_g(r, 'code', '代码') or '').strip()
-            if not code:
-                errors.append(f'行{i}: 缺 code'); continue
-            code = code.zfill(6)
-            nav = _g(r, 'nav', '净值')
-            if nav in (None, ''):
-                errors.append(f'行{i}({code}): 缺 nav'); continue
-            txn_type = str(_g(r, 'txn_type', '类型', 'type') or '申购')
-            td = trade_date or None
-            if skip_existing and td and has_transaction_on(code, td, source):
-                skipped += 1; continue
-            name = _g(r, 'name', '名称')
-            if not name:
-                try:
-                    from fund_data import fund_name
-                    name = fund_name(code)
-                except Exception:
-                    name = None
-            add_transaction(
-                code=code, txn_type=txn_type, nav=float(nav),
-                amount=_f(_g(r, 'amount', '金额')), shares=_f(_g(r, 'shares', '份额')),
-                fee=_f(_g(r, 'fee', '费用')) or 0.0, trade_date=td, name=name,
-                source=source, note=_g(r, 'note', '备注'), update_position=update_position,
-            )
-            imported += 1
-        except Exception as e:
-            errors.append(f'行{i}: {e}')
-    return {'imported': imported, 'skipped': skipped, 'errors': errors}
+    items=[{**r,'source':r.get('source') or source} for r in rows]
+    if not update_position: raise ValueError('模拟记录请使用模拟入口，不混入真实导入')
+    try:
+        return ledger.preview(items) if preview_only else ledger.commit(items,expected_version)
+    except ValueError as exc:
+        return {'imported':0,'skipped':0,'errors':[str(exc)]}
 
 
 def import_plans(rows, dedup: bool = True) -> Dict:
@@ -323,7 +277,8 @@ def import_plans(rows, dedup: bool = True) -> Dict:
       name/名称(可选,缺则按 code 补)、target_profit_pct/止盈%(可选)、auto_record/自动记账(可选)、note/备注。
     dedup=True 时跳过已存在同 code 的计划(避免重复导入)。返回 {imported, skipped, errors:[...]}。"""
     init_db()
-    existing = {p['code'] for p in get_plans()} if dedup else set()
+    identity=lambda p:(str(p['code']).zfill(6),p.get('period','monthly'),float(p['amount']),int(p.get('day_of') or 1),p.get('account','default'),p.get('channel','default'),p.get('anchor_date'),p.get('strategy','normal'))
+    existing={identity(p) for p in get_plans()} if dedup else set()
     imported = skipped = 0
     errors = []
 
@@ -342,7 +297,9 @@ def import_plans(rows, dedup: bool = True) -> Dict:
             amount = _g(r, 'amount', '金额')
             if amount in (None, ''):
                 errors.append(f'行{i}({code}): 缺 amount'); continue
-            if dedup and code in existing:
+            from fund.fund_contracts import now
+            candidate={**r,'anchor_date':r.get('anchor_date') or now()[:10],'code':code,'amount':amount,'period':_g(r,'period','周期') or 'monthly','day_of':_g(r,'day_of','扣款日') or 1}
+            if dedup and identity(candidate) in existing:
                 skipped += 1; continue
             name = _g(r, 'name', '名称')
             if not name:
@@ -360,8 +317,9 @@ def import_plans(rows, dedup: bool = True) -> Dict:
                 target_profit_pct=_f(_g(r, 'target_profit_pct', '止盈%', '止盈')),
                 auto_record=bool(_g(r, 'auto_record', '自动记账')),
                 note=_g(r, 'note', '备注'),
+                **{k:r[k] for k in ('account','channel','anchor_date','calendar_id','open_dates') if r.get(k) is not None},
             )
-            existing.add(code)
+            existing.add(identity(candidate))
             imported += 1
         except Exception as e:
             errors.append(f'行{i}: {e}')
@@ -393,8 +351,12 @@ def upsert_nav(code: str, nav_date, unit_nav, acc_nav=None, daily_return=None):
     if unit_nav is None:
         return
     if not nav_date:
-        import datetime
-        nav_date = datetime.date.today().isoformat()
+        raise ValueError('确认净值必须包含真实净值日期')
+    from fund.fund_contracts import day, number
+    nav_date = day(nav_date)
+    from fund.fund_contracts import now
+    if nav_date>now()[:10]:raise ValueError('未来净值不能作为已确认值')
+    number(unit_nav, positive=True)
     code = str(code).zfill(6)
     conn = _conn()
     cur = conn.cursor()
@@ -458,6 +420,14 @@ def get_nav_pairs(codes=None, upto_date: str = None) -> Dict[str, Dict]:
     if codes:
         cset = {str(c).zfill(6) for c in codes}
         out = {k: v for k, v in out.items() if k in cset}
+    from fund.fund_ledger import list_saved
+    snapshots={r['code']:r for r in list_saved('nav_snapshot')}
+    for code,info in out.items():
+        snapshot=snapshots.get(code,{})
+        record=next((r for r in snapshot.get('records',[]) if str(r['date'])[:10]==info['nav_date']),{})
+        info.update({k:record[k] for k in ('cash_dividend','split_ratio','income_per_10000','yield_7d') if k in record})
+        info.update({k:snapshot.get('metadata',{}).get(k) for k in ('source','upstream','actions_status','unit_nav_kind')})
+        if not info.get('actions_status'):info['actions_status']='unknown'
     return out
 
 
@@ -473,8 +443,11 @@ def save_nav(code: str, nav_df):
     all_cols = ['code', 'nav_date', 'unit_nav', 'acc_nav', 'daily_return']
     n = 0
     for _, r in nav_df.iterrows():
-        d = r['date']
-        d = d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d)
+        from fund.fund_contracts import day,number,now
+        try:
+            d=day(r['date']);number(r.get('unit_nav'),positive=True)
+            if d>now()[:10]:continue
+        except (TypeError,ValueError):continue
         vals = (code, str(d)[:10], _f(r.get('unit_nav')), _f(r.get('acc_nav')), _f(r.get('daily_return')))
         sql, ordered = upsert_sql('fund_nav', keys, all_cols, vals)
         # 逐行隔离:单行异常(并发写/脏数据触发约束)不污染整个 PG 事务、不让整批净值刷新失败
@@ -494,12 +467,18 @@ def save_nav(code: str, nav_df):
                     pass
     conn.commit()
     conn.close()
+    from fund.fund_ledger import save
+    from application.results import clean_json
+    from fund.fund_contracts import nav_records
+    records=nav_records(nav_df)
+    save('nav_snapshot',code,clean_json({'code':code,'records':records,'metadata':nav_df.attrs}))
     return n
 
 
 def _f(v):
     try:
-        return None if v is None else float(v)
+        import math
+        return float(v) if v is not None and math.isfinite(float(v)) else None
     except (ValueError, TypeError):
         return None
 
@@ -523,12 +502,13 @@ def save_portfolio_snapshot(snap_date: str, nav_lookup=None) -> Optional[Dict]:
     snap_rows = []
     for h in holdings:
         nav = nav_lookup(h['code'])
-        mv = (h['shares'] or 0) * nav if nav else 0.0
+        mv = (h['shares'] or 0) * nav if nav else None
         cost = (h['shares'] or 0) * (h['cost_nav'] or 0)
-        total_mv += mv
+        total_mv += mv or 0
         total_cost += cost
-        snap_rows.append({'code': h['code'], 'mv': round(mv, 2)})
-    pnl_pct = (total_mv - total_cost) / total_cost if total_cost else None
+        snap_rows.append({'code':h['code'],'mv':round(mv,2) if mv is not None else None})
+    valued=sum(r['mv'] is not None for r in snap_rows)
+    pnl_pct = (total_mv-total_cost)/total_cost if total_cost and valued==len(snap_rows) else None
     conn = _conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM fund_portfolio_snapshots WHERE snap_date=?", (snap_date,))
@@ -540,7 +520,10 @@ def save_portfolio_snapshot(snap_date: str, nav_lookup=None) -> Optional[Dict]:
          len(holdings), json.dumps(snap_rows, ensure_ascii=False)))
     conn.commit()
     conn.close()
+    from fund.fund_ledger import save
+    save('portfolio_snapshot_meta',snap_date,{'snap_date':snap_date,'status':'ready' if valued==len(snap_rows) else 'partial','valued_count':valued,'total_count':len(snap_rows)})
     return {'snap_date': snap_date, 'total_mv': round(total_mv, 2),
+            'status':'ready' if valued==len(snap_rows) else 'partial',
             'pnl_pct': round(pnl_pct, 4) if pnl_pct is not None else None}
 
 

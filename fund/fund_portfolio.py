@@ -48,21 +48,19 @@ def diagnose(holdings: List[Dict], with_overlap: bool = False) -> dict:
     if not holdings:
         return {'error': '组合为空'}
 
+    from fund.fund_contracts import product
     rows = []
     for h in holdings:
-        code = str(h['code']).zfill(6)
-        mv = h.get('market_value')
-        if mv is None:
-            latest = fund_data.latest_nav(code)
-            nav = latest['unit_nav'] if latest else None
-            mv = (h.get('shares') or 0) * nav if nav else 0.0
-        ftype = h.get('ftype') or fund_data.fund_type(code)
-        rows.append({'code': code, 'name': h.get('name'), 'ftype': ftype,
-                     'asset': _asset_class(ftype), 'mv': float(mv or 0)})
+        code=str(h['code']).zfill(6)
+        profile=h.get('profile') or product(code,h.get('name'),h.get('ftype'))
+        mv=h.get('market_value',h.get('mv'))
+        rows.append({'code':code,'name':h.get('name'),'ftype':h.get('ftype') or profile.get('ftype'),
+                     'asset':profile.get('asset','未知'),'mv':float(mv) if mv is not None else 0.,
+                     'valued':mv is not None,'profile':profile,'nav_date':h.get('nav_date')})
 
-    total = sum(r['mv'] for r in rows) or 1.0
+    total = sum(r['mv'] for r in rows)
     for r in rows:
-        r['weight'] = r['mv'] / total
+        r['weight'] = r['mv'] / total if total else 0.
 
     # 大类 / 类型 配置
     by_asset = defaultdict(float)
@@ -83,7 +81,7 @@ def diagnose(holdings: List[Dict], with_overlap: bool = False) -> dict:
     if by_asset.get('权益', 0) > 0.85:
         advice.append('权益类占比 >85%,波动较大,可配置部分固收/货币平滑回撤。')
     if len(rows) < 3:
-        advice.append('持有基金过少,分散不足。')
+        advice.append('持有基金较少，需结合底层资产覆盖判断分散程度。')
     if hhi < 0.25 and len(rows) >= 5 and not advice:
         advice.append('分散度良好。')
 
@@ -94,47 +92,79 @@ def diagnose(holdings: List[Dict], with_overlap: bool = False) -> dict:
         'concentration': {'hhi': round(hhi, 4), 'top1': round(top1, 4), 'top3': round(top3, 4)},
         'holdings': [{'code': r['code'], 'name': r['name'], 'ftype': r['ftype'],
                       'asset': r['asset'], 'weight': round(r['weight'], 4)} for r in rows],
-        'advice': advice or ['组合结构合理。'],
+        'advice': advice or ['请结合目标配置、数据覆盖和费用复核。'],
+        'valuation_coverage':sum(r['valued'] for r in rows)/len(rows),
+        'valuation_dates':{r['code']:r['nav_date'] for r in rows},
+        'status':'ready' if all(r['valued'] for r in rows) else 'partial',
+        'exposure':exposure_summary(rows),
     }
 
     if with_overlap:
-        out['stock_overlap'] = _holdings_overlap(rows)
+        detail = disclosed_exposure(rows)
+        out['disclosure'] = detail
+        out['stock_overlap'] = [x for x in detail['stocks'] if x['in_funds']>=2]
     return out
 
 
 _OVERLAP_MAX_FUNDS = 15   # 重仓穿透只取权重最大的前 N 只基金,避免对几十只基金逐只打东财季报接口
 
 
-def _holdings_overlap(rows: List[Dict]) -> List[Dict]:
-    """重仓股穿透重叠:统计被多只基金共同重仓的股票(按持仓占比×基金权重 加权)。慢,需联网。
-    ⚠️ 2026-06-27 防东财封禁:① 只穿透权重最大的前 _OVERLAP_MAX_FUNDS 只基金(组合再大也封顶);
-    ② 盘中(交易时段)对 get_stock_holdings 传 cache_only=True —— 只读缓存、冷则跳过,绝不盘中逐只现拉。
-    重仓是季报数据(get_stock_holdings 自带 1 天文件缓存),盘后焐一次盘中复用。"""
-    try:
-        from datahub import _is_trading_hours
-        _cache_only = _is_trading_hours()
-    except Exception:
-        _cache_only = False
-    rows = sorted(rows, key=lambda r: r.get('weight', 0), reverse=True)[:_OVERLAP_MAX_FUNDS]
-    stock_w = defaultdict(float)
-    stock_funds = defaultdict(set)
+def _holdings_overlap(rows):
+    return disclosed_exposure(rows)['stocks']
+
+
+def exposure_summary(rows):
+    result={}
+    for field in ('asset','region','currency','manager','family_id'):
+        bucket=defaultdict(float)
+        for r in rows:
+            key=r.get('asset') if field=='asset' else r.get('profile',{}).get(field)
+            bucket[str(key or '未知')]+=r['weight']
+        result[field]=dict(bucket)
+    industry=defaultdict(float)
     for r in rows:
-        hold = fund_data.get_stock_holdings(r['code'], cache_only=_cache_only)
-        if hold is None or len(hold) == 0:
-            continue
-        name_col = next((c for c in hold.columns if '股票名称' in c or '名称' in c), None)
-        pct_col = next((c for c in hold.columns if '占净值比例' in c or '占比' in c), None)
-        if not name_col:
-            continue
-        import pandas as pd
-        for _, hr in hold.iterrows():
-            sname = str(hr[name_col])
-            pct = float(pd.to_numeric(hr.get(pct_col, 0), errors='coerce') or 0) / 100 if pct_col else 0
-            stock_w[sname] += r['weight'] * pct
-            stock_funds[sname].add(r['code'])
-    overlap = [{'stock': s, 'in_funds': len(stock_funds[s]), 'combined_weight': round(w, 4)}
-               for s, w in stock_w.items() if len(stock_funds[s]) >= 2]
-    return sorted(overlap, key=lambda x: x['combined_weight'], reverse=True)[:15]
+        weights=r.get('profile',{}).get('industry_weights') or {}
+        known=0.
+        for key,value in weights.items():
+            weight=float(value)
+            if weight<0 or known+weight>1.000001:raise ValueError('行业暴露合计须不超过 1')
+            industry[key]+=r['weight']*weight;known+=weight
+        industry['未知']+=r['weight']*(1-known)
+    result['industry']=dict(industry)
+    return result
+
+
+def disclosed_exposure(rows):
+    from fund.fund_contracts import now
+    stocks={}; reports=[]; covered=0.
+    for r in sorted(rows,key=lambda r:-r['weight'])[:_OVERLAP_MAX_FUNDS]:
+        top=r.get('profile',{}).get('top_holdings')
+        if not top:
+            # Existing disk cache is used without any per-fund online fan-out.
+            frame=fund_data.get_stock_holdings(r['code'],cache_only=True)
+            if frame is None or frame.empty: continue
+            top=fund_data.normalize_holdings(frame)
+        total=0.
+        for h in top.get('holdings',[]):
+            if not h.get('code') or h.get('pct') is None: continue
+            pct=float(h['pct'])/100
+            if not 0<=pct<=1: continue
+            market=h.get('market')
+            # Unknown market is explicit, never merged by company name alone.
+            identity=str(market or 'unknown')+':'+str(h['code'])
+            item=stocks.setdefault(identity,{'security_id':identity,'stock':h.get('name') or h['code'],
+                'combined_weight':0.,'funds':set(),'market':market})
+            item['combined_weight']+=r['weight']*pct;item['funds'].add(r['code']);total+=pct
+        fraction=min(total,1.)
+        covered+=r['weight']*fraction
+        reports.append({'code':r['code'],'quarter':top.get('quarter'),'published_at':top.get('published_at'),
+                        'first_seen_at':top.get('first_seen_at'),'disclosed_fraction':fraction})
+    result=[]
+    for item in stocks.values():
+        item['in_funds']=len(item.pop('funds'));result.append(item)
+    return {'stocks':sorted(result,key=lambda x:-x['combined_weight']),'reports':reports,
+            'disclosed_weight':min(covered,1.),'unknown_weight':max(0,1-covered),
+            'basis':'已披露前十大持仓，非完整资产穿透','observed_at':now()}
 
 
 def combined_asset_view() -> dict:
@@ -187,3 +217,115 @@ if __name__ == '__main__':
     ]
     from pprint import pprint
     pprint(diagnose(demo))
+
+
+def rebalance_preview(snapshot, targets, available_cash, *, fee_rules=None, allow_redemptions=False):
+    from fund.fund_contracts import code6, number
+    fee_rules=fee_rules or {}
+    cash=number(available_cash)
+    if cash<0: raise ValueError('可用现金不能为负')
+    weights={code6(k):number(v) for k,v in targets.items()}
+    if any(v<0 or v>1 for v in weights.values()) or sum(weights.values())>1.000001:
+        raise ValueError('目标权重须介于 0～1，合计不得超过 1')
+    if not weights: return {'status':'needs_targets','orders':[],'reason':'请先设置目标配置'}
+    holdings=snapshot['holdings']
+    if any(h.get('mv') is None for h in holdings):
+        return {'status':'partial','orders':[],'reason':'存在缺失估值，不能生成调仓数量'}
+    current={h['code']:h for h in holdings}
+    total=sum(h['mv'] for h in holdings)+cash
+    orders=[]
+    for code in sorted(set(current)|set(weights)):
+        h=current.get(code,{})
+        diff=total*weights.get(code,0)-h.get('mv',0)
+        rules=fee_rules.get(code,{})
+        blockers=[]
+        profile=dict(h.get('profile',{}))
+        for field in ('subscription_status','redemption_status'):
+            if profile.get(field) is None and rules.get(field) is not None:profile[field]=rules[field]
+        if profile.get('execution') not in (None,'off_exchange'): blockers.append('需要场内成交价格与溢折价模型')
+        if diff<0 and not allow_redemptions: blockers.append('本次优先新增资金，未启用赎回预览')
+        if profile.get('subscription_status') in ('closed','suspended') and diff>0: blockers.append('暂停申购')
+        if profile.get('redemption_status') in ('closed','suspended') and diff<0: blockers.append('暂停赎回')
+        rate=rules.get('purchase_rate' if diff>0 else 'redemption_rate')
+        if rate is None: blockers.append('费率待确认')
+        elif not 0<=number(rate)<1:raise ValueError('渠道费率须介于 0～1')
+        if diff>0 and profile.get('subscription_status') is None: blockers.append('申购状态待核验')
+        if diff<0 and profile.get('redemption_status') is None: blockers.append('赎回状态待核验')
+        if diff<0 and not rules.get('holding_period_verified'): blockers.append('持有期与赎回费阶梯待核验')
+        if abs(diff)<.005:continue
+        value=abs(diff)
+        fee_detail=None
+        if diff<0 and rules.get('redemption_schedule'):
+            if not h.get('nav') or not h.get('lots'):blockers.append('缺少持有批次或净值')
+            else:
+                from fund.fund_fees import redemption_charge
+                left=min(float(h['shares']),value/float(h['nav']))
+                selling=[]
+                for lot in h['lots']:
+                    take=min(left,float(lot['shares']))
+                    if take:selling.append({**lot,'shares':take});left-=take
+                try:fee_detail=redemption_charge(selling,h['nav'],snapshot['as_of'],rules['redemption_schedule'])
+                except ValueError:blockers.append('批次持有期未核验')
+        executable=not blockers
+        orders.append({'code':code,'action':'subscribe' if diff>0 else 'redeem',
+                       'current_weight':h.get('mv',0)/total if total else 0,'target_weight':weights.get(code,0),
+                       'gross_amount':round(value,2),'fee':fee_detail['fee'] if fee_detail else round(value*number(rate),2) if rate is not None else None,'fee_details':fee_detail,
+                       'executable':executable,'blockers':blockers})
+    needed=sum(x['gross_amount'] for x in orders if x['action']=='subscribe' and x['executable'])
+    scale=min(1,cash/needed) if needed else 1
+    remaining=__import__('math').floor(cash*100+1e-8)/100
+    for x in orders:
+        if x['action']=='subscribe':
+            x['budgeted_amount']=min(remaining,round(x['gross_amount']*scale,2)) if x['executable'] else 0
+            remaining=round(remaining-x['budgeted_amount'],2)
+            if x['executable'] and x['fee'] is not None: x['budgeted_fee']=round(x['fee']*scale,2)
+    return {'status':'ready' if all(x['executable'] for x in orders) else 'partial',
+            'basis':'新增现金优先；预计费用需与渠道成交回执核对','available_cash':cash,
+            'estimated_cash_used':sum(x.get('budgeted_amount',0) for x in orders),
+            'orders':orders,'as_of':snapshot['as_of'],'execution':'preview_only'}
+
+
+def merge_market_values(funds,stocks,stock_date,as_of):
+    """Combine dated valuations; ambiguous cross-book duplicates stay out of totals."""
+    funds_by_code={h['code']:h for h in funds}
+    amounts=defaultdict(float); details=[]; excluded=[];missing=[]
+    for h in funds:
+        if h.get('mv') is None:missing.append(h['code']);continue
+        asset=h.get('profile',{}).get('asset','未知')
+        amounts['基金-'+asset]+=h['mv']
+        details.append({'code':h['code'],'value':h['mv'],'as_of':h.get('nav_date'),'basis':'confirmed_nav'})
+    for h in stocks:
+        code=str(h['code'])
+        if code in funds_by_code and (code.startswith(('15','16','5')) or h.get('asset_type')=='fund'):
+            excluded.append({'code':code,'reason':'基金与股票账本存在同标的，需核对账户身份后合并'});continue
+        if h.get('price_source') not in (None,'quote') or h.get('mv') is None:
+            missing.append(code);continue
+        amounts['股票']+=float(h['mv'])
+        details.append({'code':code,'value':float(h['mv']),'as_of':stock_date,'basis':'market_snapshot'})
+    total=sum(amounts.values())
+    return {'basis':'按各自注明日期的确认净值/市价估值，不使用成本补市值','as_of':as_of,
+            'stock_as_of':stock_date,'total':round(total,2),'amounts':dict(amounts),
+            'allocation':{k:v/total if total else 0 for k,v in amounts.items()},'detail':details,
+            'excluded_duplicates':excluded,'unvalued':missing,
+            'status':'partial' if missing or excluded or (stocks and stock_date!=as_of) or any(h.get('nav_date')!=as_of for h in funds) else 'ready'}
+
+
+def combined_market_view():
+    import json
+    from fund.fund_service import holdings_snapshot
+    snap=holdings_snapshot()
+    rows=[];stock_date=None;reason=None
+    try:
+        from portfolio import portfolio_snapshot
+        conn=portfolio_snapshot._conn()
+        try:
+            cur=conn.cursor()
+            cur.execute('SELECT snap_date,holdings_json FROM stock_portfolio_snapshots WHERE snap_date<=? ORDER BY snap_date DESC LIMIT 1',(snap['as_of'],))
+            row=cur.fetchone()
+            if row:stock_date=str(row[0])[:10];rows=json.loads(row[1])
+            else:reason='股票市值快照缺失'
+        finally:conn.close()
+    except Exception:reason='股票市值快照不可用'
+    result=merge_market_values(snap['holdings'],rows,stock_date,snap['as_of'])
+    if reason:result.update(status='partial',stock_reason=reason)
+    return result
