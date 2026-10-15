@@ -630,10 +630,12 @@ def render_qq_report(snapshot: dict[str, Any]) -> tuple[str, str]:
 
 
 def render_qq_summary(snapshot: dict[str, Any], *, include_selection: bool = True,
-                      selection_updated: bool = False) -> tuple[str, str]:
+                      selection_updated: bool = False,
+                      notification_slot: str | None = None) -> tuple[str, str]:
     from scripts.scheduled_qq_format import render
     return render(snapshot, include_selection=include_selection,
-                  selection_updated=selection_updated)
+                  selection_updated=selection_updated,
+                  notification_slot=notification_slot)
 
 
 def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -671,10 +673,12 @@ def qq_preflight(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def qq_payload(snapshot: dict[str, Any], *, include_selection: bool = True,
-               selection_updated: bool = False) -> dict[str, Any]:
+               selection_updated: bool = False,
+               notification_slot: str | None = None) -> dict[str, Any]:
     from scripts.scheduled_qq_format import render_parts
     title, content = render_qq_summary(snapshot, include_selection=include_selection,
-                                       selection_updated=selection_updated)
+                                       selection_updated=selection_updated,
+                                       notification_slot=notification_slot)
     if not content:
         return {"silent": True}
     parts = render_parts(title, content)
@@ -887,7 +891,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 payload = qq_payload(snapshot, include_selection=include_picks,
                                      selection_updated=include_picks and
-                                     not notification_slot.endswith("T10:15+08:00"))
+                                     not notification_slot.endswith("T10:15+08:00"),
+                                     notification_slot=notification_slot)
             except Exception:
                 snapshot["notification"] = {"requested": True, "sent": False,
                     "notification_slot": notification_slot,

@@ -77,7 +77,8 @@ def _count(value: Any) -> int:
 
 
 def render(snapshot: dict[str, Any], *, include_selection: bool = True,
-           selection_updated: bool = False) -> tuple[str, str]:
+           selection_updated: bool = False,
+           notification_slot: str | None = None) -> tuple[str, str]:
     day = str((snapshot.get("trading_day") or {}).get("date") or "")
     quotes = snapshot.get("quotes") or {}
     quote_rows = {_code(row): row for row in quotes.get("rows") or []
@@ -137,7 +138,8 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
 
     plans = snapshot.get("trade_plans") or {}
     formal = snapshot.get("formal_selection") or {}
-    post_close = (snapshot.get("post_close_review") or {}).get("due") is True
+    post_close = ((snapshot.get("post_close_review") or {}).get("due") is True
+                  or bool(notification_slot and notification_slot.endswith("T20:45+08:00")))
     if post_close:
         daily = snapshot.get("daily_review") or {}
         if daily.get("schema_version") == DAILY_REVIEW_SCHEMA:
@@ -252,7 +254,8 @@ def render(snapshot: dict[str, Any], *, include_selection: bool = True,
     changed_market = (risk_level(market) > 0 and
                       (not prior or any(name in prior and pct <= prior[name] - 1.0
                                         for name, pct in current.items())))
-    morning = bool(captured_at and captured_at.hour == 10)
+    morning = (notification_slot.endswith("T10:15+08:00")
+               if notification_slot else bool(captured_at and captured_at.hour == 10))
     if morning or post_close or changed_market or account_changed:
         lines.extend(market_lines(market))
         if account.get("status") == "current":

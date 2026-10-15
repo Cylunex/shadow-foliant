@@ -137,6 +137,22 @@ def test_morning_report_market_first_without_actions_and_later_material_change()
     assert "其中下跌2只" in render(later, include_selection=False)[1]
 
 
+def test_due_morning_and_evening_slots_use_slot_identity_when_capture_is_late():
+    delayed = {"trading_day": {"date": "2026-10-15"},
+               "as_of": {"captured_at": "2026-10-15T11:00:00+08:00"},
+               "quotes": {"captured_at": "2026-10-15T11:00:00+08:00", "rows": []},
+               "holdings": {"status": "missing", "rows": []},
+               "trade_plans": {"holding_actions_authority": {"status": "stale"}},
+               "post_close_review": {"due": False}, "market_risk": {"rows": []}}
+    morning = qq_payload(delayed, include_selection=False,
+                         notification_slot="2026-10-15T10:15+08:00")
+    assert "市场：当前宽基行情待核验" in morning["content"]
+    delayed["as_of"]["captured_at"] = "2026-10-15T21:00:00+08:00"
+    evening = qq_payload(delayed, include_selection=False,
+                         notification_slot="2026-10-15T20:45+08:00")
+    assert "盘后复盘" in evening["content"]
+
+
 def test_market_category_routes_once_and_does_not_open_stock_critical_gate(tmp_path, monkeypatch):
     store = ResearchStore(str(tmp_path / "archive.db"), connect_fn=sqlite3.connect,
                           is_postgres=False, ensure_schema=True)
