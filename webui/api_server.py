@@ -1495,7 +1495,9 @@ def monitor_notifications(limit: int = 20):
 
 # ============================ 基金 ============================
 from webui.fund_routes import router as fund_v2_router
-app.include_router(fund_v2_router)
+# Keep concrete APIRoutes in the table inspected by the default-deny middleware.
+# FastAPI's lazy included routers otherwise hide these paths from that inspection.
+app.router.routes.extend(fund_v2_router.routes)
 
 # ⚠️ 路由顺序:静态路径(holdings/transactions/plans)必须在 `/api/fund/{code}` 之前定义,
 #    否则 `{code}` 会把 "holdings" 当成基金代码捕获(FastAPI 按定义顺序匹配)。

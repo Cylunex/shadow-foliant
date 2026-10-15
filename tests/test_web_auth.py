@@ -375,6 +375,56 @@ class WebAuthTests(unittest.TestCase):
             client.cookies.set(platform_auth.SESSION_COOKIE, admin_session.session_token)
             self.assertEqual(client.get("/api/env").status_code, 200)
 
+    def test_fund_routes_use_concrete_paths_and_real_browser_permissions(self):
+        from starlette.requests import Request
+        from webui.api_server import app
+        from webui.fund_routes import router
+
+        # Check every new route against the same table used before dispatch,
+        # including the one-segment workspace path that can match {code}.
+        for route in router.routes:
+            path = route.path
+            for name, value in {"code": "000001", "plan_id": "1",
+                                "occurrence_id": "sample", "experiment_id": "sample"}.items():
+                path = path.replace("{" + name + "}", value)
+            for method in route.methods:
+                request = Request({"type": "http", "path": path, "method": method,
+                                   "root_path": "", "app": app, "headers": []})
+                key = access_control.route_key_for_request(request)
+                self.assertEqual(key, (method, route.path))
+                self.assertIn(key, access_control.ROUTE_POLICIES)
+
+        with patch("webui.fund_routes.call", return_value={"ok": True, "data": {}}) as use_case:
+            with TestClient(app, base_url="https://stock.example.com") as client:
+                for path in ("/api/fund/workspace", "/api/fund/ledger/positions"):
+                    self.assertEqual(client.get(path).status_code, 401)
+                self.assertEqual(client.post("/api/fund/ledger/preview", json={"rows": []}).status_code, 401)
+                use_case.assert_not_called()
+
+                user = self.service.store.upsert_identity(self._claims())
+                session = self.service.store.create_session(user, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, session.session_token)
+                self.assertEqual(client.get("/api/fund/workspace").status_code, 403)
+                self.assertEqual(client.get("/api/fund/ledger/positions").status_code, 403)
+                self.assertEqual(client.post("/api/fund/ledger/preview", json={"rows": []},
+                                            headers={"Origin": "https://stock.example.com"}).status_code, 403)
+                use_case.assert_not_called()
+                self.assertEqual(client.get("/api/fund/research/000001").status_code, 200)
+
+                admin = self.service.store.upsert_identity(self._claims(
+                    sub="fund-admin", groups=["stock-users", "stock-admins"]))
+                session = self.service.store.create_session(admin, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, session.session_token)
+                self.assertEqual(client.get("/api/fund/workspace").status_code, 200)
+                self.assertEqual(client.get("/api/fund/ledger/positions").status_code, 200)
+                count = use_case.call_count
+                self.assertEqual(client.post("/api/fund/ledger/preview", json={"rows": []},
+                                            headers={"Origin": "https://evil.example"}).status_code, 403)
+                self.assertEqual(use_case.call_count, count)
+                self.assertEqual(client.post("/api/fund/ledger/preview", json={"rows": []},
+                                            headers={"Origin": "https://stock.example.com"}).status_code, 200)
+                self.assertEqual(use_case.call_count, count + 1)
+
     def test_unknown_scanner_path_does_not_create_oidc_redirect(self):
         from webui.api_server import app
 

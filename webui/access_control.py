@@ -43,6 +43,19 @@ _add(ROUTE_POLICIES, Access.READY, "GET", "/readyz", "/research-readyz",
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/auth/me")
 _add(ROUTE_POLICIES, Access.USER, "POST", "/api/auth/session/rotate", "/auth/logout", "/auth/logout/all")
 
+_add(ROUTE_POLICIES, Access.USER, "GET", "/api/fund/research/{code}")
+_add(ROUTE_POLICIES, Access.USER, "POST", "/api/fund/share-class-costs")
+_add(ROUTE_POLICIES, Access.ADMIN, "GET",
+     "/api/fund/workspace", "/api/fund/ledger/positions")
+_add(ROUTE_POLICIES, Access.ADMIN, "POST",
+     "/api/fund/ledger/preview", "/api/fund/ledger/commit",
+     "/api/fund/migration/preview", "/api/fund/migration/commit",
+     "/api/fund/experiments/{experiment_id}/replay", "/api/fund/rebalance-preview",
+     "/api/fund/occurrences/{occurrence_id}/status", "/api/fund/account-performance")
+_add(ROUTE_POLICIES, Access.ADMIN, "PUT",
+     "/api/fund/profiles/{code}", "/api/fund/targets")
+_add(ROUTE_POLICIES, Access.ADMIN, "PATCH", "/api/fund/plan/{plan_id}/settings")
+
 _add(
     ROUTE_POLICIES,
     Access.USER,
