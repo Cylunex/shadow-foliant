@@ -5593,7 +5593,10 @@ def _morning_ai_review(n: int, sell_list, buy_list, movers, mkt_line: str = '', 
         from deepseek_client import DeepSeekClient
         ans = DeepSeekClient().call_api(
             [{'role': 'system', 'content': '你是冷静务实的早盘持仓顾问,只给可执行结论,不空话。'},
-             {'role': 'user', 'content': prompt}], max_tokens=400, call_type='morning_portfolio') or ''
+             {'role': 'user', 'content': prompt}], max_tokens=400,
+            timeout=25, call_type='morning_portfolio') or ''
+        if ans.startswith(('API调用失败:', '[LLM-Router]')):
+            return ''
         return ans.strip()[:400]
     except Exception as e:
         print(f'[morning_portfolio] AI 研判失败: {type(e).__name__}: {str(e)[:50]}')

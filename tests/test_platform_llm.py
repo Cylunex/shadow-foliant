@@ -110,6 +110,51 @@ class PlatformLLMTests(unittest.TestCase):
         client.client.chat.completions.create.assert_not_called()
         router.call.assert_called_once()
 
+    def test_morning_portfolio_router_has_one_25_second_attempt(self):
+        from core.llm_router import LLMRouter
+        platform = SimpleNamespace(configured=lambda: True,
+                                   call=Mock(side_effect=TimeoutError('slow provider')))
+        router = object.__new__(LLMRouter)
+        router.providers = [object()]
+        with patch.dict(sys.modules, {'platform_llm': platform}):
+            result = router.call([{'role': 'user', 'content': 'public facts'}],
+                                 call_type='morning_portfolio', max_tokens=400, timeout=25)
+        self.assertEqual(result, ('API调用失败: timeout', 'none'))
+        platform.call.assert_called_once()
+        self.assertEqual(platform.call.call_args.kwargs['timeout'], 25)
+        self.assertEqual(platform.call.call_args.kwargs['max_tokens'], 400)
+        self.assertTrue(platform.call.call_args.kwargs['single_attempt'])
+
+    def test_morning_portfolio_failure_does_not_append_direct_request(self):
+        with patch.dict(os.environ, {
+            'DEEPSEEK_BASE_URL': 'https://example.invalid/v1',
+            'DEEPSEEK_API_KEY': 'test-only',
+        }):
+            from core.deepseek_client import DeepSeekClient
+            client = DeepSeekClient()
+        client.client.chat.completions.create = Mock()
+        router = SimpleNamespace(providers=[object()],
+                                 call=Mock(return_value=('API调用失败: timeout', 'none')))
+        with patch.dict(sys.modules, {'llm_router': SimpleNamespace(get_router=lambda: router)}):
+            result = client.call_api([{'role': 'user', 'content': 'public facts'}],
+                                     timeout=25, call_type='morning_portfolio')
+        self.assertEqual(result, 'API调用失败: timeout')
+        client.client.chat.completions.create.assert_not_called()
+        router.call.assert_called_once()
+
+    def test_morning_portfolio_model_failure_keeps_rule_report_path(self):
+        from jobs import jobs_hub
+        fake_client = Mock()
+        fake_client.call_api.return_value = 'API调用失败: timeout'
+        with patch.dict(sys.modules, {'deepseek_client': SimpleNamespace(
+                DeepSeekClient=Mock(return_value=fake_client))}):
+            result = jobs_hub._morning_ai_review(
+                1, [{'code': '000001', 'name': '样例', 'pnl': 1,
+                     'sell_score': 1, 'sell_reasons': ['规则风险']}], [], [])
+        self.assertEqual(result, '')
+        self.assertEqual(fake_client.call_api.call_args.kwargs['timeout'], 25)
+        self.assertEqual(fake_client.call_api.call_args.kwargs['call_type'], 'morning_portfolio')
+
     def test_bounded_sdk_has_one_target_no_retry_and_request_timeout(self):
         from dataclasses import dataclass
         @dataclass(frozen=True)
