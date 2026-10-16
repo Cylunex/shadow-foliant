@@ -323,6 +323,9 @@ def date_from(value):
 def test_daily_pnl_same_across_web_mcp_and_job(db, monkeypatch):
     from portfolio.daily_pnl import calculate_fund_pnl
 
+    # The web/MCP entry points use the current day. Keep their clock on the
+    # fixture's NAV date instead of expiring this assertion after that date.
+    monkeypatch.setattr(service, "now", lambda: "2026-10-15T18:00:00+08:00")
     ledger.commit([row()])
     f = nav([1, 1.1], dates=["2026-10-14", "2026-10-15"], cash_dividend=[0, 0])
     f.attrs.update(actions_status="ready", source="fixture")
