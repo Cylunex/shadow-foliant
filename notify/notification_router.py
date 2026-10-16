@@ -47,8 +47,10 @@ log = logging.getLogger(__name__)
 
 try:
     from .archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
+    from .delivery_policy import routine_delivery_allowed
 except ImportError:
     from archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
+    from delivery_policy import routine_delivery_allowed
 
 
 class DeliveryResults(dict):
@@ -470,8 +472,11 @@ def send(category: str, title: str, content: str,
             source = str(frame.f_back.f_globals.get("__name__", "unknown")) if frame and frame.f_back else "unknown"
         finally:
             del frame
-    # Only audited scheduled reports and certified monitor events may pass.
+    # Ordinary task reports do not need a critical monitor event. Monitoring
+    # and the protected scheduled CLI retain their existing certification.
     if (category != "test"
+            and not (routine_delivery_allowed(category, source, idempotency_key)
+                     and critical_event is None and market_event is None)
             and not _certified_scheduled_report(
                 category, source, idempotency_key, only_channels, fallback,
                 externally_deduplicated, critical_event)

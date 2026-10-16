@@ -451,7 +451,10 @@ def test_portfolio_unknown_exposure_and_budgeted_preview(db, monkeypatch):
     )
 
 
-def test_actual_due_renderer_long_and_policy_stays_silent(db, monkeypatch):
+def test_actual_due_renderer_long_report_delivers_once(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+    from application.message_archive import MessageArchiveService
+    from data.research_store import ResearchStore
     from notify import notification_router as router
 
     rows = [
@@ -465,9 +468,16 @@ def test_actual_due_renderer_long_and_policy_stays_silent(db, monkeypatch):
     ]
     payload = service.render_due(rows)
     assert len(payload) > 8000 and "000119" in payload
-    monkeypatch.setattr(
-        router, "_get_routes_for", Mock(side_effect=AssertionError("must not deliver"))
-    )
+    store = ResearchStore(str(tmp_path / "archive.db"), connect_fn=sqlite3.connect,
+                          is_postgres=False, ensure_schema=True)
+    archive = MessageArchiveService(store=store, key=Fernet.generate_key())
+    monkeypatch.setattr(router, "archive_action", lambda action, body: (
+        archive.prepare(**body) if action == "prepare" else
+        {"started": archive.start(body["delivery_id"])} if action == "start" else
+        {"recorded": archive.finish(**body)}))
+    sent = []
+    monkeypatch.setitem(router.CHANNELS, "qq", lambda title, body: (
+        sent.append(body) or (True, "HTTP 200")))
     first = router.send(
         "report",
         "基金定投待确认",
@@ -475,6 +485,7 @@ def test_actual_due_renderer_long_and_policy_stays_silent(db, monkeypatch):
         source="fund.plan_due",
         idempotency_key="fund-due:fixture",
         compact=False,
+        only_channels=["qq"],
     )
     second = router.send(
         "report",
@@ -483,8 +494,12 @@ def test_actual_due_renderer_long_and_policy_stays_silent(db, monkeypatch):
         source="fund.plan_due",
         idempotency_key="fund-due:fixture",
         compact=False,
+        only_channels=["qq"],
     )
-    assert first.policy_status == second.policy_status == "silent_critical_only"
+    assert first["qq"] == (True, "HTTP 200") and first.archive_status == "recorded"
+    assert second["qq"] == (False, "archive_suppressed")
+    assert sent == [payload]
+    assert archive.detail(first.message_id)["original_body"] == payload
 
 
 def test_partial_confirmation_reversal_and_projection_migration(db):

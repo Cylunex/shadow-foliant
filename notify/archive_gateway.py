@@ -16,6 +16,11 @@ from uuid import uuid4
 
 import requests
 
+try:
+    from .delivery_policy import is_monitor_source, routine_delivery_allowed
+except ImportError:
+    from delivery_policy import is_monitor_source, routine_delivery_allowed
+
 log = logging.getLogger(__name__)
 
 
@@ -90,10 +95,12 @@ def archived_call(*, channel: str, title: str, original_body: str,
     if IN_ROUTER_DELIVERY.get():
         direct_result = sender()
         return bool(direct_result.get("ok")) if isinstance(direct_result, dict) else bool(direct_result)
-    if source.startswith("notify.notification_service.") and category != "test":
-        # These legacy monitor and portfolio transports have no shared,
-        # verified critical-event state. Fail closed instead of bypassing the
-        # action-required policy through email or a direct webhook.
+    if (("notification_service" in source.split(".")
+         or is_monitor_source(source))
+            and category != "test"
+            and not routine_delivery_allowed(category, source, idempotency_key)):
+        # Legacy monitoring cannot bypass the shared event policy via direct
+        # email/webhook; normal portfolio and analysis reports remain allowed.
         return False
     delivery_id = None
     prepared = False

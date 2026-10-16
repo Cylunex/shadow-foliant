@@ -2,6 +2,8 @@ from datetime import datetime, timedelta
 import re
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from jobs import intraday_decision_monitor as monitor
 from notify.archive_gateway import archived_call
 from notify import notification_router
@@ -200,12 +202,12 @@ def test_expired_plan_or_mismatched_quote_basis_fails_closed():
     assert not events and policy["silent_reasons"]["plan_or_price_basis_unverified"] == 1
 
 
-def test_router_is_silent_by_default_and_archive_failure_never_sends(monkeypatch):
+def test_router_keeps_monitor_reports_silent_and_archive_failure_never_sends(monkeypatch):
     calls = []
     monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda title, body: (
         calls.append(body) or (True, "HTTP 200")))
     silent = notification_router.send("report", "常规摘要", "无最高级事件",
-                                      source="jobs.jobs_hub", only_channels=["qq"])
+                                      source="jobs.intraday_decision_monitor", only_channels=["qq"])
     assert not silent and silent.policy_status == "silent_critical_only"
     event = {"policy_version": monitor.CRITICAL_POLICY_VERSION, "level": "critical",
              "trigger_type": "hard_risk_stop", "final_action": "sell",
@@ -279,10 +281,40 @@ def test_same_critical_event_uses_one_channel_and_one_archived_attempt(monkeypat
     assert calls == ["qq"]
 
 
-def test_legacy_direct_portfolio_delivery_is_silent_without_policy():
+@pytest.mark.parametrize("source,category", [
+    ("notify.notification_service.portfolio", "report"),
+    ("notify.notification_service.send_email", "report"),
+    ("notify.notification_service.send_webhook", "report"),
+    ("notification_service.portfolio", "report"),
+])
+def test_legacy_direct_reports_are_archived_and_delivered(monkeypatch, source, category):
+    actions = []
+    def archive(action, payload):
+        actions.append(action)
+        return ({"delivery_id": "b" * 32, "should_send": True} if action == "prepare"
+                else {"started": True} if action == "start" else {"recorded": True})
+    monkeypatch.setattr("notify.archive_gateway.archive_action", archive)
     calls = []
     result = archived_call(
         channel="email", title="日常分析", original_body="摘要", final_body="摘要",
         sender=lambda: calls.append("sent") or True,
-        source="notify.notification_service.portfolio", category="report")
+        source=source, category=category)
+    assert result is True and calls == ["sent"]
+    assert actions == ["prepare", "start", "finish"]
+
+
+@pytest.mark.parametrize("source,category", [
+    ("notify.notification_service.send_email", "alert"),
+    ("notify.notification_service.portfolio", "alert"),
+    ("notification_service.send_email", "alert"),
+    ("monitor.monitor_service", "report"),
+    ("monitor_scheduler", "report"),
+    ("jobs.ai_recommendation_monitor", "report"),
+])
+def test_legacy_monitor_delivery_cannot_bypass_silence(source, category):
+    calls = []
+    result = archived_call(
+        channel="email", title="监控提醒", original_body="摘要", final_body="摘要",
+        sender=lambda: calls.append("sent") or True,
+        source=source, category=category)
     assert result is False and calls == []
