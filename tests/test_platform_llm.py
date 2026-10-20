@@ -17,6 +17,29 @@ class PlatformLLMTests(unittest.TestCase):
     def tearDown(self):
         platform_llm.close_clients()
 
+    def test_morning_official_deepseek_disables_thinking_for_short_json_report(self):
+        fake = SimpleNamespace(create=Mock(return_value={
+            'choices': [{'message': {'content': '{"open_strategy":"开盘后观察"}'}}]}))
+        config = SimpleNamespace(api='chat-completions', model='deepseek-flash',
+                                 base_url='https://api.deepseek.com')
+        with patch.object(platform_llm, 'configured', return_value=True), \
+                patch.object(platform_llm, '_client', return_value=(fake, config)):
+            for kind, thinking, expected in [('morning', False, True),
+                                              ('morning', True, False),
+                                              ('technical', False, False)]:
+                platform_llm.call([{'role':'user','content':'输出 JSON'}], temperature=0.3,
+                                  max_tokens=1600, thinking=thinking, call_type=kind)
+                payload = fake.create.call_args.kwargs
+                self.assertEqual('thinking' in payload, expected)
+                self.assertEqual('response_format' in payload, expected)
+                if expected:
+                    self.assertEqual(payload['thinking'], {'type':'disabled'})
+                    self.assertEqual(payload['response_format'], {'type':'json_object'})
+            config.base_url = 'https://example.com/v1'
+            platform_llm.call([{'role':'user','content':'JSON'}], temperature=0.3,
+                              max_tokens=1600, thinking=False, call_type='morning')
+            self.assertNotIn('thinking', fake.create.call_args.kwargs)
+
     def test_metadata_only_bridge_preserves_chat_messages(self):
         fake = SimpleNamespace()
         fake.create = lambda **payload: {

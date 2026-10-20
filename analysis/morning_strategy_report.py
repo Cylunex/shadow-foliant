@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 
 _EMPTY_MARKERS = ('无数据', '暂无数据', '无持仓扫描数据', '拉取失败', '扫描失败',
-                  '不可用', 'n/a')
+                  '不可用', '暂无可用', '盘前数据未形成', 'n/a')
 _FAILURE_MARKERS = ('api调用失败', 'api返回空响应', '[llm-router]', 'emptyresponse',
                     'request timed out', 'timeout')
 _ALIASES = {
@@ -28,6 +31,42 @@ _ALIASES = {
     'position_advice': ('position_advice', '持仓建议'),
     'confidence': ('confidence', '数据置信度'),
 }
+
+
+def format_us_daily_reference(name: str, result: Dict[str, Any]) -> str:
+    """Keep Yahoo daily closes paired with their actual US trading dates."""
+    quotes = result.get('indicators', {}).get('quote') or []
+    closes = (quotes[0].get('close') or []) if quotes else []
+    timestamps = result.get('timestamp') or []
+    observations = []
+    for index, close in enumerate(closes):
+        try:
+            value = float(close)
+            if not math.isfinite(value) or value <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        observations.append((value, timestamps[index] if index < len(timestamps) else None))
+    if len(observations) < 2:
+        return ''
+    last, stamp = observations[-1]
+    previous = observations[-2][0]
+    try:
+        day = datetime.fromtimestamp(float(stamp), ZoneInfo('America/New_York')).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        day = '日期未核实'
+    return f'{name} {day}: {last:.2f} ({(last - previous) / previous * 100:+.2f}%)'
+
+
+def format_previous_pnl(snapshot: Dict[str, Any]) -> str:
+    """Describe the stored amounts without presenting incomplete NAVs as final."""
+    total = int(snapshot.get('fund_total_count', snapshot['fund_count']) or 0)
+    fresh = int(snapshot.get('fund_fresh_count') or 0)
+    scope = '已更新部分合计' if fresh < total else '合计'
+    return (f"💰 昨日收益({snapshot['snap_date']}): "
+            f"股票({snapshot['stock_count']}只) {snapshot['stock_daily_pnl']:+,.0f}元({snapshot['stock_daily_pct']:+.2f}%) | "
+            f"基金({fresh}/{total}只净值已更新) {snapshot['fund_daily_pnl']:+,.0f}元({snapshot['fund_daily_pct']:+.2f}%) | "
+            f"{scope} {snapshot['total_daily_pnl']:+,.0f}元({snapshot['total_daily_pct']:+.2f}%)")
 
 
 def _meaningful(value: Any) -> bool:
@@ -158,7 +197,10 @@ def build_rule_fallback(sources: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
         'sector_summary': '行业板块', 'hold_summary': '持仓扫描',
     }
     available_keys = [key for key in source_names if _source_available(sources.get(key))]
-    missing = [label for key, label in source_names.items() if key not in available_keys]
+    pending = [label for key, label in source_names.items()
+               if '盘前数据未形成' in str(sources.get(key) or '')]
+    missing = [label for key, label in source_names.items()
+               if key not in available_keys and label not in pending]
     total = len(source_names)
     available = len(available_keys)
 
@@ -202,7 +244,8 @@ def build_rule_fallback(sources: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
         'candidate_stocks': [],
         'confidence': _confidence(available, total),
     }
-    return fallback, {'available': available, 'total': total, 'missing': missing}
+    return fallback, {'available': available, 'total': total, 'missing': missing,
+                      'pending': pending}
 
 
 def _text(value: Any) -> Optional[str]:
@@ -276,6 +319,8 @@ def build_diagnosis(raw: Any, sources: Dict[str, Any]) -> Tuple[Dict[str, Any], 
             reason = 'timeout'
         elif '空响应' in raw_lower or 'emptyresponse' in raw_lower or not str(raw or '').strip():
             reason = 'empty_response'
+        elif 'api调用失败' in raw_lower or '[llm-router]' in raw_lower:
+            reason = 'provider_unavailable'
         else:
             reason = 'invalid_json'
 
@@ -293,20 +338,43 @@ def build_diagnosis(raw: Any, sources: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 
 def format_plain_morning_notification(diagnosis: Dict[str, Any], *,
                                       market: Any = '', holdings: Any = '',
-                                      as_of: Any = '', premarket: bool = False) -> Tuple[str, str]:
+                                      as_of: Any = '', premarket: bool = False,
+                                      sources: Optional[Dict[str, Any]] = None,
+                                      diagnosis_meta: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """晨报即时通知只保留方向、动作和两句依据。"""
     if premarket:
-        # At 09:02 a zero/unchanged index quote is not a live market signal.
-        # Keep the entire QQ message short enough to avoid per-line truncation.
+        # Before open, report collected facts without inventing live A-share
+        # direction. Source text is reference material, never a trade action.
+        from notify.plain_language import plain_text
+        sources = sources or {}
+        meta = diagnosis_meta or {}
         yesterday = next((line.strip() for line in str(holdings or '').splitlines()
                           if '昨日收益' in line), '')
-        lines = ['A股盘前数据未形成；不据零值或昨收判断盘中方向。',
-                 '待确认：开盘后核实核心指数、持仓报价与风险触发条件。']
+        lines = ['时段：尚未开盘，A股盘中行情将在开盘后形成。']
+        us = sources.get('us_summary')
+        us_text = '；'.join(line.strip() for line in str(us or '').splitlines() if line.strip())
+        lines.append('美股日线参考：' + (plain_text(us_text, 160) if _source_available(us)
+                                        else '本次未获取，暂不判断外盘影响。'))
+        news = sources.get('news_summary')
+        news_lines = [line.strip() for line in str(news or '').splitlines()
+                      if line.strip() and not line.strip().startswith(('边界:', '题材线程:'))]
+        news_text = '；'.join(news_lines[:2])
+        lines.append('新闻参考：' + (plain_text(news_text, 160) if _source_available(news_text)
+                                     else '本次暂无可用要闻，不推断新闻影响。'))
+        lines.append('开盘关注：核实核心指数、持仓报价与风险触发条件。')
+        if meta.get('mode') in {'rules', 'hybrid'}:
+            reason = {'timeout': '模型超时', 'empty_response': '模型未返回正文',
+                      'provider_unavailable': '模型暂不可用',
+                      'invalid_json': '模型输出未通过校验',
+                      'partial_json': '模型输出不完整'}.get(meta.get('reason'), '模型分析未完成')
+            lines.append(f'分析状态：{reason}，以上为已采集事实摘要。')
+        elif meta.get('mode') == 'ai':
+            lines.append('分析状态：模型分析已完成；盘前事实仅供参考。')
         if yesterday:
             lines.append(yesterday)
         if as_of:
             lines.append(f'时间：{as_of}')
-        return '⏳ 盘前待确认', '\n'.join(lines)
+        return '🌅 盘前简报', '\n'.join(lines)
     from notify.plain_language import build_market_message
 
     position = diagnosis.get('position_advice') or holdings

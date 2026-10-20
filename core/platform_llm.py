@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class PlatformLLMUnavailable(RuntimeError):
@@ -58,6 +59,15 @@ def call(
         max_tokens=max_tokens,
         thinking=thinking,
     )
+    # DeepSeek Flash defaults to thinking. A bounded short morning request can
+    # consume its whole budget on reasoning and return no content. Keep this
+    # provider-specific setting scoped to the official endpoint and task.
+    if (call_type == 'morning' and not thinking
+            and config.api == 'chat-completions'
+            and urlsplit(str(getattr(config, 'base_url', ''))).hostname == 'api.deepseek.com'
+            and str(config.model).lower() in {'deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro'}):
+        payload['thinking'] = {'type': 'disabled'}
+        payload['response_format'] = {'type': 'json_object'}
     try:
         response = client.create(agent_id=_agent_id(call_type), **payload)
         text = _extract_text(config.api, response, thinking=thinking)

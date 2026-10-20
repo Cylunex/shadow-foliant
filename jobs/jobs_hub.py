@@ -2724,12 +2724,10 @@ def task_morning_strategy():
                         headers=_h, proxies=_p, timeout=10)
                     if resp.status_code == 200:
                         d = resp.json()
-                        c = d['chart']['result'][0]['indicators']['quote'][0]['close']
-                        c = [x for x in c if x is not None]
-                        if len(c) >= 2:
-                            last, prev = c[-1], c[-2]
-                            chg = (last - prev) / prev * 100
-                            lines.append(f'  {name}: {last:.2f} ({chg:+.2f}%)')
+                        from analysis.morning_strategy_report import format_us_daily_reference
+                        line = format_us_daily_reference(name, d['chart']['result'][0])
+                        if line:
+                            lines.append(line)
                 except Exception:
                     pass
             if lines:
@@ -2851,12 +2849,8 @@ def task_morning_strategy():
             from portfolio.daily_pnl import get_pnl as _get_pnl
             _p = _get_pnl()
             if _p:
-                pnl_text = (
-                    f"💰 昨日收益({_p['snap_date']}): "
-                    f"股票({_p['stock_count']}只) {_p['stock_daily_pnl']:+,.0f}元({_p['stock_daily_pct']:+.2f}%) | "
-                    f"基金({_p.get('fund_fresh_count', 0)}/{_p.get('fund_total_count', _p['fund_count'])}只净值已更新) "
-                    f"{_p['fund_daily_pnl']:+,.0f}元({_p['fund_daily_pct']:+.2f}%) | "
-                    f"合计 {_p['total_daily_pnl']:+,.0f}元({_p['total_daily_pct']:+.2f}%)")
+                from analysis.morning_strategy_report import format_previous_pnl
+                pnl_text = format_previous_pnl(_p)
         except Exception:
             pass
         if pnl_text:
@@ -2993,6 +2987,8 @@ def task_morning_strategy():
             holdings=hold_summary,
             as_of=now_str,
             premarket=True,
+            sources=prompt_vars,
+            diagnosis_meta=diagnosis_meta,
         )
         mod_a = [notify_title, notify_body]
 

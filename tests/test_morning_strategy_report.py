@@ -1,9 +1,13 @@
 import json
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from analysis.morning_strategy_report import (
     build_diagnosis,
     format_plain_morning_notification,
+    format_us_daily_reference,
+    format_previous_pnl,
     parse_diagnosis,
 )
 
@@ -107,12 +111,61 @@ class MorningStrategyReportTests(unittest.TestCase):
             holdings='💰 昨日收益(2026-09-23): 合计 -1,048元(-0.20%)\n建议卖出若干',
             as_of='2026-09-24 09:02', premarket=True,
         )
-        self.assertEqual(title, '⏳ 盘前待确认')
-        self.assertIn('盘前数据未形成', body)
+        self.assertEqual(title, '🌅 盘前简报')
+        self.assertIn('尚未开盘', body)
         self.assertIn('昨日收益', body)
         self.assertNotIn('0.00', body)
         self.assertNotIn('建议卖出', body)
         self.assertNotIn('…', body)
+
+    def test_premarket_includes_collected_facts_and_distinguishes_model_failure(self):
+        sources = _sources(cn_index_summary='盘前数据未形成；开盘后确认',
+                           sector_summary='盘前数据未形成；开盘后确认')
+        diagnosis, meta = build_diagnosis('API调用失败: provider_unavailable', sources)
+        self.assertEqual(meta['reason'], 'provider_unavailable')
+        self.assertEqual(meta['coverage']['available'], 7)
+        self.assertEqual(meta['coverage']['pending'], ['A股指数', '行业板块'])
+        self.assertEqual(meta['coverage']['missing'], [])
+        title, body = format_plain_morning_notification(
+            diagnosis, premarket=True, sources=sources, diagnosis_meta=meta,
+            holdings='💰 昨日收益(2026-10-19): 基金(10/53只净值已更新) +257元',
+            as_of='2026-10-20 09:00')
+        self.assertEqual(title, '🌅 盘前简报')
+        self.assertIn('道琼斯', body)
+        self.assertIn('重要政策新闻', body)
+        self.assertIn('模型暂不可用', body)
+        self.assertIn('10/53只净值已更新', body)
+        self.assertNotIn('JSON', body)
+        self.assertNotIn('操作：', body)
+        self.assertLessEqual(len(body.splitlines()), 8)
+
+    def test_us_daily_reference_keeps_date_aligned_after_missing_close(self):
+        days = [datetime(2026, 10, day, 9, 30, tzinfo=ZoneInfo('America/New_York')).timestamp()
+                for day in (15, 16, 19)]
+        result = {'timestamp': days, 'indicators': {'quote': [{'close': [100, 102, None]}]}}
+        self.assertEqual(format_us_daily_reference('示例指数', result),
+                         '示例指数 2026-10-16: 102.00 (+2.00%)')
+        result.pop('timestamp')
+        self.assertIn('日期未核实', format_us_daily_reference('示例指数', result))
+
+    def test_missing_premarket_sources_are_not_reported_as_live_zeroes(self):
+        _, body = format_plain_morning_notification(
+            {}, premarket=True, sources={'us_summary': '(拉取失败: timeout)',
+                                         'news_summary': '（盘前事实流暂无可用事件）'})
+        self.assertIn('本次未获取', body)
+        self.assertIn('本次暂无可用要闻', body)
+        self.assertNotIn('timeout', body)
+
+    def test_partial_fund_navs_do_not_claim_complete_daily_profit(self):
+        snapshot = {'snap_date':'2026-10-19','stock_count':56,'stock_daily_pnl':590,
+                    'stock_daily_pct':0.29,'fund_count':53,'fund_total_count':53,
+                    'fund_fresh_count':10,'fund_daily_pnl':257,'fund_daily_pct':0.58,
+                    'total_daily_pnl':847,'total_daily_pct':0.17}
+        text = format_previous_pnl(snapshot)
+        self.assertIn('10/53只净值已更新', text)
+        self.assertIn('已更新部分合计 +847元', text)
+        snapshot['fund_fresh_count'] = 53
+        self.assertNotIn('已更新部分合计', format_previous_pnl(snapshot))
 
 
 if __name__ == '__main__':

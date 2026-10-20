@@ -1,4 +1,5 @@
 import sqlite3
+from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 import pytest
@@ -55,6 +56,43 @@ def test_real_task_reports_deliver_and_archive_once_without_critical_event(deliv
     detail = service.detail(first.message_id)
     assert detail["original_body"] == body
     assert detail["deliveries"][0]["status"] == "accepted"
+
+
+@pytest.mark.parametrize('channel', ['qq', 'dingtalk'])
+def test_maximum_premarket_facts_survive_real_rendering_archive_and_dedup(delivery, monkeypatch, channel):
+    from analysis.morning_strategy_report import build_diagnosis, format_plain_morning_notification
+    import notification_service
+    sources = {'us_summary': '\n'.join(['道琼斯 2026-10-19: 45000.00 (+0.35%)'] * 20),
+               'news_summary': '\n'.join(['[10-20 08:10] 政策新闻' + '完整事实' * 100] * 20)}
+    diagnosis, meta = build_diagnosis('API调用失败: provider_unavailable', sources)
+    title, body = format_plain_morning_notification(diagnosis, premarket=True,
+        sources=sources, diagnosis_meta=meta, as_of='2026-10-20 09:00',
+        holdings='💰 昨日收益(2026-10-19): 股票(56只) +590元(+0.29%) | '
+                 '基金(10/53只净值已更新) +257元(+0.58%) | 合计 +847元(+0.17%)')
+    service, sent = delivery
+    requests = []
+    monkeypatch.setattr(notification_service, 'NotificationService', lambda: SimpleNamespace(config={
+        'webhook_enabled':True, 'webhook_type':'dingtalk', 'webhook_url':'https://example.com/webhook'}))
+    def post(_url, **kwargs):
+        requests.append(kwargs['json'])
+        return SimpleNamespace(status_code=200, json=lambda: {'errcode':0})
+    monkeypatch.setattr(router.requests, 'post', post)
+    monkeypatch.setitem(router.CHANNELS, 'dingtalk', router._send_dingtalk_via_legacy)
+    kwargs = {'source':'jobs.jobs_hub', 'only_channels':[channel],
+              'idempotency_key':'morning-report:2026-10-20:fixture'}
+    first = router.send('report', title, body, **kwargs)
+    second = router.send('report', title, body, **kwargs)
+    assert first[channel][0] is True
+    assert second[channel] == (False, 'archive_suppressed')
+    delivered = requests[0]['markdown']['text'] if channel == 'dingtalk' else sent[0][1]
+    assert len(requests if channel == 'dingtalk' else sent) == 1
+    detail = service.detail(first.message_id)
+    assert detail['original_body'] == body
+    assert detail['deliveries'][0]['final_body'] == delivered
+    assert len(compact_notification('report', body).splitlines()) <= 8
+    assert '道琼斯 2026-10-19' in delivered
+    assert '政策新闻' in delivered and '模型暂不可用' in delivered
+    assert '10/53只净值已更新' in delivered and '时间：2026-10-20 09:00' in delivered
 
 
 @pytest.mark.parametrize("source", [
