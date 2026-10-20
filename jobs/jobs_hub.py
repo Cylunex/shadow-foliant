@@ -2547,7 +2547,8 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
                                         names: dict = None, data_note: str = '',
                                         independent: dict = None,
                                         three_way: dict = None,
-                                        compact_failures: bool = True) -> str:
+                                        compact_failures: bool = True,
+                                        wencai_reference: dict = None) -> str:
     """09:45 QQ 的固定八行摘要，保证五组状态不会被路由截断。"""
     def _label(row):
         code = str(row.get('code') or row.get('symbol') or '')
@@ -2569,6 +2570,17 @@ def _format_selection_reference_summary(final_rows: list, top15_rows: list,
                      + f'｜独立TOP15↔正式TOP15重合{overlap_count}只')
     else:
         lines.append('独立TOP5：⚠️不可用（' + str(independent.get('reason') or '必要输入不完整')[:35] + '）')
+    if wencai_reference is not None:
+        from selection.wencai_notification import format_reference_lines
+        from notify.plain_language import plain_text
+        count = int(wencai_reference.get('ready_groups') or 0)
+        as_of = str(wencai_reference.get('market_as_of') or '')
+        lines.append(f'正式TOP15：{len(top15_rows or [])}只｜问财OpenAPI试运行：{count}/5组已核验'
+                     + (f'｜截至{as_of}' if as_of else '') + '（仅供参考）'
+                     + (f'｜{data_note}' if data_note else ''))
+        # Reserve all five group lines through the shared 8-line/900-char renderer.
+        return '\n'.join([plain_text(line, 140) for line in lines]
+                         + format_reference_lines(wencai_reference))
     overlap = _format_wencai_overlap_notification(three_way or {}, names)
     note = re.sub(r'\s+', ' ', str(data_note or '')).strip()
     lines.append(f'正式TOP15：{len(top15_rows or [])}只｜{overlap}' + (f'｜{note[:70]}' if note else ''))
@@ -5550,17 +5562,26 @@ def task_unified_selection():
 
         if final_rows:
             try:
+                notification_reference = None
+                if _openapi_trial_reference_enabled():
+                    from selection.wencai_notification import load_premarket_reference
+                    notification_reference = load_premarket_reference(
+                        _iwencai_shadow_premarket_path(), selection_date=selection_date,
+                        expected_market_as_of=str(effective_market_date),
+                    )
                 _final_body = _format_selection_reference_summary(
                     final_rows, local_formal_rows, strategy_scan.get('results', {}),
                     comparison, name_map, data_note,
                     independent=independent_selection,
                     three_way=selection_comparison,
+                    wencai_reference=notification_reference,
                 )
                 _full_reference = _format_selection_reference_summary(
                     final_rows, local_formal_rows, strategy_scan.get('results', {}),
                     comparison, name_map, data_note,
                     independent=independent_selection, three_way=selection_comparison,
                     compact_failures=False,
+                    wencai_reference=notification_reference,
                 )
                 from notification_router import send
                 send('report', '今日量化候选与数据状态', _final_body,
