@@ -541,6 +541,37 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         self.assertTrue(consensus["ready"], consensus)
         self.assertEqual(consensus["latest_confirmed_open_date"], "2026-08-21")
 
+    def test_monday_selection_accepts_open_day_only_source_without_weekend_inference(self):
+        selected = self._seed()
+        conn = self.store.connect()
+        conn.execute("""DELETE FROM research_trade_calendar_evidence
+                        WHERE provider='fixture-calendar-b' AND is_open=0""")
+        conn.commit()
+        conn.close()
+        self.assertFalse(self.store.calendar_consensus("2026-08-23", inclusive=True)["ready"])
+        result = LocalStockSelector(self.store).run(
+            selected, persist=False)
+        self.assertEqual(result["status"], "success", result.get("metadata"))
+        self.assertEqual(result["metadata"]["market_as_of"], "2026-08-21")
+
+        # An explicit disagreement on Sunday must still block Monday.
+        self.store.upsert_calendar_evidence([("2026-08-23", True)],
+                                            provider="fixture-calendar-b")
+        result = LocalStockSelector(self.store).run(selected, persist=False)
+        self.assertEqual(result["status"], "incomplete")
+
+        # Missing decision-day evidence still blocks the same selection.
+        conn = self.store.connect()
+        conn.execute("""DELETE FROM research_trade_calendar_evidence
+                        WHERE provider='fixture-calendar-b' AND trade_date='2026-08-23'""")
+        conn.execute("""DELETE FROM research_trade_calendar_evidence
+                        WHERE provider='fixture-calendar-b' AND trade_date=?""", (selected,))
+        conn.commit()
+        conn.close()
+        result = LocalStockSelector(self.store).run(
+            selected, persist=False)
+        self.assertEqual(result["status"], "incomplete")
+
     def test_calendar_requires_explicit_target_day_from_two_sources(self):
         for provider in ("one", "two"):
             self.store.record_calendar_fetch(

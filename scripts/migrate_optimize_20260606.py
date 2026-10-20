@@ -82,7 +82,6 @@ def main():
         # ============ 2. 系统列 → ENUM ============
         log.append('— 2. 系统受控列转 ENUM —')
         enums = {
-            'job_status_enum': ('success', 'error', 'skipped', 'running'),
             'signal_enum': ('BUY', 'SELL', 'HOLD'),
             'notif_type_enum': ('entry', 'take_profit', 'stop_loss'),
         }
@@ -97,9 +96,9 @@ def main():
             if r and r[0] != enum:
                 cur.execute(f'ALTER TABLE {table} ALTER COLUMN {col} TYPE {enum} USING {col}::{enum}')
                 log.append(f'  ✓ {table}.{col} → {enum}')
-        alter_enum('job_runs', 'status', 'job_status_enum')
-        # 注:scheduler_logs.status(news_flow 子系统)用 success/failed/error,词汇与 job_status_enum 不同,
-        #     保持 TEXT 不转枚举,避免未来写 'failed' 越界失败。
+        # job_runs.status stays TEXT, matching bootstrap and migration 23;
+        # partial/degraded are valid task outcomes and must remain writable.
+        # scheduler_logs also keeps TEXT for its own success/failed/error states.
         alter_enum('factor_snapshots', 'signal', 'signal_enum')
         alter_enum('monitor_notifications', 'type', 'notif_type_enum')
 

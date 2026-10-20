@@ -5,6 +5,18 @@ import pytest
 from core.decision_context import DecisionContext
 
 
+@pytest.mark.parametrize("day,mode,cutoff,expected", [
+    ("2026-10-19", "preopen", None, ("2026-10-19", False)),
+    ("2026-10-20", "preopen", None, ("2026-10-20", False)),
+    ("2026-10-19", "preopen", "2026-10-15", ("2026-10-15", True)),
+    ("2026-10-19", "historical_close", None, ("2026-10-19", True)),
+])
+def test_calendar_boundary_keeps_the_same_market_cutoff(day, mode, cutoff, expected):
+    context = DecisionContext.build(day, mode=mode, data_cutoff=cutoff,
+                                    policy_version="example", policy_hash="example")
+    assert context.calendar_boundary() == expected
+
+
 def test_historical_close_defaults_after_market_data_is_available() -> None:
     context = DecisionContext.build(
         "2026-08-21", mode="historical_close", policy_version="example",

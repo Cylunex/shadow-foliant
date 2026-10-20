@@ -98,6 +98,20 @@ class DecisionContext:
     policy_hash: str
     code_revision: str
 
+    def calendar_boundary(self) -> tuple[str, bool]:
+        """Verify the decision day while excluding its unfinished market session.
+
+        Open-day-only sources cannot confirm a Sunday. Checking Monday
+        exclusively selects the same completed bars and still requires
+        independent coverage of the decision day. Older explicit cutoffs retain
+        their original boundary.
+        """
+        previous_day = (pd.Timestamp(self.selection_date).date() - timedelta(days=1)).isoformat()
+        if (self.mode == "preopen" and self.market_cutoff == previous_day
+                and self.market_cutoff_inclusive):
+            return self.selection_date, False
+        return self.market_cutoff, self.market_cutoff_inclusive
+
     @classmethod
     def build(
         cls,

@@ -396,9 +396,8 @@ class LocalStockSelector:
                 pit_universe_count, reference, persist,
                 metadata={**pit, "data_cutoff": cutoff},
             )
-        calendar = self.store.calendar_consensus(
-            cutoff, inclusive=context.market_cutoff_inclusive
-        )
+        calendar_date, calendar_inclusive = context.calendar_boundary()
+        calendar = self.store.calendar_consensus(calendar_date, inclusive=calendar_inclusive)
         expected_market_as_of = calendar.get("latest_confirmed_open_date")
         if not calendar.get("ready") or not expected_market_as_of:
             return self._failed(

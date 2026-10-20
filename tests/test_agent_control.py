@@ -210,6 +210,7 @@ class ScheduledDependencyTests(unittest.TestCase):
         syncer.store.expected_market_as_of.return_value = '2026-08-28'
         context = mock.MagicMock()
         context.market_cutoff = '2026-08-30'
+        context.calendar_boundary.return_value = ('2026-08-31', False)
 
         with mock.patch('analysis.local_stock_selector.LocalStockSelector',
                            return_value=selector), \
@@ -224,7 +225,7 @@ class ScheduledDependencyTests(unittest.TestCase):
         self.assertEqual(trade_date, '2026-08-28')
         syncer.refresh_calendar_for_day.assert_called_once_with('2026-08-31')
         syncer.store.expected_market_as_of.assert_called_once_with(
-            '2026-08-30', inclusive=True
+            '2026-08-31', inclusive=False
         )
 
     def test_research_sync_failure_propagates_to_scheduler(self):

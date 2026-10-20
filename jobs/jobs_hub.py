@@ -1294,14 +1294,18 @@ def task_fund_nav_refresh():
             )
         except Exception:
             pass
-        _log_run(job, 'success' if fund_result['fund_fresh_count']==fund_result['fund_total_count'] else 'partial',
-                 error=f'funds={len(codes)} nav_rows={saved} snap={snap} '
-                       f'fund_pnl={fund_result["fund_daily_pnl"]:.0f} '
-                       f'fresh={fund_result["fund_fresh_count"]}/{fund_result["fund_total_count"]}',
-                 started_at=started, finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
+        status = ('success' if fund_result['fund_fresh_count'] == fund_result['fund_total_count']
+                  else 'partial')
+        detail = (f'funds={len(codes)} nav_rows={saved} snap={snap} '
+                  f'fund_pnl={fund_result["fund_daily_pnl"]:.0f} '
+                  f'fresh={fund_result["fund_fresh_count"]}/{fund_result["fund_total_count"]}')
+        _log_run(job, status, error=detail, started_at=started,
+                 finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
+        return {'status': status, 'error': detail}
     except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
+        _log_run(job, 'error', error=str(e), started_at=started,
+                 finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
+        return {'status': 'error', 'error': str(e)}
 
 
 def task_fund_dca_reminder():
@@ -1422,46 +1426,61 @@ def task_fund_target_check():
                 send('report', '基金止盈提醒', text)
             except Exception as ne:
                 print(f'[fund_target_check] 推送失败: {ne}\n{text}')
-        _log_run(job, 'success', error=f'hits={len(hits)}',
-                 started_at=started, finished_at=datetime.now().isoformat())
+        detail = f'hits={len(hits)}'
+        _log_run(job, 'success', error=detail, started_at=started,
+                 finished_at=datetime.now().isoformat())
+        return {'status': 'success', 'error': detail}
     except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
+        _log_run(job, 'error', error=str(e), started_at=started,
+                 finished_at=datetime.now().isoformat())
+        return {'status': 'error', 'error': str(e)}
 
 
 def task_fund_evening():
-    """🏦 基金晚间合并(22:00)—— 合 fund_nav_refresh + fund_target_check 为一个调度入口:
-    顺序跑 ①盘后拉净值入库+算基金单日收益 → ②按最新净值查定投止盈(止盈依赖新净值,故必须先刷后查)。
-    两子任务各自的开关(fund_nav_refresh/fund_target_check)+日志仍独立有效、可单独关;本任务只是统一
-    顺序调度。开关 fund_evening(默认开;关掉则两步都不跑)。两段各自 try:一段异常不拖另一段。"""
+    """Run NAV refresh, target checks and weekly reviews; preserve every outcome."""
     job = 'fund_evening'
+    if _fund_gate(job):
+        return
+    started = datetime.now().astimezone().isoformat()
+    outcomes = []
+    for name, task in (('fund_nav_refresh', task_fund_nav_refresh),
+                       ('fund_target_check', task_fund_target_check)):
+        try:
+            outcome = task()
+            if outcome is not None:
+                outcomes.append((name, outcome))
+        except Exception as exc:
+            # A failed step must not prevent the remaining independent checks.
+            detail = f'{type(exc).__name__}: {str(exc)[:240]}'
+            outcomes.append((name, {'status': 'error', 'error': detail}))
+            _log_run(name, 'error', error=detail, started_at=started,
+                     finished_at=datetime.now().astimezone().isoformat(), notify=False)
     try:
-        from automation_config import is_enabled
-        if not is_enabled(job):
-            return
-    except Exception:
-        pass
-    try:
-        task_fund_nav_refresh()      # ① 先刷净值(内含 _fund_gate + _log_run + 异常兜底)
-    except Exception as e:
-        print(f'[fund_evening] 净值入库异常(继续查止盈): {type(e).__name__}: {str(e)[:80]}')
-    try:
-        task_fund_target_check()     # ② 再查止盈(读 ① 刷出的新净值)
-    except Exception as e:
-        print(f'[fund_evening] 止盈检查异常: {type(e).__name__}: {str(e)[:80]}')
-
-    try:
-        if not _fund_gate(job):
-            import fund_db
-            from fund.fund_service import review_week
-            from fund.fund_contracts import now as fund_now
-            fund_db.init_db()
-            reviews=review_week(fund_now()[:10])
-            if reviews:
-                _log_run('fund_weekly_review','partial' if any(r['status']!='ready' for r in reviews) else 'success',
-                         error=f'reviewed={len(reviews)}')
-    except Exception as e:
-        _log_run('fund_weekly_review','partial',error=type(e).__name__)
+        import fund_db
+        from fund.fund_service import review_week
+        from fund.fund_contracts import now as fund_now
+        fund_db.init_db()
+        reviews = review_week(fund_now()[:10])
+        if reviews:
+            status = 'partial' if any(r['status'] != 'ready' for r in reviews) else 'success'
+            detail = f'reviewed={len(reviews)}'
+            outcomes.append(('fund_weekly_review', {'status': status, 'error': detail}))
+            _log_run('fund_weekly_review', status, error=detail, started_at=started,
+                     finished_at=datetime.now().astimezone().isoformat())
+    except Exception as exc:
+        detail = type(exc).__name__
+        outcomes.append(('fund_weekly_review', {'status': 'partial', 'error': detail}))
+        _log_run('fund_weekly_review', 'partial', error=detail, started_at=started,
+                 finished_at=datetime.now().astimezone().isoformat())
+    states = {outcome['status'] for _, outcome in outcomes}
+    status = ('error' if 'error' in states else
+              'partial' if states & {'partial', 'degraded'} else
+              'success' if outcomes else 'skipped')
+    detail = '; '.join(f"{name}={outcome['status']} {outcome.get('error') or ''}"
+                       for name, outcome in outcomes) or 'no_enabled_fund_steps'
+    _log_run(job, status, error=detail, started_at=started,
+             finished_at=datetime.now().astimezone().isoformat(), notify=False)
+    return {'status': status, 'error': detail}
 
 
 def task_fund_valuation_signal():
@@ -1842,7 +1861,7 @@ def _run_with_log(name, func, *a, **kw):
         elif status == 'skipped':
             print(f'[jobs_hub] ⏭️ {name} 已跳过 (耗时 {elapsed:.1f}s): '
                   f'{detail[:120]}', flush=True)
-        elif detail.lower().startswith('degraded'):
+        elif status in {'partial', 'degraded'} or detail.lower().startswith('degraded'):
             print(f'[jobs_hub] ⚠️ {name} 降级完成 (耗时 {elapsed:.1f}s): '
                   f'{detail[:120]}', flush=True)
         else:
@@ -3833,8 +3852,9 @@ def _preopen_research_context(syncer, selection_date=None):
     master_repair = syncer.repair_master_if_missing(selected)
     if master_repair.get('input_quality', {}).get('ready') is False:
         raise RuntimeError('stage=security_master input quality gate failed')
+    calendar_date, calendar_inclusive = context.calendar_boundary()
     effective_market_date = syncer.store.expected_market_as_of(
-        context.market_cutoff, inclusive=True
+        calendar_date, inclusive=calendar_inclusive
     )
     if not effective_market_date:
         raise RuntimeError(
