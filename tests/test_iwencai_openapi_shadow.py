@@ -510,3 +510,85 @@ def test_miaoxiang_error_dict_is_not_neutral():
     assert diagnosis_verdict({'content': '建议观望'})[0] == '⚠️ 观望'
     assert diagnosis_verdict({'content': '建议规避'})[0] == '❌ 规避'
     assert diagnosis_verdict({'content': '暂不建议买入'})[0] == '⚠️ 观望'
+
+
+def _quarter_rows(name='小市值'):
+    return [{'股票代码': f'600{i:03}.SH' if name == '小市值' else f'000{i:03}.SZ',
+             '股票简称': '样例', '总市值[20261020]': 2e9 + i,
+             '营业收入同比增长率': 20.0, '归母净利润同比增长率': 120.0,
+             '成交额[20261020]': float(i + 1),
+             '营业收入来源说明': '最新营业收入来源于2026年' + ('中报' if i % 2 else '三季报'),
+             '净利润来源说明': '最新净利润来源于2026年' + ('中报' if i % 2 else '三季报')}
+            for i in range(20)]
+
+
+@pytest.mark.parametrize('name', ['小市值', '净利增长'])
+def test_latest_report_period_is_verified_per_stock_during_reporting_season(name):
+    checks = source._semantic_checks(name, _quarter_rows(name), QUERIES[name], '2026-10-20')
+    assert checks['financial_periods_verified'] and checks['yoy_baseline_verified']
+    assert checks['local_conditions_verified']
+    assert checks['yoy_baseline_evidence'][0]['report_periods'] == ['20260630', '20260930']
+    assert checks['yoy_baseline_evidence'][0]['baseline_periods'] == ['20250630', '20250930']
+
+
+@pytest.mark.parametrize('fault', ['missing', 'cross_stock_swap', 'dated_conflict'])
+def test_mixed_report_acceptance_keeps_each_stock_period_and_metric_consistent(fault):
+    rows = _quarter_rows()
+    if fault == 'missing':
+        rows[0]['营业收入来源说明'] = ''
+    elif fault == 'cross_stock_swap':
+        rows[0]['营业收入来源说明'], rows[1]['营业收入来源说明'] = (
+            rows[1]['营业收入来源说明'], rows[0]['营业收入来源说明'])
+    else:
+        for row in rows:
+            row['营业收入同比增长率[20260630]'] = row.pop('营业收入同比增长率')
+    checks = source._semantic_checks('小市值', rows, QUERIES['小市值'], '2026-10-20')
+    assert not checks['financial_periods_verified']
+    assert not checks['local_conditions_verified']
+
+
+@pytest.mark.parametrize('conflict', [False, True])
+def test_identical_latest_and_close_aliases_are_not_false_ambiguity(conflict):
+    rows = [{'股票代码': f'600{i:03}.SH', '股票简称': '样例',
+             '最新价': 10., '收盘价': 10. + (1 if conflict and i == 1 else 0),
+             '归母净利润同比增长率': 120., '成交额[20261020]': float(i + 1),
+             '净利润来源说明': '最新净利润来源于2026年三季报'} for i in range(20)]
+    checks = source._semantic_checks('低价擒牛', rows, QUERIES['低价擒牛'], '2026-10-20')
+    assert checks['local_conditions_verified'] is (not conflict)
+    assert checks['field_evidence'][0]['ambiguous_numeric_fields'] is conflict
+
+
+@pytest.mark.parametrize('cap', ['流通市值', '流通a股市值', 'a股流通市值', 'a股市值(不含限售股)'])
+def test_dated_ttm_and_float_cap_provider_aliases_are_verified(cap):
+    rows = [{'股票代码': f'600{i:03}.SH', '股票简称': '样例',
+             '市盈率(pe,ttm)[20261020]': 12., '市净率(pb)[20261020]': 1.,
+             '股息率[20251231]': 2., '资产负债率[20260630]': 20.,
+             cap + '[20261020]': float(1e9 + i)} for i in range(20)]
+    checks = source._semantic_checks('低估值', rows, QUERIES['低估值'], '2026-10-20')
+    assert checks['local_conditions_verified'] and checks['sort_verified']
+    rows[0]['市盈率(pe)[20261020]'] = rows[0].pop('市盈率(pe,ttm)[20261020]')
+    checks = source._semantic_checks('低估值', rows, QUERIES['低估值'], '2026-10-20')
+    assert not checks['required_numeric_fields']
+
+
+def test_small_complete_universe_is_not_misclassified_as_wrong_stock_scope():
+    rows = _quarter_rows('净利增长')[:3]
+    session = Session([Response({'datas': rows, 'code_count': 3})])
+    with patch.object(source, 'provider_slot', return_value=nullcontext()):
+        result = source.run_group('净利增长', session=session, key='test', expected_market_as_of='2026-10-20')
+    assert result['status'] == 'complete' and result['top_n_coverage']
+    assert len(result['picks']) == 3
+    session = Session([Response({'datas': rows, 'code_count': 30}),
+                       Response({'datas': rows, 'code_count': 30})])
+    with patch.object(source, 'provider_slot', return_value=nullcontext()):
+        result = source.run_group('净利增长', session=session, key='test', expected_market_as_of='2026-10-20')
+    assert not result['top_n_coverage'] and not result['semantic_verified']
+
+
+@pytest.mark.parametrize('state,verified,expected', [
+    ('complete', 5, 'success'), ('degraded', 1, 'degraded'),
+    ('degraded', 0, 'degraded'), ('credential_missing', 0, 'skipped')])
+def test_shadow_job_status_keeps_semantic_degradation_visible(state, verified, expected):
+    from jobs.jobs_hub import _iwencai_shadow_job_status
+    assert _iwencai_shadow_job_status({'status': state, 'semantic_verified_groups': verified,
+                                      'data_groups': 5}) == expected

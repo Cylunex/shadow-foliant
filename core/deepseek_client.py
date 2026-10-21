@@ -141,22 +141,24 @@ class DeepSeekClient:
                     if text and not text.startswith('[LLM-Router]'):
                         self.last_used_provider = used
                         return text
-                    if call_type in {'morning', 'morning_portfolio'}:
+                    if call_type in {'morning', 'morning_portfolio', 'selection_debate'}:
                         # 两项早盘报告都能独立按规则收尾；路由失败后不再追加直连请求。
                         return text or 'API调用失败: provider_unavailable'
             except Exception as e:
-                if call_type in {'morning', 'morning_portfolio'}:
+                if call_type in {'morning', 'morning_portfolio', 'selection_debate'}:
                     return ('API调用失败: timeout' if 'timeout' in type(e).__name__.lower()
                             else 'API调用失败: provider_unavailable')
                 print(f"[deepseek_client] router 异常，退回直连: {e}")
 
         try:
+            from core.llm_router import _short_request_options
             response = self.client.chat.completions.create(
                 model=model_to_use,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=eff_timeout,
+                **_short_request_options(call_type, thinking, config.DEEPSEEK_BASE_URL, model_to_use),
             )
             message = response.choices[0].message
             result = ""

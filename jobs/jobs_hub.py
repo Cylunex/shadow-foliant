@@ -4830,6 +4830,12 @@ def _iwencai_shadow_premarket_path():
     return directory / (datetime.now(_RUN_TIMEZONE).date().isoformat() + '-premarket.json')
 
 
+def _iwencai_shadow_job_status(result: dict) -> str:
+    if result.get('status') == 'complete' and result.get('semantic_verified_groups') == 5:
+        return 'success'
+    return 'skipped' if result.get('status') == 'credential_missing' else 'degraded'
+
+
 def task_iwencai_openapi_shadow_premarket():
     """Sample before legacy prefetch; never waits for or changes formal selection."""
     job = 'iwencai_openapi_shadow_premarket'
@@ -4865,7 +4871,7 @@ def task_iwencai_openapi_shadow_premarket():
             json.dump(result, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
-        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+        _log_run(job, _iwencai_shadow_job_status(result),
                  error=f"status={result['status']};data={result['data_groups']}/5",
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
@@ -4945,7 +4951,7 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
         result['selection_run_id'] = str(formal.get('run_id') or '')
         result['selection_date'] = str(formal.get('selection_date') or '')
         store.save_selection_artifact(formal['run_id'], artifact_type, result)
-        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+        _log_run(job, _iwencai_shadow_job_status(result),
                  error=f"status={result['status']};data={result['data_groups']}/5",
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
@@ -5011,7 +5017,7 @@ def _iwencai_shadow_open_retry():
         result['selection_date'] = str(formal.get('selection_date') or '')
         store.save_selection_artifact(formal['run_id'],
                                       'iwencai_openapi_shadow_open_retry', result)
-        _log_run(job, 'success' if result['data_groups'] else 'skipped',
+        _log_run(job, _iwencai_shadow_job_status(result),
                  error=f"status={result['status']};data={result['data_groups']}/5",
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
@@ -5255,6 +5261,8 @@ def task_unified_selection():
         # 决策信号在此写(record_signals=True),原 selection_debate 独立任务因此跳过不重复。
         # TOP5 仍设整体硬超时；外网/LLM 异常时放弃复核，优先发布正式本地结果。
         debate_map = {}
+        review_status = {'status': 'unavailable', 'expected_count': len(formal_top5_codes),
+                         'completed_count': 0, 'missing_codes': formal_top5_codes}
         try:
             from selection_debate import run_selection_debate
             # ⚠️ 不能用 `with ThreadPoolExecutor(...)`:result(timeout) 抛超时后,退出 with 会
@@ -5265,6 +5273,7 @@ def task_unified_selection():
                 lambda: run_selection_debate(formal_top5_codes, len(formal_top5_codes), False),
                 timeout=240,
             )
+            review_status = {key: _dres.get(key) for key in review_status}
             for _it in (_dres.get('items') or []):
                 debate_map[str(_it.get('code'))] = _it
         except Exception as _de:
@@ -5275,6 +5284,10 @@ def task_unified_selection():
         body += f'📅 {datetime.now().strftime("%Y-%m-%d %H:%M")}\n'
         body += '榜单仅表示当期量化排序，不是买入推荐；已持仓请以当期持仓风控动作和价格计划为准。\n'
         data_note = _selection_data_note(local_result.get('metadata') or {})
+        if review_status.get('status') != 'complete':
+            data_note = (f'AI复核{review_status.get("completed_count") or 0}/'
+                         f'{len(formal_top5_codes)}，部分结论缺失'
+                         + (f'｜{data_note}' if data_note else ''))
         body += data_note
         # 结论先行(2026-07-02):红蓝复核结果放最上面,不用滚到表格底部才知道几只可买
         if debate_map:
@@ -5469,6 +5482,7 @@ def task_unified_selection():
             for artifact_type, payload in (
                 ('display_overlay', artifact_rows),
                 ('ai_review', list(debate_map.values())),
+                ('ai_review_status', review_status),
             ):
                 try:
                     selector.store.save_selection_artifact(

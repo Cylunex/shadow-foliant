@@ -17,6 +17,7 @@ import _bootstrap  # noqa: F401  路径引导
 
 import re
 import os
+import math
 from typing import Any, Dict, List, Optional
 
 # 否决→sell(期望跌):让"证伪闸门"的否决可被方向后验(否对了=该股随后跌),从而量化闸门增量价值;
@@ -26,16 +27,20 @@ _VERDICT_ACTION = {'买入': 'buy', '谨慎': 'watch', '否决': 'sell'}
 
 def _f(v) -> Optional[float]:
     try:
-        return float(v) if v not in (None, '', '?', 'N/A') else None
+        value = float(v) if v not in (None, '', '?', 'N/A') and not isinstance(v, bool) else None
+        return value if value is not None and math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 
 
 def _parse_verdict(answer: str) -> Optional[Dict[str, str]]:
     """解析并校验裁判行；买入结论与明显风险主因冲突时保守降级。"""
-    m = re.search(r'结论[:：]\s*(买入|谨慎|否决)', answer or '')
-    if not m:
+    answer = re.sub(r'[*`]', '', answer or '')
+    matches = list(re.finditer(r'结论[:：]\s*(买入|谨慎|否决)', answer))
+    if not matches:
         return None
+    m = matches[-1]
+    answer = answer[m.start():]
     verdict = m.group(1)
     conf = (re.search(r'置信[:：]\s*([高中低])', answer or '') or [None, '中'])[1]
     last_line = (answer or '').strip().splitlines()[-1] if (answer or '').strip() else ''
@@ -68,21 +73,29 @@ def _context(code: str) -> Dict[str, Any]:
 
 
 def _debate_one(code: str, ctx: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    price = _f(ctx.get('price'))
+    change = _f(ctx.get('change'))
+    pe = _f(ctx.get('pe'))
+    price_text = str(price) if price is not None and price > 0 else '未知'
+    change_text = f'{change:+.2f}%' if change is not None else '未知'
+    pe_text = str(pe) if pe is not None and pe != 0 else '未知'
     prompt = f"""对候选股 {code} {ctx.get('name','')} 跑一场**红蓝对抗**(它今日被综合选股命中入选)。
-基本信息:现价{ctx.get('price','?')} 今日{(ctx.get('change') or 0):+.2f}% PE{ctx.get('pe','?')}。
+基本信息:现价{price_text} 今日{change_text} PE{pe_text}。
+只依据已提供事实；未知值不当作零，不把取数缺失当成公司风险，不虚构新闻或资金确认。
 
 请依次:
 ①【多头】用 2-3 点列出最强做多逻辑。
 ②【空头】**专门攻击**:估值是否透支?题材是否退潮/利好已兑现?有无财务雷/筹码松动?入选信号是否同源(都基于一个已被 price-in 的利好)?
 ③【裁判】对抗后给结论。
 
-最后一行严格输出(结论只能是 买入/谨慎/否决):
+最后一行用纯文本严格输出，不加 Markdown(结论只能是 买入/谨慎/否决):
 结论:X | 置信:高/中/低 | 主因:一句话(空头最致命的一点或多头最硬的支撑)"""
     try:
         from deepseek_client import DeepSeekClient
         ans = DeepSeekClient().call_api(
             [{'role': 'system', 'content': '你是选股质检官,空头视角要狠,裁判要中立,宁可错杀脆弱标的。'},
-             {'role': 'user', 'content': prompt}], max_tokens=1200, call_type='selection_debate')
+             {'role': 'user', 'content': prompt}], max_tokens=1200, timeout=30,
+            call_type='selection_debate')
     except Exception as e:
         print(f'[selection_debate] {code} LLM 失败: {type(e).__name__}: {str(e)[:50]}')
         return None
@@ -103,11 +116,13 @@ def run_selection_debate(codes: List[str], max_stocks: int = 10,
     """对 codes 逐只红蓝对抗。返回 {ok, items, text, summary}。
     ⚡ 2026-06-30 改并发:此前串行 10 只 LLM 调用 ≈ 150s,改并发 5 → ≈ 30s。
     DeepSeek API 支持并发(rate-limit 宽松),decision_signal 写 PG 是 row-level 锁,无竞争。"""
-    out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
+    out = {'ok': False, 'status': 'unavailable', 'items': [], 'text': '', 'summary': '',
+           'expected_count': 0, 'completed_count': 0, 'missing_codes': []}
     codes = [str(c).strip() for c in (codes or []) if c][:max_stocks]
     if not codes:
         out['summary'] = '无候选'
         return out
+    out['expected_count'] = len(codes)
 
     # 先一次批量取上下文；旧实现每只单独 datahub.quote，会把 10 只放大成 10 轮行情源请求。
     contexts = {}
@@ -134,7 +149,7 @@ def run_selection_debate(codes: List[str], max_stocks: int = 10,
 
     import concurrent.futures as _cf
     items, n_pass, n_reject = [], 0, 0
-    # 生产实测 5 并发会持续触发 DeepSeek EmptyResponse；默认降到 2，仍可在 6 分钟护栏内完成。
+    # Keep provider concurrency bounded independently of the one-attempt token budget.
     workers = max(1, min(int(os.getenv('SELECTION_DEBATE_WORKERS', '2')), 3))
     with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='selection-debate') as pool:
         results = list(pool.map(_run, codes))
@@ -159,9 +174,12 @@ def run_selection_debate(codes: List[str], max_stocks: int = 10,
                               reason=f"红蓝对抗[{v['verdict']}]:{v['reason']}")
             except Exception:
                 pass
-    out['ok'] = True
+    out['completed_count'] = len(items)
+    out['missing_codes'] = [code for code in codes if code not in {item['code'] for item in items}]
+    out['ok'] = len(items) == len(codes)
+    out['status'] = 'complete' if out['ok'] else 'partial' if items else 'unavailable'
     out['items'] = items
-    out['summary'] = f'对抗 {len(items)} 只:通过 {n_pass}、否决 {n_reject}'
+    out['summary'] = f'对抗 {len(items)}/{len(codes)} 只:通过 {n_pass}、否决 {n_reject}'
     out['text'] = _format(items)
     return out
 

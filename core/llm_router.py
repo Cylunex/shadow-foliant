@@ -136,6 +136,12 @@ def _build_registry() -> List[LLMProvider]:
     ]
 
 
+def _short_request_options(call_type, thinking, base_url, model):
+    from core.platform_llm import short_call_options
+    options = short_call_options(call_type, thinking=thinking, base_url=base_url, model=model)
+    return {'extra_body': options} if options else {}
+
+
 def _platform_token_budget(requested: int, thinking: bool) -> int:
     """给 Platform 路由保留足够的正文预算。
 
@@ -253,6 +259,7 @@ class LLMRouter:
         bounded = call_type in {
             'case_review', 'research_process_eval', 'strategy_policy_committee',
             'morning', 'morning_portfolio',
+            'selection_debate',
         }
         try:
             import platform_llm
@@ -327,6 +334,7 @@ class LLMRouter:
                     model=model, messages=messages,
                     temperature=temperature, max_tokens=mtokens,
                     timeout=timeout,
+                    **_short_request_options(call_type, thinking, p.base_url, model),
                 )
                 msg = resp.choices[0].message
                 result = ''

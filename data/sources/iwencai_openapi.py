@@ -36,16 +36,18 @@ _PROFIT_GROWTH_FIELDS = (
     '归母净利润同比增长率', '归属母公司股东的净利润同比增长率',
     '归母净利润增长率', '净利润同比增长率',
 )
+_PE_TTM_FIELDS = ('市盈率ttm', '市盈率(pe,ttm)', '市盈率(pe，ttm)')
+_FLOAT_CAP_FIELDS = ('流通市值', '流通a股市值', 'a股流通市值', 'a股市值(不含限售股)')
 _REQUIRED_FIELDS = {
     '低价擒牛': (('收盘价', '最新价', '股价'), _PROFIT_GROWTH_FIELDS, ('成交额',)),
-    '低估值': (('市盈率ttm',), ('市净率',), ('股息率',), ('资产负债率',), ('流通市值',)),
+    '低估值': (_PE_TTM_FIELDS, ('市净率',), ('股息率',), ('资产负债率',), _FLOAT_CAP_FIELDS),
     '主力资金': (('主力资金净流入', '主力资金流向'),),
     '小市值': (('总市值',), ('营业收入同比增长率',), _PROFIT_GROWTH_FIELDS),
     '净利增长': (_PROFIT_GROWTH_FIELDS, ('上一交易日成交额', '成交额')),
 }
 _SORT_FIELDS = {
     '低价擒牛': (('成交额',), False),
-    '低估值': (('流通市值',), False),
+    '低估值': (_FLOAT_CAP_FIELDS, False),
     '主力资金': (('主力资金净流入', '主力资金流向'), True),
     '小市值': (('总市值',), False),
     '净利增长': (('上一交易日成交额', '成交额'), False),
@@ -167,6 +169,16 @@ def _field_evidence(rows: list[dict], aliases: tuple[str, ...]) -> tuple[str | N
         })
     full_numeric = [field for field in candidates[:6]
                     if all(_numeric(row.get(field)) for row in sample)]
+    # The provider can echo latest price and close as separate identical columns.
+    # Only collapse this known price alias family, for the same dated basis and
+    # identical values on every row; conflicting prices remain ambiguous.
+    if (len(full_numeric) > 1 and set(aliases) == {'收盘价', '最新价', '股价'}
+            and all(_DATE_FIELD.sub('', field) in aliases for field in full_numeric)
+            and len({_DATE_FIELD.search(field).group(1) if _DATE_FIELD.search(field)
+                     else None for field in full_numeric}) == 1
+            and all(len({_number(row.get(field)) for field in full_numeric}) == 1
+                    for row in sample)):
+        full_numeric = full_numeric[:1]
     selected = full_numeric[0] if len(full_numeric) == 1 else None
     return selected, {
         'aliases': list(aliases)[:3], 'candidates': details,
@@ -265,19 +277,22 @@ def _financial_period_checks(name: str, sample: list[dict],
     ]
     for index, field in enumerate(_REPORT_SOURCE_FIELDS.get(name, ())):
         periods = [_report_period(row.get(field)) for row in sample]
-        unique = sorted({period for period in periods if period})
         metric_period = (selected_metric_periods[index]
                          if index < len(selected_metric_periods) else None)
-        if not unique and metric_period:
-            unique = [metric_period]
-        passed = bool(sample and len(unique) == 1
-                      and (all(periods) or metric_period == unique[0]))
+        resolved = [period or metric_period for period in periods]
+        unique = sorted({period for period in resolved if period})
+        # Latest reporting periods differ across issuers during reporting season.
+        # Verify each stock's period, rather than requiring the universe to have
+        # one period. A dated metric must still agree with its source note.
+        passed = bool(sample and all(resolved)
+                      and (not metric_period or all(period == metric_period for period in resolved)))
         evidence.append({
             'source_field': field, 'metric_field_period': metric_period,
-            'periods': unique[:3], 'verified': passed,
+            'periods': unique[:3], 'row_periods': resolved, 'verified': passed,
         })
     if name == '小市值' and len(evidence) == 2:
-        same_period = evidence[0]['periods'] == evidence[1]['periods']
+        same_period = bool(evidence[0]['verified'] and evidence[1]['verified']
+                           and evidence[0]['row_periods'] == evidence[1]['row_periods'])
         evidence.append({'source_field': '收入与净利润报告期',
                          'periods': evidence[0]['periods'] if same_period else [],
                          'verified': same_period})
@@ -289,17 +304,22 @@ def _yoy_baseline_checks(name: str, field_evidence: list[dict],
     indices = {'低价擒牛': (1,), '小市值': (1, 2), '净利增长': (0,)}.get(name, ())
     if not indices:
         return True, []
-    periods = [item.get('periods', [None])[0] if item.get('periods') else None
-               for item in financial_evidence if item.get('source_field') != '收入与净利润报告期']
+    sources = [item for item in financial_evidence
+               if item.get('source_field') != '收入与净利润报告期']
     evidence = []
     for position, index in enumerate(indices):
         field = str(field_evidence[index].get('selected_field') or '')
-        period = periods[position] if position < len(periods) else None
-        baseline = str(int(period[:4]) - 1) + period[4:] if period else None
-        passed = bool(field and '同比' in field and period and baseline)
+        source = sources[position] if position < len(sources) else {}
+        periods = source.get('row_periods') or source.get('periods') or []
+        valid = bool(periods and all(periods) and source.get('verified'))
+        unique = sorted(set(periods)) if valid else []
+        baselines = [str(int(period[:4]) - 1) + period[4:] for period in unique]
+        passed = bool(field and '同比' in field and valid)
         evidence.append({
-            'field': field or None, 'report_period': period,
-            'baseline_period': baseline, 'basis': 'same_period_previous_year',
+            'field': field or None, 'report_period': unique[0] if len(unique) == 1 else None,
+            'baseline_period': baselines[0] if len(baselines) == 1 else None,
+            'report_periods': unique, 'baseline_periods': baselines,
+            'basis': 'same_period_previous_year_per_stock',
             'verified': passed,
         })
     return bool(evidence and all(item['verified'] for item in evidence)), evidence
@@ -332,7 +352,9 @@ def _semantic_checks(name: str, rows: list[dict], query: str,
     rejections = [_scope_rejections(name, row) for row in sample]
     eligible = [not reasons for reasons in rejections]
     target = _TARGET_TOP_N[name]
-    scope_verified = bool(len(eligible) >= target and all(eligible)
+    # Scope validates the rows returned, while run_group separately proves
+    # min(provider_total, target) coverage. A real universe of three is not ten.
+    scope_verified = bool(sample and all(eligible)
                           and len({_symbol(row) for row in sample}) == len(sample))
     date_match = _DATE_FIELD.search(sort_field or '')
     financial_periods, financial_evidence = _financial_period_checks(

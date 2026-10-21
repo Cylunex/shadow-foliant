@@ -62,12 +62,10 @@ def call(
     # DeepSeek Flash defaults to thinking. A bounded short morning request can
     # consume its whole budget on reasoning and return no content. Keep this
     # provider-specific setting scoped to the official endpoint and task.
-    if (call_type == 'morning' and not thinking
-            and config.api == 'chat-completions'
-            and urlsplit(str(getattr(config, 'base_url', ''))).hostname == 'api.deepseek.com'
-            and str(config.model).lower() in {'deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro'}):
-        payload['thinking'] = {'type': 'disabled'}
-        payload['response_format'] = {'type': 'json_object'}
+    payload.update(short_call_options(
+        call_type, thinking=thinking, api=config.api,
+        base_url=str(getattr(config, 'base_url', '')), model=str(config.model),
+    ))
     try:
         response = client.create(agent_id=_agent_id(call_type), **payload)
         text = _extract_text(config.api, response, thinking=thinking)
@@ -78,6 +76,20 @@ def call(
     finally:
         if single_attempt:
             client.close()
+
+
+def short_call_options(call_type: str, *, thinking: bool, base_url: str,
+                       model: str, api: str = 'chat-completions') -> dict:
+    """Provider settings shared by the SDK and legacy short-call paths."""
+    if (call_type not in {'morning', 'selection_debate'} or thinking
+            or api != 'chat-completions'
+            or urlsplit(base_url).hostname != 'api.deepseek.com'
+            or model.lower() not in {'deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro'}):
+        return {}
+    options = {'thinking': {'type': 'disabled'}}
+    if call_type == 'morning':
+        options['response_format'] = {'type': 'json_object'}
+    return options
 
 
 def _single_attempt_client(config, *, timeout):

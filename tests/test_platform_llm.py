@@ -210,3 +210,34 @@ class PlatformLLMTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_short_selection_disables_reasoning_without_changing_plain_text_contract():
+    options = platform_llm.short_call_options('selection_debate', thinking=False,
+        base_url='https://api.deepseek.com/v1', model='deepseek-flash')
+    assert options == {'thinking': {'type': 'disabled'}}
+    assert platform_llm.short_call_options('selection_debate', thinking=True,
+        base_url='https://api.deepseek.com', model='deepseek-flash') == {}
+    from core.llm_router import _short_request_options
+    assert _short_request_options('selection_debate', False, 'https://api.deepseek.com',
+                                  'deepseek-flash') == {'extra_body': options}
+
+
+def test_selection_router_failure_has_one_attempt_and_no_direct_retry():
+    from core.llm_router import LLMRouter
+    platform = SimpleNamespace(configured=lambda: True, call=Mock(side_effect=RuntimeError('empty')))
+    router = object.__new__(LLMRouter)
+    router.providers = [object()]
+    with patch.dict(sys.modules, {'platform_llm': platform}):
+        result = router.call([], call_type='selection_debate', max_tokens=1200, timeout=30)
+    assert result == ('', 'none')
+    assert platform.call.call_count == 1 and platform.call.call_args.kwargs['single_attempt']
+    with patch.dict(os.environ, {'DEEPSEEK_BASE_URL': 'https://example.invalid/v1',
+                                 'DEEPSEEK_API_KEY': 'test-only'}):
+        from core.deepseek_client import DeepSeekClient
+        client = DeepSeekClient()
+    direct = client.client.chat.completions.create = Mock()
+    router.call = Mock(return_value=('', 'none'))
+    with patch.dict(sys.modules, {'llm_router': SimpleNamespace(get_router=lambda: router)}):
+        assert client.call_api([], call_type='selection_debate') == 'API调用失败: provider_unavailable'
+    direct.assert_not_called()
