@@ -2815,6 +2815,8 @@ class ResearchStore:
         the 20-day horizon reachable as producer/reference strategies add more rows.
         """
         wanted = sorted({max(1, int(value)) for value in horizons})
+        if not wanted:
+            raise ValueError("outcome_horizons_required")
         conn = self.connect()
         updated = 0
         pending = 0
@@ -2841,16 +2843,28 @@ class ResearchStore:
             )
             nominations = list(cur.fetchall())
             now = datetime.now().astimezone().isoformat()
+            bar_cache = {}
             for nomination_id, symbol, signal_date in nominations:
                 cur.execute(
-                    """SELECT trade_date,open,close,low FROM research_daily_bars
-                       WHERE symbol=? AND trade_date>? AND adjustment='qfq'
-                         AND quality_status NOT IN ('unknown_unit','failed')
-                       ORDER BY trade_date""",
-                    (str(symbol), str(signal_date)),
+                    "SELECT horizon_days FROM selection_candidate_outcomes "
+                    "WHERE nomination_id=? AND outcome_status='matured'",
+                    (str(nomination_id),),
                 )
-                bars = list(cur.fetchall())
+                matured = {int(row[0]) for row in cur.fetchall()}
+                key = (str(symbol), str(signal_date))
+                if key not in bar_cache:
+                    cur.execute(
+                        """SELECT trade_date,open,close,low FROM research_daily_bars
+                           WHERE symbol=? AND trade_date>? AND adjustment='qfq'
+                             AND quality_status NOT IN ('unknown_unit','failed')
+                           ORDER BY trade_date LIMIT ?""",
+                        (*key, max(wanted)),
+                    )
+                    bar_cache[key] = list(cur.fetchall())
+                bars = bar_cache[key]
                 for horizon in wanted:
+                    if horizon in matured:
+                        continue
                     if len(bars) < horizon:
                         pending += 1
                         continue

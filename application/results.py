@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from pandas import NA, NaT
+
 RUN_STATUSES = {"queued", "running", "complete", "failed", "cancelled"}
 
 
@@ -18,6 +20,8 @@ def now_iso() -> str:
 
 def clean_json(value: Any) -> Any:
     """Convert common scientific values into strict JSON without exposing object reprs."""
+    if value is NA or value is NaT:
+        return None
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):

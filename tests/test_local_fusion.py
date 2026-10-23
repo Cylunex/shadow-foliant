@@ -206,6 +206,21 @@ class SelectionOutcomeTest(unittest.TestCase):
             self.assertIsNone(row["benchmark_excess_pct"])
             self.assertEqual(row["benchmark_sample_size"], 0)
 
+            # An unfinished longer horizon must not rewrite matured labels,
+            # their evaluation timestamps, or a previously attached benchmark.
+            conn = store.connect()
+            conn.execute("UPDATE selection_candidate_outcomes SET evaluated_at='frozen',"
+                         "benchmark_return_pct=1.5 WHERE horizon_days=1")
+            conn.commit()
+            conn.close()
+            pending = store.update_selection_candidate_outcomes(horizons=(1, 5, 20))
+            self.assertEqual(pending['updated'], 0)
+            self.assertEqual(pending['pending'], 1)
+            conn = store.connect()
+            self.assertEqual(conn.execute("SELECT evaluated_at,benchmark_return_pct "
+                "FROM selection_candidate_outcomes WHERE horizon_days=1").fetchone(), ('frozen', 1.5))
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

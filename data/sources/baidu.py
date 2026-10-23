@@ -44,12 +44,22 @@ def concept_blocks(code: str) -> dict:
     url = f"https://finance.pae.baidu.com/api/getrelatedblock?code={c}&market=ab&typeCode=all&finClientType=pc"
     try:
         d = C.requests_session().get(url, headers=_HEADERS, timeout=10).json()
-        if str(d.get("ResultCode", -1)) != "0":
+        if not isinstance(d, dict) or str(d.get("ResultCode", -1)) != "0":
+            return _empty_blocks()
+        blocks = d.get("Result")
+        if not isinstance(blocks, list):
             return _empty_blocks()
         result = _empty_blocks()
-        for block in d.get("Result", []):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
             bt = block.get("type", "")
-            for item in block.get("list", []):
+            items = block.get("list")
+            if not isinstance(bt, str) or not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+                    continue
                 entry = {"name": item.get("name", ""), "change_pct": item.get("increase", ""),
                          "desc": item.get("desc", "")}
                 if "行业" in bt:

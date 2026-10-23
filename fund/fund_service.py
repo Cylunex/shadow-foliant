@@ -326,7 +326,9 @@ def refresh_profile(code):
         (r for r in ledger.list_saved("profile") if r["code"] == code), None
     )
     name, ftype = fund_data.fund_name(code), fund_data.fund_type(code)
-    observed_basic = fund_data.get_fund_basic(code)
+    # Provider frames contain pandas.NA/NaN. Normalize before truth tests and
+    # comparisons; cleaning only the final profile is too late.
+    observed_basic = clean_json(fund_data.get_fund_basic(code))
     basic = observed_basic or (existing or {}).get("basic", {})
     top = fund_data.top_holdings(code)
     profile = product(
@@ -622,7 +624,16 @@ def review_week(today, budget_seconds=60):
             continue
         if time.monotonic() >= deadline:
             break
-        profile = refresh_profile(h["code"])
+        try:
+            profile = refresh_profile(h["code"])
+        except Exception as exc:
+            # One malformed provider response must not starve later holdings.
+            result = {"review_key": key, "code": h["code"], "week": week,
+                      "status": "partial", "reason": "profile_refresh_failed",
+                      "error_type": type(exc).__name__, "known_at": now()}
+            ledger.save("weekly_review_pending", key, result)
+            results.append(result)
+            continue
         status = profile.get("fetch_status", "partial")
         result = {
             "review_key": key,
