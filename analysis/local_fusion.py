@@ -9,6 +9,8 @@ policy order.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from collections import Counter
+from itertools import combinations
 import hashlib
 import json
 import math
@@ -18,6 +20,9 @@ import numpy as np
 import pandas as pd
 
 from analysis.local_reference_strategies import STRATEGY_CONFIG
+
+SHORTLIST_SHADOW_ID = "shadow_top5_score_caps"
+SHORTLIST_SHADOW_VERSION = "score-caps-v1"
 
 
 def _number(value: object) -> Optional[float]:
@@ -247,13 +252,35 @@ class LocalFusionComposer:
         # TOP15 的模板只负责让三类本地生产器按配额进入正式候选集。TOP5 必须在
         # 完整 TOP15 上重新比较，不能再次套用同一模板，否则结构上永远等于前五行。
         # 复排只使用同一 PIT 快照内的确定性信息，不读取行情、持仓、问财或 LLM。
-        top5 = self._shortlist_top5(top15, feature_map)
+        ranked = self._rank_top5(top15, feature_map)
+        top5 = self._select_top5_legacy(ranked)
+        shadow = self._select_top5_score_caps(ranked)
+        # Keep the full contemporaneous ranking, including rejected candidates.
+        # This small receipt makes shortlist-only replay independent of later
+        # market-data corrections or missing historical warehouse captures.
+        audit = {
+            "schema_version": "top5-shortlist-audit-v1",
+            "scoring_version": "local_fusion_shortlist_v2",
+            "policy": self.policy.as_dict(), "policy_hash": self.policy.policy_hash,
+            "candidates": ranked,
+            "pit_scores": {row["symbol"]: self._pit_score(
+                feature_map.get(row["symbol"]), float(row["lane_score_raw"])) for row in top15},
+            "production_symbols": [row["symbol"] for row in top5],
+            "challenger": {
+                "strategy_id": SHORTLIST_SHADOW_ID, "strategy_version": SHORTLIST_SHADOW_VERSION,
+                "status": "complete" if len(shadow) == self.policy.top5_size else "incomplete",
+                "rows": shadow, "affects_formal_selection": False,
+                "promotion_evidence": False,
+                "objective": "maximum_total_shortlist_score_under_existing_caps",
+            },
+        }
         return {
             "policy": self.policy.as_dict(),
             "policy_hash": self.policy.policy_hash,
             "nominations": nominations,
             "top15": top15,
             "top5": top5,
+            "shortlist_audit": audit,
             "lane_counts": {lane: len(rows) for lane, rows in selected_by_lane.items()},
         }
 
@@ -279,6 +306,10 @@ class LocalFusionComposer:
 
     def _shortlist_top5(self, top15: Sequence[dict],
                         feature_map: Mapping[str, pd.Series]) -> List[dict]:
+        return self._select_top5_legacy(self._rank_top5(top15, feature_map))
+
+    def _rank_top5(self, top15: Sequence[dict],
+                   feature_map: Mapping[str, pd.Series]) -> List[dict]:
         """Independently re-rank TOP15 while preserving the local lane contract.
 
         Cross-lane raw scores use different units, so they are never added directly.
@@ -356,6 +387,10 @@ class LocalFusionComposer:
             -float(row["shortlist_score"]), int(row.get("top15_rank") or 9999),
             str(row.get("symbol") or ""),
         ))
+        return ranked
+
+    def _select_top5_legacy(self, ranked: Sequence[dict]) -> List[dict]:
+        """Preserve the incumbent's lane reservations, including old replays."""
         selected: List[dict] = []
         used: set[str] = set()
 
@@ -409,6 +444,42 @@ class LocalFusionComposer:
             item["rank"] = rank
             item["shortlist_rank"] = rank
         return selected[:self.policy.top5_size]
+
+    def _select_top5_score_caps(self, ranked: Sequence[dict]) -> List[dict]:
+        """Shadow challenger: caps are ceilings, never mandatory reserved seats.
+
+        At most C(15,5)=3003 full portfolios. Enumerating these avoids the greedy
+        core-first choice consuming industry capacity needed by a stronger set.
+        No outcome, model review or new score weight is used.
+        """
+        if len(ranked) > 15 or not 0 <= self.policy.top5_core_floor <= self.policy.top5_size <= 5:
+            raise ValueError("shortlist_search_exceeds_fixed_budget")
+        symbols = [str(row.get("symbol") or "") for row in ranked]
+        if not all(symbols) or len(set(symbols)) != len(symbols):
+            raise ValueError("shortlist_symbols_must_be_unique")
+        ordered = sorted(ranked, key=lambda r: (
+            -float(r["shortlist_score"]), int(r.get("top15_rank") or 9999), str(r["symbol"])))
+        for size in range(min(self.policy.top5_size, len(ordered)), self.policy.top5_core_floor - 1, -1):
+            best, best_score = None, -math.inf
+            for group in combinations(ordered, size):
+                lanes = Counter(row.get("assigned_lane") or "core" for row in group)
+                if (set(lanes) - {"core", "satellite", "timing"}
+                        or lanes["core"] < self.policy.top5_core_floor
+                        or lanes["satellite"] > self.policy.top5_satellite_cap
+                        or lanes["timing"] > self.policy.top5_timing_cap):
+                    continue
+                industries = Counter(str(row.get("industry") or "").strip() for row in group)
+                if (max(industries.values(), default=0) > self.policy.max_top5_per_industry
+                        or (("" in industries or "未分类" in industries)
+                            and self.policy.max_top5_per_industry < self.policy.top5_size)):
+                    continue
+                score = sum(float(row["shortlist_score"]) for row in group)
+                if math.isfinite(score) and score > best_score:
+                    best, best_score = group, score
+            if best is not None:
+                return [{**row, "rank": i, "selection_priority": i, "shortlist_rank": i}
+                        for i, row in enumerate(best, 1)]
+        return []
 
     def _nominations(self, core_rows: Sequence[dict], local_result: dict,
                      genome_result: dict) -> List[dict]:

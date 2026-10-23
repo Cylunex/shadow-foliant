@@ -114,6 +114,53 @@ class LocalFusionTest(unittest.TestCase):
         self.assertEqual(family["小市值"], family["净利增长"])
         self.assertNotEqual(family["低价擒牛"], family["小市值"])
 
+    def test_audit_covers_rejected_candidates_and_never_changes_incumbent(self):
+        composer = LocalFusionComposer(self.policy)
+        result = composer.compose(self.core, self.local, self.genome, self.eligible)
+        features = {r['symbol']: r for _, r in self.eligible.iterrows()}
+        self.assertEqual(result['top5'], composer._shortlist_top5(result['top15'], features))
+        audit = result['shortlist_audit']
+        self.assertEqual(len(audit['candidates']), 15)
+        self.assertEqual(set(audit['pit_scores']), {r['symbol'] for r in result['top15']})
+        self.assertFalse(audit['challenger']['affects_formal_selection'])
+        self.assertFalse(audit['challenger']['promotion_evidence'])
+        self.assertEqual(audit['production_symbols'], [r['symbol'] for r in result['top5']])
+
+    def test_shadow_does_not_force_a_weak_timing_slot_and_keeps_caps(self):
+        composer = LocalFusionComposer(FusionPolicy(max_top5_per_industry=2))
+        rows = [dict(symbol=f'600{i:03d}', assigned_lane=lane, industry=f'i{i}',
+                     shortlist_score=score, top15_rank=i + 1)
+                for i, (lane, score) in enumerate([
+                    ('core', 99), ('core', 98), ('core', 97), ('core', 96),
+                    ('satellite', 95), ('satellite', 94), ('timing', 20)])]
+        incumbent = composer._select_top5_legacy(rows)
+        shadow = composer._select_top5_score_caps(rows)
+        self.assertIn('timing', [r['assigned_lane'] for r in incumbent])
+        self.assertNotIn('timing', [r['assigned_lane'] for r in shadow])
+        self.assertEqual(sum(r['assigned_lane'] == 'satellite' for r in shadow), 1)
+        self.assertGreater(sum(r['shortlist_score'] for r in shadow), sum(r['shortlist_score'] for r in incumbent))
+        # Outcome hints must have no path into the choice.
+        for row in rows:
+            row['future_return'] = 1000 if row['assigned_lane'] == 'timing' else -1000
+        self.assertEqual([r['symbol'] for r in shadow],
+                         [r['symbol'] for r in composer._select_top5_score_caps(rows)])
+
+    def test_shadow_solves_industry_interaction_globally_and_breaks_ties_stably(self):
+        composer = LocalFusionComposer(FusionPolicy(max_top5_per_industry=2))
+        rows = [dict(symbol=str(i), assigned_lane=lane, industry=industry,
+                     shortlist_score=score, top15_rank=i + 1)
+                for i, (lane, industry, score) in enumerate([
+                    ('core', 'A', 100), ('core', 'A', 90), ('core', 'B', 80), ('core', 'D', 79),
+                    ('satellite', 'A', 95), ('satellite', 'E', 70), ('timing', 'C', 94)])]
+        best = composer._select_top5_score_caps(rows)
+        self.assertEqual({r['symbol'] for r in best}, {'0', '2', '3', '4', '6'})
+        self.assertEqual(best, composer._select_top5_score_caps(list(reversed(rows))))
+        self.assertEqual(composer._select_top5_score_caps([r for r in rows if r['assigned_lane'] != 'core']), [])
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            composer._select_top5_score_caps([rows[0], rows[0]])
+        with self.assertRaisesRegex(ValueError, 'budget'):
+            composer._select_top5_score_caps(rows * 3)
+
 
 class StrategyPolicyValidationTest(unittest.TestCase):
     def setUp(self):

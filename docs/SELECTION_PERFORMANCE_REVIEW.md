@@ -42,6 +42,34 @@
 板块，分类字段保持空值并标记 `mixed_unclassified`；这些关联板块只展示事实，不进入热点
 题材匹配、龙头判断或正式因子。已经可用的百度分类优先保留，不能被低精度补充结果覆盖。
 
+## TOP5 差距归因与对照策略
+
+同一只股票在 TOP5 和 TOP15 中的后验标签必须一致，且两个组合必须来自同一冻结快照、
+同一规则版本和同一观察窗口。新增 `shortlist_attribution` 将差距分成：
+
+- 逐股贡献：`(TOP5 等权权重 - TOP15 等权权重) × 股票价格收益`。
+- 赛道配置贡献：`(TOP5 赛道权重 - TOP15 赛道权重) × TOP15 该赛道平均收益`。
+- 赛道内选择贡献：`TOP5 赛道权重 × (TOP5 该赛道平均收益 - TOP15 该赛道平均收益)`。
+
+两类赛道贡献之和与组合差距精确对账；这只是算术归因，不能证明某因素导致涨跌。
+同时展示未入选的其他十只、行业分布、重复股票数量和排除原因。应分别查看 1/3/5 日等
+窗口，不能用 1 日价格波动代替中期趋势策略效果。日期重叠的较长窗口也不是独立样本。
+
+新选股将 `top5_shortlist_audit` 作为追加式产物保存完整十五只的复排得分、组成项、
+PIT 合计分、政策和入选名单。旧数据缺少这些记录时不会用当前行情反填排名，也不计算
+虚假的排名 IC。完整新记录支持同日 Spearman 排名 IC 和精选阶段的独立复核。
+
+`shadow_top5_score_caps` / `score-caps-v1` 是固定规则的对照策略：保持当前评分权重不变，
+沿用核心数量下限、卫星/技术数量上限及行业上限，在最多 15 只中有界枚举（最多 3003 个
+完整五股组合），最大化总复排评分。卫星/技术上限不再强制占位，并整体处理行业约束的
+交互。若无法凑足且符合硬约束则明确 incomplete，不放宽上限。完整名单进入 shadow
+赛道的独立提名与既有后验流程，报告只在同运行、同观察窗口完整成熟时比较新旧结果。
+
+该对照不改变正式 TOP5/TOP15、权重、交易计划或旧快照，也不触发 LLM 或额外外部取数。
+价格标签的改善仍不是上线晋升证据；正式切换需要既有执行成本、独立日期及样本外验证。
+冻结历史不足时按 [真实数据加固](REAL_DATA_HARDENING.md) 保留重放不完整，绝不借用当前
+长历史冒充旧输入。保存精选阶段收据也不表示全流程 PIT 历史已经补齐。
+
 ## 参考项目与取舍
 
 - [Microsoft Qlib：PortfolioMetrics](https://github.com/microsoft/qlib/blob/main/qlib/backtest/report.py)
@@ -54,5 +82,14 @@
   记录百度概念接口返回 10003 后替换接口的经历。本轮本机及服务端公开探测也返回 10003，
   后续已验证东方财富关联板块接口能返回数据，但未提供可靠类别；借鉴其替代方向，同时
   保留未分类状态，不能宣称行业/概念分类已完全恢复。
+- [Alphalens：performance.py](https://github.com/quantopian/alphalens/blob/master/alphalens/performance.py)
+  按日期、分组和前向窗口评估因子排序，并计算排名 IC。本项目借鉴同日分组拆解与完整
+  评分覆盖后才计算排名相关性，不将赛道模板展示顺序当成预测分数。
+- [Qlib：EnhancedIndexingOptimizer](https://github.com/microsoft/qlib/blob/main/qlib/contrib/strategy/optimizer/enhanced_indexing.py)
+  在风险和权重约束下优化组合目标。本项目只借鉴“整体约束下择优”的思想，用小候选集
+  的确定性枚举避免引入求解器；不把原评分伪称为预期收益，也不放松约束求满仓。
+- [skfolio：WalkForward](https://github.com/skfolio/skfolio/blob/main/src/skfolio/model_selection/_walk_forward.py)
+  区分训练/测试时序并提供隔离间隔。本项目保留既有 purged walk-forward 验证协议，新
+  对照先积累决策时点记录；本周已看过的收益不能转称未触碰的样本外验证。
 
 以上借鉴评估和错误处理方法，未复制第三方实现或加入新依赖。

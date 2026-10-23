@@ -722,6 +722,10 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
         latest = self.store.latest_selection()
         self.assertEqual(latest["metadata"]["primary_pipeline"], "local_fusion")
         self.assertIn("formal_membership_nominations", latest["artifacts"])
+        self.assertIn("top5_shortlist_audit", latest["artifacts"])
+        audit = latest["artifacts"]["top5_shortlist_audit"]["payload"]
+        self.assertEqual(len(audit["candidates"]), len(result["candidates"]))
+        self.assertFalse(audit["challenger"]["affects_formal_selection"])
         evidence_conn = self.store.connect()
         try:
             recorded_strategy_ids = {
@@ -734,6 +738,8 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             evidence_conn.close()
         self.assertIn("formal_local_fusion_top15", recorded_strategy_ids)
         self.assertIn("formal_local_fusion_top5", recorded_strategy_ids)
+        if audit["challenger"]["status"] == "complete":
+            self.assertIn("shadow_top5_score_caps", recorded_strategy_ids)
         self.assertEqual(sum(latest["metadata"]["lane_counts"].values()), 6)
         self.assertLessEqual(latest["metadata"]["lane_counts"]["satellite"], 5)
         self.assertLessEqual(latest["metadata"]["lane_counts"]["timing"], 2)

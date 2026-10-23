@@ -600,6 +600,7 @@ class LocalStockSelector:
 
         from analysis.local_fusion import (
             FusionPolicy, GenomeCandidateProducer, LocalFusionComposer, genome_snapshot,
+            SHORTLIST_SHADOW_ID, SHORTLIST_SHADOW_VERSION,
         )
         recorded_pit_only = (
             strategy_snapshot.get("pit_only_mode")
@@ -800,6 +801,17 @@ class LocalStockSelector:
                         },
                     })
             eligible_symbols = sorted(eligible_scored["symbol"].astype(str).tolist())
+            challenger = fusion["shortlist_audit"]["challenger"]
+            shadow_memberships = [{
+                "symbol": row["symbol"], "lane": "shadow",
+                "strategy_id": SHORTLIST_SHADOW_ID, "strategy_name": "TOP5约束择优对照",
+                "strategy_version": SHORTLIST_SHADOW_VERSION, "lane_rank": rank,
+                "lane_score_raw": row["shortlist_score"], "priority_weight": 0.0,
+                "evidence": {"assigned_lane": row["assigned_lane"],
+                             "baseline_strategy_id": "formal_local_fusion_top5",
+                             "affects_formal_selection": False, "promotion_evidence": False},
+            } for rank, row in enumerate(challenger["rows"], 1)
+                if challenger["status"] == "complete"]
             eligible_payload = {
                 "snapshot_id": hashlib.sha256(json.dumps(
                     eligible_symbols, separators=(",", ":")
@@ -819,6 +831,7 @@ class LocalStockSelector:
                 ("genome_nominations", genome_result),
                 ("candidate_nominations", fusion["nominations"]),
                 ("formal_membership_nominations", formal_memberships),
+                ("top5_shortlist_audit", fusion["shortlist_audit"]),
                 ("pit_only_top15", core_candidates[:self.policy.final_n]),
                 ("fusion_policy", fusion_policy.as_dict()),
                 ("lane_ablation_reruns", ablations),
@@ -826,7 +839,7 @@ class LocalStockSelector:
             ):
                 self.store.save_selection_artifact(run["run_id"], artifact_type, payload)
             self.store.save_selection_strategy_records(
-                run["run_id"], [*fusion["nominations"], *formal_memberships],
+                run["run_id"], [*fusion["nominations"], *formal_memberships, *shadow_memberships],
                 policy=fusion_policy.as_dict(), policy_hash=fusion_policy.policy_hash,
                 selection_date=selection_date,
                 input_snapshot_id=eligible_payload["snapshot_id"],

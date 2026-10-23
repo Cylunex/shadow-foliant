@@ -29,10 +29,22 @@ def read_performance(store, *, start_date, end_date, as_of, horizon_days=1):
             ORDER BY r.data_as_of,n.nomination_id""", (horizon_days, start_date, end_date))
         columns = [c[0] for c in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        cur.execute("""SELECT a.run_id,a.artifact_type,a.payload FROM selection_artifacts a
+            JOIN selection_runs r ON CAST(r.run_id AS TEXT)=a.run_id
+            WHERE r.selection_date>=? AND r.selection_date<=?
+              AND a.artifact_type IN ('formal_top15','formal_top5','top5_shortlist_audit')""",
+                    (start_date, end_date))
+        artifacts = {}
+        for run_id, kind, payload in cur.fetchall():
+            artifacts.setdefault(str(run_id), {})[kind] = json.loads(payload) if isinstance(payload, str) else payload
     finally:
         conn.close()
-    return summarize_selection_performance(rows, start_date=start_date, end_date=end_date,
-                                           as_of=as_of, horizon_days=horizon_days)
+    result = summarize_selection_performance(rows, start_date=start_date, end_date=end_date,
+                                            as_of=as_of, horizon_days=horizon_days)
+    from analysis.shortlist_attribution import attribute_shortlist
+    result['shortlist_attribution'] = attribute_shortlist(
+        rows, artifacts, start_date=start_date, end_date=end_date, as_of=as_of, horizon_days=horizon_days)
+    return result
 
 
 def main():
