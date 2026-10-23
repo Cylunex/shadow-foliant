@@ -2061,7 +2061,7 @@ def portfolio_performance():
     全用现成净值快照+成交记录,无外部行情拉取。Redis 缓存 10min。"""
     try:
         from performance import summary
-        return _ok(_cache_or("pf_perf:v2", 600, summary, keep=lambda v: isinstance(v, dict)))
+        return _ok(_cache_or("pf_perf:v3", 600, summary, keep=lambda v: isinstance(v, dict)))
     except Exception as e:
         return _err(e)
 
@@ -2127,7 +2127,7 @@ def portfolio_benchmark(code: str = "000300"):
     try:
         from benchmark import compare
         # 指数历史拉取可能慢(akshare),12s 护栏不让页面卡死;成功结果缓存 1h(日级数据)
-        return _ok(_cache_or(f"pf_bench:{code}", 3600,
+        return _ok(_cache_or(f"pf_bench:v2:{code}", 3600,
                              lambda: _with_deadline(lambda: compare(code), 12, {"dates": [], "error": "timeout"}),
                              keep=lambda v: isinstance(v, dict) and v.get("dates")))
     except Exception as e:

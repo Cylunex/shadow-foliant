@@ -1,5 +1,6 @@
 import { reactive, ref, computed, onMounted } from 'vue'
 import { api, fmt, zh, cls, useSort } from '../lib.js'
+import { referenceGroups } from '../selection-view.js'
 
 const INDEXES = [
   {code:'000300', name:'沪深300'}, {code:'000905', name:'中证500'},
@@ -33,11 +34,12 @@ export default {
     <div v-if="tab==='latest'">
       <section class="command-hero" style="margin-bottom:16px">
         <div><span class="badge info">LOCAL FUSION V2</span><h1 style="margin-top:10px">本地多赛道选股</h1><p>PIT 为核心，本地五策略与技术基因组拥有受控提名权；问财、妙想和红蓝只作参考复核。</p></div>
-        <div class="hero-status"><div><strong>{{latest.meta?.snapshot_date||'暂无快照'}}</strong><small>{{latest.status==='success'?'今日产物可用':statusCn(latest.status)}}</small></div><button class="ghost" :disabled="latest.loading" @click="loadLatest">{{latest.loading?'读取中…':'刷新'}}</button></div>
+        <div class="hero-status"><div><strong>{{latest.meta?.snapshot_date||'暂无快照'}}</strong><small>{{statusCn(latest.status)}}</small></div><button class="ghost" :disabled="latest.loading" @click="loadLatest">{{latest.loading?'读取中…':'刷新'}}</button></div>
       </section>
       <div v-if="latest.err" class="err">{{latest.err}}</div>
+      <p v-for="warning in latest.warnings" :key="warning" class="sub">{{warning}}</p>
       <section class="card">
-        <div class="section-head"><div><h2>今日赛道构成</h2><p>正式 TOP15：PIT 至少 8，本地策略最多 5，技术基因组最多 2；空缺自动归还 PIT</p></div><span class="pill">同一行业最多 5 只</span></div>
+        <div class="section-head"><div><h2>快照赛道构成</h2><p>正式 TOP15：PIT 至少 {{policy.top15_core_floor??'—'}}，本地策略最多 {{policy.top15_satellite_cap??'—'}}，技术基因组最多 {{policy.top15_timing_cap??'—'}}；空缺自动归还 PIT</p></div><span class="pill">同一行业最多 {{policy.max_per_industry??'—'}} 只</span></div>
         <div style="display:flex;flex-wrap:wrap;gap:10px">
           <span class="badge info">PIT 核心 {{laneCounts.core||0}}</span>
           <span class="badge warning">本地五策略 {{laneCounts.satellite||0}}</span>
@@ -59,7 +61,7 @@ export default {
       <section class="card">
         <div class="section-head"><div><h2>完整候选 TOP15</h2><p>点击任意标的进入股票研究</p></div><span class="pill">{{latestRows.length}} 只</span></div>
         <div v-if="latestRows.length" class="table-wrap"><table><thead><tr><th>#</th><th>代码 / 名称</th><th>赛道分</th><th>赛道</th><th>现价</th><th>涨跌</th><th>主要策略</th><th>共同提名</th></tr></thead>
-          <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.lane_score_raw??r.final_score)}}</td><td><span class="badge info">{{laneText(r.assigned_lane)}}</span></td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}%</td><td>{{r.primary_strategy_name||'本地PIT'}}</td><td style="text-align:left">{{(r.source_labels||r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
+          <tbody><tr v-for="r in latestRows" :key="r.code" @click="openStock(r.code)" style="cursor:pointer"><td>{{r.rank}}</td><td><b>{{r.code}}</b><span style="margin-left:7px;color:var(--muted)">{{r.name}}</span></td><td>{{fmt(r.lane_score_raw??r.final_score)}}</td><td><span class="badge info">{{laneText(r.assigned_lane)}}</span></td><td>{{r.price??'—'}}</td><td :class="cls(r.change_pct)">{{signed(r.change_pct)}}</td><td>{{r.primary_strategy_name||'本地PIT'}}</td><td style="text-align:left">{{(r.source_labels||r.sources||[]).join(' / ')||'—'}}</td></tr></tbody>
         </table></div><div v-else class="empty-state">尚无综合选股快照。</div>
       </section>
       <section class="card">
@@ -87,9 +89,11 @@ export default {
         <div class="section-head"><div><h2>外部策略参考</h2><p>问财与妙想仅用于发现差异和后验比较，永远不改变正式 TOP15/TOP5</p></div><span class="pill">REFERENCE ONLY</span></div>
         <div v-if="externalReferences.length" class="dashboard-grid">
           <article v-for="group in externalReferences" :key="group.source" class="card" style="box-shadow:none">
-            <div class="section-head"><h3>{{group.source}}</h3><span class="badge info">{{group.ready}}/{{group.items.length}} 可用</span></div>
+            <div class="section-head"><h3>{{group.source}}<small v-if="group.trial"> · OpenAPI 试运行</small></h3><span class="badge" :class="group.ready===group.items.length?'success':'warning'">{{group.ready}}/{{group.items.length}} 通过核验 · {{group.dataCount}} 组有数据</span></div>
             <div v-for="item in group.items" :key="item.name" style="margin-top:10px">
-              <b>{{item.name}}</b><span style="margin-left:8px;color:var(--muted)">{{item.picks.length}} 只</span>
+              <b>{{item.name}}</b><span class="badge" :class="item.verified?'success':'warning'" style="margin-left:8px">{{item.statusText}}</span><span style="margin-left:8px;color:var(--muted)">{{item.picks.length}} 只</span>
+              <p v-if="item.reason" class="sub" style="margin:6px 0">{{item.reason}}</p>
+              <p v-else-if="item.resultAsOf" class="sub" style="margin:6px 0">数据日期 {{item.resultAsOf}}</p>
               <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
                 <button v-for="r in item.picks" :key="r.symbol" class="ghost" @click="openStock(r.symbol)">{{r.symbol}} {{r.name||''}}</button>
               </div>
@@ -177,30 +181,25 @@ export default {
   </div>`,
   setup(){
     const tab = ref('latest')
-    const latest = reactive({ status:'missing', data:null, meta:null, loading:false, err:'' })
+    const latest = reactive({ status:'missing', data:null, meta:null, warnings:[], loading:false, err:'' })
+    const policy = computed(()=>latest.data?.fusion_policy||{})
     const latestFinal = computed(()=>latest.data?.final_rows||[])
     const latestRows = computed(()=>latest.data?.rows||[])
     const laneCounts = computed(()=>latest.data?.lane_counts||{})
     const localStrategies = computed(()=>Object.entries(latest.data?.local_strategy_reference?.strategies||{}).map(([name,value])=>({name,rows:value.rows||[],...value})))
     const genomeRows = computed(()=>latest.data?.genome_nominations?.rows||[])
     const genomeStatus = computed(()=>({ready:'可用',empty:'无命中',unavailable:'不可用'}[latest.data?.genome_nominations?.status]||'未知'))
-    const externalReferences = computed(()=>[
-      ['问财', latest.data?.wencai_strategy_runs],
-      ['妙想', latest.data?.miaoxiang_strategy_runs],
-    ].map(([source,run])=>{
-      const items=Object.entries(run?.strategies||{}).map(([name,value])=>({name,picks:value.picks||[],status:value.status}))
-      return {source,items,ready:items.filter(x=>x.status==='ready').length}
-    }).filter(group=>group.items.length))
+    const externalReferences = computed(()=>referenceGroups(latest.data))
     async function loadLatest(){
       latest.loading=true;latest.err=''
-      try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{}}
-      catch(e){latest.err=''+e}finally{latest.loading=false}
+      try{const r=await api('/api/screen/latest');latest.status=r.status;latest.data=r.data||{};latest.meta=r.meta||{};latest.warnings=r.warnings||r.meta?.warnings||[]}
+      catch(e){latest.status='failed';latest.err=''+e}finally{latest.loading=false}
     }
-    const statusCn=v=>({success:'今日可用',stale:'快照已过期',missing:'尚无快照',failed:'读取失败'}[v]||v||'未知')
+    const statusCn=v=>({success:'快照可用',stale:'快照已过期',missing:'尚无快照',failed:'读取失败'}[v]||v||'未知')
     const debateClass=v=>String(v||'').includes('否决')?'danger':String(v||'').includes('谨慎')?'warning':'success'
     const strategyStatusText=v=>({ready:'完整',degraded:'降级',unavailable:'待数据',empty:'无命中'}[v]||v||'未知')
     const strategyStatusClass=v=>v==='ready'?'success':v==='degraded'?'warning':v==='unavailable'?'danger':'info'
-    const signed=v=>v==null?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`
+    const signed=v=>v==null||v===''||!Number.isFinite(Number(v))?'—':`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}%`
     const laneText=v=>({core:'PIT核心',satellite:'本地策略',timing:'技术基因组'}[v]||v||'本地')
     function openStock(code){if(code){try{sessionStorage.setItem('sf-stock-code',code)}catch(e){};location.hash='stock'}}
     const s = reactive({ index:'000300', n:15, style:'balanced', res:null, err:'', loading:false })
@@ -241,7 +240,7 @@ export default {
       catch(e){ w.err=''+e }finally{ w.loading=false }
     }
     onMounted(loadLatest)
-    return { tab, latest, latestFinal, latestRows, laneCounts, localStrategies, genomeRows,
+    return { tab, latest, policy, latestFinal, latestRows, laneCounts, localStrategies, genomeRows,
              genomeStatus, externalReferences, loadLatest, statusCn, debateClass,
              strategyStatusText, strategyStatusClass, signed, laneText, openStock,
              s, mcols, w, wcols, sortedTop, sortMf, arrowMf, sortedWc, sortWc, arrowWc,

@@ -75,7 +75,9 @@ export default {
     <div class="card"><h3>组合净值曲线</h3><div ref="curve" class="chart" style="height:240px"></div>
       <div v-if="!p.curve||!p.curve.length" class="loading">暂无快照(盘后任务落点)。</div></div>
     <div class="card" v-if="p.perf && p.perf.n_snapshots">
-      <h3>📈 组合绩效 <span style="color:var(--muted);font-weight:400;font-size:12px">(TWR时间加权 / XIRR资金加权年化)</span></h3>
+      <h3>📈 股票持仓绩效 <span style="color:var(--muted);font-weight:400;font-size:12px">(TWR时间加权 / 区间XIRR资金加权年化)</span></h3>
+      <p class="sub">{{p.perf.basis||'按股票市值和买卖金额估算，不含账户现金。'}}</p>
+      <p v-for="warning in p.perf.warnings||[]" :key="warning" class="badge warning">{{warning}}</p>
       <div class="row" style="gap:24px;flex-wrap:wrap">
         <div v-if="p.perf.twr"><div class="sub">时间加权 TWR</div>
           <b :class="cls(p.perf.twr.twr_pct)" style="font-size:18px">{{p.perf.twr.twr_pct>0?'+':''}}{{p.perf.twr.twr_pct}}%</b>

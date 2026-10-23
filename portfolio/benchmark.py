@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 
 import _bootstrap  # noqa: F401
@@ -30,23 +31,21 @@ def _d(s) -> str:
 def _portfolio_cum_series() -> List[Tuple[str, float]]:
     """组合累计收益序列 [(date, cum_return_pct)],基于净值快照的 TWR 子区间链,首日=0。"""
     from portfolio_snapshot import get_snapshots
-    from performance import _flows_from_trades
+    from performance import _flows_from_trades, adjusted_return_series
     snaps = sorted(get_snapshots(limit=730) or [], key=lambda s: _d(s.get("snap_date")))
-    eq = [(_d(s.get("snap_date")), float(s.get("total_mv") or 0)) for s in snaps if (s.get("total_mv") or 0) > 0]
+    eq = [(_d(s.get("snap_date")), s.get("total_mv")) for s in snaps]
     if len(eq) < 2:
         return []
-    flows, _ = _flows_from_trades()
+    flows, _ = _flows_from_trades(eq[0][0], eq[-1][0])
+    series = adjusted_return_series(eq, flows)
+    if series is None:
+        return []
+    eq, periods = series
     out = [(eq[0][0], 0.0)]
     cum = 1.0
-    for i in range(1, len(eq)):
-        mv_prev, mv_cur = eq[i - 1][1], eq[i][1]
-        # flow 累计 (d_prev, d_cur] 区间全部成交(与 performance.twr 同修,2026-07-17):
-        # 快照缺日时中段买卖原来匹配不上、被算进收益
-        flow = sum(float(v) for d, v in flows.items() if eq[i - 1][0] < d <= eq[i][0])
-        r = (mv_cur - mv_prev - flow) / mv_prev if mv_prev > 0 else 0.0
-        if -0.5 < r < 0.5:
-            cum *= (1 + r)
-        out.append((eq[i][0], round((cum - 1) * 100, 2)))
+    for d, ret in periods:
+        cum *= 1 + ret
+        out.append((d, round((cum - 1) * 100, 2)))
     return out
 
 
@@ -89,9 +88,11 @@ def compare(benchmark_code: str = "000300") -> dict:
     portfolio_return_pct, benchmark_return_pct, excess_pct} 或 {error}。"""
     port = _portfolio_cum_series()
     if len(port) < 2:
-        return {"error": "净值快照不足(需盘后快照积累几日)", "dates": []}
+        return {"error": "净值快照或成交现金流不足、异常，暂不计算对比", "dates": []}
     start = port[0][0]
     idx_map = _index_close_map(benchmark_code, start)
+    idx_map = {d: float(v) for d, v in idx_map.items()
+               if isinstance(v, (int, float)) and math.isfinite(v) and v > 0}
     name = BENCHMARKS.get(benchmark_code, benchmark_code)
     dates = [d for d, _ in port]
     port_cum = [v for _, v in port]
@@ -116,11 +117,14 @@ def compare(benchmark_code: str = "000300") -> dict:
             bench_cum.append(None)
 
     pr = port_cum[-1]
-    br = next((b for b in reversed(bench_cum) if b is not None), None)
+    # A stale index close cannot be compared with a newer portfolio valuation.
+    aligned = bool(idx_map.get(dates[0]) and idx_map.get(dates[-1]))
+    br = bench_cum[-1] if aligned else None
     excess = round(pr - br, 2) if br is not None else None
     return {"dates": dates, "portfolio": port_cum, "benchmark": bench_cum,
             "benchmark_code": benchmark_code, "benchmark_name": name,
-            "portfolio_return_pct": pr, "benchmark_return_pct": br, "excess_pct": excess}
+            "portfolio_return_pct": pr, "benchmark_return_pct": br, "excess_pct": excess,
+            "comparison_status": "complete" if aligned else "unmatched_endpoint_dates"}
 
 
 def format_text(c: dict) -> str:

@@ -784,8 +784,8 @@ def latest_selection_artifact() -> Dict[str, Any]:
         (artifacts.get('genome_nominations') or {}).get('payload') or {}
     )
     fusion_policy = (artifacts.get('fusion_policy') or {}).get('payload') or {}
-    from selection.strategy_cache import artifact_payload as wencai_artifact_payload
-    wencai_strategy_runs = wencai_artifact_payload(artifacts)
+    from selection.reference_display import wencai_reference
+    wencai_strategy_runs = wencai_reference(artifacts)
     from analysis.independent_selector import (
         artifact_payload, comparison as compare_selection_lanes,
     )
