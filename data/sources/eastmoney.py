@@ -30,6 +30,46 @@ _ULIST_LOG_LAST = 0.0
 _ULIST_LOG_GAP = 60.0
 
 
+def related_boards(code: str) -> dict:
+    """个股所属的混合板块。上游不区分类别，不能直接当成概念标签。"""
+    try:
+        response = C.requests_session().get(
+            "https://push2.eastmoney.com/api/qt/slist/get",
+            params={"secid": C.em_secid(code), "spt": "3", "pi": "0", "pz": "100",
+                    "po": "1", "fltt": "2", "invt": "2", "fields": "f12,f14"},
+            headers={"User-Agent": C.DESKTOP_UA, "Referer": "https://quote.eastmoney.com/"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("rc") != 0:
+            return {}
+        data = payload.get("data")
+        rows = data.get("diff") if isinstance(data, dict) else None
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        if not isinstance(rows, list):
+            return {}
+        boards, seen = [], set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            board_code, name = row.get("f12"), row.get("f14")
+            if not isinstance(board_code, str) or not re.fullmatch(r"BK\d+", board_code):
+                continue
+            if not isinstance(name, str) or not name.strip() or name.strip() == "-" or board_code in seen:
+                continue
+            boards.append({"code": board_code, "name": name.strip()})
+            seen.add(board_code)
+        if not boards:
+            return {}
+        return {"industry": [], "concept": [], "region": [], "concept_tags": [],
+                "unclassified_boards": boards, "source": "eastmoney",
+                "classification_status": "mixed_unclassified"}
+    except Exception:
+        return {}
+
+
 # ── 全球财经快讯 ─────────────────────────────────────────────────────────────
 _GNEWS_URL = ("https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
               "?client=web&biz=web_724&fastColumn=102&sortEnd=&pageSize={ps}&req_trace=1")

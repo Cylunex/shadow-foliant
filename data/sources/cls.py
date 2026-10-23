@@ -35,10 +35,10 @@ def _red_signature(params: dict[str, Any]) -> str:
     return hashlib.md5(first.encode("utf-8")).hexdigest()
 
 
-def _red_params(last_time: int, page_size: int) -> dict[str, Any]:
+def _red_params(last_time: int, page_size: int, *, category: str = "red") -> dict[str, Any]:
     params: dict[str, Any] = {
         "app": _CLS_APP,
-        "category": "red",
+        "category": category,
         "last_time": int(last_time),
         "os": "web",
         "refresh_type": 1,
@@ -89,14 +89,26 @@ def _normalize_red_item(item: dict[str, Any]) -> dict[str, Any] | None:
 def telegraph(page_size: int = 50) -> List[dict]:
     """财联社电报(全市场实时快讯)→ [{title,content,time}]。空/异常 → []。"""
     try:
-        d = C.requests_session().get("https://www.cls.cn/nodeapi/telegraphList",
-                                     params={"rn": str(page_size), "page": "1"},
-                                     headers={"User-Agent": C.DESKTOP_UA, "Referer": "https://www.cls.cn/"},
-                                     timeout=10).json()
-        return [{"title": it.get("title", "") or it.get("brief", ""),
-                 "content": it.get("content", "") or it.get("brief", ""),
+        # nodeapi/telegraphList 已返回 HTML；与加红源复用当前公开 Web 签名协议。
+        response = C.requests_session().get(
+            "https://www.cls.cn/v1/roll/get_roll_list",
+            params=_red_params(int(time.time()), page_size, category=""),
+            headers={"User-Agent": C.DESKTOP_UA, "Referer": "https://www.cls.cn/telegraph"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or int(payload.get("errno", -1)) != 0:
+            return []
+        data = payload.get("data")
+        items = data.get("roll_data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [{"title": _clean(it.get("title") or it.get("brief")),
+                 "content": _clean(it.get("content") or it.get("brief")),
                  "time": it.get("ctime", "")}
-                for it in (d.get("data", {}) or {}).get("roll_data", [])]
+                for it in items[:max(1, min(int(page_size), 100))]
+                if isinstance(it, dict) and (it.get("title") or it.get("content") or it.get("brief"))]
     except Exception as e:
         print(f"[sources.cls] 财联社快讯请求失败: {e}")
         return []

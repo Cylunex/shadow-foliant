@@ -87,6 +87,7 @@ def build_market_structure(context: Dict[str, Any], code: str) -> Dict[str, Any]
     if not industries:
         industries = _items([info.get('industry') or info.get('sector')])
     concepts = _items(blocks.get('concept') or blocks.get('concept_tags'))
+    unclassified = _items(blocks.get('unclassified_boards'))
     boards = list(dict.fromkeys([*industries, *concepts]))
     hot_themes = _hot_theme_rows(sentiment)
 
@@ -117,10 +118,12 @@ def build_market_structure(context: Dict[str, Any], code: str) -> Dict[str, Any]
     limitations = []
     if not boards:
         limitations.append('缺少行业/概念归属')
+    if unclassified:
+        limitations.append('关联板块未区分行业、概念或地域，不参与题材与龙头判断')
     if not hot_themes:
         limitations.append('缺少当前热点题材榜')
     limitations.append('缺少历史题材热度序列，阶段不做推测')
-    status = 'available' if primary else ('partial' if boards or hot_themes else 'missing')
+    status = 'available' if primary else ('partial' if boards or hot_themes or unclassified else 'missing')
     return {
         'status': status,
         'primary_theme': primary['theme'] if primary else None,
@@ -129,6 +132,7 @@ def build_market_structure(context: Dict[str, Any], code: str) -> Dict[str, Any]
         'matched_boards': primary['matched_boards'] if primary else [],
         'related_industries': industries,
         'related_concepts': concepts,
+        'related_unclassified_boards': unclassified,
         'stock_role': role,
         'stock_role_cn': role_cn,
         'theme_phase': 'unknown',

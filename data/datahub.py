@@ -176,7 +176,7 @@ _ROUTE_INFLIGHT_LOCK = _route_threading.Lock()
 def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
            timeout: int = None):
     """稳定等级优先，同等级按健康度排序，返回第一个非空结果。
-    sources: [(源名, 无参thunk), ...]。DataFrame 用 not empty 判空,其余用 truthy。
+    sources: [(源名, 无参thunk), ...]。与缓存共用有效结果判定，结构性空字典也触发降级。
     有限等待和整条路由预算；底层超时线程不能强制取消，保留 inflight 防重入。"""
     to = timeout or _SOURCE_TIMEOUT
     deadline = _time.monotonic() + min(90., max(float(to), float(to) * 2))
@@ -247,7 +247,7 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
                     _failure_diagnostic(capability, name)
                     or {'failure_category': 'route_exception'})
             continue
-        good = (not v.empty) if isinstance(v, pd.DataFrame) else bool(v)
+        good = _nonempty(v)
         _record(key, good, _time.time() - t0,
                 None if good else _failure_diagnostic(capability, name))
         if good:
@@ -2085,9 +2085,15 @@ def sector_fund_flow(sector_type: str = "industry", top_n: int = 50) -> List[dic
 
 
 def concept_blocks(code: str) -> dict:
-    """个股概念/行业/地域归属。dict 键:industry/concept/region/concept_tags。"""
+    """优先获取已分类归属；缺失时保留东财关联板块，但不猜测板块类别。"""
+    from data.sources import baidu, eastmoney
     _empty = {"industry": [], "concept": [], "region": [], "concept_tags": []}
-    return _route("concept_blocks", [("a_stock", lambda: _adapter().get_concept_blocks(code))], empty=_empty) or _empty
+    classified = _route("concept_blocks", [("baidu", lambda: baidu.concept_blocks(code))])
+    if classified:
+        return classified
+    # 分类完整性优先于供应商等级；混合板块不能提前覆盖可用的精确分类。
+    return _route("concept_blocks", [("eastmoney", lambda: eastmoney.related_boards(code))],
+                  empty=_empty) or _empty
 
 
 # ══════════════════════════════════════════════════════════
