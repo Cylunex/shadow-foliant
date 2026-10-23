@@ -43,6 +43,8 @@ jobs:
       REDIS_URL: redis://127.0.0.1:6379/0
       RUN_POSTGRES_INTEGRATION: "1"
       SHADOW_PLATFORM_ENABLED: "false"
+      # Provider unit tests patch process environment; no diagnostic DB worker may outlive them.
+      FOLIANT_RUNTIME_CAPABILITY_PERSIST: "false"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
