@@ -58,6 +58,35 @@ def test_real_task_reports_deliver_and_archive_once_without_critical_event(deliv
     assert detail["deliveries"][0]["status"] == "accepted"
 
 
+def test_morning_fund_valuation_delivers_all_five_indexes_to_qq_only(delivery, monkeypatch):
+    import sys
+    import fund_valuation
+    from jobs import jobs_hub as hub
+
+    indexes = ['上证50', '沪深300', '中证500', '中证1000', '创业板50']
+    monkeypatch.setattr(hub, '_fund_gate', lambda _: False)
+    monkeypatch.setattr(hub, '_log_run', lambda *a, **kw: None)
+    monkeypatch.setattr(fund_valuation, 'COMMON_INDEXES', indexes)
+    monkeypatch.setattr(fund_valuation, 'index_pe_percentile', lambda name: {
+        'index':name, 'pe':12.3, 'percentile':40, 'level':'正常偏低', 'multiplier':1.5})
+    monkeypatch.setitem(sys.modules, 'notification_router', router)
+    def forbidden(*a, **kw):
+        raise AssertionError('fund valuation must not send email')
+    monkeypatch.setitem(router.CHANNELS, 'email', forbidden)
+    service, sent = delivery
+    hub.task_fund_valuation_signal()
+    assert len(sent) == 1
+    title, body = sent[0]
+    assert title == '基金估值分位'
+    assert len(body.splitlines()) <= 8
+    assert all(f'· {name}:' in body for name in indexes)
+    messages = service.list_messages()
+    assert len(messages) == 1 and messages[0]['category'] == 'report'
+    detail = service.detail(messages[0]['message_id'])
+    assert [(d['channel'], d['status']) for d in detail['deliveries']] == [('qq', 'accepted')]
+    assert detail['deliveries'][0]['final_body'] == body
+
+
 @pytest.mark.parametrize('channel', ['qq', 'dingtalk'])
 def test_maximum_premarket_facts_survive_real_rendering_archive_and_dedup(delivery, monkeypatch, channel):
     from analysis.morning_strategy_report import build_diagnosis, format_plain_morning_notification

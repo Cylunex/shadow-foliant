@@ -1514,9 +1514,8 @@ def task_fund_valuation_signal():
             text = "🏦 宽基估值分位(定投择时)\n" + head + "\n\n" + "\n".join(lines)
             try:
                 from notification_router import send
-                # Slow valuation percentile changes belong in the full archive;
-                # do not occupy a separate QQ notification every morning.
-                send('archive', '基金估值分位', text, only_channels=['email'])
+                # The morning valuation report goes to QQ with all five indexes.
+                send('report', '基金估值分位', text, only_channels=['qq'], fallback=None)
             except Exception as ne:
                 print(f'[fund_valuation_signal] 推送失败: {ne}\n{text}')
         _log_run(job, 'success', error=f'indexes={len(rows)} cheap={len(cheap)}',
