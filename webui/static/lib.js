@@ -61,7 +61,7 @@ export async function api(path, opts){
     throw new Error('登录已失效')
   }
   const j = await r.json()
-  if(!j.ok) throw new Error(j.error || '请求失败')
+  if(!j.ok) throw new Error(j.error || (typeof j.detail==='string'?j.detail:'请求失败'))
   return j.data
 }
 
