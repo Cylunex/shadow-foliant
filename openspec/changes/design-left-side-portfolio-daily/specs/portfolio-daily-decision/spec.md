@@ -82,3 +82,37 @@
 - **GIVEN** 未来财报加入数据集、选择日未冻结相同字段，或仅有少数完整一日价格观察
 - **WHEN** 重放选择与评估改权
 - **THEN** 未来信息不应改变旧名单，无法复演则标不完整。短期表现或回填不是净收益证据，不能触发正式政策晋级。
+
+### Requirement: Publish verified index levels wherever a report describes the market
+市场通知 MUST 同时显示当前所处交易时段、五个核心宽基名称、可核验点位和较昨收涨跌幅。风险触发与去重继续依据已核风险信息。
+
+#### Scenario: Market opens after a dated premarket brief
+- **GIVEN** 09:00 只有上个交易日的收盘行情，10:08 已有当日开盘、昨收和完整指数报价
+- **WHEN** 生成盘前、盘中通知并经过实际渠道压缩
+- **THEN** 盘前标收盘日期。盘中两行保留五个点位和百分比，开盘与现时比较使用百分点。标题显示实际报价时间。
+
+#### Scenario: One incomplete index or a later quote
+- **GIVEN** 四只有可靠点位和幅度，第五只仅有当时核实的涨跌幅，或仅有晚于报告的报价
+- **WHEN** 生成 10:05 固定报告、午报或 QQ 风险报告
+- **THEN** 对第五只保留经独立核验的同时点字段，其余写待核，旧存档维持原时点。点位写入报告不会重复触发风险消息。
+
+### Requirement: Make opening reviews useful to the portfolio holder
+早盘通知 MUST 在最终正文的行数预算内区分持仓动作、场内 ETF、条件式新候选和数据时间，硬风险优先。相同行业、资讯和日内涨幅只能作各自范围内的证据。
+
+#### Scenario: Split fund and rising non-held stock
+- **GIVEN** 一只 ETF 公告拆分、账户批次尚未核对，另一只非持仓股早盘上涨且被问财提名
+- **WHEN** 编排首屏
+- **THEN** 保留 ETF 当日报价并提示核对拆分份额与成本，暂停成本类盈亏触发。新候选列来源与观察条件，仅当证据满足左侧模板才标左侧。缺合格候选可显示零只。
+
+### Requirement: Distinguish Wencai evidence, performance and portfolio action
+问财参考 MUST 按查询版本、组、首次可知时间和窗口记录，保存实际可复盘的排名及分母。历史价格评估 MUST 分开早盘可见名单、其他渠道和盘后补采。比较正式名单 MUST 使用共同完整日期与执行窗口。
+
+#### Scenario: Verified groups and late retry
+- **GIVEN** 盘前部分组已通过、另一组首次在 10:40 核验，另有一组无返回
+- **WHEN** 回放 10:08 通知并计算表现
+- **THEN** 首屏仅标当时通过的组，10:40 的新结果另记。重用的盘前结果不重复计入，报空与缺失分别计数，跨组重复股在整体只计一次。
+
+#### Scenario: Strong historical result and weak recent returns
+- **GIVEN** 旧版单日某组五只全涨，而现版同日配对回放没有稳定的扣成本优势
+- **WHEN** 确定首屏优先级
+- **THEN** 保留有本地证据的问财独有观察或交集出处，分别报告两版的期限、分母与缺项。不得按旧胜率给现版加买入权重。

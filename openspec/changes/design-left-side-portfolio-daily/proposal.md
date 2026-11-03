@@ -11,3 +11,5 @@
 实现只扩展现有 DataHub、持仓、任务、归档与研究服务。不加券商交易、跨项目个人数据同步、新 MCP 或独立审批页。既有 critical/market_risk 即时告警保持独立。
 
 详见 [设计与通知样例](design.md)、[需求场景](specs/portfolio-daily-decision/spec.md) 和 [实施验收清单](tasks.md)。
+
+早盘新增独立的[仓位与选股参考样稿](morning-brief.md)。该稿给出五个宽基的点位、涨跌幅与行情时点，定义了当期有效的问财参考如何进入持仓和候选说明。
