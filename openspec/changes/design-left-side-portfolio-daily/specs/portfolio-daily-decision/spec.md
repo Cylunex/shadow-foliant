@@ -116,3 +116,37 @@
 - **GIVEN** 旧版单日某组五只全涨，而现版同日配对回放没有稳定的扣成本优势
 - **WHEN** 确定首屏优先级
 - **THEN** 保留有本地证据的问财独有观察或交集出处，分别报告两版的期限、分母与缺项。不得按旧胜率给现版加买入权重。
+
+### Requirement: Attribute Losna discoveries and directed reviews separately
+Foliant MUST 锁定同一冻结输入、用途、可见资料、名单顺序与放弃项，再揭盲比较。服务端 MUST 将 Losna 与既有 Codex 外部研究按生产者、策略版本及运行独立存取和结算。
+
+#### Scenario: A Wencai-only discovery is assigned for review
+- **GIVEN** 点名工作读过问财名单并发现一条公司公告
+- **WHEN** Losna 提交观点或改用独立提名的产物类型
+- **THEN** 点名工作可提交有出处的复核，独立提名写入被拒绝。该标的不因榜外或被看好而获得独立发现成绩。
+
+#### Scenario: A blind job requests another result
+- **GIVEN** 盲提名工作尚未锁定，模型尝试读取正式榜、问财缓存、个人记忆或另一任务的证据 ID
+- **WHEN** 服务端或执行器校验来源、对象及阶段
+- **THEN** 拒绝该读取。可见范围内的证券研究继续，锁定后允许对照已冻结的结果。私人对照另用有账户授权的工作。
+
+### Requirement: Keep Losna operation comparisons inside authoritative account constraints
+私人 Skill MUST 以 Foliant 的持仓水位和最终裁决比较允许的操作，公开产物 MUST NOT 引用私人附件或账户数据。
+
+#### Scenario: Only part of an overweight portfolio position can be sold
+- **GIVEN** 18 只个股和 2 只 ETF，持仓甲只能卖部分，Losna 提出全退替换
+- **WHEN** Foliant 生成私人建议
+- **THEN** 显示实际可行备选、硬限制和部分减仓释放 0 个名额。新股票仍为观察；真实成交与账户刷新前，个股数保持 18。最晚截止到来时照常发超限日报。
+
+### Requirement: Validate receipt, deadline and promotion independently
+Foliant MUST 校验工作领取代次、输入版本、接收时刻及引用对象，并将实际采纳的产物版本绑定报告。迟到研究和后验反思只能用于以后的有效决定。
+
+#### Scenario: Worker restarts and the report has closed
+- **GIVEN** 旧执行者超时，备用执行者重领；正常内容已按时送出
+- **WHEN** 两者回传或查询接收回执
+- **THEN** 旧代次不能覆盖结果，同键同文只取原回执。迟到且仍有效的研究在后续复核中注明时间。Losna 的工作完成与成果附件均不触发第二条定时报告。
+
+#### Scenario: A successful experiment introduces a new feature
+- **GIVEN** Losna 的预登记实验提高了部分样本的指标，但变更超出已注册政策参数
+- **WHEN** Foliant 复核研究成果
+- **THEN** 保留影子结果、未成熟样本、成本和反例。新增条件先注册与验证；既有参数按策略证据门、版本条件及生效日处理。未来才知道的结果不能改写过去提名。

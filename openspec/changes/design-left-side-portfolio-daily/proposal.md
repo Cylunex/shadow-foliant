@@ -13,3 +13,5 @@
 详见 [设计与通知样例](design.md)、[需求场景](specs/portfolio-daily-decision/spec.md) 和 [实施验收清单](tasks.md)。
 
 早盘新增独立的[仓位与选股参考样稿](morning-brief.md)。该稿给出五个宽基的点位、涨跌幅与行情时点，定义了当期有效的问财参考如何进入持仓和候选说明。
+
+纳入 [Losna 投研协作](losna-research.md)。Losna 在当时的可用数据内提出选股候选、复核反证、比较持仓操作并发起策略实验。Foliant 校验产物、管理动作和送达。实施先验只读回放，再观察前向增量。
