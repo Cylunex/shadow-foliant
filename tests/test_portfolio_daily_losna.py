@@ -244,3 +244,16 @@ def test_native_daily_job_adapts_report_router_signature(store, monkeypatch):
     monkeypatch.setattr(notification_router, "send", router)
     assert portfolio_daily.run_daily_exit()["status"] == "accepted"
     assert calls[0][0] == "report" and "16/15" in calls[0][2]
+
+
+def test_lunch_report_keeps_verified_midday_close_levels():
+    from application.market_risk_notice import current_indices, index_lines, INDEX_CODES
+    now = NOW.replace(hour=12, minute=0)
+    quote_time = now.replace(hour=11, minute=30).strftime("%Y%m%d%H%M%S")
+    market = current_indices(now, lambda codes: {c: {"price": 3600, "change_pct": -1.2,
+        "quote_time": quote_time} for c in codes})
+    assert len(market["rows"]) == 5 and market["status"] == "session_close"
+    assert "午间收盘 11:30" in index_lines(market)[0]
+    stale = current_indices(now, lambda codes: {c: {"price": 3600, "change_pct": -1.2,
+        "quote_time": now.replace(hour=11, minute=0).strftime("%Y%m%d%H%M%S")} for c in codes})
+    assert stale["status"] == "unavailable"
