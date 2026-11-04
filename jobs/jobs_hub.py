@@ -5948,7 +5948,8 @@ def task_afternoon_portfolio():
     try:
         _refresh_market_gate('14:35')
         import os as _os6
-        target = int(_os6.getenv('EXIT_TARGET_POSITIONS', '20'))
+        from application.portfolio_daily import LIMIT
+        target = LIMIT
         from eod_review import run_eod_review
         res = run_eod_review(target_positions=target, record_signals=True)
         _action_cn = {'add': '加仓', 'hold': '不动', 'reduce': '减仓', 'sell': '卖出'}

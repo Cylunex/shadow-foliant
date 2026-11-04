@@ -12,7 +12,7 @@ import _bootstrap  # noqa: F401  路径引导
     同时保存一组决策信号(source_type='eod_review')。
 比原来 3 任务 / 2 次 LLM / 3 条推送 更省、更不矛盾、更好看。
 
-接口:run_eod_review(target_positions=20, record_signals=True) -> dict
+接口:run_eod_review(target_positions=15, record_signals=True) -> dict
 """
 
 import os
@@ -132,8 +132,10 @@ def _apply_portfolio_action_guard(
     }
 
 
-def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:
+def run_eod_review(target_positions: int = 15, record_signals: bool = True) -> Dict[str, Any]:
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
+    from application.portfolio_daily import LIMIT, load_account_counts, position_count_line
+    target_positions = min(LIMIT, max(1, int(target_positions)))
     try:
         from portfolio_db import portfolio_db
         # 与 DB 层语义对齐(2026-07-17 修):quantity=0=已清仓(get_all_stocks 已过滤),
@@ -176,7 +178,8 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
                      'sell_reasons': scan.get('sell_reasons') or []})
     rows.sort(key=lambda x: -x['exit_score'])
     n = len(rows)
-    over = n > target_positions
+    counts = load_account_counts(holdings)
+    over = counts['equity_count'] > target_positions
 
     # 2) 一次 LLM 只把确定性动作解释成人话；不得改变动作。
     decide = [r for r in rows if r['exit_score'] >= 15 or (r['sell_score'] or 0) >= 1][:18]
@@ -235,10 +238,11 @@ def run_eod_review(target_positions: int = 20, record_signals: bool = True) -> D
     out['ok'] = True
     out['items'] = items
     out['action_guard'] = action_guard
-    out['summary'] = (f'持仓{n}只(目标{target_positions}),清仓{n_sell}/减仓{n_reduce}'
+    out['summary'] = (position_count_line(counts, target_positions) + f'，清仓{n_sell}/减仓{n_reduce}'
                       f'·保护降级{action_guard["guarded_count"]}'
                       + ('·过度分散' if over else ''))
-    out['text'] = _format(items, n, target_positions, over)
+    out['position_counts'] = counts
+    out['text'] = position_count_line(counts, target_positions) + '\n' + _format(items, n, target_positions, over)
     return out
 
 
@@ -247,10 +251,10 @@ def _ai_fuse(decide: List[Dict[str, Any]], n: int, target: int, over: bool):
     if not decide:
         return ('', {})
     lines = [f"{r['code']} {r['name']}|既定动作:{r['rule_action']}|紧迫{r['exit_score']}|{r['category']}|"
-             f"浮盈亏{(r['pnl'] if r['pnl'] is not None else 0):+.0f}%|"
+             f"浮盈亏{str(r['pnl'])+'%' if r['pnl'] is not None else '待核'}|"
              f"持有{(r['holding_days'] if r.get('holding_days') is not None else '未知')}天|"
              f"风险分{r['sell_score']}({'/'.join(r['sell_reasons'][:3]) or '无'})" for r in decide]
-    prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'，持仓偏多' if over else ''}。
+    prompt = f"""你是持仓瘦身顾问。该账户证券合计 {n} 项；本次已分类个股{'超限' if over else '未确认超限'}，个股上限{target}，ETF另计。
 下面动作已经由确定性风控规则决定：
 
 {chr(10).join(lines)}
@@ -311,11 +315,11 @@ def _format(items, n, target, over) -> str:
             f'卖掉 {n_sell} 只' if n_sell else '',
             f'减一点 {n_reduce} 只' if n_reduce else '',
             f'可加一点 {n_add} 只' if n_add else '') if s)
-        lines = [f"🧹 尾盘只看这几件事", f"持仓 {n} 只：{verdict}，其余先不动。"]
+        lines = [f"🧹 尾盘只看这几件事", f"证券 {n} 项：{verdict}，其余先不动。"]
     else:
-        lines = ["🧹 尾盘持仓", f"持仓 {n} 只，今天没有必须处理的，先不动。"]
+        lines = ["🧹 尾盘持仓", f"证券 {n} 项，今天没有必须处理的，先不动。"]
     if over:
-        lines.append(f"仓位比较分散，后面慢慢收敛到约 {target} 只，不用一天卖完。")
+        lines.append(f"个股超限，逐步收敛到 {target} 只以内；ETF另计，减仓不释放名额。")
     act = sorted([it for it in items if it['action'] in ('sell', 'reduce', 'add')],
                  key=lambda x: (_ACT_ORDER.get(x['action'], 9), -x['exit_score']))[:5]
     if act:

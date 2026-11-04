@@ -257,3 +257,25 @@ def test_lunch_report_keeps_verified_midday_close_levels():
     stale = current_indices(now, lambda codes: {c: {"price": 3600, "change_pct": -1.2,
         "quote_time": now.replace(hour=11, minute=0).strftime("%Y%m%d%H%M%S")} for c in codes})
     assert stale["status"] == "unavailable"
+
+
+def test_legacy_exit_and_eod_use_equities_only_and_limit_15(monkeypatch):
+    from application import portfolio_daily
+    from portfolio import exit_advisor, eod_review
+    import portfolio_db
+    import jobs_hub
+    holdings = [{"code": f"600{i:03}", "quantity": 100} for i in range(16)]
+    holdings += [{"code": f"510{i:03}", "quantity": 100} for i in range(3)]
+    meta = {"stock_symbols": {h["code"] for h in holdings[:16]}, "etf_symbols": {h["code"] for h in holdings[16:]}}
+    monkeypatch.setattr(portfolio_db.portfolio_db, "get_all_stocks", lambda: holdings)
+    monkeypatch.setattr(jobs_hub, "_scan_holdings_with_snapshot", lambda: [])
+    monkeypatch.setattr(portfolio_daily, "load_account_counts", lambda rows: portfolio_daily.count_positions(rows, meta))
+    monkeypatch.setattr(exit_advisor, "_ai_narrative", lambda *args: "")
+    for run in [exit_advisor.run_exit_advice, eod_review.run_eod_review]:
+        result = run(target_positions=20, record_signals=False)
+        assert result["ok"] and result["position_counts"]["equity_count"] == 16
+        assert "个股 16/15" in result["text"] and "ETF 3" in result["text"]
+    del holdings[:2]
+    result = exit_advisor.run_exit_advice(record_signals=False)
+    assert len(holdings) == 17 and not result["over_diversified"]
+    assert "个股 14/15" in result["text"]

@@ -18,7 +18,7 @@ import _bootstrap  # noqa: F401  路径引导
 清仓/减仓结论写 decision_signal(source_type='exit_advice', action=sell/reduce)→ 16:10 方向后验
 (卖出期望跌→命中),让"清仓建议"也进可量化胜率环。
 
-接口:run_exit_advice(target_positions=20, record_signals=True) -> dict
+接口:run_exit_advice(target_positions=15, record_signals=True) -> dict
 """
 
 from datetime import datetime
@@ -119,9 +119,11 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
 _ACT_TAG = {'sell': '🟢清仓', 'reduce': '🟢减仓', 'hold': '⚪持有'}
 
 
-def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> Dict[str, Any]:
+def run_exit_advice(target_positions: int = 15, record_signals: bool = True) -> Dict[str, Any]:
     """对全部持仓打清仓紧迫分并排序 + 过度分散瘦身建议 + AI 整体策略。返回 {ok, items, text, ...}。"""
     out = {'ok': False, 'items': [], 'text': '', 'summary': ''}
+    from application.portfolio_daily import LIMIT, load_account_counts, position_count_line
+    target_positions = min(LIMIT, max(1, int(target_positions)))
     try:
         from portfolio_db import portfolio_db
         # quantity NULL=未填数量(保留),0=清仓(DB 层已滤);同 eod_review(2026-07-17 修)
@@ -166,10 +168,11 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
     items.sort(key=lambda x: -x['exit_score'])
 
     n = len(items)
-    over = n > target_positions
+    counts = load_account_counts(holdings)
+    over = counts['equity_count'] > target_positions
     # 紧迫清仓:分≥40;瘦身候选:过度分散时,分最高的几只(清到目标数)
     urgent = [it for it in items if it['exit_score'] >= 40]
-    trim_to_target = items[:max(0, n - target_positions)] if over else []
+    trim_to_target = [it for it in items if it['code'] in counts['equity_symbols'] and it['action'] == 'sell'][:counts['excess']] if over else []
 
     ai_summary = _ai_narrative(items, n, target_positions, over)
 
@@ -194,17 +197,18 @@ def run_exit_advice(target_positions: int = 20, record_signals: bool = True) -> 
     out['target'] = target_positions
     out['over_diversified'] = over
     out['urgent'] = urgent
-    out['summary'] = f'持仓{n}只(目标{target_positions}),紧迫清仓{len(urgent)}只' + ('·过度分散' if over else '')
-    out['text'] = _format(items, n, target_positions, over, trim_to_target, ai_summary)
+    out['summary'] = position_count_line(counts, target_positions) + f'，紧迫清仓{len(urgent)}只' + ('·过度分散' if over else '')
+    out['position_counts'] = counts
+    out['text'] = position_count_line(counts, target_positions) + '\n' + _format(items, n, target_positions, over, trim_to_target, ai_summary)
     return out
 
 
 def _ai_narrative(items, n, target, over) -> str:
     top = items[:min(12, n)]
     lines = [f"{it['code']} {it['name']} 紧迫分{it['exit_score']}|{it['category']}|"
-             f"浮盈亏{(it['pnl'] if it['pnl'] is not None else 0):+.0f}%|持有{it.get('holding_days','?')}天|{it['reason']}"
+             f"浮盈亏{str(it['pnl'])+'%' if it['pnl'] is not None else '待核'}|持有{it.get('holding_days') if it.get('holding_days') is not None else '未知'}天|{it['reason']}"
              for it in top]
-    prompt = f"""你是持仓瘦身顾问。该账户持有 {n} 只{'(明显过多/过度分散,健康零售组合通常 5-10 只)' if over else ''}。
+    prompt = f"""你是持仓瘦身顾问。该账户证券合计 {n} 项。用户个股上限{target}，ETF另计；本次已分类个股{'超限' if over else '未确认超限'}，不得以证券合计数量替代个股数。
 下面是按"清仓紧迫分"排序的持仓(分越高越该清):
 
 {chr(10).join(lines)}
@@ -217,14 +221,14 @@ def _ai_narrative(items, n, target, over) -> str:
     try:
         from deepseek_client import DeepSeekClient
         return (DeepSeekClient().call_api(
-            [{'role': 'system', 'content': '你是冷静的持仓瘦身顾问,敢于让用户割肉与收敛持仓,只给点名到票的可执行建议。'},
+            [{'role': 'system', 'content': '用户偏左侧交易。只解释既定风险动作和持仓结构，未知成本或持有日期保持待核，不因下跌或个股数量直接创造清仓动作。'},
              {'role': 'user', 'content': prompt}], max_tokens=900, call_type='exit_advice') or '').strip()
     except Exception as e:
         return f'(AI 策略生成失败: {type(e).__name__})'
 
 
 def _format(items, n, target, over, trim, ai_summary) -> str:
-    lines = [f"🧹 清仓决策助手 — 持仓 {n} 只" + (f"(目标~{target},过度分散建议瘦身)" if over else "")]
+    lines = [f"🧹 清仓决策助手 — 证券 {n} 项" + (f"(个股目标≤{target}，ETF另计)" if over else "")]
     if ai_summary:
         lines.append('\n' + ai_summary + '\n')
     show = [it for it in items if it['action'] in ('sell', 'reduce')][:10]
@@ -235,7 +239,7 @@ def _format(items, n, target, over, trim, ai_summary) -> str:
             lines.append(f"  {_ACT_TAG.get(it['action'])} {it['name']} {it['code']} "
                          f"[{it['category']}·紧迫{it['exit_score']:.0f}] 浮盈亏{pnl}\n      {it['reason']}")
     else:
-        lines.append('当前无紧迫清仓/减仓信号,持仓相对健康。')
+        lines.append('尚无证据充分的清仓/减仓动作；缺失数据继续待核。')
     return '\n'.join(lines)
 
 

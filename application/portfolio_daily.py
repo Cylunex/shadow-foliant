@@ -35,6 +35,18 @@ def count_positions(holdings, metadata):
                 equity_symbols=sorted(equities), excess=max(0, len(equities) - LIMIT))
 
 
+def load_account_counts(holdings):
+    from data.research_store import ResearchStore
+    from application.stock_budget import load_security_metadata
+    metadata = load_security_metadata(ResearchStore(ensure_schema=False))
+    return count_positions(holdings, metadata)
+
+
+def position_count_line(counts, limit=LIMIT):
+    return (f"个股 {counts['equity_count']}/{limit}｜ETF {counts['etf_count']} 只另计｜"
+            f"其他基金 {counts['other_fund_count']}｜待核 {counts['unknown_count']}")
+
+
 def build_daily(holdings, metadata, decisions, *, now, market_date=None):
     counts = count_positions(holdings, metadata)
     lines = [f"个股 {counts['equity_count']}/{LIMIT}，超 {counts['excess']} 只｜ETF {counts['etf_count']} 只另计",
