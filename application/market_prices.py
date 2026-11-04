@@ -7,6 +7,14 @@ from zoneinfo import ZoneInfo
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
+def shanghai_instant(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=SHANGHAI) if parsed.tzinfo is None else parsed.astimezone(SHANGHAI)
+    except (TypeError, ValueError):
+        return None
+
+
 def current_day_price(quote, now):
     if isinstance(quote.get("price"), bool):
         return None

@@ -5,12 +5,11 @@ Recorded intraday triggers retain their original date and protected final action
 """
 from __future__ import annotations
 
-from datetime import datetime
 import math
 from zoneinfo import ZoneInfo
 
 from application.results import clean_json, payload_hash
-from application.market_prices import current_day_price
+from application.market_prices import current_day_price, shanghai_instant
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAILY_REVIEW_SCHEMA = "daily-account-review-v1"
@@ -34,17 +33,8 @@ def _number(value):
         return None
 
 
-def _instant(value):
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return (parsed.replace(tzinfo=SHANGHAI) if parsed.tzinfo is None else
-                parsed.astimezone(SHANGHAI))
-    except (TypeError, ValueError):
-        return None
-
-
 def _today(value, now):
-    instant = _instant(value)
+    instant = shanghai_instant(value)
     return bool(instant and instant.date() == now.date() and instant <= now)
 
 

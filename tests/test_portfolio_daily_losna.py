@@ -106,9 +106,13 @@ def test_real_daily_payload_archives_and_retries_only_explicit_rejection(store, 
         return router.send("report", title, body, **kw)
     holdings = [{"code": f"600{i:03}", "quantity": 100} for i in range(150)]
     metadata = {"stock_symbols": {r["code"] for r in holdings}}
-    decisions = [{"symbol": h["code"], "name": "很长的示例名称" * 4,
-                  "action": "sell", "reason": "原计划失效需要复核" * 10} for h in holdings]
-    report = build_daily(holdings, metadata, decisions, now=NOW)
+    decisions = [{"symbol": h["code"], "name": "很长的示例名称\n" * 4, "price_usable": True,
+                  "quote_time_source": "provider", "quote_as_of": NOW.isoformat(),
+                  "action": "sell", "reason": "原计划失效需要复核\n" * 10} for h in holdings]
+    yesterday = NOW - timedelta(days=1)
+    prior = build_daily(holdings, metadata, [dict(row, action="hold", quote_as_of=yesterday.isoformat())
+                        for row in decisions], now=yesterday, snapshot_at=yesterday)
+    report = build_daily(holdings, metadata, decisions, now=NOW, snapshot_at=NOW, prior=prior)
     service = DailyExitService(store)
     assert service.deliver(report, sender)["status"] == "retryable"
     result = service.deliver(report, sender)
@@ -116,6 +120,8 @@ def test_real_daily_payload_archives_and_retries_only_explicit_rejection(store, 
     assert service.deliver(report, sender)["status"] == "accepted"
     assert len(calls) == 2 and calls[0] == calls[1]
     assert all("150/15" in body and "ETF 0" in body for body in calls)
+    assert all("判断变化｜600000" in body and "下次开市复核" in body for body in calls)
+    assert len(report["text"].splitlines()) == 8
 
 
 def test_fixed_summary_preserves_five_levels_and_equity_counts():
@@ -236,7 +242,28 @@ def test_native_daily_job_adapts_report_router_signature(store, monkeypatch):
     monkeypatch.setattr(data.research_store, "ResearchStore", lambda **kwargs: store)
     monkeypatch.setattr(portfolio_db.portfolio_db, "action_preview_context", lambda **kwargs: {"holdings": holdings, "watermark": "v1"})
     monkeypatch.setattr(stock_budget, "load_security_metadata", lambda *a: {"stock_symbols": {r["code"] for r in holdings}})
-    monkeypatch.setattr(jobs_hub, "get_indicator_snapshot", lambda key: {})
+    now = datetime(2026, 11, 4, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    yesterday = now - timedelta(days=1)
+    row = {"symbol": "600000", "action": "hold", "requested_action": "sell",
+           "price_usable": True, "quote_time_source": "provider", "quote_as_of": yesterday.isoformat()}
+    # The old archive format contains the examined risk rows but no judgments projection.
+    prior = build_daily(holdings, {"stock_symbols": {h["code"] for h in holdings}},
+                        [row], now=yesterday)
+    prior.pop("judgments")
+    service = DailyExitService(store)
+    service.deliver(prior, lambda *a, **kw: {"qq": (True, "HTTP 200")})
+    assert service.yesterday_accepted_report(now, owner="other") is None
+    assert service.yesterday_accepted_report(now + timedelta(days=1)) is None
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(portfolio_daily, "datetime", Clock)
+    current = {**row, "quote_as_of": now.isoformat(), "action": "reduce", "reason": "本批风控收紧"}
+    monkeypatch.setattr(jobs_hub, "get_indicator_snapshot",
+                        lambda key: {"generated_at": now.isoformat(), "holdings": [current]})
     calls = []
     def router(message_type, title, body, **kwargs):
         calls.append((message_type, title, body))
@@ -244,6 +271,36 @@ def test_native_daily_job_adapts_report_router_signature(store, monkeypatch):
     monkeypatch.setattr(notification_router, "send", router)
     assert portfolio_daily.run_daily_exit()["status"] == "accepted"
     assert calls[0][0] == "report" and "16/15" in calls[0][2]
+    assert "昨日14:30 不动 → 今日14:30 部分减仓复核｜当期依据：本批风控收紧" in calls[0][2]
+    assert portfolio_daily.run_daily_exit()["status"] == "accepted"
+    assert len(calls) == 1
+
+
+def test_judgment_comparison_filters_unavailable_future_and_unaccepted_evidence(store):
+    yesterday = NOW - timedelta(days=1)
+    holdings = [{"code": f"600{i:03}", "quantity": 100} for i in range(16)]
+    metadata = {"stock_symbols": {h["code"] for h in holdings}}
+    row = {"symbol": "600000", "quote_as_of": yesterday.isoformat(), "quote_time_source": "provider",
+           "price_usable": True, "action": "hold"}
+    prior = build_daily(holdings, metadata, [row], now=yesterday, snapshot_at=yesterday)
+    service = DailyExitService(store)
+    service.deliver(prior, lambda *a, **kw: {"qq": (False, "HTTP 429")})
+    assert service.yesterday_accepted_report(NOW) is None
+    today = {**row, "quote_as_of": NOW.isoformat(), "requested_action": "sell"}
+    report = build_daily(holdings, metadata, [today], now=NOW, snapshot_at=NOW, prior=prior)
+    assert "可比较的 1 只持仓，最终判断相同" in report["text"]
+    for override, snapshot_at in [
+        ({"quote_as_of": yesterday.isoformat()}, NOW),
+        ({"quote_as_of": (NOW + timedelta(minutes=1)).isoformat()}, NOW),
+        ({}, NOW + timedelta(minutes=1)),
+        ({"quote_time_source": "retrieved_at"}, NOW),
+        ({"price_usable": False}, NOW),
+        ({"symbol": "600001"}, NOW),
+        ({"action": "data_insufficient"}, NOW),
+    ]:
+        report = build_daily(holdings, metadata, [{**today, **override}], now=NOW,
+                             snapshot_at=snapshot_at, prior=prior)
+        assert "两期没有同一持仓的可比判断" in report["text"]
 
 
 def test_lunch_report_keeps_verified_midday_close_levels():

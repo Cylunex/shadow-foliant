@@ -1,12 +1,15 @@
 """Equity-only daily exit review. No trading and no LLM dependency."""
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from application.market_prices import shanghai_instant
+from application.results import payload_hash
 from data.reliability_store import ReliabilityStore
 
 TZ = ZoneInfo("Asia/Shanghai")
 LIMIT = 15
+FINAL_ACTIONS = {"sell": "退出复核", "reduce": "部分减仓复核", "hold": "不动", "add": "加仓复核"}
 
 
 def count_positions(holdings, metadata):
@@ -47,7 +50,41 @@ def position_count_line(counts, limit=LIMIT):
             f"其他基金 {counts['other_fund_count']}｜待核 {counts['unknown_count']}")
 
 
-def build_daily(holdings, metadata, decisions, *, now, market_date=None):
+def _observations(rows, cutoff):
+    """Freeze only final decisions with usable provider quotes from this report day."""
+    observations = {}
+    for row in rows:
+        quote_at = shanghai_instant(row.get("quote_as_of"))
+        if (row.get("action") not in FINAL_ACTIONS or row.get("price_usable") is not True
+                or row.get("quote_time_source") != "provider" or not quote_at
+                or quote_at.date() != cutoff.date() or quote_at > cutoff):
+            continue
+        symbol = str(row.get("symbol") or row.get("code"))
+        observations[symbol] = {"action": row["action"], "quote_at": quote_at.isoformat(),
+                                "reason": " ".join(str(row.get("reason") or "").split())[:55]}
+    return observations
+
+
+def _comparison_line(current, prior, now):
+    baseline = shanghai_instant((prior or {}).get("created_at"))
+    if not baseline or baseline.date() != now.date() - timedelta(days=1):
+        return "判断变化｜昨日无渠道已受理的超限日报，待积累可比记录。"
+    previous = prior.get("judgments")
+    if previous is None:  # Earlier reports archived review candidates only.
+        previous = _observations(prior.get("items") or [], baseline)
+    common = [symbol for symbol in current if symbol in previous]
+    if not common:
+        return "判断变化｜两期没有同一持仓的可比判断，请核对持仓与当日行情。"
+    for symbol in common:  # Current final-risk priority, independent of the raw trigger.
+        before, after = previous[symbol], current[symbol]
+        if before["action"] != after["action"]:
+            return (f"判断变化｜{symbol} 昨日{before['quote_at'][11:16]} {FINAL_ACTIONS[before['action']]}"
+                    f" → 今日{after['quote_at'][11:16]} {FINAL_ACTIONS[after['action']]}｜"
+                    f"当期依据：{after['reason'] or '待核'}")
+    return f"判断变化｜两期可比较的 {len(common)} 只持仓，最终判断相同。"
+
+
+def build_daily(holdings, metadata, decisions, *, now, market_date=None, snapshot_at=None, prior=None):
     counts = count_positions(holdings, metadata)
     lines = [f"个股 {counts['equity_count']}/{LIMIT}，超 {counts['excess']} 只｜ETF {counts['etf_count']} 只另计",
              f"其他场内基金 {counts['other_fund_count']} 只｜数量或品种待核 {counts['unknown_count']} 项"]
@@ -56,17 +93,25 @@ def build_daily(holdings, metadata, decisions, *, now, market_date=None):
                                    -float(r.get("exit_score") or 0), str(r.get("symbol") or r.get("code"))))
     reviews = [r for r in ranked if r.get("action") in {"sell", "reduce"}
                or r.get("requested_action") in {"sell", "reduce"}]
+    cutoff = shanghai_instant(snapshot_at)
+    local_now = shanghai_instant(now)
+    judgments = (_observations(ranked, cutoff) if cutoff and cutoff.date() == local_now.date()
+                 and cutoff <= local_now else {})
+    if counts["excess"]:
+        lines.insert(1, _comparison_line(judgments, prior, local_now))
     for row in reviews[:3]:
         symbol = str(row.get("symbol") or row.get("code"))
         action = row.get("action")
         label = "退出复核" if action == "sell" else "部分减仓复核" if action == "reduce" else "风险观察"
         reason = str(row.get("reason") or row.get("requested_reason") or row.get("rule_reason") or "原风险触发待核")
-        lines.append(f"{label}｜{symbol} {str(row.get('name') or '')[:20]}｜{reason[:65]}")
+        name = " ".join(str(row.get("name") or "").split())[:20]
+        lines.append(f"{label}｜{symbol} {name}｜{' '.join(reason.split())[:65]}")
     if not reviews:
         lines.append("今日无证据充分的整只退出候选。先核持仓、报价和原计划失效条件。")
     lines.append("整只可卖量待核；部分减仓释放0个名额，实际清仓成交入账后才扣只数。")
     lines.append(f"账本读取 {now.strftime('%m-%d %H:%M')}｜最近行情 {market_date or '待核'}｜下次开市复核可卖量和报价")
-    return {"counts": counts, "items": reviews, "text": "\n".join(lines),
+    frozen = {symbol: {"action": row["action"], "quote_at": row["quote_at"]} for symbol, row in judgments.items()}
+    return {"counts": counts, "items": reviews, "judgments": frozen, "text": "\n".join(lines),
             "required": counts["equity_count"] > LIMIT,
             "needs_review": counts["unknown_count"] > 0,
             "created_at": now.isoformat(), "auto_execution": False}
@@ -76,10 +121,16 @@ class DailyExitService:
     def __init__(self, store):
         self.repo = ReliabilityStore(store)
 
+    def yesterday_accepted_report(self, now, *, owner="primary"):
+        day = shanghai_instant(now).date() - timedelta(days=1)
+        record = self.repo.get("daily_equity_exit", f"daily_equity_exit:{day}:{payload_hash(owner)[:12]}", owner)
+        if record and any(receipt[0] for receipt in record.get("receipts", {}).values()):
+            return record["report"]
+        return None
+
     def deliver(self, report, sender, *, owner="primary"):
         day = datetime.fromisoformat(report["created_at"]).astimezone(TZ).date().isoformat()
         kind = "daily_equity_exit" if report["required"] else "daily_equity_count_review"
-        from application.results import payload_hash
         key = f"{kind}:{day}:{payload_hash(owner)[:12]}"
         if not report["required"] and not report["needs_review"]:
             # Close an explicitly rejected obligation against fresh holdings.
@@ -158,7 +209,9 @@ def run_daily_exit():
     snapshot = get_indicator_snapshot("intraday_decision") or {}
     # Old snapshots are useful observations, never today's executable orders.
     decisions = snapshot.get("holdings") or []
+    service = DailyExitService(store)
     report = build_daily(context["holdings"], metadata, decisions, now=now,
+                         prior=service.yesterday_accepted_report(now), snapshot_at=snapshot.get("generated_at"),
                          market_date=str(snapshot.get("generated_at") or "")[:10] or None)
     report["holdings_watermark"] = context.get("watermark")
-    return DailyExitService(store).deliver(report, sender)
+    return service.deliver(report, sender)
