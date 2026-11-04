@@ -169,7 +169,7 @@ def prepare_followups():
     dashboard = service.dashboard()
     public = {key: dashboard.get(key) for key in ("policy_timeline", "experiments", "model_books")}
     result["strategy"] = research.create(
-        purpose="strategy_validation", input_version=payload_hash(public),
+        purpose="strategy_validation", input_version=payload_hash({"facts": public, "run_id": capsule["run_id"]}),
         candidates=capsule["opportunity_set"]["top15"],
         evidence=[{"evidence_id": payload_hash(public), "fact": public}],
         owner="research", ttl_minutes=120, run_id=capsule["run_id"])
@@ -182,7 +182,7 @@ def prepare_followups():
     candidates = [{**r, "symbol": str(r.get("symbol") or r.get("code"))}
                   for r in context["holdings"]]
     result["portfolio"] = research.create(
-        purpose="portfolio_review", input_version=payload_hash(context),
+        purpose="portfolio_review", input_version=payload_hash({"context": context, "run_id": capsule["run_id"]}),
         candidates=candidates,
         evidence=[{"evidence_id": payload_hash(preview), "fact": preview}],
         owner="primary", ttl_minutes=120, run_id=capsule["run_id"])
