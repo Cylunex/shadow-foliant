@@ -409,3 +409,16 @@ def test_strategy_evidence_budget_keeps_metrics_and_marks_omissions():
     assert group["strategies"][0]["avg_return_pct"] == -1.5
     assert group["strategies"][0]["effective_samples"] == 0
     assert "unused_raw" not in group["strategies"][0]
+
+
+def test_lunch_provider_midday_republication_is_dated_reference():
+    from application.market_risk_notice import current_indices, index_lines
+    now = NOW.replace(hour=12, minute=45)
+    quote_at = now.replace(hour=12, minute=5).strftime("%Y%m%d%H%M%S")
+    market = current_indices(now, lambda codes: {code: {"price": 3600, "change_pct": .2,
+        "quote_time": quote_at} for code in codes})
+    assert len(market["rows"]) == 5
+    assert "午间参考 12:05" in index_lines(market)[0]
+    after_open = current_indices(now.replace(hour=13, minute=5), lambda codes: {code: {"price": 3600, "change_pct": .2,
+        "quote_time": quote_at} for code in codes})
+    assert after_open["status"] == "unavailable"

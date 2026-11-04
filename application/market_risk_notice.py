@@ -69,7 +69,7 @@ def current_indices(now: datetime, loader: Callable | None = None,
                              "as_of": quote_at.isoformat(), "source": "tencent_full_index_quote"})
             continue
         lunch_close = (lunch and quote_at is not None and
-                       (11, 29) <= (quote_at.hour, quote_at.minute) <= (11, 31))
+                       (11, 29) <= (quote_at.hour, quote_at.minute) < (13, 0))
         if (quote_at is None or quote_at.date() != now.date()
                 or quote_at > now + timedelta(minutes=1)
                 or now - quote_at > timedelta(minutes=90 if lunch_close else 8 if not post_close else 360)
@@ -109,7 +109,9 @@ def index_lines(market):
     stamps = [str(r.get("as_of") or "")[11:16] for r in rows.values()]
     stamp = min(stamps) if stamps else "待核"
     if market.get("status") == "session_close" and rows:
-        stamp = "午间收盘 " + stamp
+        closing_tick = all((11, 30) <= (_stamp(r.get("as_of")).hour, _stamp(r.get("as_of")).minute) <= (11, 31)
+                           for r in rows.values() if _stamp(r.get("as_of")))
+        stamp = ("午间收盘 " if closing_tick else "午间参考 ") + stamp
     if market.get("status") == "prior_close" and rows:
         stamp = "已核收盘 " + min(r["as_of"][:16].replace("T", " ") for r in rows.values())
     return [f"指数 {stamp}｜" + " · ".join(labels[:2]), " · ".join(labels[2:])]
