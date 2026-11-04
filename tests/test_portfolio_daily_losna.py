@@ -336,3 +336,41 @@ def test_legacy_exit_and_eod_use_equities_only_and_limit_15(monkeypatch):
     result = exit_advisor.run_exit_advice(record_signals=False)
     assert len(holdings) == 17 and not result["over_diversified"]
     assert "个股 14/15" in result["text"]
+
+
+def test_frozen_feature_cache_reuses_manifest_and_excludes_account_fields(store, monkeypatch):
+    import pandas as pd
+    from types import SimpleNamespace
+    from analysis import independent_selector
+    from application.losna_research import frozen_features, attach_feature_evidence
+    calls = []
+    def prepare(*args):
+        calls.append(1)
+        return pd.DataFrame([{"symbol": "600001", "industry": "制造业", "close": 10,
+            "pe_ttm": 8, "cash_quality": 1.2, "ret_60": -.15, "volume_20_vs_60": 1.1,
+            "cost_price": 999, "quantity": 50000, "owner": "private"}]), {"market_as_of": "2026-11-03", "market_input_hash": "frozen-hash"}
+    monkeypatch.setattr(independent_selector, "_prepare_frame", prepare)
+    service = SimpleNamespace(store=store)
+    capsule = {"manifest_id": "frozen-manifest"}
+    frame, source = frozen_features(service, capsule)
+    assert frame.iloc[0]["close"] == 10
+    assert not {"cost_price", "quantity", "owner"} & set(frame.columns)
+    candidates, evidence = attach_feature_evidence(service, capsule, [{"symbol": "600001"}, {"symbol": "600002"}], [])
+    assert len(calls) == 1
+    assert evidence[0]["fact"]["frozen_features"]["cash_quality"] == 1.2
+    assert evidence[0]["fact"]["source"]["market_input_hash"] == "frozen-hash"
+    assert evidence[1]["fact"]["frozen_features"] is None
+    assert candidates[0]["feature_evidence_ref"] == evidence[0]["evidence_id"]
+
+
+def test_private_review_only_copies_relevant_final_actions(monkeypatch):
+    from application.losna_research import private_action_evidence
+    from jobs import jobs_hub
+    monkeypatch.setattr(jobs_hub, "get_indicator_snapshot", lambda key: {"generated_at": NOW.isoformat(),
+        "holdings": [{"symbol": "600001", "action": "reduce", "requested_action": "sell",
+                       "reason": "组合保护后减仓", "cost_price": 999},
+                      {"symbol": "600002", "action": "sell"}], "portfolio_action_guard": {"guarded_count": 1}})
+    fact = private_action_evidence([{"code": "600001"}])["fact"]
+    assert len(fact["final_actions"]) == 1
+    assert fact["final_actions"][0]["requested_action"] == "sell"
+    assert "cost_price" not in fact["final_actions"][0]
