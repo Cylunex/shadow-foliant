@@ -362,6 +362,7 @@ MACHINE_CAPABILITIES = {
 
 _audit_logger = logging.getLogger("webui.security_audit")
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/research/decision-loop")
+_add(ROUTE_POLICIES, Access.USER, "GET", "/api/research/weekly-contribution")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/action-plan")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/research/cases")
 _add(ROUTE_POLICIES, Access.ADMIN, "GET", "/api/portfolio/account-facts")

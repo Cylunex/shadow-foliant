@@ -1,4 +1,5 @@
 """Research/public-private separation for decision loop views."""
+from datetime import date
 from fastapi import Body, Query, Request, HTTPException
 from functools import wraps
 
@@ -27,6 +28,14 @@ def register_decision_loop_routes(app, *, agent_result, agent_error, browser_ok)
     def browser_loop():
         from application.decision_loop import DecisionLoopService
         return browser_ok(DecisionLoopService().dashboard())
+
+    @app.get("/api/research/weekly-contribution")
+    @browser_errors
+    def browser_weekly_contribution(week_of: date | None = None):
+        from application.weekly_contribution import weekly_contribution
+        from data.research_store import ResearchStore
+        return browser_ok(weekly_contribution(ResearchStore(ensure_schema=False),
+                          week_of=week_of.isoformat() if week_of else None))
 
     @app.get("/api/research/cases")
     def browser_cases():

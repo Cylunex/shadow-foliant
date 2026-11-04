@@ -1,9 +1,10 @@
 import { reactive, onMounted } from 'vue'
 import { api, cls, fmt } from '../lib.js'
+import WeeklyContribution from '../research-weekly.js'
 import { EvidenceDetails, EvidenceEditor, editorState, selectDraft, isSaved, hasChanges, resetEditor, saveDraft, lockDraft } from '../research-evidence.js'
 
 export default {
-  components: { EvidenceDetails, EvidenceEditor },
+  components: { WeeklyContribution, EvidenceDetails, EvidenceEditor },
   template: `
   <section class="card" aria-label="研究决策闭环">
     <div class="section-head"><div><h2>研究 → 决策 → 验证</h2><p>选股名单、可成交模型与真实账户分开看；未成熟不代表零收益。</p></div>
@@ -14,6 +15,7 @@ export default {
         <div class="stat-label">{{bookName(book.kind)}}</div><div class="stat-note">{{book.description}}</div>
       </article>
     </div>
+    <weekly-contribution />
     <div v-if="s.data?.capsule" class="list-item"><div class="list-body">
       <div class="list-title">冻结上下文 {{s.data.capsule.capsule_id.slice(0,15)}}…</div>
       <div class="list-meta">行情日期 {{s.data.capsule.market_as_of}} · 发布 {{s.data.capsule.published_at}}<br>

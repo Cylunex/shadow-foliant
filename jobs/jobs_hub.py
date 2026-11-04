@@ -5914,9 +5914,16 @@ def task_losna_followups():
     try:
         from application.losna_research import prepare_followups
         prepare_followups()
-        _log_run("losna_followups", "success", started_at=started, finished_at=datetime.now().isoformat())
     except Exception as exc:
         _log_run("losna_followups", "error", error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now().isoformat())
+    else:
+        _log_run("losna_followups", "success", started_at=started, finished_at=datetime.now().isoformat())
+    try:
+        from application.weekly_paper_pair import freeze_latest_pair
+        freeze_latest_pair()
+    except Exception as exc:
+        _log_run("losna_weekly_pair", "error", error=type(exc).__name__,
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
