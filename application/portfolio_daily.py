@@ -125,6 +125,8 @@ def run_daily_exit():
     from application.stock_budget import load_security_metadata
     from notify.notification_router import send
     from jobs.jobs_hub import get_indicator_snapshot
+    def sender(title, text, **kwargs):
+        return send("report", title, text, **kwargs)
     now = datetime.now(TZ)
     store = ResearchStore(ensure_schema=False)
     try:
@@ -139,7 +141,7 @@ def run_daily_exit():
                   "text": f"今日持仓账本读取失败；上次核实 {last['created_at'][:10]} 个股 {last['counts']['equity_count']} 只。\n"
                           "上次个股超限，今日只数与清仓顺序待核。\n"
                           "账本恢复后会重算当日清仓建议；未核实的旧动作只供历史查询。"}
-        return DailyExitService(store).deliver(report, send)
+        return DailyExitService(store).deliver(report, sender)
     metadata = load_security_metadata(store, now.date().isoformat())
     snapshot = get_indicator_snapshot("intraday_decision") or {}
     # Old snapshots are useful observations, never today's executable orders.
@@ -147,4 +149,4 @@ def run_daily_exit():
     report = build_daily(context["holdings"], metadata, decisions, now=now,
                          market_date=str(snapshot.get("generated_at") or "")[:10] or None)
     report["holdings_watermark"] = context.get("watermark")
-    return DailyExitService(store).deliver(report, send)
+    return DailyExitService(store).deliver(report, sender)

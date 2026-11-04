@@ -223,3 +223,24 @@ def test_unknown_pnl_does_not_create_flat_position_or_health_fact():
     _, category, action, reasons = _exit_score({"pnl": None, "change": None}, 120)
     assert category == "证据待核" and action == "hold"
     assert not any("横盘" in text and "判定" not in text for text in reasons)
+
+
+def test_native_daily_job_adapts_report_router_signature(store, monkeypatch):
+    from application import portfolio_daily
+    from notify import notification_router
+    from jobs import jobs_hub
+    import portfolio_db
+    from application import stock_budget
+    import data.research_store
+    holdings = [{"code": f"600{i:03}", "quantity": 100} for i in range(16)]
+    monkeypatch.setattr(data.research_store, "ResearchStore", lambda **kwargs: store)
+    monkeypatch.setattr(portfolio_db.portfolio_db, "action_preview_context", lambda **kwargs: {"holdings": holdings, "watermark": "v1"})
+    monkeypatch.setattr(stock_budget, "load_security_metadata", lambda *a: {"stock_symbols": {r["code"] for r in holdings}})
+    monkeypatch.setattr(jobs_hub, "get_indicator_snapshot", lambda key: {})
+    calls = []
+    def router(message_type, title, body, **kwargs):
+        calls.append((message_type, title, body))
+        return {"qq": (True, "HTTP 200")}
+    monkeypatch.setattr(notification_router, "send", router)
+    assert portfolio_daily.run_daily_exit()["status"] == "accepted"
+    assert calls[0][0] == "report" and "16/15" in calls[0][2]
