@@ -42,7 +42,7 @@ def _stamp(value: Any) -> datetime | None:
 
 
 def current_indices(now: datetime, loader: Callable | None = None,
-                    *, post_close: bool = False) -> dict[str, Any]:
+                    *, post_close: bool = False, prior_close: bool = False) -> dict[str, Any]:
     """Read existing provider's full index quotes; reject receipt-time-only data."""
     if loader is None:
         from data.sources.tencent import quotes
@@ -58,6 +58,15 @@ def current_indices(now: datetime, loader: Callable | None = None,
         quote_at = _stamp(value.get("quote_time")) if isinstance(value, dict) else None
         pct = _number(value.get("change_pct")) if isinstance(value, dict) else None
         price = _number(value.get("price")) if isinstance(value, dict) else None
+        if prior_close:
+            # A provider-dated close is historical context, never today's risk baseline.
+            if (quote_at is not None and quote_at.date() < now.date()
+                    and now - quote_at <= timedelta(days=14)
+                    and (quote_at.hour, quote_at.minute) >= (15, 0)
+                    and pct is not None and -25 <= pct <= 25 and price is not None and price > 0):
+                rows.append({"name": name, "price": price, "change_pct": pct,
+                             "as_of": quote_at.isoformat(), "source": "tencent_full_index_quote"})
+            continue
         if (quote_at is None or quote_at.date() != now.date()
                 or quote_at > now + timedelta(minutes=1)
                 or now - quote_at > timedelta(minutes=8 if not post_close else 360)
@@ -68,7 +77,7 @@ def current_indices(now: datetime, loader: Callable | None = None,
                      "open": _number(value.get("open")), "change_pct": round(pct, 3),
                      "as_of": quote_at.isoformat(timespec="seconds"),
                      "source": "tencent_full_index_quote", "time_source": "provider"})
-    return {"version": VERSION, "status": "current" if rows else "unavailable",
+    return {"version": VERSION, "status": ("prior_close" if prior_close else "current") if rows else "unavailable",
             "rows": rows, "observed_at": now.isoformat(timespec="seconds")}
 
 
@@ -96,6 +105,8 @@ def index_lines(market):
               for name in INDEX_CODES]
     stamps = [str(r.get("as_of") or "")[11:16] for r in rows.values()]
     stamp = min(stamps) if stamps else "待核"
+    if market.get("status") == "prior_close" and rows:
+        stamp = "已核收盘 " + min(r["as_of"][:16].replace("T", " ") for r in rows.values())
     return [f"指数 {stamp}｜" + " · ".join(labels[:2]), " · ".join(labels[2:])]
 
 

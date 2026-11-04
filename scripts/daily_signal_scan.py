@@ -747,16 +747,9 @@ def portfolio_analysis(session_name="持仓"):
 def noon_report():
     """午盘只回答大盘涨跌、持仓涨跌和是否加减仓。"""
     now_text = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
-    index_rows = []
-    try:
-        want = ["上证指数", "深证成指", "创业板指"]
-        idx_map = {d.get("name"): d for d in (datahub.indices() or [])}
-        for name in want:
-            row = idx_map.get(name) or {}
-            if row.get('change_pct') is not None:
-                index_rows.append((name, float(row.get('change_pct') or 0)))
-    except Exception:
-        index_rows = []
+    from application.market_risk_notice import current_indices, index_lines, SHANGHAI
+    market_snapshot = current_indices(datetime.now(SHANGHAI))
+    index_rows = [(row["name"], row["change_pct"]) for row in market_snapshot["rows"]]
 
     holding_changes = []
     try:
@@ -787,7 +780,7 @@ def noon_report():
         direction, action = '震荡', '不动'
         reason = '涨跌都不明显，下午先看，不急着动。'
 
-    market = '、'.join(f'{name}{change:+.2f}%' for name, change in index_rows) or '指数数据待补'
+    market = '\n'.join(index_lines(market_snapshot))
     holdings = ''
     if holding_changes:
         up = sum(1 for change, _, _ in holding_changes if change > 0)
@@ -803,9 +796,10 @@ def noon_report():
         from notify.plain_language import build_market_message
         title, body = build_market_message(
             label='午盘', direction=direction, action=action,
-            market=market, holdings=holdings, reason=reason, as_of=now_text,
+            market='', holdings=holdings, reason=reason, as_of=now_text,
         )
-        return title + '\n' + body
+        parts = body.splitlines()
+        return '\n'.join([title, parts[0], *index_lines(market_snapshot), *parts[1:]])
     except Exception:
         return f'午盘：{direction}｜{action}\n大盘：{market}\n持仓：{holdings}\n原因：{reason}'
 

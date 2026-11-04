@@ -33,9 +33,10 @@ def main():
         raise ValueError("input_too_large")
     data = json.loads(raw or "{}")
     if args.name == "claim":
-        if data:
-            raise ValueError("claim_has_no_input")
-        result = service.claim(owner=owner, worker=worker, purposes=purposes)
+        if set(data) - {"claim_id"} or (data.get("claim_id") is not None and
+                (not isinstance(data["claim_id"], str) or not 1 <= len(data["claim_id"]) <= 200)):
+            raise ValueError("invalid_claim_identity")
+        result = service.claim(owner=owner, worker=worker, purposes=purposes, claim_id=data.get("claim_id"))
     else:
         old = service.get(data["identity"], owner)
         if old["packet"]["purpose"] not in purposes:

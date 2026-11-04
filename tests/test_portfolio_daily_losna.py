@@ -170,3 +170,56 @@ def test_blind_nominations_use_existing_pipeline_without_activating_policy(store
         assert conn.execute("SELECT COUNT(*) FROM strategy_policy_versions").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_rejected_daily_refreshes_holdings_and_closes_obligation(store):
+    holdings = [{"code": f"600{i:03}", "quantity": 100} for i in range(17)]
+    metadata = {"stock_symbols": {r["code"] for r in holdings}}
+    service = DailyExitService(store)
+    reports = []
+    def reject(title, text, **kw):
+        reports.append(text)
+        return {"qq": (False, "HTTP 429")}
+    first = build_daily(holdings, metadata, [], now=NOW)
+    service.deliver(first, reject)
+    service.deliver(build_daily(holdings[1:], metadata, [], now=NOW), reject)
+    assert "17/15" in reports[0] and "16/15" in reports[1]
+    assert service.deliver(build_daily(holdings[2:], metadata, [], now=NOW), reject)["status"] == "not_required"
+    assert service.repo.list("daily_equity_exit", owner="primary")[0]["status"] == "closed"
+
+
+def test_research_claim_lease_fences_old_worker_and_expires(store):
+    clock = [NOW]
+    service = LosnaResearch(store, lambda: clock[0])
+    job = service.create(purpose="directed_review", input_version="lease", candidates=[], evidence=[], owner="research")
+    old = service.claim(owner="research", worker="losna", purposes=["directed_review"], claim_id="run1")
+    assert service.claim(owner="research", worker="losna", purposes=["directed_review"], claim_id="run2")["status"] == "empty"
+    clock[0] += timedelta(minutes=4)
+    new = service.claim(owner="research", worker="losna", purposes=["directed_review"], claim_id="run2")
+    assert new["revision"] > old["revision"]
+    with pytest.raises(ValueError, match="generation"):
+        service.submit(identity=job["object_id"], owner="research", worker="losna", generation=old["revision"], result={"reviews": [], "next_check": "核对"})
+    clock[0] += timedelta(hours=1)
+    assert service.claim(owner="research", worker="losna", purposes=["directed_review"])["status"] == "empty"
+    assert service.get(job["object_id"], "research")["status"] == "expired"
+
+
+def test_preopen_indices_retain_confirmed_close_without_current_risk():
+    from application.market_risk_notice import current_indices, index_lines, INDEX_CODES
+    before = NOW.replace(hour=9, minute=0)
+    close = before - timedelta(days=2)
+    close = close.replace(hour=15, minute=0)
+    market = current_indices(before, lambda codes: {code: {"price": 3600, "change_pct": -2,
+        "quote_time": close.strftime("%Y%m%d%H%M%S")} for code in codes}, prior_close=True)
+    assert market["status"] == "prior_close" and len(market["rows"]) == 5
+    assert "已核收盘" in index_lines(market)[0]
+    assert close.strftime("%Y-%m-%d") in index_lines(market)[0]
+    assert current_indices(before, lambda codes: {code: {"price": 3600, "change_pct": -2,
+        "quote_time": close.strftime("%Y%m%d%H%M%S")} for code in codes})["status"] == "unavailable"
+
+
+def test_unknown_pnl_does_not_create_flat_position_or_health_fact():
+    from portfolio.exit_advisor import _exit_score
+    _, category, action, reasons = _exit_score({"pnl": None, "change": None}, 120)
+    assert category == "证据待核" and action == "hold"
+    assert not any("横盘" in text and "判定" not in text for text in reasons)

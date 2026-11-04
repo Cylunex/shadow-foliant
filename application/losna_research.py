@@ -34,7 +34,7 @@ class LosnaResearch:
             raise ValueError("research_not_found")
         return result
 
-    def claim(self, *, owner, worker, purposes):
+    def claim(self, *, owner, worker, purposes, claim_id=None):
         if not worker or not set(purposes) <= PURPOSES:
             raise ValueError("research_claim_invalid")
         for item in reversed(self.repo.list(KIND, owner=owner)):
@@ -42,12 +42,24 @@ class LosnaResearch:
                 continue
             with self.repo.transaction() as cur:
                 old = self.repo.read(cur, KIND, item["object_id"], owner)
-                if old["status"] == "claimed" and old.get("worker") == worker and datetime.fromisoformat(old["packet"]["deadline"]) > self.clock():
-                    return old
-                if old["status"] != "pending" or datetime.fromisoformat(old["packet"]["deadline"]) <= self.clock():
+                now = self.clock()
+                if old["status"] in {"pending", "claimed"} and datetime.fromisoformat(old["packet"]["deadline"]) <= now:
+                    self.repo.append(cur, KIND, item["object_id"], owner,
+                                     {**old, "status": "expired", "expired_at": now.isoformat()}, old)
+                    continue
+                if old["status"] == "claimed":
+                    if old.get("worker") == worker and old.get("claim_id") == (claim_id or worker):
+                        return old
+                    lease = old.get("lease_until") or old["packet"]["deadline"]
+                    if datetime.fromisoformat(lease) > now:
+                        continue
+                elif old["status"] != "pending":
                     continue
                 return self.repo.append(cur, KIND, item["object_id"], owner,
-                                        {**old, "status": "claimed", "worker": worker}, old)
+                                        {**old, "status": "claimed", "worker": worker,
+                                         "claim_id": claim_id or worker,
+                                         "lease_until": min(now + timedelta(minutes=3),
+                                             datetime.fromisoformat(old["packet"]["deadline"])).isoformat()}, old)
         return {"status": "empty"}
 
     def submit(self, *, identity, owner, worker, generation, result):
@@ -111,7 +123,8 @@ def prepare_reviews():
     evidence = [{"evidence_id": payload_hash(row), "fact": row} for row in candidates]
     from selection.reference_display import latest_openapi_shadow, openapi_trial_reference
     formal = service.store.latest_formal_selection() or {}
-    reference = openapi_trial_reference(latest_openapi_shadow(formal.get("artifacts") or {}))
+    reference = (openapi_trial_reference(latest_openapi_shadow(formal.get("artifacts") or {}))
+                 if formal.get("run_id") == capsule.get("run_id") else {})
     known = {row["symbol"] for row in candidates}
     candidates = list(candidates)
     for group in (reference.get("strategies") or {}).values():
@@ -136,7 +149,7 @@ def latest_review(run_id, *, now, store=None):
         if (record["status"] == "received" and packet["purpose"] in {"directed_review", "independent_discovery"}
                 and packet.get("run_id") == run_id
                 and datetime.fromisoformat(record["received_at"]) <= now
-                and datetime.fromisoformat(packet["deadline"]).date() == now.date()):
+                and datetime.fromisoformat(packet["deadline"]) > now):
             return {"id": record["object_id"], "reviews": record["result"]["reviews"],
                     "next_check": record["result"]["next_check"]}
     return {}

@@ -63,24 +63,25 @@ def _holding_age_evidence(holding: Dict[str, Any]) -> Dict[str, Any]:
 def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
     """返回 (exit_score 0-100, category, action, reasons[])。分越高越该清。"""
     pnl = scan.get('pnl')
-    pnl = float(pnl) if pnl is not None else 0.0
-    change = float(scan.get('change') or 0)
+    from application.stock_budget import _finite
+    pnl = _finite(pnl)
+    change = _finite(scan.get('change'))
     sell_score = int(scan.get('sell_score') or 0)
     reasons: List[str] = []
     score = 0.0
 
     # ① 割肉止损
-    if pnl <= -15:
+    if pnl is not None and (pnl <= -15):
         score += 55; reasons.append(f'浮亏{pnl:.0f}%已破位')
-    elif pnl <= -10 and sell_score >= 1:
+    elif pnl is not None and (pnl <= -10 and sell_score >= 1):
         score += 45; reasons.append(f'浮亏{pnl:.0f}%+技术破位')
-    elif pnl <= -8 and sell_score >= 2:
+    elif pnl is not None and (pnl <= -8 and sell_score >= 2):
         score += 35; reasons.append(f'浮亏{pnl:.0f}%+多重风险')
 
     # ② 止盈锁定(大浮盈 + 动能转弱)
-    if pnl >= 50 and (change < 0 or sell_score >= 1):
+    if pnl is not None and (pnl >= 50 and ((change is not None and change < 0) or sell_score >= 1)):
         score += 35; reasons.append(f'浮盈{pnl:.0f}%但动能转弱,锁利')
-    elif pnl >= 30 and (change < -1 or sell_score >= 1):
+    elif pnl is not None and (pnl >= 30 and ((change is not None and change < -1) or sell_score >= 1)):
         score += 25; reasons.append(f'浮盈{pnl:.0f}%遇阻,落袋部分')
 
     # ③ 破位减仓(风险信号)
@@ -90,23 +91,26 @@ def _exit_score(scan: Dict[str, Any], hold_days: Optional[int]):
         score += 10; reasons.append('单一风险:' + '/'.join((scan.get('sell_reasons') or [])[:2]))
 
     # ④ 长期效率观察（只有明确建仓日期才能进入；本身不构成卖出依据）
-    if hold_days is not None and hold_days >= 90 and -8 < pnl < 8:
+    if pnl is not None and (hold_days is not None and hold_days >= 90 and -8 < pnl < 8):
         score += 22; reasons.append(f'明确持有{hold_days}天且横盘({pnl:+.0f}%),仅列入效率观察')
 
     score = min(100.0, score)
     # 归类(取最主导的触发)
-    if pnl <= -12 or (pnl <= -8 and sell_score >= 2):
+    if pnl is not None and (pnl <= -12 or (pnl <= -8 and sell_score >= 2)):
         cat, act = '割肉止损', 'sell'
-    elif pnl >= 30 and score >= 25:
+    elif pnl is not None and (pnl >= 30 and score >= 25):
         cat, act = '止盈锁定', 'reduce'
     elif sell_score >= 2:
         cat, act = '破位减仓', 'reduce'
-    elif hold_days is not None and hold_days >= 90 and -8 < pnl < 8 and score >= 20:
+    elif pnl is not None and hold_days is not None and hold_days >= 90 and -8 < pnl < 8 and score >= 20:
         # Time-in-position plus flat P&L is an efficiency observation, not a
         # liquidation fact. It may inform a later reviewed rebalance only.
         cat, act = '长期效率观察', 'hold'
     else:
         cat, act = '健康保留', 'hold'
+    if pnl is None and act == 'hold':
+        cat = '证据待核'
+        reasons.append('浮盈亏待核，不以零收益判定健康或长期横盘')
     if not reasons:
         reasons.append(f'浮盈亏{pnl:+.0f}%,趋势未坏' if pnl >= 0 else f'浮亏{pnl:.0f}%,暂未破位')
     return score, cat, act, reasons

@@ -2813,7 +2813,9 @@ def task_morning_strategy():
         sector_summary = '（无数据）'
         # 09:02 的行情接口可能返回零值或昨收，尚无当日价格发现。
         # 不把它们输入方向判断，也不补写成 0.00%。
-        cn_index_summary = '盘前数据未形成；开盘后确认指数与板块方向'
+        from application.market_risk_notice import current_indices, index_lines, SHANGHAI
+        cn_index_summary = '\n'.join(index_lines(current_indices(datetime.now(SHANGHAI), prior_close=True)))
+        cn_index_summary += '\n盘前仅列已核收盘，开盘后确认方向。'
         sector_summary = '盘前数据未形成；开盘后确认'
 
         # ─── 5d. 持仓逐只扫描（共用 _scan_holdings_with_snapshot,零逐只接口）───

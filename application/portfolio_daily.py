@@ -65,12 +65,19 @@ class DailyExitService:
         self.repo = ReliabilityStore(store)
 
     def deliver(self, report, sender, *, owner="primary"):
-        if not report["required"] and not report["needs_review"]:
-            return {"status": "not_required"}
         day = datetime.fromisoformat(report["created_at"]).astimezone(TZ).date().isoformat()
         kind = "daily_equity_exit" if report["required"] else "daily_equity_count_review"
         from application.results import payload_hash
         key = f"{kind}:{day}:{payload_hash(owner)[:12]}"
+        if not report["required"] and not report["needs_review"]:
+            # Close an explicitly rejected obligation against fresh holdings.
+            prior_key = f"daily_equity_exit:{day}:{payload_hash(owner)[:12]}"
+            with self.repo.transaction() as cur:
+                old = self.repo.read(cur, "daily_equity_exit", prior_key, owner)
+                if old and old["status"] == "retryable" and not any(v[0] for v in old.get("receipts", {}).values()):
+                    self.repo.append(cur, "daily_equity_exit", prior_key, owner,
+                                     {**old, "status": "closed", "closed_report": report}, old)
+            return {"status": "not_required"}
         # Persist before external I/O. An interrupted/unknown attempt is never
         # blindly repeated, even if the producer restarts or the account changes.
         with self.repo.transaction() as cur:
@@ -81,7 +88,10 @@ class DailyExitService:
             previous_receipts = (old or {}).get("receipts", {})
             kwargs = {}
             if old:
-                report = old["report"]
+                # Once any channel accepted, every remaining channel must see
+                # the same immutable body. Otherwise refresh stale holdings.
+                if any(v[0] for v in previous_receipts.values()):
+                    report = old["report"]
                 kwargs["only_channels"] = [k for k, v in previous_receipts.items() if not v[0]]
             record = self.repo.append(cur, kind, key, owner,
                                       {"status": "unknown", "report": report, "attempt": attempt,
@@ -103,7 +113,7 @@ class DailyExitService:
                 status = "unknown"
             archive = getattr(result, "archive_status", "unrecorded")
         except Exception:
-            receipts, status, archive = {}, "unknown", "unrecorded"
+            receipts, status, archive = previous_receipts, "unknown", "unrecorded"
         return self.repo.put(kind, key, {**record, "status": status,
                             "receipts": receipts, "archive_status": archive},
                             owner=owner, expected_revision=record["revision"])
