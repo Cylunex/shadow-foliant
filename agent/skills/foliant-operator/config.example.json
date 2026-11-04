@@ -1,0 +1,5 @@
+{
+  "owner": "research",
+  "worker": "losna-research",
+  "purposes": ["independent_discovery", "directed_review", "strategy_validation"]
+}

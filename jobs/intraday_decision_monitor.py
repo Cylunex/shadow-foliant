@@ -813,15 +813,20 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
             f"{quality.get('plan_requested', 0)}｜as-of {str(as_of)[11:19] or as_of}"
         ),
     ]
+    from application.market_risk_notice import index_lines
+    lines.extend(index_lines(snapshot.get("market_risk") or {}))
     holdings = snapshot.get("holdings") or []
     candidates = (snapshot.get("formal_top5") or []) + (snapshot.get("formal_top15_watch") or [])
     guarded_count = sum(
         row.get("requested_action") and row.get("requested_action") != row.get("action")
         for row in holdings
     )
-    lines.append(
-        f"持仓 {len(holdings)} 只｜保护调整{guarded_count}只（原始风险仍须关注；完整覆盖见 intraday_decision_snapshot）"
-    )
+    counts = snapshot.get("position_counts")
+    if counts:
+        lines.append(f"个股 {counts['equity_count']}/15，超 {counts['excess']} 只｜ETF {counts['etf_count']} 只另计｜其他基金 {counts['other_fund_count']}｜待核 {counts['unknown_count']}")
+    else:
+        lines.append(f"证券记录 {len(holdings)} 项，个股与ETF分类待核｜保护调整{guarded_count}项")
+
     shown_h = sorted(holdings, key=lambda row: (
         -max(ACTION_RANK.get(str(row.get("action")), -1),
              ACTION_RANK.get(str(row.get("requested_action")), -1)),
@@ -845,7 +850,12 @@ def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
     if not shown_c:
         shown_c = [row for row in candidates
                    if "holding" not in (row.get("sources") or [])][:2]
-    for row in shown_c:
+    losna = snapshot.get("losna_review") or {}
+    reviews = losna.get("reviews") or []
+    if reviews:
+        row = reviews[0]
+        lines.append(f"Losna复核｜{row['symbol']}｜{' '.join(str(row['reason']).split())[:55]}｜反证 {' '.join(str(row['counterevidence']).split())[:40]}")
+    for row in shown_c[:0 if reviews else 1]:
         entry = (f"¥{row['entry_low']:.2f}-{row['entry_high']:.2f}"
                  if row.get("entry_low") is not None and row.get("entry_high") is not None else "暂不给价")
         if not row.get("price_actionable") or row.get("action") == "data_insufficient":
@@ -992,6 +1002,7 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     if formal_loader is None:
         from data.research_store import ResearchStore
         formal_loader = lambda: ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+    runtime_holdings = holdings_loader is None
     if holdings_loader is None:
         from portfolio_db import portfolio_db
         holdings_loader = lambda: portfolio_db.get_all_stocks() or []
@@ -1019,7 +1030,8 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
     formal = formal_loader() or {}
     if str(formal.get("selection_date") or "")[:10] != current.date().isoformat():
         return early_skip("today_formal_selection_unavailable")
-    pool = build_monitor_pool(formal, holdings_loader() or [])
+    raw_holdings = holdings_loader() or []
+    pool = build_monitor_pool(formal, raw_holdings)
     plans = _plans_from_previous(previous, str(formal.get("run_id") or ""))
     if allow_plan_build:
         _build_missing_plans(formal, pool, plans, snapshot_loader)
@@ -1261,6 +1273,20 @@ def run_cycle(*, now: datetime | None = None, allow_plan_build: bool = False,
         },
         "execution_boundary": "research_only_no_broker_no_auto_order",
     }
+    if runtime_holdings:
+        try:
+            from application.portfolio_daily import count_positions
+            from application.stock_budget import load_security_metadata
+            from data.research_store import ResearchStore
+            metadata = load_security_metadata(ResearchStore(ensure_schema=False), current.date().isoformat())
+            snapshot["position_counts"] = count_positions(raw_holdings, metadata)
+        except Exception:
+            snapshot["position_counts"] = None
+    try:
+        from application.losna_research import latest_review
+        snapshot["losna_review"] = latest_review(snapshot.get("selection_run_id"), now=current)
+    except Exception:
+        snapshot["losna_review"] = {}
     snapshot_saver(SNAPSHOT_KEY, snapshot)
 
     if notify_changes and critical_events:

@@ -64,7 +64,8 @@ def current_indices(now: datetime, loader: Callable | None = None,
                 or (post_close and (quote_at.hour, quote_at.minute) < (15, 0))
                 or pct is None or not -25 <= pct <= 25 or price is None or price <= 0):
             continue
-        rows.append({"name": name, "change_pct": round(pct, 3),
+        rows.append({"name": name, "price": price, "last_close": _number(value.get("last_close")),
+                     "open": _number(value.get("open")), "change_pct": round(pct, 3),
                      "as_of": quote_at.isoformat(timespec="seconds"),
                      "source": "tencent_full_index_quote", "time_source": "provider"})
     return {"version": VERSION, "status": "current" if rows else "unavailable",
@@ -83,13 +84,28 @@ def risk_level(market: dict[str, Any]) -> int:
     return 2 if len(triggers) >= 3 else 1
 
 
+def index_label(row):
+    price = _number(row.get("price"))
+    level = f"{price:,.2f}点" if price and price > 0 else "点位待核"
+    return f"{row['name']} {level}（{row['change_pct']:+.2f}%）"
+
+
+def index_lines(market):
+    rows = {r.get("name"): r for r in market.get("rows") or []}
+    labels = [index_label(rows[name]) if name in rows else f"{name}待核"
+              for name in INDEX_CODES]
+    stamps = [str(r.get("as_of") or "")[11:16] for r in rows.values()]
+    stamp = min(stamps) if stamps else "待核"
+    return [f"指数 {stamp}｜" + " · ".join(labels[:2]), " · ".join(labels[2:])]
+
+
 def market_lines(market: dict[str, Any]) -> list[str]:
     rows = [row for row in market.get("rows") or [] if isinstance(row, dict)]
     if not rows:
         return ["市场：当前宽基行情待核验"]
     stamps = [stamp for row in rows if (stamp := _stamp(row.get("as_of")))]
     time = min(stamps).strftime("%H:%M") if stamps else "待核验"
-    detail = "、".join(f"{row['name']}{row['change_pct']:+.2f}%" for row in rows[:5])
+    detail = "、".join(index_label(row) for row in rows[:5])
     if risk_level(market):
         triggered = [row for row in rows if row["change_pct"] <= -(
             _limit("FOLIANT_MARKET_MAIN_DROP_PCT", 1.5, 1.0, 3.0)

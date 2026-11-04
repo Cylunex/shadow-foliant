@@ -5894,6 +5894,46 @@ def task_morning_portfolio():
                  finished_at=datetime.now().isoformat())
 
 
+def task_losna_research():
+    started = datetime.now().isoformat()
+    try:
+        from application.losna_research import prepare_reviews
+        result = prepare_reviews()
+        _log_run("losna_research", "success" if result.get("packet") else "degraded",
+                 started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as exc:
+        _log_run("losna_research", "error", error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
+
+def task_losna_followups():
+    started = datetime.now().isoformat()
+    try:
+        from application.losna_research import prepare_followups
+        prepare_followups()
+        _log_run("losna_followups", "success", started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as exc:
+        _log_run("losna_followups", "error", error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
+def task_daily_equity_exit():
+    """Natural-day equity review, including weekends and holidays."""
+    if datetime.now().hour < 14 or (datetime.now().hour == 14 and datetime.now().minute < 30):
+        return
+    started = datetime.now().isoformat()
+    try:
+        from application.portfolio_daily import run_daily_exit
+        result = run_daily_exit()
+        status = result.get("status")
+        _log_run("daily_equity_exit", "success" if status == "not_required" or (status == "accepted" and result.get("archive_status") == "recorded") else "degraded",
+                 error=f"delivery={status}", started_at=started, finished_at=datetime.now().isoformat())
+    except Exception as exc:
+        _log_run("daily_equity_exit", "error", error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now().isoformat())
+
+
 def task_afternoon_portfolio():
     """🧹 尾盘持仓总结(14:30)—— 合并持仓分析、AI 体检和清仓助手。
     一次取数 + 一次 LLM → 逐只融合动作；通知只展示总览和最重要的 5 只，完整结果留给 Agent 查询；
@@ -6769,6 +6809,10 @@ def register_default_jobs():
     hub.register('noon_report',                 '12:00', task_noon_report)
     # stock_monitor_check 与三点急跌推送已退役；盘中只由统一状态机提醒。
     # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
+    hub.register('losna_followups', '17:20', task_losna_followups)
+    hub.register('losna_research', '09:58', task_losna_research)
+    hub.register('daily_equity_exit', '14:30', task_daily_equity_exit)
+    hub.register('daily_equity_exit_retry', 'every:10:minutes', task_daily_equity_exit)
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 
     # ---- 🔴 盘后：BaoStock 日线 17:30、复权因子 18:00 完成后再跑正式数据链 ----

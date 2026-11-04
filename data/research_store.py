@@ -2728,7 +2728,7 @@ class ResearchStore:
                                         *, policy: dict, policy_hash: str,
                                         selection_date: str,
                                         input_snapshot_id: str = "",
-                                        persist_policy: bool = True) -> int:
+                                        persist_policy: bool = True, idempotent: bool = False) -> int:
         """Persist multi-strategy nominations as normalized immutable facts."""
         now = datetime.now().astimezone().isoformat()
         grouped: Dict[tuple, List[dict]] = {}
@@ -2774,12 +2774,23 @@ class ResearchStore:
                     """INSERT INTO selection_strategy_runs
                        (strategy_run_id,selection_run_id,strategy_id,strategy_version,lane,
                         status,data_as_of,input_snapshot_id,policy_version,metadata,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""" +
+                    (" ON CONFLICT(strategy_run_id) DO NOTHING" if idempotent else ""),
                     (strategy_run_id, str(run_id), strategy_id, strategy_version, lane,
                      "success", str(selection_date), str(input_snapshot_id),
                      str(policy.get("version") or "local-fusion-v2"),
                      _json({"nomination_count": len(rows)}), now),
                 )
+                if idempotent and cur.rowcount == 0:
+                    cur.execute("SELECT input_snapshot_id FROM selection_strategy_runs WHERE strategy_run_id=?", (strategy_run_id,))
+                    if cur.fetchone()[0] != str(input_snapshot_id):
+                        raise ValueError("nomination_input_conflict")
+                    cur.execute("SELECT symbol,lane_rank,evidence FROM selection_candidate_nominations WHERE strategy_run_id=? ORDER BY symbol", (strategy_run_id,))
+                    existing = [(r[0], r[1], json.loads(r[2]) if isinstance(r[2], str) else r[2]) for r in cur.fetchall()]
+                    expected = sorted([(_symbol(r.get("symbol")), int(r.get("lane_rank") or 0), r.get("evidence") or {}) for r in rows], key=lambda r: r[0])
+                    if existing != expected:
+                        raise ValueError("nomination_content_conflict")
+                    continue
                 for item in rows:
                     symbol = _symbol(item.get("symbol"))
                     nomination_id = hashlib.sha256(

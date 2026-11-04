@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+from contextlib import redirect_stdout
+import argparse
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+import _bootstrap
+from application.losna_research import LosnaResearch, PURPOSES
+from data.research_store import ResearchStore
+
+CATALOG = [{"name": name, "inputSchema": {"type": "object"}} for name in ("claim", "status", "submit")]
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", required=True)
+    p.add_argument("command", choices=["catalog", "call"])
+    p.add_argument("name", nargs="?")
+    args = p.parse_args()
+    if args.command == "catalog":
+        sys.__stdout__.write(json.dumps(CATALOG) + "\n")
+        return
+    config = json.loads(Path(args.config).read_text())
+    owner, worker = config["owner"], config["worker"]
+    purposes = config["purposes"]
+    if not purposes or not set(purposes) <= PURPOSES:
+        raise ValueError("invalid_config")
+    service = LosnaResearch(ResearchStore(ensure_schema=False))
+    raw = sys.stdin.read(262145)
+    if len(raw) > 262144:
+        raise ValueError("input_too_large")
+    data = json.loads(raw or "{}")
+    if args.name == "claim":
+        if data:
+            raise ValueError("claim_has_no_input")
+        result = service.claim(owner=owner, worker=worker, purposes=purposes)
+    else:
+        old = service.get(data["identity"], owner)
+        if old["packet"]["purpose"] not in purposes:
+            raise ValueError("purpose_denied")
+        if args.name == "status":
+            result = old
+        elif args.name == "submit":
+            result = service.submit(identity=data["identity"], owner=owner, worker=worker,
+                                    generation=data["generation"], result=data["result"])
+        else:
+            raise ValueError("unknown_operation")
+    sys.__stdout__.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        with redirect_stdout(sys.stderr):
+            main()
+    except Exception as exc:
+        sys.__stdout__.write(json.dumps({"isError": True, "code": type(exc).__name__}) + "\n")
+        sys.exit(1)

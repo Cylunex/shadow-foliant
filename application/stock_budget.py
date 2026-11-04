@@ -50,6 +50,7 @@ def load_security_metadata(store: Any, as_of: str | None = None) -> dict[str, An
     except Exception:
         errors.append("stock_security_master_unavailable")
 
+    funds = None
     # Prefer the repository's fund metadata adapter. It has a process cache and
     # returns explicit fund codes/types; an empty result is not guessed around.
     try:
@@ -68,6 +69,11 @@ def load_security_metadata(store: Any, as_of: str | None = None) -> dict[str, An
     return {
         "stock_symbols": stock_symbols,
         "fund_symbols": fund_symbols,
+        "etf_symbols": set(
+            str(row["基金代码"]).zfill(6) for _, row in funds.iterrows()
+            if "ETF" in str(row.get("基金简称") or "").upper()
+            and "联接" not in str(row.get("基金简称") or "")
+        ) if funds is not None and not funds.empty else set(),
         "sources": sources,
         "errors": errors,
     }

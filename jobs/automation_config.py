@@ -124,6 +124,26 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心', 'default': True, 'core': True,
         'description': '大盘/板块/热门股 + 持仓盘中概况(红绿/领涨领跌)',
     },
+    'losna_followups': {
+        'cn': 'Losna策略与持仓复盘', 'schedule': '17:20',
+        'category': '研究', 'default': True, 'core': False,
+        'description': '分别冻结公开策略证据与私人持仓预览，提交受限研究包',
+    },
+    'losna_research': {
+        'cn': 'Losna冻结候选研究', 'schedule': '09:58',
+        'category': '研究', 'default': True, 'core': False,
+        'description': '把已发布冻结事实交给Losna受限研究，未收到结果仍准时报表',
+    },
+    'daily_equity_exit': {
+        'cn': '个股超限清仓日报', 'schedule': '14:30 每日',
+        'category': '持仓', 'default': True, 'core': True,
+        'description': '仅计个股，ETF单列；自然日超过15只必报，无模型依赖',
+    },
+    'daily_equity_exit_retry': {
+        'cn': '个股超限日报回执核对', 'schedule': '14:30后每10分钟',
+        'category': '持仓', 'default': True, 'core': True,
+        'description': '核对同日稳定业务键，不重复发送结果未知的报告',
+    },
     'afternoon_portfolio': {
         'cn': '🧹 尾盘持仓总结',
         'schedule': '14:30 每日',
