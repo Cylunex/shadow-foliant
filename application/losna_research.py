@@ -238,6 +238,66 @@ def latest_review(run_id, *, now, store=None):
     return {}
 
 
+def strategy_validation_facts(dashboard, store):
+    """Bound model input without changing any sample or return metric."""
+    def bounded(value, depth=0):
+        if depth >= 6:
+            return {"omitted_nested_detail": True} if isinstance(value, (dict, list)) else value
+        if isinstance(value, str):
+            return value if len(value) <= 400 else value[:400] + " [truncated]"
+        if isinstance(value, list):
+            rows = [bounded(v, depth+1) for v in value[:12]]
+            return rows if len(value) <= 12 else {"shown": rows, "total_count": len(value), "truncated": True}
+        if isinstance(value, dict):
+            priority = {"state", "status", "promotion_ready", "effective_samples", "sample_size", "independent_dates", "blockers", "reason"}
+            keys = sorted(value, key=lambda k: (k not in priority, k))
+            result = {k: bounded(value[k], depth+1) for k in keys[:40]}
+            if len(keys) > 40:
+                result["omitted_field_count"] = len(keys)-40
+            return result
+        return value
+    experiments = [{k: trial[k] for k in ("trial_id", "hypothesis_id", "state", "status", "protocol", "evaluation") if k in trial}
+                   for trial in (dashboard.get("experiments") or [])[:20]]
+    public = {"policy_timeline": bounded(dashboard.get("policy_timeline")),
+              "experiments": bounded(experiments), "model_books": bounded(dashboard.get("model_books")),
+              "projection": "bounded aggregate evidence; raw factor arrays omitted; full source remains in Foliant",
+              "signal_outcomes": {}}
+    fields = ("strategy_id", "strategy_version", "metric_version", "lane", "sample_size", "independent_dates",
+              "effective_samples", "promotion_blocker", "avg_return_pct", "win_rate_pct", "benchmark_excess_pct",
+              "benchmark_sample_size", "worst_drawdown_pct", "worst_mae_pct", "nonoverlapping_price_intervals")
+    for horizon in (1, 3, 5, 10, 20):
+        try:
+            source = store.selection_strategy_evidence(horizon_days=horizon)
+            rows = source.get("strategies") or []
+            ordered = sorted(rows, key=lambda r: (not any(x in str(r.get("strategy_id", "")).lower() for x in ("wencai", "openapi", "losna")),
+                                                 -int(r.get("sample_size") or 0), str(r.get("strategy_id")), str(r.get("strategy_version"))))
+            limit = 40 if horizon == 5 else 12
+            public["signal_outcomes"][str(horizon)] = {
+                "evidence_snapshot_id": source.get("evidence_snapshot_id"), "horizon_days": horizon,
+                "source_group_count": len(rows), "shown_group_count": min(limit, len(rows)), "truncated": len(rows)>limit,
+                "strategies": [{k: row[k] for k in fields if k in row} for row in ordered[:limit]],
+                "portfolio_comparison": {k: v for k, v in (source.get("portfolio_comparison") or {}).items() if k != "runs"}}
+        except Exception as exc:
+            public["signal_outcomes"][str(horizon)] = {"status": "unavailable", "error_code": type(exc).__name__}
+    public["metric_boundary"] = "price labels are observations, not executable net returns; effective_samples and promotion blockers remain authoritative"
+    return public
+
+
+def portfolio_research_preview(*, capsule, context, quotes, now):
+    from application.account_preview import build_account_preview
+    from jobs.intraday_decision_monitor import assess_quotes
+    mode = "post_close" if (now.hour, now.minute) >= (15, 0) else "intraday"
+    symbols = {str(r.get("symbol") or r.get("code")) for r in context["holdings"]}
+    quality = assess_quotes([{"symbol": symbol} for symbol in symbols], quotes, now, mode=mode)
+    preview = build_account_preview(owner_id="primary", capsule=capsule, context=context,
+        raw_quotes=quotes, allow_add=False, now=now, quote_ttl_seconds=480,
+        quote_freshness_by_symbol={symbol: row.get("freshness") for symbol, row in quality["items"].items()},
+        pricing_mode=mode)
+    # Packet admission time is recorded by the journal. Keep the input identity
+    # bound to business facts rather than the wall clock of a repeated read.
+    return {k: v for k, v in preview.items() if k not in {"created_at", "expires_at", "plan_id"}}
+
+
 def prepare_followups():
     from application.decision_loop import DecisionLoopService
     from portfolio_db import portfolio_db
@@ -250,14 +310,7 @@ def prepare_followups():
     research = LosnaResearch(service.store)
     result = {"registered_nominations": register_forward_nominations(service.store)}
     dashboard = service.dashboard()
-    public = {key: dashboard.get(key) for key in ("policy_timeline", "experiments", "model_books")}
-    public["signal_outcomes"] = {}
-    for horizon in (1, 3, 5, 10, 20):
-        try:
-            public["signal_outcomes"][str(horizon)] = service.store.selection_strategy_evidence(horizon_days=horizon)
-        except Exception as exc:
-            public["signal_outcomes"][str(horizon)] = {"status": "unavailable", "error_code": type(exc).__name__}
-    public["metric_boundary"] = "price labels are observations, not executable net returns; effective_samples and promotion blockers remain authoritative"
+    public = strategy_validation_facts(dashboard, service.store)
     result["strategy"] = research.create(
         purpose="strategy_validation", input_version=payload_hash({"facts": public, "run_id": capsule["run_id"], "schema": "v2"}),
         candidates=capsule["opportunity_set"]["top15"],
@@ -267,8 +320,9 @@ def prepare_followups():
         owner="research", ttl_minutes=120, run_id=capsule["run_id"])
     context = portfolio_db.action_preview_context()
     quotes = datahub.quotes(account_quote_symbols(capsule, context["holdings"]))
-    preview = build_account_preview(owner_id="primary", capsule=capsule, context=context,
-                                    raw_quotes=quotes, allow_add=False)
+    from zoneinfo import ZoneInfo
+    preview = portfolio_research_preview(capsule=capsule, context=context, quotes=quotes,
+                                         now=datetime.now(ZoneInfo("Asia/Shanghai")))
     if portfolio_db.action_preview_context()["watermark"] != context["watermark"]:
         raise ValueError("holdings_changed_during_review")
     candidates = [{**r, "symbol": str(r.get("symbol") or r.get("code"))}

@@ -374,3 +374,38 @@ def test_private_review_only_copies_relevant_final_actions(monkeypatch):
     assert len(fact["final_actions"]) == 1
     assert fact["final_actions"][0]["requested_action"] == "sell"
     assert "cost_price" not in fact["final_actions"][0]
+
+
+def test_portfolio_research_uses_same_day_close_without_executable_prices():
+    from application.losna_research import portfolio_research_preview
+    now = NOW.replace(hour=17, minute=20)
+    capsule = {"capsule_id": "fixture-capsule", "opportunity_set": {"top5": [], "top15": []}}
+    context = {"holdings": [{"code": "600001", "quantity": 100, "cost_price": 10}], "watermark": "v1"}
+    quotes = {"600001": {"price": 12, "quote_time": now.replace(hour=15, minute=0).strftime("%Y%m%d%H%M%S"), "volume": 10000}}
+    one = portfolio_research_preview(capsule=capsule, context=context, quotes=quotes, now=now)
+    two = portfolio_research_preview(capsule=capsule, context=context, quotes=quotes, now=now+timedelta(minutes=1))
+    assert one == two
+    assert one["pricing_mode"] == "post_close" and one["preview_only"]
+    assert one["risk_snapshot"]["missing_prices"] == []
+    assert one["pricing_snapshot"]["freshness_counts"] == {"closing_current": 1}
+    old = {"600001": {**quotes["600001"], "quote_time": (now-timedelta(days=1)).replace(hour=15, minute=0).strftime("%Y%m%d%H%M%S")}}
+    stale = portfolio_research_preview(capsule=capsule, context=context, quotes=old, now=now)
+    assert stale["risk_snapshot"]["missing_prices"] == ["600001"]
+
+
+def test_strategy_evidence_budget_keeps_metrics_and_marks_omissions():
+    import json
+    from types import SimpleNamespace
+    from application.losna_research import strategy_validation_facts
+    rows = [{"strategy_id": "wencai" if i == 999 else f"local-{i}", "strategy_version": "v1",
+             "sample_size": i, "effective_samples": 0, "promotion_blocker": "not_net_evidence",
+             "avg_return_pct": -1.5, "win_rate_pct": 42, "unused_raw": list(range(1000))} for i in range(1000)]
+    store = SimpleNamespace(selection_strategy_evidence=lambda **kw: {"strategies": rows, "evidence_snapshot_id": "full-source", "portfolio_comparison": {"matured_runs": 99, "runs": rows}})
+    facts = strategy_validation_facts({"experiments": [{"trial_id": "t1", "evaluation": {"effective_samples": 0, "promotion_ready": False}, "diagnostics": rows}]}, store)
+    assert len(json.dumps(facts, ensure_ascii=False).encode()) < 150000
+    group = facts["signal_outcomes"]["5"]
+    assert group["source_group_count"] == 1000 and group["shown_group_count"] == 40 and group["truncated"]
+    assert group["strategies"][0]["strategy_id"] == "wencai"
+    assert group["strategies"][0]["avg_return_pct"] == -1.5
+    assert group["strategies"][0]["effective_samples"] == 0
+    assert "unused_raw" not in group["strategies"][0]
