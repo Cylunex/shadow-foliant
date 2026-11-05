@@ -137,7 +137,7 @@ def test_fixed_summary_preserves_five_levels_and_equity_counts():
     body = compact_notification("report", format_fixed_summary(snapshot, "10:05"))
     for i, name in enumerate(INDEX_CODES):
         assert name in body and f"{3600+i:,.2f}点" in body
-    assert "16/15" in body and "ETF 3" in body
+    assert '个股16只' in body and '较15只参考上限多1只' in body and 'ETF 3' in body
 
 
 def test_blind_packet_uses_manifest_features_not_published_membership(store, monkeypatch):

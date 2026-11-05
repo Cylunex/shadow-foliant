@@ -40,6 +40,9 @@ def send_report(text: str, title: str = ""):
     """统一路由，QQ 失败时由同一逻辑消息记录邮件兜底。"""
     try:
         from notification_router import send as _nr_send
+        from notify.stock_report import is_report
+        if is_report(text):
+            title = text.splitlines()[0]
         res = _nr_send('report', title or "股票分析报告", text,
                        fallback='email', source='scripts.daily_signal_scan')
         if any(ok for ok, _ in res.values()):
@@ -770,17 +773,20 @@ def noon_report():
                  if index_rows else 0.0)
     holding_avg = (sum(change for change, _, _ in holding_changes) / len(holding_changes)
                    if holding_changes else 0.0)
-    if index_avg <= -0.8 or holding_avg <= -1.0:
+    if not index_rows:
+        direction, action = '待核验', '不动'
+        reason = '指数行情不足，暂缓整体仓位判断；已有持仓风险仍需单独核对。'
+    elif index_avg <= -0.8 or holding_avg <= -1.0:
         direction, action = '看跌', '减仓'
-        reason = '大盘或持仓跌得比较多，先把最弱的减一点。'
+        reason = '大盘或已获取持仓明显走弱，优先核对弱势持仓与减仓条件。'
     elif index_avg >= 0.8 and (not holding_changes or holding_avg >= 0):
         direction, action = '看涨', '加仓'
-        reason = '大盘和持仓都偏强，只在回落时小幅加，不追高。'
+        reason = ('指数偏强，已获取持仓平均涨跌非负；关注回落机会，不追高。'
+                  if holding_changes else '指数偏强，但持仓涨跌待核验，暂不据此决定个股加仓。')
     else:
         direction, action = '震荡', '不动'
         reason = '涨跌都不明显，下午先看，不急着动。'
 
-    market = '\n'.join(index_lines(market_snapshot))
     holdings = ''
     if holding_changes:
         up = sum(1 for change, _, _ in holding_changes if change > 0)
@@ -792,16 +798,13 @@ def noon_report():
         if weak:
             holdings += '；最弱：' + '、'.join(weak)
 
-    try:
-        from notify.plain_language import build_market_message
-        title, body = build_market_message(
-            label='午盘', direction=direction, action=action,
-            market='', holdings=holdings, reason=reason, as_of=now_text,
-        )
-        parts = body.splitlines()
-        return '\n'.join([title, parts[0], *index_lines(market_snapshot), *parts[1:]])
-    except Exception:
-        return f'午盘：{direction}｜{action}\n大盘：{market}\n持仓：{holdings}\n原因：{reason}'
+    from notify.stock_report import report
+    # Broad market strength is context, not authority to buy an unspecified holding.
+    return report('午盘', now_text, [
+        ('1）盘面概况', [*index_lines(market_snapshot), f'盘面判断：{direction}。']),
+        ('2）持仓观察', [holdings or '持仓涨跌待核验。']),
+        ('3）下午关注', [f'仓位参考：{action}。{reason}', '具体证券动作以同批持仓分析为准。']),
+    ])
 
 
 # ═══════════════════════════════════════════════════════════

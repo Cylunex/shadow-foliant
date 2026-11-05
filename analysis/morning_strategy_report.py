@@ -341,40 +341,43 @@ def format_plain_morning_notification(diagnosis: Dict[str, Any], *,
                                       as_of: Any = '', premarket: bool = False,
                                       sources: Optional[Dict[str, Any]] = None,
                                       diagnosis_meta: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-    """晨报即时通知只保留方向、动作和两句依据。"""
+    """盘前按事实分段；开盘后沿用已核验的方向与动作。"""
     if premarket:
-        # Before open, report collected facts without inventing live A-share
-        # direction. Source text is reference material, never a trade action.
-        from notify.plain_language import plain_text
+        from notify.stock_report import report, text
         sources = sources or {}
         meta = diagnosis_meta or {}
         yesterday = next((line.strip() for line in str(holdings or '').splitlines()
                           if '昨日收益' in line), '')
-        lines = ['时段：尚未开盘，A股盘中行情将在开盘后形成。']
         us = sources.get('us_summary')
-        us_text = '；'.join(line.strip() for line in str(us or '').splitlines() if line.strip())
-        lines.append('美股日线参考：' + (plain_text(us_text, 160) if _source_available(us)
-                                        else '本次未获取，暂不判断外盘影响。'))
-        news = sources.get('news_summary')
-        news_lines = [line.strip() for line in str(news or '').splitlines()
-                      if line.strip() and not line.strip().startswith(('边界:', '题材线程:'))]
-        news_text = '；'.join(news_lines[:2])
-        lines.append('新闻参考：' + (plain_text(news_text, 160) if _source_available(news_text)
-                                     else '本次暂无可用要闻，不推断新闻影响。'))
-        lines.append('开盘关注：核实核心指数、持仓报价与风险触发条件。')
+        us_rows = list(dict.fromkeys(line.strip() for line in str(us or '').splitlines() if line.strip()))
+        market_rows = ['尚未开盘，A股盘面与主线待开盘后确认。']
+        market_rows += ([text(line, 100) for line in us_rows[:3]] if _source_available(us)
+                        else ['外盘：本次未获取，暂不判断外盘影响。'])
+        news_rows = []
+        for line in str(sources.get('news_summary') or '').splitlines():
+            if not line.strip() or line.strip().startswith(('边界:', '题材线程:')):
+                continue
+            # Use the original headline; do not invent a summary from clipped wire copy.
+            headline = re.split(r'[:：]\s*(?:财联社|新华社|据|记者)', line, maxsplit=1)[0]
+            headline = re.sub(r'\[(?:延续|金融|财经|国内|国际)\]', '', headline)
+            headline = text(headline, 85)
+            if headline and _source_available(headline) and '• ' + headline not in news_rows:
+                news_rows.append('• ' + headline)
+            if len(news_rows) == 2:
+                break
+        notes = []
         if meta.get('mode') in {'rules', 'hybrid'}:
             reason = {'timeout': '模型超时', 'empty_response': '模型未返回正文',
                       'provider_unavailable': '模型暂不可用',
-                      'invalid_json': '模型输出未通过校验',
-                      'partial_json': '模型输出不完整'}.get(meta.get('reason'), '模型分析未完成')
-            lines.append(f'分析状态：{reason}，以上为已采集事实摘要。')
-        elif meta.get('mode') == 'ai':
-            lines.append('分析状态：模型分析已完成；盘前事实仅供参考。')
-        if yesterday:
-            lines.append(yesterday)
-        if as_of:
-            lines.append(f'时间：{as_of}')
-        return '🌅 盘前简报', '\n'.join(lines)
+                      'invalid_json': '模型分析未通过校验',
+                      'partial_json': '模型分析不完整'}.get(meta.get('reason'), '模型分析未完成')
+            notes.append(f'数据说明：{reason}，本条仅列已采集事实。')
+        return '🌅 盘前简报', report('盘前', as_of, [
+            ('1）隔夜与开盘关注', market_rows),
+            ('2）要闻摘要', news_rows or ['本次暂无可用要闻。']),
+            ('3）账户与今日关注', [text(yesterday, 240) if yesterday else '昨日收益待更新。',
+                                 '开盘后关注指数方向、持仓风险及候选买点。']),
+        ], notes)
     from notify.plain_language import build_market_message
 
     position = diagnosis.get('position_advice') or holdings

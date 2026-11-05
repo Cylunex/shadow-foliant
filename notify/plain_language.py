@@ -192,6 +192,9 @@ def compact_notification(category: str, content: object,
     raw = str(content or "").strip()
     if category == "archive" or not raw:
         return raw
+    from notify.stock_report import is_report, validate
+    if category in {"report", "daily_summary"} and is_report(raw):
+        return validate(raw)
     line_limit = max_lines or (10 if category in {"alert", "system_error"} else 8)
     char_limit = max_chars or (1200 if category in {"alert", "system_error"} else 900)
     lines = []

@@ -1506,12 +1506,13 @@ def task_fund_valuation_signal():
                 print(f'[fund_valuation] ❌ {idx} {type(e).__name__}: {str(e)[:80]} ({time.time()-_t0:.1f}s)', flush=True)
         cheap = [v for v in rows if v['multiplier'] >= 1.5]
         if rows:
-            lines = [f"· {v['index']}: PE{v['pe']} 分位{v['percentile']:.0f}% [{v['level']}]（定投建议 {v['multiplier']}倍）"
+            from notify.stock_report import report
+            lines = [f"• {v['index']}：{v['level']}（历史分位{v['percentile']:.0f}%），"
+                     f"定投参考 {v['multiplier']:g} 倍。"
                      for v in sorted(rows, key=lambda x: x['percentile'])]
-            # 结论先行(2026-07-02):可加投的指数放第一行,不用扫完整表才知道
-            head = ("💡 偏低估、本期可加投:" + "、".join(v['index'] for v in cheap)
-                    if cheap else "本期无明显低估指数,按常规定投即可")
-            text = "🏦 宽基估值分位(定投择时)\n" + head + "\n\n" + "\n".join(lines)
+            text = report('估值参考', datetime.now().strftime('%Y-%m-%d %H:%M'), [
+                ('本期定投参考', lines),
+            ], ['倍数以原定投金额为基准；估值偏低不代表短期会上涨。'], fund=True)
             try:
                 from notification_router import send
                 # The morning valuation report goes to QQ with all five indexes.
@@ -5584,12 +5585,12 @@ def task_unified_selection():
                         _iwencai_shadow_premarket_path(), selection_date=selection_date,
                         expected_market_as_of=str(effective_market_date),
                     )
-                _final_body = _format_selection_reference_summary(
-                    final_rows, local_formal_rows, strategy_scan.get('results', {}),
-                    comparison, name_map, data_note,
-                    independent=independent_selection,
-                    three_way=selection_comparison,
-                    wencai_reference=notification_reference,
+                from notify.stock_report import selection_report
+                _final_body = selection_report(
+                    final_rows, held_codes=held_codes, names=name_map,
+                    as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    market_as_of=effective_market_date,
+                    reference=notification_reference, data_note=data_note,
                 )
                 _full_reference = _format_selection_reference_summary(
                     final_rows, local_formal_rows, strategy_scan.get('results', {}),
@@ -5599,7 +5600,7 @@ def task_unified_selection():
                     wencai_reference=notification_reference,
                 )
                 from notification_router import send
-                send('report', '今日量化候选与数据状态', _final_body,
+                send('report', 'A股选股观察', _final_body,
                      original_body=_full_reference)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
@@ -5882,6 +5883,7 @@ def task_morning_portfolio():
         if intraday.get('data_quality'):
             from jobs.intraday_decision_monitor import format_fixed_summary
             _body = format_fixed_summary(intraday, '10:05')
+            _title = 'A股早盘参考'
         _push_daily(_title, _body)
 
         _log_run(job, _intraday_job_log_status(intraday),

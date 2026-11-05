@@ -137,7 +137,8 @@ class MorningStrategyReportTests(unittest.TestCase):
         self.assertIn('10/53只净值已更新', body)
         self.assertNotIn('JSON', body)
         self.assertNotIn('操作：', body)
-        self.assertLessEqual(len(body.splitlines()), 8)
+        self.assertIn('\n\n2）要闻摘要\n', body)
+        self.assertLessEqual(len(body), 1500)
 
     def test_us_daily_reference_keeps_date_aligned_after_missing_close(self):
         days = [datetime(2026, 10, day, 9, 30, tzinfo=ZoneInfo('America/New_York')).timestamp()
@@ -147,6 +148,15 @@ class MorningStrategyReportTests(unittest.TestCase):
                          '示例指数 2026-10-16: 102.00 (+2.00%)')
         result.pop('timestamp')
         self.assertIn('日期未核实', format_us_daily_reference('示例指数', result))
+
+    def test_premarket_keeps_headline_without_long_wire_copy_or_success_status(self):
+        _, body = format_plain_morning_notification(
+            {}, premarket=True, as_of='2026-10-20 09:00', diagnosis_meta={'mode': 'ai'},
+            sources={'news_summary': '[10-20 08:00][延续][金融] 政策公告：财联社10月20日电，' + '新闻正文' * 100})
+        self.assertIn('政策公告', body)
+        self.assertNotIn('新闻正文', body)
+        self.assertNotIn('[延续]', body)
+        self.assertNotIn('模型分析已完成', body)
 
     def test_missing_premarket_sources_are_not_reported_as_live_zeroes(self):
         _, body = format_plain_morning_notification(

@@ -239,9 +239,9 @@ def test_stale_quotes_fail_closed_and_report_quality():
     assert all(row["action"] == "data_insufficient" for row in result["holdings"])
     assert all(row["price_actionable"] is False for row in result["formal_top5"])
     text = monitor.format_fixed_summary(result, "11:20")
-    assert "as-of" in text
+    assert '【A股参考｜午间｜9/10 11:20】' in text
     assert "暂不给价" in text
-    assert "失败关闭" in text
+    assert '暂缓动作判断' in text
 
 
 def test_batch_retrieved_at_keeps_existing_price_fresh_when_provider_omits_row_time():
@@ -443,8 +443,8 @@ def test_transition_guard_reports_original_trigger_and_final_action():
     assert holding['action'] == 'reduce'
     assert holding['action_guard']['original_reason'] == '技术破位待退出'
     summary = monitor.format_fixed_summary(result, '14:30')
-    assert '原始触发卖出(技术破位待退出)→本轮判断减仓(跨级升级需复核)' in summary
-    assert '风险仍在，未发生交易' in summary
+    assert '原信号：技术破位待退出；本轮减仓参考：跨级升级需复核' in summary
+    assert '风险未解除' in summary and '未发生交易' in summary
 
 
 def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkeypatch):
@@ -474,8 +474,8 @@ def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkey
     assert holding['action_guard']['reason_family'] == 'take_profit'
     summary = monitor.format_fixed_summary(result, '14:30')
     assert '永杰新材' in summary
-    assert '原始触发减仓(当前价触及 trade_plan 第一目标 12.00)→本轮判断不动(同类风险动作过密)' in summary
-    assert '风险仍在，未发生交易' in summary
+    assert '原信号：当前价触及 计划第一目标 12.00；本轮观望：同类风险动作过密' in summary
+    assert '风险未解除' in summary and '未发生交易' in summary
 
 
 def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
@@ -490,9 +490,9 @@ def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
                          'coverage': 1, 'plan_available': 1, 'plan_requested': 1},
         'holdings': [qilu], 'formal_top5': [], 'formal_top15_watch': [qilu],
     }, '14:30')
-    assert '齐鲁银行' in text and '本轮判断减仓(跌破20日均线(6.98))' in text
+    assert '减仓参考：齐鲁银行' in text and '跌破20日均线(6.98)' in text
     assert '候选 齐鲁银行' not in text
-    assert '量化候选（排名非买入指令）' in text
+    assert '候选排名不代表买入时机' in text
     _, alert = monitor.format_alert({'trigger_type': 'action_escalation', 'item': qilu}, {})
     assert '本轮判断减仓' in alert
     assert '买入区' not in alert

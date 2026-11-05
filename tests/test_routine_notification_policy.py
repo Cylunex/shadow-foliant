@@ -78,8 +78,9 @@ def test_morning_fund_valuation_delivers_all_five_indexes_to_qq_only(delivery, m
     assert len(sent) == 1
     title, body = sent[0]
     assert title == '基金估值分位'
-    assert len(body.splitlines()) <= 8
-    assert all(f'· {name}:' in body for name in indexes)
+    assert len(body) <= 1500
+    assert '\n\n本期定投参考\n' in body
+    assert all(f'• {name}：' in body for name in indexes)
     messages = service.list_messages()
     assert len(messages) == 1 and messages[0]['category'] == 'report'
     detail = service.detail(messages[0]['message_id'])
@@ -118,10 +119,73 @@ def test_maximum_premarket_facts_survive_real_rendering_archive_and_dedup(delive
     detail = service.detail(first.message_id)
     assert detail['original_body'] == body
     assert detail['deliveries'][0]['final_body'] == delivered
-    assert len(compact_notification('report', body).splitlines()) <= 8
+    assert compact_notification('report', body) == body
+    assert len(body.encode('utf-8')) <= 4096
     assert '道琼斯 2026-10-19' in delivered
     assert '政策新闻' in delivered and '模型暂不可用' in delivered
-    assert '10/53只净值已更新' in delivered and '时间：2026-10-20 09:00' in delivered
+    assert '10/53只净值已更新' in delivered and '10/20 09:00' in delivered
+
+
+@pytest.mark.parametrize('kind', ['portfolio', 'selection'])
+@pytest.mark.parametrize('channel', ['qq', 'dingtalk'])
+def test_readable_reports_preserve_sections_warnings_archive_and_dedup(delivery, monkeypatch, kind, channel):
+    from notify.portfolio_report import render
+    from notify.stock_report import selection_report
+    from application.scheduled_report_contract import REPORT_MAX_BYTES, REPORT_MAX_CHARS
+    import notification_service
+
+    holdings = [{'symbol': f'60000{i}', 'name': '持仓名称' * 10, 'action': 'hold',
+                 'requested_action': 'sell', 'requested_reason': '止损风险' * 100,
+                 'reason': '组合保护' * 100, 'cost_price': 1.478,
+                 'price': .529, 'price_actionable': False} for i in range(5)]
+    rows = [{'symbol': code, 'name': '候选名称' * 10, 'price': .529,
+             'price_actionable': True, 'reason': '入选理由' * 100}
+            for code in ['600000', '688001', '000001', '000001', '000002', '000003', '000004']]
+    if kind == 'portfolio':
+        from application.market_risk_notice import INDEX_CODES
+        body = render({'generated_at': '2026-10-20T10:05:00+08:00',
+                       'holdings': holdings, 'formal_top5': rows,
+                       'market_risk': {'rows': [
+                           {'name': name, 'price': 12345.67, 'change_pct': -3.25,
+                            'as_of': '2026-10-20T10:05:00+08:00'} for name in INDEX_CODES]},
+                       'position_counts': {'equity_count': 56, 'etf_count': 11,
+                                           'other_fund_count': 1, 'excess': 41},
+                       'data_quality': {'status': 'degraded'}}, '10:05')
+        assert '风险未解除' in body and '暂缓动作判断' in body
+        assert '现价暂不给价，成本 1.478' in body
+    else:
+        body = selection_report(rows, held_codes=['600000'], as_of='2026-10-20 09:45',
+                                market_as_of='2026-10-19',
+                                reference={'ready_groups': 3}, data_note='关键数据待核验' * 100)
+        assert '问财3/5组已核验' in body and '关键数据待核验' in body
+    section = body.split('新选股观察（非持仓、无688）', 1)[1]
+    assert all(code in section for code in ('000001', '000002', '000003'))
+    assert all(code not in section for code in ('600000', '688001', '000004'))
+    assert section.count('000001') == 1
+    assert '0.529' in body and '\n\n' in body
+    assert len(body) <= REPORT_MAX_CHARS and len(body.encode('utf-8')) <= REPORT_MAX_BYTES
+    assert compact_notification('report', body) == body
+
+    service, sent = delivery
+    requests = []
+    monkeypatch.setattr(notification_service, 'NotificationService', lambda: SimpleNamespace(config={
+        'webhook_enabled': True, 'webhook_type': 'dingtalk', 'webhook_url': 'https://example.com/webhook'}))
+    def post(_url, **kwargs):
+        requests.append(kwargs['json'])
+        return SimpleNamespace(status_code=200, json=lambda: {'errcode': 0})
+    monkeypatch.setattr(router.requests, 'post', post)
+    monkeypatch.setitem(router.CHANNELS, 'dingtalk', router._send_dingtalk_via_legacy)
+    kwargs = {'source': 'jobs.jobs_hub', 'only_channels': [channel],
+              'idempotency_key': f'readable:{kind}:{channel}', 'original_body': '完整来源明细'}
+    first = router.send('report', 'A股参考', body, **kwargs)
+    second = router.send('report', 'A股参考', body, **kwargs)
+    assert first[channel][0] is True and second[channel] == (False, 'archive_suppressed')
+    actual = requests[0]['markdown']['text'] if channel == 'dingtalk' else sent[0][1]
+    assert actual == body and not actual.startswith('#')
+    assert len(requests if channel == 'dingtalk' else sent) == 1
+    detail = service.detail(first.message_id)
+    assert detail['original_body'] == '完整来源明细'
+    assert detail['deliveries'][0]['final_body'] == body
 
 
 @pytest.fixture

@@ -113,6 +113,9 @@ def _certified_market_event(category: str, source: str, key: str | None,
 
 
 def _submitted_body(channel: str, title: str, content: str) -> str:
+    from notify.stock_report import is_report
+    if channel == "dingtalk" and is_report(content):
+        return content
     if channel == "wechat_work":
         return f"## {title}\n\n{content}"
     if channel in {"telegram", "slack"}:
@@ -255,7 +258,7 @@ def _send_dingtalk_via_legacy(title: str, content: str) -> Tuple[bool, str]:
         safe_title = f'{keyword} {title}' if keyword else title
         payload = {
             'msgtype': 'markdown',
-            'markdown': {'title': safe_title, 'text': f'# {title}\n\n{content}'},
+            'markdown': {'title': safe_title, 'text': _submitted_body('dingtalk', title, content)},
         }
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code != 200:

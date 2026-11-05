@@ -133,3 +133,10 @@ def test_zero_item_limit_does_not_emit_an_item():
 def test_task_identifiers_are_not_destroyed_by_markdown_cleanup():
     assert plain_text("research_data_sync_premarket_retry") == "research_data_sync_premarket_retry"
     assert plain_text("_说明_ **重点**") == "说明 重点"
+
+
+def test_readable_report_overflow_is_rejected_instead_of_losing_risk_footer():
+    import pytest
+    body = '【A股参考｜早盘｜10/20 10:05】\n\n' + '行情' * 1000 + '\n风险未解除'
+    with pytest.raises(ValueError, match='stock_report_exceeds_budget'):
+        compact_notification('report', body)

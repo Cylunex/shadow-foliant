@@ -749,6 +749,20 @@ def format_critical_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tu
     ])
 
 
+def _holding_guard_reason(row: dict[str, Any]) -> str:
+    guard = row.get("action_guard") or {}
+    codes = (guard.get("transition_reasons") or []) + (guard.get("current_limit_reasons") or [])
+    explanations = {
+        "multi_level_action_jump": "跨级升级需复核",
+        "portfolio_upgrade_count_limit": "本轮升级数超限",
+        "same_reason_upgrade_limit": "同因升级过密",
+        "same_reason_action_limit": "同类风险动作过密",
+        "portfolio_sell_count_limit": "卖出动作数超限",
+        "portfolio_action_count_limit": "总动作数超限",
+    }
+    return "、".join(dict.fromkeys(explanations.get(code, code) for code in codes)) or "组合保护限制"
+
+
 def _holding_action_summary(row: dict[str, Any]) -> str:
     labels = {"hold": "不动", "reduce": "减仓", "sell": "卖出",
               "add": "加仓", "data_insufficient": "数据不足"}
@@ -757,17 +771,7 @@ def _holding_action_summary(row: dict[str, Any]) -> str:
     trigger = str(row.get("requested_reason") or row.get("reason") or "")[:75]
     final_reason = str(row.get("reason") or "")[:75]
     if requested != final:
-        guard = row.get("action_guard") or {}
-        codes = (guard.get("transition_reasons") or []) + (guard.get("current_limit_reasons") or [])
-        explanations = {
-            "multi_level_action_jump": "跨级升级需复核",
-            "portfolio_upgrade_count_limit": "本轮升级数超限",
-            "same_reason_upgrade_limit": "同因升级过密",
-            "same_reason_action_limit": "同类风险动作过密",
-            "portfolio_sell_count_limit": "卖出动作数超限",
-            "portfolio_action_count_limit": "总动作数超限",
-        }
-        why = "、".join(dict.fromkeys(explanations.get(code, code) for code in codes)) or "组合保护限制"
+        why = _holding_guard_reason(row)
         return (f"原始触发{labels.get(requested, requested)}({trigger})→"
                 f"本轮判断{labels.get(final, final)}({why})；风险仍在，未发生交易")
     return f"本轮判断{labels.get(final, final)}({final_reason})；未发生交易"
@@ -803,74 +807,9 @@ def _decision_row(item: dict[str, Any], quote: dict[str, Any], plan: dict[str, A
 
 
 def format_fixed_summary(snapshot: dict[str, Any], label: str) -> str:
-    """QQ 即时报告的八行内摘要；完整明细留在 Agent 快照。"""
-    quality = snapshot.get("data_quality") or {}
-    as_of = quality.get("quote_as_of") or snapshot.get("generated_at") or "未知"
-    lines = [
-        (
-            f"{label}盘中决策｜行情{quality.get('valid', 0)}/{quality.get('requested', 0)} "
-            f"({quality.get('coverage', 0) * 100:.0f}%)｜计划{quality.get('plan_available', 0)}/"
-            f"{quality.get('plan_requested', 0)}｜as-of {str(as_of)[11:19] or as_of}"
-        ),
-    ]
-    from application.market_risk_notice import index_lines
-    lines.extend(index_lines(snapshot.get("market_risk") or {}))
-    holdings = snapshot.get("holdings") or []
-    candidates = (snapshot.get("formal_top5") or []) + (snapshot.get("formal_top15_watch") or [])
-    guarded_count = sum(
-        row.get("requested_action") and row.get("requested_action") != row.get("action")
-        for row in holdings
-    )
-    counts = snapshot.get("position_counts")
-    if counts:
-        lines.append(f"个股 {counts['equity_count']}/15，超 {counts['excess']} 只｜ETF {counts['etf_count']} 只另计｜其他基金 {counts['other_fund_count']}｜待核 {counts['unknown_count']}")
-    else:
-        lines.append(f"证券记录 {len(holdings)} 项，个股与ETF分类待核｜保护调整{guarded_count}项")
-
-    shown_h = sorted(holdings, key=lambda row: (
-        -max(ACTION_RANK.get(str(row.get("action")), -1),
-             ACTION_RANK.get(str(row.get("requested_action")), -1)),
-        -ACTION_RANK.get(str(row.get("action")), -1),
-    ))[:2]
-    for row in shown_h:
-        lines.append(
-            f"持仓 {_event_label({'symbol': row['symbol'], 'item': row}, snapshot)} 当前{_row_price(row, 'price')}｜"
-            f"{_holding_action_summary(row)}｜计划止损参考{_row_price(row, 'stop_loss')}｜"
-            f"目标参考{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
-        )
-    independent = snapshot.get("independent_selection") or {}
-    independent_label = (str(len(independent.get("top5") or []))
-                         if independent.get("status") == "ready" else "不可用")
-    lines.append(
-        f"量化候选（排名非买入指令）TOP5 {len(snapshot.get('formal_top5') or [])} / "
-        f"观察 {len(snapshot.get('formal_top15_watch') or [])}｜独立TOP5 {independent_label}"
-    )
-    shown_c = [row for row in (snapshot.get("formal_top5") or [])
-               if "holding" not in (row.get("sources") or [])][:2]
-    if not shown_c:
-        shown_c = [row for row in candidates
-                   if "holding" not in (row.get("sources") or [])][:2]
-    losna = snapshot.get("losna_review") or {}
-    reviews = losna.get("reviews") or []
-    if reviews:
-        row = reviews[0]
-        lines.append(f"Losna复核｜{row['symbol']}｜{' '.join(str(row['reason']).split())[:55]}｜反证 {' '.join(str(row['counterevidence']).split())[:40]}")
-    for row in shown_c[:0 if reviews else 1]:
-        entry = (f"¥{row['entry_low']:.2f}-{row['entry_high']:.2f}"
-                 if row.get("entry_low") is not None and row.get("entry_high") is not None else "暂不给价")
-        if not row.get("price_actionable") or row.get("action") == "data_insufficient":
-            entry = "暂不给价"
-        lines.append(
-            f"候选 {_event_label({'symbol': row['symbol'], 'item': row}, snapshot)} 当前{_row_price(row, 'price')}｜"
-            f"{row.get('action_cn')}｜"
-            f"{'买入触发参考' if row.get('action') == 'add' else '计划观察区(非买入指令)'}{entry}｜"
-            f"计划止损参考{_row_price(row, 'stop_loss')}｜"
-            f"目标参考{_row_price(row, 'target_price')}｜{str(row.get('quote_as_of') or '')[11:19]}"
-        )
-    if quality.get("status") != "success":
-        lines.append("⚠️ 行情缺失、陈旧或计划不足项已失败关闭，不据此给明确动作")
-    lines.append("价格依据：trade_plan + 正式 manifest qfq 日线；参考价非委托/成交价，委托价须另核盘口与复权；不自动下单")
-    return "\n".join(lines[:8])
+    """展示同批权威快照，不在通知层生成交易判断。"""
+    from notify.portfolio_report import render
+    return render(snapshot, label)
 
 
 def format_alert(event: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, str]:
