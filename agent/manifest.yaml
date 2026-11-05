@@ -29,7 +29,7 @@ skills:
     invocation: { model: true, user: true }
   - id: foliant-personal-portfolio
     path: skills/foliant-personal-portfolio/SKILL.md
-    summary: 读取个人持仓和成交，识别成交导入意图并生成 Nexus 成交 Proposal
+    summary: 股票项目自有日常操作 skill；本清单保留旧 Nexus Host 的持仓和成交兼容合同
     capabilities:
       - foliant.portfolio.read
       - foliant.trades.read

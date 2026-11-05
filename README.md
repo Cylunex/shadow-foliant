@@ -65,3 +65,5 @@ python3.12 -m venv .test-venv
 > 本项目仅用于个人研究与信息管理，不构成投资建议。
 
 - [统一鉴权、Agent 与 Nexus 接入设计（目标方案，尚未实现）](docs/nexus-integration-design.md)
+
+日常 Agent 操作见 [个人股票 Skill](agent/skills/foliant-personal-portfolio/SKILL.md)：成交录入与查看、持仓收益、行情研究、监控和个人策略参数；[命令导航](agent/skills/foliant-personal-portfolio/references/commands.md)由本项目维护。

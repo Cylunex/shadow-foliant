@@ -1065,7 +1065,8 @@ class TradeEntryService:
         }
 
     def create_review(self, *, actor_id: str, fields: Mapping[str, Any],
-                      idempotency_key: str, trace_id: str = "") -> dict[str, Any]:
+                      idempotency_key: str, trace_id: str = "",
+                      source: str = "nexus:trade-entry") -> dict[str, Any]:
         key = str(idempotency_key or "").strip()
         if len(key) < 8 or len(key) > 160:
             raise ApplicationError(
@@ -1073,6 +1074,8 @@ class TradeEntryService:
                 "Idempotency-Key must contain 8 to 160 characters",
             )
         request_payload = {"fields": clean_json(dict(fields))}
+        if source != "nexus:trade-entry":
+            request_payload["source"] = source
         action = "portfolio.trade-review.create"
         try:
             claimed, existing_result = self.repository.claim_write(
@@ -1097,7 +1100,7 @@ class TradeEntryService:
             rows, table, update_position = self._parse_review_fields(fields)
             preview = self.preview(
                 rows=rows, table=table, update_position=update_position,
-                actor_id=actor_id, persist=False, source="nexus:trade-entry",
+                actor_id=actor_id, persist=False, source=source,
             )
             if preview.get("errors"):
                 raise ApplicationError("invalid_trade", "trade validation failed")
@@ -1150,7 +1153,7 @@ class TradeEntryService:
         return batch
 
     def commit_review(self, review_id: str, *, actor_id: str, idempotency_key: str,
-                      trace_id: str = "") -> dict[str, Any]:
+                      trace_id: str = "", source: str = "nexus:trade-entry") -> dict[str, Any]:
         batch = self.get_review(review_id, actor_id=actor_id)
         if batch.get("status") == "confirmed":
             return self._review_envelope(batch, replayed=True, trace_id=trace_id)
@@ -1165,7 +1168,7 @@ class TradeEntryService:
             rows=[dict(item) for item in rows if isinstance(item, Mapping)],
             update_position=bool(batch.get("update_position")),
             confirmed=True,
-            source="nexus:trade-entry",
+            source=source,
         )
         if result.get("status") not in {"success", "noop"}:
             raise ApplicationError("trade_import_failed", "trade import failed", status_code=409)
