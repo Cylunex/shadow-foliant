@@ -5578,7 +5578,7 @@ def task_unified_selection():
 
         if final_rows:
             try:
-                notification_reference = None
+                notification_reference = wencai_strategy_runs
                 if _openapi_trial_reference_enabled():
                     from selection.wencai_notification import load_premarket_reference
                     notification_reference = load_premarket_reference(
@@ -5591,17 +5591,19 @@ def task_unified_selection():
                     as_of=datetime.now().strftime('%Y-%m-%d %H:%M'),
                     market_as_of=effective_market_date,
                     reference=notification_reference, data_note=data_note,
+                    top15_rows=local_formal_rows,
                 )
                 _full_reference = _format_selection_reference_summary(
                     final_rows, local_formal_rows, strategy_scan.get('results', {}),
                     comparison, name_map, data_note,
                     independent=independent_selection, three_way=selection_comparison,
                     compact_failures=False,
-                    wencai_reference=notification_reference,
+                    wencai_reference=(notification_reference
+                                      if _openapi_trial_reference_enabled() else None),
                 )
                 from notification_router import send
                 send('report', 'A股选股观察', _final_body,
-                     original_body=_full_reference)
+                     original_body=_final_body + '\n\n' + _full_reference)
             except Exception as _fpe:
                 print(f'[unified_selection] 最终TOP5推送失败(正式产物已保存): '
                       f'{type(_fpe).__name__}: {str(_fpe)[:80]}')

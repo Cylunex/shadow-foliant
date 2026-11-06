@@ -2,12 +2,52 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from application.services import _openapi_trial_reference
+from selection.reference_display import openapi_trial_reference as _openapi_trial_reference
 from selection.wencai_query_contract import ORDER
+
+
+def verified_picks(group: dict) -> list[dict]:
+    """Use only usable group results, deduplicated in provider order."""
+    if group.get('status') not in {'ready', 'trial_verified'}:
+        return []
+    picks, seen = [], set()
+    for row in group.get('picks') or []:
+        code = str(row.get('symbol') or row.get('code') or '')
+        if not re.fullmatch(r'\d{6}', code) or code in seen:
+            continue
+        seen.add(code)
+        picks.append({**row, 'symbol': code})
+        if len(picks) == 5:
+            break
+    return picks
+
+
+def reference_top5(reference: dict) -> list[dict]:
+    """Display-only consensus: group hits, best group rank, then stock code.
+
+    This is a project summary of the five groups, not an official Wencai rank
+    and never an input to the formal selection or trading decisions.
+    """
+    candidates = {}
+    for name in ORDER:
+        group = (reference.get('strategies') or {}).get(name) or {}
+        for rank, pick in enumerate(verified_picks(group), 1):
+            code = pick['symbol']
+            row = candidates.setdefault(code, {
+                'symbol': code, 'name': pick.get('name') or '',
+                'group_count': 0, 'best_rank': rank,
+            })
+            row['name'] = row['name'] or pick.get('name') or ''
+            row['group_count'] += 1
+            row['best_rank'] = min(row['best_rank'], rank)
+    return sorted(candidates.values(), key=lambda row: (
+        -row['group_count'], row['best_rank'], row['symbol'],
+    ))[:5]
 
 
 def load_premarket_reference(path: Path, *, selection_date: str,

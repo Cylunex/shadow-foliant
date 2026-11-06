@@ -157,7 +157,7 @@ def test_readable_reports_preserve_sections_warnings_archive_and_dedup(delivery,
         body = selection_report(rows, held_codes=['600000'], as_of='2026-10-20 09:45',
                                 market_as_of='2026-10-19',
                                 reference={'ready_groups': 3}, data_note='关键数据待核验' * 100)
-        assert '问财3/5组已核验' in body and '关键数据待核验' in body
+        assert '问财0/5组已核验' in body and '关键数据待核验' in body
     section = body.split('新选股观察（非持仓、无688）', 1)[1]
     assert all(code in section for code in ('000001', '000002', '000003'))
     assert all(code not in section for code in ('600000', '688001', '000004'))
@@ -211,26 +211,30 @@ def wencai_sample(tmp_path):
 
 
 @pytest.mark.parametrize('channel', ['qq', 'dingtalk'])
+@pytest.mark.parametrize('reference_mode', ['partial', 'maximum', 'legacy'])
 def test_openapi_picks_survive_selection_delivery_archive_and_dedup(
-        delivery, monkeypatch, channel, wencai_sample):
-    from jobs.jobs_hub import _format_selection_reference_summary
+        delivery, monkeypatch, channel, wencai_sample, reference_mode):
+    from notify.stock_report import selection_report
     from selection.wencai_notification import load_premarket_reference
     from selection.wencai_query_contract import ORDER
+    from application.scheduled_report_contract import REPORT_MAX_BYTES, REPORT_MAX_CHARS
     import notification_service
 
     path, _ = wencai_sample
     reference = load_premarket_reference(path, selection_date='2026-10-20',
                                         expected_market_as_of='2026-10-19')
-    rows = [{'code': f'601{i:03}', 'name': f'正式候选{i}', 'price': 12.34}
+    if reference_mode != 'partial':
+        for group in reference['strategies'].values():
+            group['status'] = 'ready' if reference_mode == 'legacy' else 'trial_verified'
+            for pick in group['picks']:
+                pick['name'] = '𠮷' * 100
+    rows = [{'code': f'601{i:03}', 'name': '𠮷' * 100, 'price': 12.34,
+             'reason': '候选理由' * 100}
             for i in range(15)]
-    independent = {'status': 'ready', 'market_as_of': '2026-10-19',
-                   'top5': rows[:5], 'top15': rows}
-    body = _format_selection_reference_summary(
-        rows[:5], rows, {}, {}, independent=independent,
-        data_note='数据状态说明' * 40, wencai_reference=reference)
-    original = _format_selection_reference_summary(
-        rows[:5], rows, {}, {}, independent=independent,
-        data_note='数据状态说明' * 40, wencai_reference=reference, compact_failures=False)
+    body = selection_report(rows[10:15], top15_rows=rows,
+        as_of='2026-10-20 09:45', market_as_of='2026-10-19',
+        data_note='数据状态说明' * 40, reference=reference)
+    original = body + '\n\n完整来源明细'
     service, sent = delivery
     requests = []
     monkeypatch.setattr(notification_service, 'NotificationService', lambda: SimpleNamespace(config={
@@ -249,19 +253,70 @@ def test_openapi_picks_survive_selection_delivery_archive_and_dedup(
     assert second[channel] == (False, 'archive_suppressed')
     delivered = requests[0]['markdown']['text'] if channel == 'dingtalk' else sent[0][1]
     assert len(requests if channel == 'dingtalk' else sent) == 1
-    assert len(body) <= 900 and len(body.splitlines()) == 8
-    assert '4/5组已核验' in delivered and '截至2026-10-19' in delivered
+    assert len(body) <= REPORT_MAX_CHARS and len(body.encode('utf-8')) <= REPORT_MAX_BYTES
+    assert compact_notification('report', body) == body
+    assert ('4/5组已核验' if reference_mode == 'partial' else '5/5组已核验') in delivered
+    assert '截至 2026-10-19' in delivered
+    assert '正式 TOP15（完整候选）' in delivered and '正式 TOP5（最终优选）' in delivered
+    assert '问财 TOP5（项目汇总，非官方排名）' in delivered
+    assert all(row['code'] in delivered for row in rows)
+    formal5 = delivered.split('正式 TOP5（最终优选）', 1)[1].split('\n\n', 1)[0]
+    assert all(row['code'] in formal5 for row in rows[10:15])
+    assert rows[0]['code'] not in formal5
+    wencai5 = delivered.split('问财 TOP5（项目汇总，非官方排名）', 1)[1].split('\n')[1]
+    expected_top5 = (['600000', '600010', '600020', '600040', '600001']
+                     if reference_mode == 'partial' else
+                     ['600000', '600010', '600020', '600030', '600040'])
+    assert all(code in wencai5 for code in expected_top5)
+    assert [wencai5.index(code) for code in expected_top5] == sorted(
+        wencai5.index(code) for code in expected_top5)
     for i, name in enumerate(ORDER):
-        assert f'问财参考·{name}：' in delivered
-        if i != 3:
-            assert f'600{i * 10:03}' in delivered
-    assert '小市值：⚠️条件或时点待核验' in delivered
-    assert '600030' not in delivered
+        assert f'{name}：' in delivered
+        if i != 3 or reference_mode != 'partial':
+            assert all(f'600{i * 10 + j:03}' in delivered for j in range(5))
+    if reference_mode == 'partial':
+        assert '小市值：条件或时点待核验' in delivered
+        assert '600030' not in delivered
     assert '0/5可用' not in delivered
     detail = service.detail(first.message_id)
     assert detail['original_body'] == original
     assert detail['deliveries'][0]['final_body'] == delivered
     assert rows[0]['code'] == '601000' and reference['reference_affects_membership'] is False
+
+
+def test_wencai_top5_counts_distinct_verified_groups_and_preserves_inputs():
+    from copy import deepcopy
+    from selection.wencai_notification import reference_top5
+    from selection.wencai_query_contract import ORDER
+
+    def pick(code):
+        return {'symbol': code, 'name': code}
+    reference = {'strategies': {
+        ORDER[0]: {'status': 'trial_verified', 'picks': [
+            pick('600003'), pick('600003'), pick('600002'), pick('bad'), pick('600001')]},
+        ORDER[1]: {'status': 'ready', 'picks': [pick('600002'), pick('600001'), pick('600004')]},
+        ORDER[2]: {'status': 'trial_unverified', 'picks': [pick('600099'), pick('600003')]},
+        ORDER[3]: {'status': 'degraded', 'picks': [pick('600099')]},
+        ORDER[4]: {'status': 'failed', 'picks': [pick('600099')]},
+    }}
+    before = deepcopy(reference)
+    rows = reference_top5(reference)
+    assert [row['symbol'] for row in rows] == ['600002', '600001', '600003', '600004']
+    assert [row['group_count'] for row in rows] == [2, 2, 1, 1]
+    assert reference == before
+    assert reference_top5({}) == []
+
+
+def test_selection_keeps_formal_members_and_empty_reference_sections():
+    from notify.stock_report import selection_report
+
+    rows = [{'code': '600000', 'name': '持仓'}, {'code': '688001', 'name': '科创'}]
+    body = selection_report(rows, top15_rows=rows, held_codes=['600000'])
+    formal = body.split('问财选股结果', 1)[0]
+    assert formal.count('600000') == 2 and formal.count('688001') == 2
+    assert '问财 TOP5（项目汇总，非官方排名）\n暂无已核验候选。' in body
+    assert body.count('暂不可用') == 5
+    assert '本轮暂无符合条件的新候选。' in body
 
 
 @pytest.mark.parametrize('invalid', ['yesterday', 'market_date', 'duplicate_group', 'naive', 'broken'])
