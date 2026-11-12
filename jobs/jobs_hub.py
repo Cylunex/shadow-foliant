@@ -1364,30 +1364,36 @@ def task_daily_pnl_snapshot():
                     _stock_note = f" ⚠️{r['stock_fallback_count']}只股票未采用实时价"
                     if r.get('stock_anomaly_count'):
                         _stock_note += f"（含{r['stock_anomaly_count']}只异常报价）"
+                partial = bool(r.get('fund_pending') or r.get('fund_fresh_count', 0) < r.get('fund_total_count', r.get('fund_count', 0)))
+                pnl_label = '已更新部分盈亏' if partial else '今日盈亏'
                 lines = [
-                    f"{emoji} 今日盈亏 {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}{_stock_note}",
+                    f"{emoji} {pnl_label} {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}{_stock_note}",
                     f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · "
                     f"基金 {r.get('fund_daily_pnl', 0):+,.0f}"
                     f"({r.get('fund_fresh_count', 0)}/{r.get('fund_total_count', r.get('fund_count', 0))}只净值已更新)",
                 ]
                 if s.get('mtd_pnl') is not None:
                     lines.append(f"  本月累计 {s['mtd_pnl']:+,.0f} · 近{s.get('period_days', 0)}日 {s.get('period_pnl', 0):+,.0f}(胜率{s.get('win_rate', 0)}%)")
-                from postmarket_digest import add_section, format_digest
-                add_section('pnl', '💰 今日盈亏', '\n'.join(lines), max_chars=600)
-                body = format_digest(snap_date)
+                from postmarket_digest import add_section, format_digest, format_notification_digest
+                add_section('pnl', '💰 ' + pnl_label, '\n'.join(lines), max_chars=600)
+                body = format_notification_digest(snap_date)
                 if body:
                     from notification_router import send
-                    send('report', f"🌙 盘后汇总｜今日盈亏 {tp:+,.0f}", body)
+                    send('report', f"🌙 盘后汇总｜{pnl_label} {tp:+,.0f}", body,
+                         original_body=format_digest(snap_date),
+                         idempotency_key='postmarket:' + snap_date, business_as_of=snap_date)
             except Exception as pe:
                 print(f'[daily_pnl_snapshot] 推送失败: {pe}')
         else:
             # 收益源偶发缺失时，仍把已完成的普通盘后报告送出，不让整晚内容被吞掉。
             try:
-                from postmarket_digest import format_digest
-                body = format_digest(snap_date)
+                from postmarket_digest import format_digest, format_notification_digest
+                body = format_notification_digest(snap_date)
                 if body:
                     from notification_router import send
-                    send('report', '🌙 盘后汇总｜收益数据待补', body)
+                    send('report', '🌙 盘后汇总｜收益数据待补', body,
+                         original_body=format_digest(snap_date),
+                         idempotency_key='postmarket:' + snap_date, business_as_of=snap_date)
             except Exception as pe:
                 print(f'[daily_pnl_snapshot] 盘后汇总推送失败: {pe}')
         _log_run(job, status, error=err, started_at=started,
@@ -5763,7 +5769,7 @@ def task_morning_portfolio():
             intraday = _run_fixed_intraday('10:05')
             if intraday.get('data_quality'):
                 from jobs.intraday_decision_monitor import format_fixed_summary
-                _push_daily('☀️ 早盘持仓与候选计划', format_fixed_summary(intraday, '10:05'))
+                _publish_morning_intraday(intraday)
             _log_run(job, _intraday_job_log_status(intraday),
                      error=(f"decision_status={intraday.get('status')}; "
                             'no holdings; formal candidates covered'), started_at=started,
@@ -5884,9 +5890,9 @@ def task_morning_portfolio():
         intraday = _run_fixed_intraday('10:05')
         if intraday.get('data_quality'):
             from jobs.intraday_decision_monitor import format_fixed_summary
-            _body = format_fixed_summary(intraday, '10:05')
-            _title = 'A股早盘参考'
-        _push_daily(_title, _body)
+            _publish_morning_intraday(intraday)
+        else:
+            _push_daily(_title, _body)
 
         _log_run(job, _intraday_job_log_status(intraday),
                  error=(f'decision_status={intraday.get("status")}; '
@@ -5931,19 +5937,39 @@ def task_losna_followups():
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
+def _publish_morning_intraday(snapshot):
+    """One early report: excess-equity review and candidates share this snapshot."""
+    from application.portfolio_daily import run_daily_exit
+    from automation_config import is_enabled
+    result = (run_daily_exit(snapshot=snapshot) if is_enabled('daily_equity_exit')
+              else {"status": "not_required"})
+    if result.get("status") == "not_required":
+        from jobs.intraday_decision_monitor import format_fixed_summary
+        _push_daily('A股早盘参考', format_fixed_summary(snapshot, '10:05'))
+    return result
+
+
 def task_daily_equity_exit():
-    """Natural-day equity review, including weekends and holidays."""
-    if datetime.now().hour < 14 or (datetime.now().hour == 14 and datetime.now().minute < 30):
+    """Trading-day early review; retries share the same day's delivery identity."""
+    from datetime import time as daytime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('Asia/Shanghai'))
+    if not daytime(10, 5) <= now.time().replace(tzinfo=None) < daytime(11, 30):
         return
-    started = datetime.now().isoformat()
+    if _skip_if_not_trading('daily_equity_exit'):
+        return
+    started = now.isoformat()
     try:
         from application.portfolio_daily import run_daily_exit
         result = run_daily_exit()
-        status = result.get("status")
-        _log_run("daily_equity_exit", "success" if status == "not_required" or (status == "accepted" and result.get("archive_status") == "recorded") else "degraded",
-                 error=f"delivery={status}", started_at=started, finished_at=datetime.now().isoformat())
+        if result.get('status') == 'waiting_snapshot':
+            result = run_daily_exit(snapshot=_run_fixed_intraday('10:05'))
+        status = result.get('status')
+        _log_run('daily_equity_exit', 'success' if status == 'not_required' or (
+            status == 'accepted' and result.get('archive_status') == 'recorded') else 'degraded',
+            error=f'delivery={status}', started_at=started, finished_at=datetime.now().isoformat())
     except Exception as exc:
-        _log_run("daily_equity_exit", "error", error=type(exc).__name__,
+        _log_run('daily_equity_exit', 'error', error=type(exc).__name__,
                  started_at=started, finished_at=datetime.now().isoformat())
 
 
@@ -6825,7 +6851,7 @@ def register_default_jobs():
     # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
     hub.register('losna_followups', '17:20', task_losna_followups)
     hub.register('losna_research', '09:58', task_losna_research)
-    hub.register('daily_equity_exit', '14:30', task_daily_equity_exit)
+    hub.register('daily_equity_exit', '10:06', task_daily_equity_exit)
     hub.register('daily_equity_exit_retry', 'every:10:minutes', task_daily_equity_exit)
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
 

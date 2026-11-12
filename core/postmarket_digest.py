@@ -31,8 +31,8 @@ def add_section(key: str, title: str, text: str, *, max_chars: int = 1200,
     body = str(text or '').strip()
     if not body:
         return
-    if len(body) > max_chars:
-        body = body[:max_chars].rstrip() + '\n…（完整内容请由 Agent 查询任务产物）'
+    # Keep the original intact. Mobile budgets belong to the renderer, not the
+    # source archive; cutting here also used to sever numbered citations.
     with _LOCK:
         os.makedirs(_DIR, exist_ok=True)
         path = _path(day)
@@ -79,3 +79,40 @@ def format_digest(day: Optional[str] = None) -> str:
         f"━━ {row.get('title') or row['key']} ━━\n{row['text'].strip()}"
         for row in sections
     )
+
+
+def format_notification_digest(day: Optional[str] = None) -> str:
+    from notify.stock_report import report, text
+    from notify.report_details import history_reference
+    import re
+    sections = load_sections(day)
+    if not sections:
+        return ''
+    order = {'pnl': 0, 'mx_close': 10, 'sector_rotation': 20,
+             'eod_info': 30, 'strategy_scan': 40, 'strategy_evolution': 50}
+    rendered = []
+    for section in sorted(sections, key=lambda s: order.get(s.get('key'), 100)):
+        key = section['key']
+        lines = [line.strip() for line in section['text'].splitlines() if line.strip()]
+        if key == 'pnl':
+            summary = [text(line, 80) for line in lines[:3]]
+        elif key == 'mx_close':
+            # Numbered model citations are not verified source URLs. Retain the
+            # raw research in the archive without promoting its units/actions.
+            summary = ['模型复盘已生成，来源和指标口径待核验；原稿仅供研究，持仓动作以同日尾盘复核为准。']
+        elif key == 'strategy_scan':
+            summary = [text(line, 95) for line in lines if line.startswith(('股票池:', '1.'))][:2]
+        elif key == 'sector_rotation':
+            summary = [text(line, 95) for line in lines if '看多:' in line or '看空:' in line][:2]
+        elif key == 'strategy_evolution':
+            score = next((line for line in lines if re.search(r'触发\d+/\d+只', line)), '')
+            pool = re.search(r'触发\d+/(\d+)只', score)
+            summary = [f'历史回测样本池{pool.group(1)}只；非全市场实盘收益。' if pool else '历史样本评估，非实盘收益。',
+                       text(score, 95)]
+        else:
+            useful = [line for line in lines if not line.startswith(('━━', '【', '📢', '📑', '===', '#'))]
+            summary = [text(line, 100) for line in useful[:2]]
+        rendered.append((text(section['title'], 18),
+                         [text(line, 70) for line in summary if line][:3 if key == 'pnl' else 2]
+                         or ['本轮无可核验摘要，详见完整报告。']))
+    return report('盘后汇总', _day(day), rendered[:6], [history_reference()])

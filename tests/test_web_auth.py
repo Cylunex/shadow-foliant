@@ -375,6 +375,33 @@ class WebAuthTests(unittest.TestCase):
             client.cookies.set(platform_auth.SESSION_COOKIE, admin_session.session_token)
             self.assertEqual(client.get("/api/env").status_code, 200)
 
+    def test_notification_history_requires_admin_and_escapes_private_content(self):
+        from webui.api_server import app
+        from types import SimpleNamespace
+        row = {'message_id': 'a' * 32, 'title': '<script>title</script>',
+               'generated_at': '2026-11-09T10:05:00+08:00', 'status': 'accepted',
+               'original_body': '<script>private</script>', 'deliveries': [
+                   {'channel': 'qq', 'status': 'accepted', 'final_body': '实收摘要'}]}
+        fake = SimpleNamespace(list_messages=lambda **kwargs: [row], detail=lambda identity: row)
+        with patch('application.message_archive.MessageArchiveService', return_value=fake):
+            with TestClient(app, base_url='https://stock.example.com', follow_redirects=False) as client:
+                assert client.get('/notifications').status_code == 302
+                user = self.service.store.upsert_identity(self._claims())
+                session = self.service.store.create_session(user, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, session.session_token)
+                assert client.get('/notifications').status_code == 403
+                assert client.get('/notifications/' + 'a' * 32).status_code == 403
+                admin = self.service.store.upsert_identity(self._claims(
+                    sub='notice-admin', groups=['stock-users', 'stock-admins']))
+                session = self.service.store.create_session(admin, ttl_seconds=300)
+                client.cookies.set(platform_auth.SESSION_COOKIE, session.session_token)
+                response = client.get('/notifications')
+                assert response.status_code == 200 and '&lt;script&gt;' in response.text
+                response = client.get('/notifications/' + 'a' * 32)
+                assert response.status_code == 200 and '<script>' not in response.text
+                assert 'private' in response.text and '实收摘要' in response.text
+                assert 'no-store' in response.headers['Cache-Control']
+
     def test_fund_routes_use_concrete_paths_and_real_browser_permissions(self):
         from starlette.requests import Request
         from webui.api_server import app

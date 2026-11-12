@@ -127,15 +127,8 @@ def _submitted_body(channel: str, title: str, content: str) -> str:
 
 def _qq_archive_summary(content: str) -> str:
     """Keep long weekly material in encrypted archive; QQ gets a bounded index."""
-    lines = []
-    for raw in str(content or "").splitlines():
-        line = raw.strip()
-        if not line or len(line) > 150 or line.startswith(("━━", "===")):
-            continue
-        lines.append(line)
-        if len(lines) == 5:
-            break
-    return "\n".join(lines + ["完整正文与数据口径见加密消息存档；QQ仅显示摘要。"])
+    from notify.weekly_report import archive_summary
+    return archive_summary(content)
 
 
 def _receipt(ok: bool, message: str) -> dict:

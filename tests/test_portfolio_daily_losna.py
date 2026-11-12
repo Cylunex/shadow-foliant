@@ -120,7 +120,7 @@ def test_real_daily_payload_archives_and_retries_only_explicit_rejection(store, 
     assert service.deliver(report, sender)["status"] == "accepted"
     assert len(calls) == 2 and calls[0] == calls[1]
     assert all("150/15" in body and "ETF 0" in body for body in calls)
-    assert all("判断变化｜600000" in body and "下次开市复核" in body for body in calls)
+    assert all("判断变化｜600000" in body and "操作前复核" in body for body in calls)
     assert len(report["text"].splitlines()) == 8
 
 
@@ -248,7 +248,7 @@ def test_native_daily_job_adapts_report_router_signature(store, monkeypatch):
            "price_usable": True, "quote_time_source": "provider", "quote_as_of": yesterday.isoformat()}
     # The old archive format contains the examined risk rows but no judgments projection.
     prior = build_daily(holdings, {"stock_symbols": {h["code"] for h in holdings}},
-                        [row], now=yesterday)
+                        [row], now=yesterday, snapshot_at=yesterday)
     prior.pop("judgments")
     service = DailyExitService(store)
     service.deliver(prior, lambda *a, **kw: {"qq": (True, "HTTP 200")})
@@ -300,7 +300,7 @@ def test_judgment_comparison_filters_unavailable_future_and_unaccepted_evidence(
     ]:
         report = build_daily(holdings, metadata, [{**today, **override}], now=NOW,
                              snapshot_at=snapshot_at, prior=prior)
-        assert "两期没有同一持仓的可比判断" in report["text"]
+        assert "本次或前次有效行情不足" in report["text"]
 
 
 def test_lunch_report_keeps_verified_midday_close_levels():

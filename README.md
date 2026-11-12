@@ -55,6 +55,7 @@ python3.12 -m venv .test-venv
 [研究决策闭环使用说明](docs/RESEARCH_DECISION_LOOP.md)。
 0.6.0 的使用入口、迁移、回退和未完成的外部验收见
 [研究可靠性与持仓学习](docs/RESEARCH_RELIABILITY.md)。
+通知内容、早盘清仓与完整报告入口见[通知修复说明](docs/NOTIFICATION_REPAIR_2026-11-12.md)。
 网页中的引用录入、数字重算与原文复核见
 [研究证据录入与复核](docs/RESEARCH_EVIDENCE_WORKBENCH.md)。
 历史冻结、就绪检查和降级边界见

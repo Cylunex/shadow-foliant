@@ -14,13 +14,13 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from application.holding_review import ACTION_RANK
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_KEY = "intraday_decision"
 VERSION = "intraday-decision-v1"
 CRITICAL_POLICY_VERSION = "critical-only-action-required-v1"
 ACTION_REASON_VERSION = "portfolio-action-reason-v3"
-ACTION_RANK = {"data_insufficient": -1, "hold": 0, "add": 1, "reduce": 2, "sell": 3}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -505,8 +505,10 @@ def _candidate_decision(quote: dict[str, Any], plan: dict[str, Any], fail_closed
     if buy_approved and low is not None and high is not None and low <= price <= high:
         return {"action": "add", "action_cn": "买入", "reason": f"进入买入区 {low:.2f}-{high:.2f}"}
     trigger = (f"{low:.2f}-{high:.2f}" if low is not None and high is not None else "暂不给价")
-    reason = (f"等待，触发价为 {trigger}" if buy_approved else
-              f"等待，触发价为 {trigger}；trade_plan 尚未放行买入")
+    blockers = list(dict.fromkeys(str(x) for x in (plan.get("blockers") or []) if x))
+    pending = "；".join(blockers[:2]) or str(plan.get("reason") or "计划批准条件未齐，等待复核")
+    reason = (f"等待价格进入观察区 {trigger}" if buy_approved else
+              f"观察区 {trigger}；暂不买入：{pending}")
     return {"action": "hold", "action_cn": "等待", "reason": reason}
 
 
@@ -756,11 +758,19 @@ def _holding_guard_reason(row: dict[str, Any]) -> str:
         "multi_level_action_jump": "跨级升级需复核",
         "portfolio_upgrade_count_limit": "本轮升级数超限",
         "same_reason_upgrade_limit": "同因升级过密",
-        "same_reason_action_limit": "同类风险动作过密",
+        "same_reason_action_limit": "本轮同类风险处理名额已满",
         "portfolio_sell_count_limit": "卖出动作数超限",
         "portfolio_action_count_limit": "总动作数超限",
     }
-    return "、".join(dict.fromkeys(explanations.get(code, code) for code in codes)) or "组合保护限制"
+    if not codes:
+        codes = guard.get("reasons") or []
+        explanations.update({
+            "same_trigger_concentration_limit": "本轮同类风险处理名额已满",
+            "portfolio_turnover_sell_demoted": "本轮换手预算仅容许部分减仓",
+            "portfolio_turnover_limit": "本轮换手预算已满",
+            "turnover_denominator_unavailable": "仓位金额待核验",
+        })
+    return "、".join(dict.fromkeys(explanations.get(code, code) for code in codes)) or "本轮处理预算受限，原风险仍需复核"
 
 
 def _holding_action_summary(row: dict[str, Any]) -> str:

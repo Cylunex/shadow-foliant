@@ -41,6 +41,7 @@ _add(ROUTE_POLICIES, Access.PUBLIC, "GET", "/healthz", "/api/health", "/auth/log
 _add(ROUTE_POLICIES, Access.READY, "GET", "/readyz", "/research-readyz",
      "/data-readyz", "/selection-readyz")
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/auth/me")
+_add(ROUTE_POLICIES, Access.ADMIN, "GET", "/notifications", "/notifications/{message_id}")
 _add(ROUTE_POLICIES, Access.USER, "POST", "/api/auth/session/rotate", "/auth/logout", "/auth/logout/all")
 
 _add(ROUTE_POLICIES, Access.USER, "GET", "/api/fund/research/{code}")

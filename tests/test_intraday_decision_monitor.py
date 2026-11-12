@@ -443,7 +443,7 @@ def test_transition_guard_reports_original_trigger_and_final_action():
     assert holding['action'] == 'reduce'
     assert holding['action_guard']['original_reason'] == '技术破位待退出'
     summary = monitor.format_fixed_summary(result, '14:30')
-    assert '原信号：技术破位待退出；本轮减仓参考：跨级升级需复核' in summary
+    assert '原信号：技术破位待退出；处理限制：跨级升级需复核' in summary
     assert '风险未解除' in summary and '未发生交易' in summary
 
 
@@ -474,7 +474,7 @@ def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkey
     assert holding['action_guard']['reason_family'] == 'take_profit'
     summary = monitor.format_fixed_summary(result, '14:30')
     assert '永杰新材' in summary
-    assert '原信号：当前价触及 计划第一目标 12.00；本轮观望：同类风险动作过密' in summary
+    assert '原信号：当前价触及 计划第一目标 12.00；处理限制：本轮同类风险处理名额已满' in summary
     assert '风险未解除' in summary and '未发生交易' in summary
 
 
@@ -490,7 +490,7 @@ def test_ranked_holding_is_reported_as_reduce_not_buy_candidate():
                          'coverage': 1, 'plan_available': 1, 'plan_requested': 1},
         'holdings': [qilu], 'formal_top5': [], 'formal_top15_watch': [qilu],
     }, '14:30')
-    assert '减仓参考：齐鲁银行' in text and '跌破20日均线(6.98)' in text
+    assert '部分减仓复核：齐鲁银行' in text and '跌破20日均线(6.98)' in text
     assert '候选 齐鲁银行' not in text
     assert '候选排名不代表买入时机' in text
     _, alert = monitor.format_alert({'trigger_type': 'action_escalation', 'item': qilu}, {})

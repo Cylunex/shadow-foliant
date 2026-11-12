@@ -135,12 +135,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '把已发布冻结事实交给Losna受限研究，未收到结果仍准时报表',
     },
     'daily_equity_exit': {
-        'cn': '个股超限清仓日报', 'schedule': '14:30 每日',
+        'cn': '个股超限清仓日报', 'schedule': '10:05早盘合并，10:06回执核对（交易日）',
         'category': '持仓', 'default': True, 'core': True,
-        'description': '仅计个股，ETF单列；自然日超过15只必报，无模型依赖',
+        'description': '仅计个股，ETF单列；超过15只合并早盘提醒，休市日不重复旧行情',
     },
     'daily_equity_exit_retry': {
-        'cn': '个股超限日报回执核对', 'schedule': '14:30后每10分钟',
+        'cn': '个股超限日报回执核对', 'schedule': '10:05至11:30每10分钟（交易日）',
         'category': '持仓', 'default': True, 'core': True,
         'description': '核对同日稳定业务键，不重复发送结果未知的报告',
     },

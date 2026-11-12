@@ -146,6 +146,7 @@ createApp({
           },[iconNode(it.icon),h('span',{class:'nav-copy'},[h('b',it.t),h('small',it.desc)])]))
         ]))),
         h('div',{class:'sidebar-footer'},[
+          identity.value?.is_admin ? h('a',{class:'nav-item',href:'notifications'},'通知记录') : null,
           h('div',{class:'runtime-state'},[
             h('span',{class:['status-dot',health.value?.status==='ok'?'ready':'offline']}),
             h('span',{class:'runtime-copy'},[
