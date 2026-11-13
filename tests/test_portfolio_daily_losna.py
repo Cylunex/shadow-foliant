@@ -1,11 +1,13 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from threading import Barrier
 from zoneinfo import ZoneInfo
 
 import pytest
 from data.research_store import ResearchStore
 from application.portfolio_daily import build_daily, DailyExitService
-from application.losna_research import LosnaResearch
+from application.losna_research import LosnaResearch, ResearchRejection
 from notify.plain_language import compact_notification
 
 NOW = datetime(2026, 11, 8, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -208,6 +210,90 @@ def test_research_claim_lease_fences_old_worker_and_expires(store):
     clock[0] += timedelta(hours=1)
     assert service.claim(owner="research", worker="losna", purposes=["directed_review"])["status"] == "empty"
     assert service.get(job["object_id"], "research")["status"] == "expired"
+
+
+def test_claim_replays_original_packet_across_queue_and_lease_changes(store):
+    clock = [NOW]
+    service = LosnaResearch(store, lambda: clock[0])
+    queue = dict(owner="research", purpose="directed_review", candidates=[], evidence=[])
+    first, second, waiting = [service.create(**queue, input_version=str(n)) for n in range(3)]
+    args = dict(owner="research", worker="losna", purposes=["directed_review"])
+    a = service.claim(**args, claim_id="A")
+    b = service.claim(**args, claim_id="B")
+    assert [a["object_id"], b["object_id"]] == [first["object_id"], second["object_id"]]
+    clock[0] += timedelta(minutes=4)
+    assert service.claim(**args, claim_id="B") == b
+    receipt = service.submit(owner="research", worker="losna", identity=b["object_id"],
+                             generation=b["revision"], result={"reviews": [], "next_check": ""})
+    assert service.claim(**args, claim_id="B") == receipt
+    assert service.get(waiting["object_id"], "research") == waiting
+    clock[0] += timedelta(hours=1)
+    expired = service.claim(**args, claim_id="A")
+    assert expired["object_id"] == a["object_id"] and expired["status"] == "expired"
+    assert service.claim(**args, claim_id="A") == expired
+    assert service.claim(**args, claim_id="B") == receipt
+
+
+def test_reassigned_claim_cannot_replay_another_generations_packet_or_result(store):
+    clock = [NOW]
+    service = LosnaResearch(store, lambda: clock[0])
+    queue = dict(owner="research", purpose="directed_review", candidates=[], evidence=[])
+    job = service.create(**queue, input_version="v1")
+    args = dict(owner="research", worker="losna", purposes=["directed_review"])
+    old = service.claim(**args, claim_id="old")
+    clock[0] += timedelta(minutes=4)
+    current = service.claim(**args, claim_id="new")
+    assert current["object_id"] == old["object_id"] and current["revision"] > old["revision"]
+    waiting = service.create(**queue, input_version="v2")
+    with pytest.raises(ResearchRejection, match="^research_generation_conflict$") as superseded:
+        service.claim(**args, claim_id="old")
+    assert superseded.value.identity == job["object_id"]
+    service.submit(owner="research", worker="losna", identity=current["object_id"],
+                   generation=current["revision"], result={"reviews": [], "next_check": ""})
+    with pytest.raises(ResearchRejection, match="^research_generation_conflict$") as superseded:
+        service.claim(**args, claim_id="old")
+    assert superseded.value.identity == job["object_id"]
+    with pytest.raises(ValueError, match="^purpose_denied$"):
+        service.claim(**{**args, "purposes": ["independent_discovery"]}, claim_id="old")
+    assert service.get(waiting["object_id"], "research") == waiting
+
+
+def test_concurrent_claims_share_one_generation_and_survive_queue_window(store):
+    service = LosnaResearch(store, lambda: NOW)
+    queue = dict(owner="research", purpose="directed_review", candidates=[], evidence=[])
+    packets = [service.create(**queue, input_version=str(n)) for n in range(3)]
+    args = dict(owner="research", worker="losna", purposes=["directed_review"], claim_id="run")
+    start = Barrier(4)
+
+    def claim(_):
+        start.wait(timeout=10)
+        return LosnaResearch(store, lambda: NOW).claim(**args)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        claims = list(executor.map(claim, range(4)))
+    assert all(c == claims[0] for c in claims)
+    assert claims[0]["object_id"] == packets[0]["object_id"] and claims[0]["revision"] == 2
+    assert all(service.get(p["object_id"], "research") == p for p in packets[1:])
+    for n in range(100):
+        service.create(**queue, input_version=f"later-{n}")
+    assert service.claim(**args) == claims[0]
+
+
+def test_retry_of_legacy_reused_key_does_not_inherit_a_later_generation(store):
+    service = LosnaResearch(store, lambda: NOW)
+    args = dict(owner="research", worker="losna", purposes=["directed_review"], claim_id="A")
+    job = service.create(owner="research", purpose="directed_review", input_version="legacy",
+                         candidates=[], evidence=[])
+    first = service.claim(**args)
+    # Older providers could grant A, B and then A again on the very same packet.
+    with service.repo.transaction() as cur:
+        for key in ("B", "A"):
+            old = service.repo.read(cur, "losna_research", job["object_id"], "research")
+            service.repo.append(cur, "losna_research", job["object_id"], "research", {**old, "claim_id": key}, old)
+    with pytest.raises(ResearchRejection, match="^research_generation_conflict$") as superseded:
+        service.claim(**args)
+    assert superseded.value.identity == first["object_id"]
+    assert service.get(first["object_id"], "research")["revision"] == first["revision"] + 2
 
 
 def test_preopen_indices_retain_confirmed_close_without_current_risk():

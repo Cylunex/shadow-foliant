@@ -28,7 +28,7 @@ JSON 从 stdin 传入，stdout 是一个 JSON 结果。配置只指定固定 `ac
 - 指定成交日用 `trade_date`，指定录入日用 `import_date`，不能同时传。使用上海时间解释无时区的用户日期。返回数量达到 limit 时不要宣称已经读完全部历史。
 - 用户明确要求记下**已经成交**的事实时，使用 `trades.import`。支持 `rows` 或原始 Markdown `table`，二选一；必需事实是名称或代码、成交时间、方向、数量和价格。名称可以由服务批量解析；代码歧义、日期或买卖方向不明时只问缺少的事实。截图看不清时不猜。
 - 保留已提供费用、券商成交编号、委托编号与账户标识，不补造手续费。默认 `update_position=true`；仅在用户要求只记流水时设为 false。计划买卖和研究建议不录为成交。
-- 同一意图使用稳定的 `idempotency_key`；失败或超时后复用原键，已知 `batch_id` 时先查 `trades.receipt`。后台自动预检、防重、持仓版本校验及原子提交，普通录入不向用户另开审批流程。
+- 同一笔录入使用稳定的 `idempotency_key`。提交中断后，用原配置身份调用 `trades.receipt`，传 `batch_id` 或原 `idempotency_key` 其中一个。该查询只读，返回批次当前状态。`write_in_progress` 表示创建仍在进行，稍后再查。`trade_review_not_found` 表示该身份尚未查到对应批次。需重试录入时复用原键和原始参数；同键改动内容会返回 `idempotency_conflict`。
 - 只有回执 `status=complete` 且存在 `receipt` 才说明成功。回执中的 `record_count` 是本批记录数，`replayed=true` 是重读原回执，不是再次新增。最后按相关代码/成交日 `trades.list` 和 `portfolio.summary` 核对；回读失败应说明已提交但核对未完成，不能重新造一笔。
 - `needs_input/conflict/partial/failed` 按真实状态解释；不要通过关闭持仓更新绕过超卖或冲突。
 

@@ -20,6 +20,9 @@ class RunQuotaExceeded(ValueError):
     """The actor already owns the configured number of active Runs."""
 
 
+_NO_REQUEST = object()
+
+
 @dataclass(frozen=True)
 class CreateRunResult:
     run: dict[str, Any]
@@ -811,8 +814,8 @@ class RunRepository:
             conn.close()
 
     def get_write_result(self, actor_id: str, action: str,
-                         idempotency_key: str, request_payload: Any) -> dict[str, Any] | None:
-        request_digest = payload_hash(request_payload)
+                         idempotency_key: str, request_payload: Any = _NO_REQUEST) -> dict[str, Any] | None:
+        """Read the actor's claim or saved response. A write retry must also match its request."""
         conn = self.connect()
         try:
             cur = conn.cursor()
@@ -824,7 +827,7 @@ class RunRepository:
             row = cur.fetchone()
             if not row:
                 return None
-            if str(row[0]) != request_digest:
+            if request_payload is not _NO_REQUEST and str(row[0]) != payload_hash(request_payload):
                 raise IdempotencyConflict("idempotency key conflicts with a different request")
             return json.loads(row[1]) if not isinstance(row[1], dict) else dict(row[1])
         finally:

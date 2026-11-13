@@ -13,7 +13,7 @@ import _bootstrap
 from application import personal_skill as skill
 from application.personal_strategy import validate_change
 from application.run_repository import RunRepository
-from application.services import TradeEntryService, PortfolioAccessService
+from application.services import ApplicationError, TradeEntryService, PortfolioAccessService
 from test_trade_entry_application import FakePortfolioDB, _row
 
 CONFIG = {'actor': 'synthetic-owner', 'allow_writes': True}
@@ -40,13 +40,82 @@ def test_import_readback_and_retry_use_one_domain_batch(domain):
     assert db.import_calls == 1
     assert first['records'][0]['commission'] == 5
     assert first['records'][0]['source'] == 'skill:foliant-personal-portfolio'
-    assert skill.invoke('trades.receipt', {'batch_id': first['batch_id']}, CONFIG)['receipt'] == first['receipt']
+    reader = {'actor': CONFIG['actor']}
+    by_batch = skill.invoke('trades.receipt', {'batch_id': first['batch_id']}, reader)
+    by_key = skill.invoke('trades.receipt', {'idempotency_key': args['idempotency_key']}, reader)
+    assert by_key == by_batch == {k: v for k, v in first.items() if k != 'replayed'}
     records = skill.invoke('trades.list', {'limit': 1}, CONFIG)['data']['records']
     assert records[0]['code'] == '600519'
-    with pytest.raises(Exception):
-        skill.invoke('trades.receipt', {'batch_id': first['batch_id']}, {**CONFIG, 'actor': 'different-owner'})
-    with pytest.raises(Exception):
+    for selector in [{'batch_id': first['batch_id']}, {'idempotency_key': args['idempotency_key']}]:
+        with pytest.raises(ApplicationError) as missing:
+            skill.invoke('trades.receipt', selector, {'actor': 'different-owner'})
+        assert (missing.value.code, missing.value.status_code) == ('trade_review_not_found', 404)
+    with pytest.raises(ApplicationError) as conflict:
         skill.invoke('trades.import', {**args, 'rows': [_row(price=1600)]}, CONFIG)
+    assert conflict.value.code == 'idempotency_conflict'
+    assert skill.invoke('trades.receipt', {'idempotency_key': args['idempotency_key']}, reader) == by_key
+    assert db.import_calls == 1
+
+
+def test_receipt_before_commit_distinguishes_missing_processing_and_pending(domain):
+    db, app = domain
+    entry = app.trade_entry
+    key = 'synthetic-message-002'
+    selector = {'idempotency_key': key}
+    reader = {'actor': CONFIG['actor']}
+    with pytest.raises(ApplicationError) as missing:
+        skill.invoke('trades.receipt', selector, reader)
+    assert missing.value.code == 'trade_review_not_found'
+    fields = {'trades': [_row()], 'table': '', 'updatePosition': True}
+    source = 'skill:foliant-personal-portfolio'
+    payload = {'fields': fields, 'source': source}
+    assert entry.repository.claim_write(reader['actor'], entry.review_create_action, key, payload) == (True, None)
+    with pytest.raises(ApplicationError) as processing:
+        skill.invoke('trades.receipt', selector, reader)
+    assert processing.value.code == 'write_in_progress'
+    assert db.import_calls == 0 and not db.batches
+    entry.repository.release_write_claim(reader['actor'], entry.review_create_action, key, payload)
+    staged = entry.create_review(actor_id=reader['actor'], fields=fields, idempotency_key=key, source=source)
+    pending = skill.invoke('trades.receipt', selector, reader)
+    assert (pending['batch_id'], pending['status'], pending['receipt']) == (staged['review_id'], 'pending', None)
+    assert db.import_calls == 0
+    imported = skill.invoke('trades.import', {**selector, 'rows': fields['trades']}, CONFIG)
+    assert imported['status'] == 'complete' and db.import_calls == 1
+    other = {**CONFIG, 'actor': 'different-owner'}
+    second = skill.invoke('trades.import', {**selector, 'rows': [_row(price=1600)]}, other)
+    assert second['batch_id'] != imported['batch_id']
+    for actor, expected in [(reader, imported), (other, second)]:
+        assert skill.invoke('trades.receipt', selector, actor)['receipt'] == expected['receipt']
+
+
+def test_receipt_requires_exactly_one_selector(domain):
+    reader = {'actor': CONFIG['actor']}
+    cap = next(item for item in skill.catalog(reader) if item['name'] == 'trades.receipt')
+    schema = cap['inputSchema']
+    assert cap['annotations']['readOnlyHint']
+    assert schema['minProperties'] == schema['maxProperties'] == 1
+    assert set(schema['properties']) == {'batch_id', 'idempotency_key'}
+    for selector in [{}, {'batch_id': 'batch-01', 'idempotency_key': 'synthetic-key'}]:
+        with pytest.raises(ValueError, match='provide_batch_id_or_idempotency_key'):
+            skill.invoke('trades.receipt', selector, reader)
+    for selector in [{'idempotency_key': 'short'}, {'batch_id': None}, {'idempotency_key': None},
+                     {'idempotency_key': 'synthetic-key', 'actor': 'different-owner'}]:
+        with pytest.raises(ValidationError):
+            skill.invoke('trades.receipt', selector, reader)
+
+
+def test_receipt_and_import_normalize_the_same_key(domain):
+    db, _ = domain
+    for key in [' ' * 8, '   short   ']:
+        for name, args in [('trades.import', {'rows': [_row()]}), ('trades.receipt', {})]:
+            with pytest.raises(ApplicationError) as invalid:
+                skill.invoke(name, {**args, 'idempotency_key': key}, CONFIG)
+            assert invalid.value.code == 'idempotency_key_required'
+    assert not db.batches and db.import_calls == 0
+    args = {'rows': [_row()], 'idempotency_key': '  synthetic-key  '}
+    saved = skill.invoke('trades.import', args, CONFIG)
+    for key in [args['idempotency_key'], args['idempotency_key'].strip()]:
+        assert skill.invoke('trades.receipt', {'idempotency_key': key}, CONFIG)['receipt'] == saved['receipt']
     assert db.import_calls == 1
 
 

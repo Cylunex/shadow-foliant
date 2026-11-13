@@ -819,10 +819,20 @@ class TradeEntryService:
     """Stock Web transaction entry; deliberately absent from the Agent research manifest."""
 
     action = "portfolio.trade-record.create"
+    review_create_action = "portfolio.trade-review.create"
 
     def __init__(self, repository: RunRepository, *, portfolio_db: Any = None) -> None:
         self.repository = repository
         self._portfolio_db = portfolio_db
+
+    @staticmethod
+    def _idempotency_key(value: str) -> str:
+        key = str(value or "").strip()
+        if not 8 <= len(key) <= 160:
+            raise ApplicationError(
+                "idempotency_key_required", "Idempotency-Key must contain 8 to 160 characters"
+            )
+        return key
 
     def _db(self):
         if self._portfolio_db is not None:
@@ -896,11 +906,7 @@ class TradeEntryService:
                 created_by_id: str | None = None) -> dict[str, Any]:
         if not confirmed:
             raise ApplicationError("confirmation_required", "explicit confirmation is required")
-        key = str(idempotency_key or "").strip()
-        if len(key) < 8 or len(key) > 160:
-            raise ApplicationError(
-                "idempotency_key_required", "Idempotency-Key must contain 8 to 160 characters"
-            )
+        key = self._idempotency_key(idempotency_key)
         preview = self.preview(
             rows=rows, table=table, update_position=update_position,
             actor_id=actor_id, persist=False, source=source,
@@ -922,8 +928,8 @@ class TradeEntryService:
             )
         except IdempotencyConflict as exc:
             raise ApplicationError("idempotency_conflict", str(exc), status_code=409) from exc
-        if not claimed and existing is not None:
-            if existing.get("status") == "processing":
+        if not claimed:
+            if existing is None or existing.get("status") == "processing":
                 raise ApplicationError(
                     "write_in_progress", "an identical trade write is already in progress",
                     status_code=409,
@@ -1067,24 +1073,19 @@ class TradeEntryService:
     def create_review(self, *, actor_id: str, fields: Mapping[str, Any],
                       idempotency_key: str, trace_id: str = "",
                       source: str = "nexus:trade-entry") -> dict[str, Any]:
-        key = str(idempotency_key or "").strip()
-        if len(key) < 8 or len(key) > 160:
-            raise ApplicationError(
-                "idempotency_key_required",
-                "Idempotency-Key must contain 8 to 160 characters",
-            )
+        key = self._idempotency_key(idempotency_key)
         request_payload = {"fields": clean_json(dict(fields))}
         if source != "nexus:trade-entry":
             request_payload["source"] = source
-        action = "portfolio.trade-review.create"
+        action = self.review_create_action
         try:
             claimed, existing_result = self.repository.claim_write(
                 actor_id, action, key, request_payload
             )
         except IdempotencyConflict as exc:
             raise ApplicationError("idempotency_conflict", str(exc), status_code=409) from exc
-        if not claimed and existing_result is not None:
-            if existing_result.get("status") == "processing":
+        if not claimed:
+            if existing_result is None or existing_result.get("status") == "processing":
                 raise ApplicationError(
                     "write_in_progress",
                     "an identical trade review is already being created",
@@ -1151,6 +1152,18 @@ class TradeEntryService:
             raise ApplicationError("trade_review_not_found", "trade review was not found",
                                    status_code=404)
         return batch
+
+    def get_review_by_key(self, idempotency_key: str, *, actor_id: str) -> dict[str, Any]:
+        created = self.repository.get_write_result(
+            actor_id, self.review_create_action, self._idempotency_key(idempotency_key)
+        )
+        if created is None:
+            raise ApplicationError("trade_review_not_found", "trade review was not found",
+                                   status_code=404)
+        if created.get("status") == "processing":
+            raise ApplicationError("write_in_progress", "trade review is being created",
+                                   status_code=409)
+        return self.get_review(created["review_id"], actor_id=actor_id)
 
     def commit_review(self, review_id: str, *, actor_id: str, idempotency_key: str,
                       trace_id: str = "", source: str = "nexus:trade-entry") -> dict[str, Any]:

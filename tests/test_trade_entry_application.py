@@ -132,6 +132,35 @@ def test_trade_preview_rejects_invalid_fees(service) -> None:
     assert db.import_calls == 0
 
 
+@pytest.mark.parametrize("action", [TradeEntryService.review_create_action, TradeEntryService.action])
+def test_trade_writer_needs_a_new_claim_if_the_other_writer_released_it(service, monkeypatch, action):
+    entry, db = service
+    actor_id = "synthetic-actor"
+    key = "synthetic-trade-key"
+    real_claim = entry.repository.claim_write
+
+    def lose_claim(actor, operation, idem_key, payload):
+        if operation == action:
+            # The conflicting writer released the row between the insert and readback.
+            return False, None
+        return real_claim(actor, operation, idem_key, payload)
+
+    monkeypatch.setattr(entry.repository, "claim_write", lose_claim)
+    with pytest.raises(ApplicationError) as in_progress:
+        staged = entry.create_review(actor_id=actor_id, fields={"trades": [_row()]}, idempotency_key=key)
+        entry.commit_review(staged["review_id"], actor_id=actor_id, idempotency_key=key)
+    assert in_progress.value.code == "write_in_progress"
+    assert db.import_calls == 0
+    if action == entry.review_create_action:
+        assert not db.batches
+    else:
+        assert db.batches[staged["review_id"]]["status"] == "staged"
+    monkeypatch.setattr(entry.repository, "claim_write", real_claim)
+    staged = entry.create_review(actor_id=actor_id, fields={"trades": [_row()]}, idempotency_key=key)
+    assert entry.commit_review(staged["review_id"], actor_id=actor_id, idempotency_key=key)["state"] == "approved"
+    assert db.import_calls == 1
+
+
 def test_trade_entry_rejects_unconfirmed_mismatch_and_key_reuse(service) -> None:
     entry, db = service
     preview = entry.preview(rows=[_row()])

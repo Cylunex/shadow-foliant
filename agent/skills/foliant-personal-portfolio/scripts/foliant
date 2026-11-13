@@ -43,7 +43,7 @@ if __name__ == '__main__':
         result = {'isError': True, 'code': code}
         if type(exc).__name__ == 'ValidationError':
             result['fields'] = [{'path': list(e['loc']), 'type': e['type']} for e in exc.errors()]
-        elif isinstance(exc, ValueError) and str(exc) in {'provide_rows_or_table', 'input_too_large', 'invalid_config', 'capability_unavailable', 'non_finite_number', 'unknown_strategy_parameter', 'invalid_strategy_type', 'strategy_value_out_of_range', 'strategy_parameter_order'}:
+        elif isinstance(exc, ValueError) and str(exc) in {'provide_rows_or_table', 'provide_batch_id_or_idempotency_key', 'input_too_large', 'invalid_config', 'capability_unavailable', 'non_finite_number', 'unknown_strategy_parameter', 'invalid_strategy_type', 'strategy_value_out_of_range', 'strategy_parameter_order'}:
             result['code'] = str(exc)
         sys.__stdout__.write(json.dumps(result, ensure_ascii=False) + '\n')
         sys.exit(1)

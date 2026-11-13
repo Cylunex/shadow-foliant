@@ -33,8 +33,9 @@ class Capability:
 CAPABILITIES: dict[str, Capability] = {}
 
 
-def register(capability_name, description, target, *, effect='read', **fields):
-    model = create_model(capability_name.replace('.', '_'), __config__=ConfigDict(extra='forbid', strict=True), **fields)
+def register(capability_name, description, target, *, effect='read', schema_extra=None, **fields):
+    config = ConfigDict(extra='forbid', strict=True, json_schema_extra=schema_extra)
+    model = create_model(capability_name.replace('.', '_'), __config__=config, **fields)
     CAPABILITIES[capability_name] = Capability(capability_name, description, target, model, effect)
 
 
@@ -45,7 +46,10 @@ trade_fields = dict(rows=(Annotated[list[dict[str, Any]], Field(max_length=500)]
 register('trades.preview', '后台校验已成交事实、名称解析、防重及持仓变动，不提交成交。', '@preview_trades', **trade_fields)
 register('trades.import', '录入用户已完成的成交并读回回执；同一意图重试复用 idempotency_key，不是证券下单。',
          '@import_trades', effect='write', idempotency_key=(Key, ...), **trade_fields)
-register('trades.receipt', '查询成交导入回执；超时后先核对，不能把未收到结果当作未入账。', '@trade_receipt', batch_id=(Text, ...))
+register('trades.receipt', '按 batch_id 或原 idempotency_key 之一查询当前身份的成交导入状态和回执。',
+         '@trade_receipt', schema_extra={'minProperties': 1, 'maxProperties': 1},
+         batch_id=(Text, Field(default_factory=lambda: None)),
+         idempotency_key=(Key, Field(default_factory=lambda: None)))
 register('portfolio.summary', '真实持仓、数量与成本；不是券商可卖余额。', '$portfolio.summary')
 register('portfolio.intraday', '今日已持久化的持仓、正式 TOP5/TOP15 与行情质量，不重新分析。', '$portfolio.intraday_decision')
 register('portfolio.performance', '组合 TWR、XIRR、回撤与盈亏归因，读取已有净值和成交。', 'performance:summary')
@@ -151,9 +155,14 @@ def import_trades(*, rows, table, update_position, idempotency_key, config):
     return {**receipt, 'replayed': bool(batch.get('replayed') or result.get('replayed'))}
 
 
-def trade_receipt(*, batch_id, config):
+def trade_receipt(*, batch_id=None, idempotency_key=None, config):
+    if (batch_id is None) == (idempotency_key is None):
+        raise ValueError('provide_batch_id_or_idempotency_key')
     entry = services().trade_entry
-    batch = entry.get_review(batch_id, actor_id=config['actor'])
+    if batch_id is not None:
+        batch = entry.get_review(batch_id, actor_id=config['actor'])
+    else:
+        batch = entry.get_review_by_key(idempotency_key, actor_id=config['actor'])
     result = entry._review_envelope(batch)
     return {'status': 'complete' if result['state'] == 'approved' else result['state'],
             'batch_id': result['review_id'], 'receipt': result['receipt'],

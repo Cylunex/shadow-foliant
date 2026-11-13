@@ -1,6 +1,7 @@
 """Purpose-scoped Losna research packets backed by the existing revision journal."""
 from datetime import datetime, timedelta, timezone
 from application.results import payload_hash
+from core.research_errors import ResearchRejection
 from data.reliability_store import ReliabilityStore
 
 PURPOSES = {"independent_discovery", "directed_review", "strategy_validation", "portfolio_review"}
@@ -31,22 +32,46 @@ class LosnaResearch:
     def get(self, identity, owner):
         result = self.repo.get(KIND, identity, owner)
         if not result:
-            raise ValueError("research_not_found")
+            raise ResearchRejection("research_not_found")
         return result
+
+    def _original_claim(self, cur, owner, worker, claim_id):
+        # Include historical generations, even if the packet left the current queue
+        # or another worker took its lease. The first grant owns a reused legacy key.
+        payload = "CAST(payload AS jsonb)" if self.repo.store._is_postgres else "payload"
+        cur.execute(f"SELECT object_id,revision FROM research_reliability_records WHERE kind=? AND owner_id=? "
+                    f"AND {payload}->>'worker'=? AND {payload}->>'claim_id'=? "
+                    f"AND {payload}->>'status'='claimed' ORDER BY created_at, object_id, revision LIMIT 1",
+                    (KIND, owner, worker, claim_id))
+        return cur.fetchone()
+
+    def _expire(self, cur, owner, record, now):
+        if (record["status"] in {"pending", "claimed"}
+                and datetime.fromisoformat(record["packet"]["deadline"]) <= now):
+            return self.repo.append(cur, KIND, record["object_id"], owner,
+                                    {**record, "status": "expired", "expired_at": now.isoformat()}, record)
+        return record
 
     def claim(self, *, owner, worker, purposes, claim_id=None):
         if not worker or not set(purposes) <= PURPOSES:
-            raise ValueError("research_claim_invalid")
-        for item in reversed(self.repo.list(KIND, owner=owner)):
-            if item["packet"]["purpose"] not in purposes:
-                continue
-            with self.repo.transaction() as cur:
-                old = self.repo.read(cur, KIND, item["object_id"], owner)
-                now = self.clock()
-                if old["status"] in {"pending", "claimed"} and datetime.fromisoformat(old["packet"]["deadline"]) <= now:
-                    self.repo.append(cur, KIND, item["object_id"], owner,
-                                     {**old, "status": "expired", "expired_at": now.isoformat()}, old)
+            raise ResearchRejection("research_claim_invalid")
+        with self.repo.transaction() as cur:
+            now = self.clock()
+            if claim_id is not None:
+                original = self._original_claim(cur, owner, worker, claim_id)
+                if original:
+                    identity, generation = original
+                    bound = self.repo.read(cur, KIND, identity, owner)
+                    if bound["packet"]["purpose"] not in purposes:
+                        raise ResearchRejection("purpose_denied")
+                    expected_revision = generation + (1 if bound["status"] in {"received", "expired"} else 0)
+                    if bound["revision"] != expected_revision:
+                        raise ResearchRejection("research_generation_conflict", identity=identity)
+                    return self._expire(cur, owner, bound, now)
+            for item in reversed(self.repo.list_latest(cur, KIND, owner)):
+                if item["packet"]["purpose"] not in purposes:
                     continue
+                old = self._expire(cur, owner, item, now)
                 if old["status"] == "claimed":
                     if old.get("worker") == worker and old.get("claim_id") == (claim_id or worker):
                         return old
@@ -55,7 +80,7 @@ class LosnaResearch:
                         continue
                 elif old["status"] != "pending":
                     continue
-                return self.repo.append(cur, KIND, item["object_id"], owner,
+                return self.repo.append(cur, KIND, old["object_id"], owner,
                                         {**old, "status": "claimed", "worker": worker,
                                          "claim_id": claim_id or worker,
                                          "lease_until": min(now + timedelta(minutes=3),
@@ -63,40 +88,46 @@ class LosnaResearch:
         return {"status": "empty"}
 
     def submit(self, *, identity, owner, worker, generation, result):
-        if set(result) != {"reviews", "next_check"} or not isinstance(result["next_check"], str) or len(result["next_check"]) > 400:
-            raise ValueError("research_result_invalid")
+        if (not isinstance(result, dict) or set(result) != {"reviews", "next_check"}
+                or not isinstance(result["next_check"], str) or len(result["next_check"]) > 400):
+            raise ResearchRejection("research_result_invalid")
         if not isinstance(result["reviews"], list) or len(result["reviews"]) > 3:
-            raise ValueError("research_budget_invalid")
+            raise ResearchRejection("research_budget_invalid")
         digest = payload_hash(result)
         with self.repo.transaction() as cur:
             old = self.repo.read(cur, KIND, identity, owner)
             if not old or old.get("worker") != worker:
-                raise ValueError("research_not_found")
-            if old["status"] == "received":
+                raise ResearchRejection("research_not_found")
+            if old["status"] in {"received", "expired"}:
+                # The terminal revision immediately follows the last claim.
+                if generation != old["revision"] - 1:
+                    raise ResearchRejection("research_generation_conflict")
+                if old["status"] == "expired":
+                    raise ResearchRejection("research_deadline_expired")
                 if old["result_hash"] != digest:
-                    raise ValueError("research_result_conflict")
+                    raise ResearchRejection("research_result_conflict")
                 return old
             if old["status"] != "claimed" or old["revision"] != generation:
-                raise ValueError("research_generation_conflict")
+                raise ResearchRejection("research_generation_conflict")
             if datetime.fromisoformat(old["packet"]["deadline"]) <= self.clock():
-                raise ValueError("research_deadline_expired")
+                raise ResearchRejection("research_deadline_expired")
             symbols = {str(r["symbol"]) for r in old["packet"]["candidates"]}
             refs = {r["evidence_id"] for r in old["packet"]["evidence"]}
             seen = set()
             for review in result["reviews"]:
-                if set(review) != {"symbol", "reason", "counterevidence", "evidence_refs"}:
-                    raise ValueError("research_fields_invalid")
+                if not isinstance(review, dict) or set(review) != {"symbol", "reason", "counterevidence", "evidence_refs"}:
+                    raise ResearchRejection("research_fields_invalid")
                 symbol = review["symbol"]
-                if symbol not in symbols or symbol in seen:
-                    raise ValueError("research_subject_invalid")
+                if not isinstance(symbol, str) or symbol not in symbols or symbol in seen:
+                    raise ResearchRejection("research_subject_invalid")
                 seen.add(symbol)
                 if (not isinstance(review["evidence_refs"], list) or not review["evidence_refs"]
                         or any(not isinstance(ref, str) for ref in review["evidence_refs"])
                         or not set(review["evidence_refs"]) <= refs):
-                    raise ValueError("research_evidence_invalid")
+                    raise ResearchRejection("research_evidence_invalid")
                 if any(not isinstance(review[k], str) or not 1 <= len(review[k]) <= 600
                        for k in ("reason", "counterevidence")):
-                    raise ValueError("research_text_invalid")
+                    raise ResearchRejection("research_text_invalid")
             return self.repo.append(cur, KIND, identity, owner,
                                     {**old, "status": "received", "result": result,
                                      "result_hash": digest, "received_at": self.clock().isoformat(),

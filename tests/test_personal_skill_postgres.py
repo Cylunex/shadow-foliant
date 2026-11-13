@@ -28,10 +28,17 @@ def test_cli_import_query_retry_and_personal_parameters(database, tmp_path):
             cur.execute('select current_schema()'); schema = cur.fetchone()[0]
     config=tmp_path/'personal.json';config.write_text(json.dumps({'actor':'synthetic-cli','allow_writes':True}))
     env={**os.environ,'PGOPTIONS':f'-c search_path={schema}'}
-    def call(name,args):
-        result=subprocess.run([sys.executable,str(CLI),'--config',str(config),'call',name], input=json.dumps(args),text=True,capture_output=True,env=env)
+    reader = tmp_path / 'reader.json'
+    reader.write_text(json.dumps({'actor': 'synthetic-cli'}))
+    stranger = tmp_path / 'stranger.json'
+    stranger.write_text(json.dumps({'actor': 'other-synthetic-cli'}))
+    def call(name,args, *, identity=config, error=None):
+        result=subprocess.run([sys.executable,str(CLI),'--config',str(identity),'call',name], input=json.dumps(args),text=True,capture_output=True,env=env)
         payload=json.loads(result.stdout)
-        assert result.returncode == 0, payload
+        if error:
+            assert result.returncode == 1 and payload == {'isError': True, 'code': error}
+        else:
+            assert result.returncode == 0, payload
         return payload
     row={'code':'600001','name':'合成股票','trade_type':'买入','quantity':100,'price':10,'trade_time':'2026-01-05 10:30:00'}
     args={'rows':[row],'idempotency_key':'synthetic-cli-trade-001'}
@@ -42,7 +49,15 @@ def test_cli_import_query_retry_and_personal_parameters(database, tmp_path):
     latest=call('trades.list',{'limit':1})['data']['records'][0]
     assert latest['code']=='600001' and latest['quantity']==100
     assert latest['source']=='skill:foliant-personal-portfolio'
-    assert call('trades.receipt',{'batch_id':saved['batch_id']})['receipt']==saved['receipt']
+    by_batch=call('trades.receipt',{'batch_id':saved['batch_id']},identity=reader)
+    by_key={'idempotency_key': args['idempotency_key']}
+    assert by_batch['receipt']==saved['receipt']
+    assert call('trades.receipt',by_key,identity=reader)==by_batch
+    call('trades.receipt',by_key,identity=stranger,error='trade_review_not_found')
+    call('trades.receipt',{'idempotency_key':'synthetic-cli-missing'},identity=reader,error='trade_review_not_found')
+    call('trades.import',{**args,'rows':[{**row,'price':20}]},error='idempotency_conflict')
+    assert call('trades.receipt',by_key,identity=reader)==by_batch
+    assert len(db.get_trades())==1
     sell=call('trades.import',{'rows':[{**row,'trade_type':'卖出','quantity':200}],'idempotency_key':'synthetic-cli-sell-001'})
     assert sell['status']=='needs_input' and db.get_all_stocks()[0]['quantity']==100
     params={r['key']:r['current'] for r in call('strategy.parameters',{})}

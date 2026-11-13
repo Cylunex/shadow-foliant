@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from application.results import payload_hash
+from core.research_errors import ResearchRejection
 
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS research_reliability_records (
@@ -77,7 +78,7 @@ class ReliabilityStore:
         value = {**value, "object_id": identity, "revision": revision}
         raw = json.dumps(value, ensure_ascii=False, allow_nan=False, default=str)
         if len(raw.encode()) > 262144:
-            raise ValueError("research_record_too_large")
+            raise ResearchRejection("research_record_too_large")
         cur.execute("INSERT INTO research_reliability_records VALUES (?,?,?,?,?,?)",
                     (kind, identity, owner, revision, raw, utcnow()))
         return value
@@ -96,14 +97,17 @@ class ReliabilityStore:
     def list(self, kind, *, owner="research", limit=100):
         conn = self.store.connect()
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT r.payload FROM research_reliability_records r WHERE r.kind=? AND r.owner_id=? "
-                        "AND NOT EXISTS (SELECT 1 FROM research_reliability_records n WHERE n.kind=r.kind "
-                        "AND n.object_id=r.object_id AND n.owner_id=r.owner_id AND n.revision>r.revision) "
-                        "ORDER BY r.created_at DESC LIMIT ?", (kind, owner, min(max(int(limit), 1), 2000)))
-            return [json.loads(r[0]) for r in cur.fetchall()]
+            return self.list_latest(conn.cursor(), kind, owner, limit)
         finally:
             conn.close()
+
+    @staticmethod
+    def list_latest(cur, kind, owner, limit=100):
+        cur.execute("SELECT r.payload FROM research_reliability_records r WHERE r.kind=? AND r.owner_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM research_reliability_records n WHERE n.kind=r.kind "
+                    "AND n.object_id=r.object_id AND n.owner_id=r.owner_id AND n.revision>r.revision) "
+                    "ORDER BY r.created_at DESC LIMIT ?", (kind, owner, min(max(int(limit), 1), 2000)))
+        return [json.loads(r[0]) for r in cur.fetchall()]
 
     def enqueue(self, kind, key, payload, *, priority=2, available_at=None):
         identity = payload_hash({"kind": kind, "key": key})
