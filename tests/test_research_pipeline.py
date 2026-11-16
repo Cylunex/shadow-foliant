@@ -572,6 +572,30 @@ class ResearchStoreAndSelectionTest(unittest.TestCase):
             selected, persist=False)
         self.assertEqual(result["status"], "incomplete")
 
+    def test_monday_readiness_uses_the_same_decision_day_boundary_as_selection(self):
+        selected = self._seed()
+        conn = self.store.connect()
+        conn.execute("""DELETE FROM research_trade_calendar_evidence
+                        WHERE provider='fixture-calendar-b' AND is_open=0""")
+        conn.commit()
+        conn.close()
+        readiness = research_health_snapshot(
+            store=self.store, selection_date=selected, mode='preopen',
+            require_selection=False,
+        )
+        self.assertTrue(readiness['checks']['calendar_consensus'])
+        self.assertEqual(readiness['expected_market_date'], '2026-08-21')
+        conn = self.store.connect()
+        conn.execute("""DELETE FROM research_trade_calendar_evidence
+                        WHERE provider='fixture-calendar-b' AND trade_date=?""", (selected,))
+        conn.commit()
+        conn.close()
+        readiness = research_health_snapshot(
+            store=self.store, selection_date=selected, mode='preopen',
+            require_selection=False,
+        )
+        self.assertFalse(readiness['checks']['calendar_consensus'])
+
     def test_calendar_requires_explicit_target_day_from_two_sources(self):
         for provider in ("one", "two"):
             self.store.record_calendar_fetch(

@@ -42,9 +42,8 @@ def snapshot(*, store: Optional[ResearchStore] = None,
         policy_version=policy.version, policy_hash=policy.policy_hash,
     )
     pit = store.pit_coverage(context.universe_cutoff)
-    calendar = store.calendar_consensus(
-        context.market_cutoff, inclusive=context.market_cutoff_inclusive
-    )
+    calendar_date, calendar_inclusive = context.calendar_boundary()
+    calendar = store.calendar_consensus(calendar_date, inclusive=calendar_inclusive)
     expected = calendar.get("latest_confirmed_open_date")
     universe = store.load_universe(
         context.universe_cutoff, cutoff_at=context.decision_at
