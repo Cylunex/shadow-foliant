@@ -33,6 +33,10 @@ from analysis.selection_feature_catalog import (
 )
 
 
+class _DatasetPublicationChanged(Exception):
+    """Discard an attempt's large frames before retrying a changed dataset."""
+
+
 def _number(value) -> Optional[float]:
     try:
         number = float(value)
@@ -330,6 +334,23 @@ class LocalStockSelector:
             strategy_snapshot: Optional[dict] = None,
             persist: bool = True, _generation_retry: int = 0) -> dict:
         selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
+        reference = list(wencai_reference) if wencai_reference is not None else None
+        for attempt in range(_generation_retry, max(3, _generation_retry + 1)):
+            try:
+                return self._run_once(
+                    selection_date, data_cutoff=data_cutoff, decision_at=decision_at,
+                    decision_mode=decision_mode, wencai_reference=reference,
+                    strategy_snapshot=strategy_snapshot, persist=persist,
+                    _generation_retry=attempt,
+                )
+            except _DatasetPublicationChanged:
+                pass
+        raise RuntimeError("selection retry budget exhausted")
+
+    def _run_once(self, selection_date: str, *, data_cutoff=None, decision_at=None,
+                  decision_mode="preopen", wencai_reference=None,
+                  strategy_snapshot=None, persist=True, _generation_retry=0) -> dict:
+        selection_date = pd.Timestamp(selection_date or date.today()).date().isoformat()
         try:
             context = DecisionContext.build(
                 selection_date,
@@ -386,10 +407,12 @@ class LocalStockSelector:
             )
 
         panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
-        panel = panel.dropna(subset=["trade_date", "symbol", "close"])
+        usable = panel[["trade_date", "symbol", "close"]].notna().all(axis=1)
         panel["close"] = pd.to_numeric(panel["close"], errors="coerce")
         panel["volume"] = pd.to_numeric(panel["volume"], errors="coerce")
-        panel = panel[~panel["quality_status"].isin({"unknown_unit", "failed"})]
+        usable &= ~panel["quality_status"].isin({"unknown_unit", "failed"})
+        if not usable.all():
+            panel = panel.loc[usable].copy()
         if panel.empty:
             return self._failed(
                 selection_date, "local warehouse has no usable normalized bars",
@@ -420,7 +443,7 @@ class LocalStockSelector:
                     **pit,
                 },
             )
-        history_counts = panel.groupby("symbol")["trade_date"].nunique()
+        history_counts = panel.groupby("symbol", observed=True)["trade_date"].nunique()
         current_symbols = set(panel.loc[panel["trade_date"] == market_as_of, "symbol"])
         primary_symbols = set(panel.loc[
             (panel["trade_date"] == market_as_of) & (panel["provider"] == "zzshare"), "symbol"
@@ -530,16 +553,7 @@ class LocalStockSelector:
         )
         if generation_after != generation_before:
             if _generation_retry < 2:
-                return self.run(
-                    selection_date,
-                    data_cutoff=data_cutoff,
-                    decision_at=decision_at,
-                    decision_mode=decision_mode,
-                    wencai_reference=reference,
-                    strategy_snapshot=strategy_snapshot,
-                    persist=persist,
-                    _generation_retry=_generation_retry + 1,
-                )
+                raise _DatasetPublicationChanged
             return self._failed(
                 selection_date, "dataset_publication_unstable", pit_universe_count,
                 reference, persist, coverage=coverage,
@@ -940,20 +954,24 @@ class LocalStockSelector:
                 frame = frame[published.notna() & (published <= pd.Timestamp(selection_date))]
             frame = frame.sort_values(["symbol", "stat_date", "pub_date"])
             tables[table] = frame
-        symbols = sorted(set().union(*(
-            set(frame["symbol"].astype(str)) for frame in tables.values()
-        ))) if tables else []
+        # Repeatedly filtering every statement table for each security is
+        # quadratic in the full market size. Index once, then read its rows.
+        groups = {table: frame.groupby(frame["symbol"].astype(str), sort=False).indices
+                  for table, frame in tables.items()}
+        symbols = sorted(set().union(*(set(index) for index in groups.values()))) if groups else []
         records = []
         revision_keys = []
         for symbol in symbols:
+            statements = {table: frame.iloc[groups[table][symbol]]
+                          for table, frame in tables.items() if symbol in groups[table]}
             periods = []
             for table in ("indicator", "income", "balance", "cash_flow"):
-                frame = tables.get(table)
+                frame = statements.get(table)
                 if frame is None:
                     periods.append(set())
                 else:
                     periods.append(set(
-                        frame.loc[frame["symbol"].astype(str) == symbol, "stat_date"].dropna().astype(str)
+                        frame["stat_date"].dropna().astype(str)
                     ))
             common_periods = set.intersection(*periods) if periods and all(periods) else set()
             anchor = max(common_periods) if common_periods else None
@@ -962,8 +980,7 @@ class LocalStockSelector:
                 "statement_period_mismatch": not bool(anchor),
             }
             selected_periods = []
-            for table, frame in tables.items():
-                available = frame[frame["symbol"].astype(str) == symbol]
+            for table, available in statements.items():
                 if available.empty:
                     continue
                 if anchor:
@@ -1006,10 +1023,10 @@ class LocalStockSelector:
             for metric_name, sources in history_specs.items():
                 observations = pd.Series(dtype=float)
                 for table, candidate_columns in sources:
-                    frame = tables.get(table)
+                    frame = statements.get(table)
                     if frame is None:
                         continue
-                    available = frame[frame["symbol"].astype(str) == symbol].copy()
+                    available = frame.copy()
                     if anchor:
                         available = available[
                             available["stat_date"].astype(str) <= str(anchor)
@@ -1042,7 +1059,13 @@ class LocalStockSelector:
                         market_as_of: pd.Timestamp) -> pd.DataFrame:
         meta = universe.set_index("symbol")
         rows = []
-        for symbol, bars in panel[panel["symbol"].isin(meta.index)].groupby("symbol"):
+        # Iterating a DataFrameGroupBy materializes a reordered copy of the
+        # entire multi-year panel. Only keep row indexes and take one security.
+        groups = panel.groupby("symbol", observed=True).indices
+        for symbol, positions in groups.items():
+            if symbol not in meta.index:
+                continue
+            bars = panel.iloc[positions]
             bars = bars.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
             bars = bars.copy()
             bars["close"] = pd.to_numeric(bars["close"], errors="coerce")

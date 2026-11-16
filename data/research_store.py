@@ -1728,6 +1728,52 @@ class ResearchStore:
         columns = [item[0] for item in cur.description] if cur.description else []
         return pd.DataFrame(rows, columns=columns)
 
+    def _market_cursor(self, conn):
+        return (conn.cursor(name="foliant_market_" + uuid.uuid4().hex)
+                if self._is_postgres else conn.cursor())
+
+    @staticmethod
+    def _market_frame(cur, *, observations: bool = False) -> pd.DataFrame:
+        """Read bounded batches and dictionary-encode repeated market labels.
+
+        Keep float64 prices/volumes and every input row. Only repeated labels
+        change representation; selection windows and evidence stay identical.
+        """
+        from pandas.api.types import union_categoricals
+
+        labels = ("symbol", "provider", "quality_status", "dataset_id")
+        dates = {}
+        chunks = []
+        while True:
+            rows = cur.fetchmany(4096)
+            if not rows:
+                break
+            if observations:
+                frame = ResearchStore._observation_frame(rows, kind="market")
+            else:
+                frame = pd.DataFrame.from_records(
+                    rows, columns=[item[0] for item in cur.description])
+            # Dates retain their comparable ISO string API; share the few
+            # hundred date objects rather than retaining one string per bar.
+            frame["trade_date"] = frame["trade_date"].map(
+                lambda value: dates.setdefault(value, value))
+            for column in labels:
+                frame[column] = pd.Categorical(frame[column])
+            for column in ("is_paused", "is_st"):
+                if column in frame and frame[column].isin([0, 1]).all():
+                    frame[column] = frame[column].astype("int8")
+            chunks.append(frame)
+        if not chunks:
+            return pd.DataFrame()
+        # Concatenating independently encoded categories through pd.concat
+        # would expand them back into millions of Python strings.
+        result = {}
+        for column in chunks[0].columns:
+            values = [chunk[column] for chunk in chunks]
+            result[column] = (union_categoricals(values) if column in labels
+                              else pd.concat(values, ignore_index=True))
+        return pd.DataFrame(result, copy=False)
+
     def load_universe(self, as_of: str, *, cutoff_at: Optional[str] = None) -> pd.DataFrame:
         conn = self.connect()
         try:
@@ -1857,6 +1903,8 @@ class ResearchStore:
             dates = [row[0] for row in cur.fetchall()]
             if not dates:
                 return pd.DataFrame()
+            cur.close()
+            cur = self._market_cursor(conn)
             cur.execute(
                 """SELECT symbol,trade_date,open,high,low,close,volume,amount,turnover_rate,
                           is_paused,is_st,provider,quality_status,dataset_id
@@ -1864,7 +1912,7 @@ class ResearchStore:
                    ORDER BY symbol,trade_date""",
                 (min(dates), as_of, adjustment),
             )
-            return self._frame(cur)
+            return self._market_frame(cur)
         finally:
             conn.close()
 
@@ -2278,7 +2326,7 @@ class ResearchStore:
             boundary += " AND o.trade_date" + ("<=?" if context.get("market_cutoff_inclusive") else "<?")
         conn = self.connect()
         try:
-            cur = conn.cursor()
+            cur = self._market_cursor(conn)
             cur.execute(
                 """SELECT o.symbol,o.trade_date,o.provider,b.quality_status,o.dataset_id,o.payload
                    FROM research_market_observations o JOIN research_dataset_batches b
@@ -2287,7 +2335,7 @@ class ResearchStore:
                 + " ORDER BY o.symbol,o.trade_date,o.retrieved_at,o.observation_id",
                 (*ids, *wanted, *((cutoff,) if cutoff else ())),
             )
-            frame = self._observation_frame(cur.fetchall(), kind="market")
+            frame = self._market_frame(cur, observations=True)
             return frame if frame.empty else frame.drop_duplicates(["symbol", "trade_date"], keep="last")
         finally:
             conn.close()

@@ -134,6 +134,10 @@ def _qq_archive_summary(content: str) -> str:
 def _receipt(ok: bool, message: str) -> dict:
     # Sender text may contain webhook URLs, tokens, addresses, or response bodies.
     match = re.fullmatch(r"HTTP ([1-5][0-9]{2})(?: app:rejected)?", message or "")
+    if not ok and match and match.group(1) == "504":
+        # A bridge deadline does not prove that the provider rejected the send.
+        return {"status": "unknown", "http_status": 504, "provider_code": None,
+                "error_code": "http_timeout_unknown"}
     rejected = bool(match) or message in {"provider_rejected", "send_failed",
                                          "webhook 未启用", "feishu 未启用"}
     return {"status": "accepted" if ok else "failed" if rejected else "unknown",
@@ -320,7 +324,9 @@ def _send_qq(title: str, content: str) -> Tuple[bool, str]:
         'markdown': {'title': title, 'text': content},
     }
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        # The local bridge allows 25 seconds for CLI startup plus the actual
+        # provider receipt. The caller must outlive that budget.
+        r = requests.post(url, json=payload, timeout=30)
         if r.status_code in (200, 204):
             return True, f'HTTP {r.status_code}'
         # A response body may echo private content or infrastructure details.

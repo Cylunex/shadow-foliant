@@ -93,10 +93,12 @@ def _frame_hash(frame: pd.DataFrame, columns: Iterable[str]) -> str:
     selected = [column for column in columns if column in frame.columns]
     if not selected:
         return hashlib.sha256(b"").hexdigest()
-    normalized = frame[selected].copy().sort_values(selected[:2]).reset_index(drop=True)
-    return hashlib.sha256(
-        pd.util.hash_pandas_object(normalized, index=False).values.tobytes()
-    ).hexdigest()
+    order = frame[selected[:2]].reset_index(drop=True).sort_values(selected[:2]).index
+    digest = hashlib.sha256()
+    for start in range(0, len(order), 4096):
+        normalized = frame.iloc[order[start:start + 4096]][selected]
+        digest.update(pd.util.hash_pandas_object(normalized, index=False).values.tobytes())
+    return digest.hexdigest()
 
 
 def artifact_payload(artifacts: dict[str, Any]) -> dict[str, Any]:
@@ -158,17 +160,18 @@ def _prepare_frame(store: ResearchStore, manifest_id: str,
         return pd.DataFrame(), {"reason": "required_manifest_input_missing",
                                 "missing_inputs": missing_inputs}
 
-    panel = panel.copy()
     panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
     for column in ("open", "high", "low", "close", "volume", "amount"):
         if column in panel:
             panel[column] = pd.to_numeric(panel[column], errors="coerce")
-    panel = panel.dropna(subset=["trade_date", "symbol", "close"])
-    panel = panel[~panel["quality_status"].isin({"unknown_unit", "failed"})]
+    usable = panel[["trade_date", "symbol", "close"]].notna().all(axis=1)
+    usable &= ~panel["quality_status"].isin({"unknown_unit", "failed"})
+    if not usable.all():
+        panel = panel.loc[usable].copy()
     if panel.empty:
         return pd.DataFrame(), {"reason": "manifest_market_rows_unusable"}
     market_as_of = panel["trade_date"].max()
-    history = panel.groupby("symbol")["trade_date"].nunique()
+    history = panel.groupby("symbol", observed=True)["trade_date"].nunique()
     market_input_mode = "manifest_dataset_ids"
     # Early materialized histories predate the append-only observation table, so
     # some otherwise valid manifests name only the recent slice.  Repair that
@@ -181,15 +184,16 @@ def _prepare_frame(store: ResearchStore, manifest_id: str,
         )
         if repaired is None or repaired.empty:
             return pd.DataFrame(), {"reason": "manifest_history_incomplete"}
-        repaired = repaired.copy()
         repaired["trade_date"] = pd.to_datetime(repaired["trade_date"], errors="coerce")
-        repaired = repaired[
+        usable = (
             repaired["trade_date"].notna()
             & (repaired["trade_date"] <= market_as_of)
             & ~repaired["quality_status"].isin({"unknown_unit", "failed"})
-        ]
+        )
+        if not usable.all():
+            repaired = repaired.loc[usable].copy()
         panel = repaired
-        history = panel.groupby("symbol")["trade_date"].nunique()
+        history = panel.groupby("symbol", observed=True)["trade_date"].nunique()
         market_input_mode = "manifest_as_of_warehouse_history_repair"
     current = set(panel.loc[panel["trade_date"] == market_as_of, "symbol"].astype(str))
     universe = universe.drop_duplicates("symbol").copy()

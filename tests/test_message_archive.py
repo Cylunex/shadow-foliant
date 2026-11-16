@@ -16,6 +16,20 @@ from data.research_store import ResearchStore
 from notify import notification_router
 
 
+def test_qq_budget_outlives_bridge_and_gateway_timeout_stays_unknown(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setenv('QQ_WEBHOOK_URL', 'http://example.com/webhook/qq')
+    calls = []
+    monkeypatch.setattr(notification_router.requests, 'post', lambda *a, **kw: (
+        calls.append(kw) or SimpleNamespace(status_code=504)))
+    ok, result = notification_router._send_qq('标题', '完整正文')
+    assert not ok and calls[0]['timeout'] > 25
+    assert calls[0]['json']['markdown']['text'] == '完整正文'
+    assert notification_router._receipt(ok, result) == {
+        'status': 'unknown', 'http_status': 504, 'provider_code': None,
+        'error_code': 'http_timeout_unknown'}
+
+
 @pytest.fixture(autouse=True)
 def exercise_archive_transport_below_investment_gate(monkeypatch):
     """Keep archive transport tests independent of the production signal gate."""

@@ -1813,7 +1813,7 @@ def _run_with_log(name, func, *a, **kw):
     t0 = time.time()
     pool_busy = len(_TASK_START_TS) + 1
     timeout = _TASK_HARD_TIMEOUTS.get(name, _DEFAULT_TASK_TIMEOUT)
-    print(f'[jobs_hub] ▶ {name} 开始 (pool={pool_busy}/6, 超时{timeout}s)', flush=True)
+    print(f'[jobs_hub] ▶ {name} 开始 (active={pool_busy}, 超时{timeout}s)', flush=True)
     cancel_event = threading.Event()
     with _TASK_LOCK:
         _TASK_START_TS[name] = t0
@@ -1968,8 +1968,9 @@ class _JobsHub:
         self._registered: List[Dict] = []
         self._thread: Optional[threading.Thread] = None
         self._running = False
-        # ⭐ 线程池：所有任务异步执行，不阻塞调度 loop
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        # Each scheduled job owns an isolated Python process. Keep overlapping
+        # warehouse/portfolio work bounded on small hosts; the loop stays free.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         # Agent/Web 手动任务走独立持久队列。默认单 worker，避免与盘中/盘后自动任务
         # 同时猛烈拉外部数据；可用 MANUAL_TASK_WORKERS=1..2 调整。
         try:
@@ -2205,9 +2206,9 @@ class _JobsHub:
         #   - 软超时 > SOFT_DEADLINE_SEC: 每个 (name, ts) 只打一次 ⚠️ + 记 job_runs, 不杀进程
         #     (任务可能本身就慢, 如 InStock 取因子, 让它继续跑完)
         #   - 硬超时 > HARD_DEADLINE_SEC 任一任务: 真失控, 整体退出由 supervisor 拉起
-        #   - 僵尸: 线程池 6 个 slot 全部都超软超时 → 进程死锁, 也整体退出
+        #   - 僵尸: 线程池所有 slot 都超软超时 → 进程死锁, 也整体退出
         def _deadman():
-            pool_size = self._executor._max_workers  # 6
+            pool_size = self._executor._max_workers
             while self._running:
                 try:
                     now = time.time()

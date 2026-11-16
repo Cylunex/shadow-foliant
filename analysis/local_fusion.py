@@ -128,7 +128,7 @@ class GenomeCandidateProducer:
         ).head(self.policy.genome_prefilter_n)
         bars_by_symbol = {
             str(symbol): bars.sort_values("trade_date").copy()
-            for symbol, bars in panel[panel["symbol"].isin(prefiltered["symbol"])].groupby("symbol")
+            for symbol, bars in panel[panel["symbol"].isin(prefiltered["symbol"])].groupby("symbol", observed=True)
         }
         try:
             from selection.instock_strategy_runner import STRATEGIES, run_one

@@ -176,8 +176,11 @@ class _PGConnection:
             raise RuntimeError("PostgreSQL configuration is incomplete")
         self._conn = _psycopg2.connect(**PG_CONFIG)
 
-    def cursor(self):
-        return _PGCursor(self._conn.cursor(cursor_factory=_psycopg2.extras.DictCursor))
+    def cursor(self, name=None):
+        # A named cursor streams rows from PostgreSQL instead of buffering the
+        # whole result in libpq before the first fetchmany().
+        return _PGCursor(self._conn.cursor(
+            name=name, cursor_factory=_psycopg2.extras.DictCursor))
 
     def commit(self):
         return self._conn.commit()
