@@ -10,7 +10,7 @@ import json
 import math
 import re
 import statistics
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -33,7 +33,7 @@ _ALIASES = {
 }
 
 
-def format_us_daily_reference(name: str, result: Dict[str, Any]) -> str:
+def format_us_daily_reference(name: str, result: Dict[str, Any], *, as_of: date | None = None) -> str:
     """Keep Yahoo daily closes paired with their actual US trading dates."""
     quotes = result.get('indicators', {}).get('quote') or []
     closes = (quotes[0].get('close') or []) if quotes else []
@@ -54,7 +54,11 @@ def format_us_daily_reference(name: str, result: Dict[str, Any]) -> str:
     try:
         day = datetime.fromtimestamp(float(stamp), ZoneInfo('America/New_York')).date().isoformat()
     except (TypeError, ValueError, OverflowError, OSError):
+        if as_of is not None:
+            return ''
         day = '日期未核实'
+    if as_of is not None and not as_of - timedelta(days=4) <= date.fromisoformat(day) <= as_of:
+        return ''
     return f'{name} {day}: {last:.2f} ({(last - previous) / previous * 100:+.2f}%)'
 
 

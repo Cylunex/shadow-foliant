@@ -175,8 +175,36 @@ def test_existing_followup_job_locks_public_pair_even_when_private_followup_fail
     monkeypatch.setattr("application.decision_loop.DecisionLoopService",lambda:DecisionLoopService(store))
     monkeypatch.setattr("application.losna_research.prepare_followups",fail)
     monkeypatch.setattr(jobs_hub,"_log_run",lambda name,status,**kwargs:logged.append((name,status)))
+    monkeypatch.setattr(jobs_hub, "_is_trading_day", lambda *_: False)
     jobs_hub.task_losna_followups()
     assert logged==[("losna_followups","error")]
     saved=ReliabilityStore(store).get("losna_weekly_paper_pair","r")
     assert saved["entry_at"]=="2026-10-13T09:30:00+08:00" and saved["formal"]==[B]
     assert DecisionLoopService(store).dashboard()["model_books"]==[]
+
+
+def test_late_formal_selection_prepares_today_and_audits_expired_delivery(store, monkeypatch):
+    from datetime import timedelta
+    from application.decision_loop import DecisionLoopService
+    from application import losna_research as research
+    from application.losna_research import LosnaResearch
+
+    monkeypatch.setattr("application.decision_loop.DecisionLoopService", lambda: DecisionLoopService(store))
+    monkeypatch.setattr(research, "attach_feature_evidence", lambda _svc, _cap, picks, facts: (picks, facts))
+    monkeypatch.setattr(research, "prepare_discovery", lambda svc, capsule: LosnaResearch(svc.store).create(
+        purpose="independent_discovery", input_version="today", candidates=[], evidence=[],
+        owner="research", run_id=capsule["run_id"],
+    ))
+    assert research.prepare_reviews(selection_date=DAY)["status"] == "today_formal_selection_unavailable"
+    publish(store, "late")
+    assert research.prepare_reviews(selection_date="2026-10-13")["status"] == "today_formal_selection_unavailable"
+    queued = research.prepare_reviews(selection_date=DAY, retry_only=True)
+    assert queued["packet"]["run_id"] == "late"
+    assert research.prepare_reviews(selection_date=DAY, retry_only=True)["status"] == "already_prepared"
+
+    worker = LosnaResearch(store)
+    claimed = worker.claim(owner="research", worker="fixture", purposes=["directed_review"])
+    worker.submit(identity=claimed["object_id"], owner="research", worker="fixture",
+                  generation=claimed["revision"], result={"reviews": [], "next_check": ""})
+    now = datetime.fromisoformat(queued["packet"]["deadline"]) + timedelta(minutes=1)
+    assert research.research_delivery(DAY, now) == {"directed": "received", "discovery": "expired"}

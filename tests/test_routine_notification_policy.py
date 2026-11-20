@@ -275,7 +275,7 @@ def test_openapi_picks_survive_selection_delivery_archive_and_dedup(
         if i != 3 or reference_mode != 'partial':
             assert all(f'600{i * 10 + j:03}' in delivered for j in range(5))
     if reference_mode == 'partial':
-        assert '小市值：条件或时点待核验' in delivered
+        assert '小市值：筛选条件还没核实' in delivered
         assert '600030' not in delivered
     assert '0/5可用' not in delivered
     detail = service.detail(first.message_id)
@@ -371,3 +371,23 @@ def test_routine_report_import_aliases_do_not_require_monitor_certification(deli
     result = router.send("report", "正常分析", "报告正文",
                          source=source, only_channels=["qq"])
     assert result["qq"][0] and len(sent) == 1
+
+
+def test_morning_fallback_explains_paused_additions_in_delivered_body(delivery):
+    from notify.plain_language import build_portfolio_message
+
+    archive, sent = delivery
+    title, body = build_portfolio_message(
+        label="早盘持仓",
+        signal={"action": "unknown", "reason": "市场总闸数据未完整确认（a500_constituents_asof_mismatch），暂停买入与加仓"},
+        sell_rows=[{"code": "600001", "name": "甲", "sell_reasons": ["当前价触及 trade_plan 止损 6.64"]}],
+        buy_rows=[{"code": "600002", "name": "乙", "buy_reason": "走势转强"}],
+        as_of="11:45",
+    )
+    outcome = router.send("report", title, body, source="jobs.jobs_hub", only_channels=["qq"])
+    delivered = sent[0][1]
+    assert "操作：不动" in delivered
+    assert "中证A500的成分股名单日期对不上，暂停买入与加仓" in delivered
+    assert "股价已到计划止损价 6.64 元" in delivered
+    assert "观察：乙" in delivered and "加仓：乙" not in delivered
+    assert archive.detail(outcome.message_id)["deliveries"][0]["final_body"] == delivered

@@ -24,6 +24,7 @@ import os
 import json
 import logging
 import inspect
+from contextvars import ContextVar
 import hashlib
 import requests
 import re
@@ -46,11 +47,14 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 try:
-    from .archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
+    from .archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY, qq_bridge_url, qq_request_id
     from .delivery_policy import routine_delivery_allowed
 except ImportError:
-    from archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY
+    from archive_gateway import archive_action, ArchiveConflict, IN_ROUTER_DELIVERY, qq_bridge_url, qq_request_id
     from delivery_policy import routine_delivery_allowed
+
+
+_GATEWAY_REQUEST_ID = ContextVar("gateway_request_id", default=None)
 
 
 class DeliveryResults(dict):
@@ -257,7 +261,10 @@ def _send_dingtalk_via_legacy(title: str, content: str) -> Tuple[bool, str]:
             'msgtype': 'markdown',
             'markdown': {'title': safe_title, 'text': _submitted_body('dingtalk', title, content)},
         }
-        r = requests.post(url, json=payload, timeout=10)
+        bridge = qq_bridge_url(url)
+        r = requests.post(url, json=payload, timeout=30 if bridge else 10)
+        if bridge:
+            _GATEWAY_REQUEST_ID.set(qq_request_id(r))
         if r.status_code != 200:
             return False, f'HTTP {r.status_code}'
         ret = r.json()
@@ -327,6 +334,8 @@ def _send_qq(title: str, content: str) -> Tuple[bool, str]:
         # The local bridge allows 25 seconds for CLI startup plus the actual
         # provider receipt. The caller must outlive that budget.
         r = requests.post(url, json=payload, timeout=30)
+        if qq_bridge_url(url):
+            _GATEWAY_REQUEST_ID.set(qq_request_id(r))
         if r.status_code in (200, 204):
             return True, f'HTTP {r.status_code}'
         # A response body may echo private content or infrastructure details.
@@ -517,6 +526,11 @@ def send(category: str, title: str, content: str,
             return
         delivery_id = None
         archive_ready = False
+        target_label = None
+        if ch == "dingtalk":
+            from notification_service import NotificationService
+            if qq_bridge_url(NotificationService().config.get("webhook_url") or ""):
+                target_label = "qq"
         channel_content = (_qq_archive_summary(delivery_content)
                            if category == "archive" and ch == "qq" else delivery_content)
         try:
@@ -528,6 +542,7 @@ def send(category: str, title: str, content: str,
                 "idempotency_key": idempotency_key, "business_as_of": business_as_of,
                 "sensitivity": sensitivity, "planned_at": planned_at,
                 "fallback_from": fallback_from, "retry_of": None,
+                **({"target_label": target_label} if target_label else {}),
             })
             results.message_id = prepared["message_id"]
             if not prepared["should_send"]:
@@ -559,6 +574,7 @@ def send(category: str, title: str, content: str,
                 return
             results.archive_outcomes[ch] = "unrecorded"
             log.warning("message archive unavailable before %s delivery; source=%s", ch, source)
+        request_token = _GATEWAY_REQUEST_ID.set(None)
         try:
             token = IN_ROUTER_DELIVERY.set(True)
             try:
@@ -567,9 +583,14 @@ def send(category: str, title: str, content: str,
                 IN_ROUTER_DELIVERY.reset(token)
         except Exception:
             results[ch] = (False, "sender_exception")
+        finally:
+            request_id = _GATEWAY_REQUEST_ID.get()
+            _GATEWAY_REQUEST_ID.reset(request_token)
         if archive_ready and delivery_id:
             try:
                 receipt = _receipt(*results[ch])
+                if request_id:
+                    receipt["gateway_request_id"] = request_id
                 recorded = archive_action("finish", {"delivery_id": delivery_id, **receipt})["recorded"]
                 results.archive_outcomes[ch] = "recorded" if recorded else "unknown"
             except Exception:
@@ -582,7 +603,8 @@ def send(category: str, title: str, content: str,
     # 兜底:主渠道全军覆没 → 尝试 fallback。默认 None(不兜底, 保持路由约定)。
     if (fallback and fallback in CHANNELS and fallback not in results
             and results and not any(ok for ok, _ in results.values())
-            and not any(message.startswith('archive_') for _, message in results.values())):
+            and not any(message.startswith(('archive_', 'HTTP 504'))
+                        for _, message in results.values())):
         attempt(fallback, fallback_from=','.join(targets))
 
     outcomes = set(results.archive_outcomes.values())

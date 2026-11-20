@@ -502,12 +502,22 @@ def project(cur, positions, codes):
         )
 
 
-def read(codes=None):
+def read(codes=None, *, as_of=None):
+    """Replay confirmed events through a given date, subject to opening coverage."""
     with transaction() as cur:
         if codes is None:
             cur.execute("SELECT code FROM fund_ledger_openings")
             codes = [r[0] for r in cur.fetchall()]
+            if as_of:
+                cur.execute("SELECT code FROM fund_holdings WHERE shares>0")
+                codes.extend(r[0] for r in cur.fetchall())
         openings, events = _load(cur, codes)
+        if as_of:
+            as_of = day(as_of)
+            if any(D(row["shares"]) > 0 and (not row.get("as_of") or row["as_of"] > as_of)
+                   for row in openings.values()):
+                return None
+            events = [event for event in events if event["confirmation_date"] <= as_of]
         return replay(openings, events)
 
 

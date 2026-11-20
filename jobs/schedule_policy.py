@@ -39,6 +39,8 @@ MARKET_DATA_TIMES = {
     'closing_trade_plans': '20:20',
 }
 
+DAILY_BACKTEST_RETRY_TIMES = ("20:35", "21:40")
+
 # 夜间任务按硬超时预算后仍应在 23:30 前结束；24:00 是绝对上限。
 EVENING_TIMES = {
     'rag_ingest': '20:15',          # 默认关闭；启用时 60 分钟预算，21:15 前收尾

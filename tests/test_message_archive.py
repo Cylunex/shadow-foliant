@@ -328,3 +328,42 @@ def test_protected_route_page_detail_and_export_are_read_only(tmp_path, monkeypa
     assert "完整原稿" in export.text
     assert export.headers["cache-control"] == "no-store"
     assert svc.detail(row["message_id"])["deliveries"][0]["status"] == "pending"
+
+
+def test_legacy_dingtalk_route_archives_qq_gateway_timeout_without_fallback(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import notification_service
+
+    svc, _ = service(tmp_path)
+    request_id = str(uuid4())
+    config = {"webhook_enabled": True, "webhook_type": "dingtalk",
+              "webhook_url": "http://example.com/webhook/qq"}
+    monkeypatch.setattr(notification_service, "NotificationService",
+                        lambda: SimpleNamespace(config=config))
+    calls = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status_code=504, json=lambda: {
+            "ok": False, "backend": "hermes", "request_id": request_id,
+        })
+
+    def archive(action, payload):
+        if action == "start":
+            return {"started": svc.start(payload["delivery_id"])}
+        if action == "finish":
+            return {"recorded": svc.finish(**payload)}
+        return svc.prepare(**payload)
+
+    monkeypatch.setattr(notification_router.requests, "post", post)
+    monkeypatch.setattr(notification_router, "archive_action", archive)
+    monkeypatch.setitem(notification_router.CHANNELS, "dingtalk", notification_router._send_dingtalk_via_legacy)
+    monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda *_: pytest.fail("fallback after unknown"))
+    args = dict(only_channels=["dingtalk"], fallback="qq", source="job.test", idempotency_key="fixture:qq-timeout")
+    result = notification_router.send("report", "盘后测试", "完整正文", **args)
+    notification_router.send("report", "盘后测试", "完整正文", **args)
+    assert len(calls) == 1 and calls[0]["timeout"] > 25
+    delivery = svc.detail(result.message_id)["deliveries"][0]
+    assert (delivery["channel"], delivery["target_label"]) == ("dingtalk", "qq")
+    assert delivery["gateway_request_id"] == request_id
+    assert delivery["status"] == "unknown" and delivery["http_status"] == 504

@@ -86,11 +86,32 @@ def archive_action(action: str, payload: dict):
     return {"recorded": service.finish(**payload)}
 
 
+def qq_bridge_url(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(url)
+        return parsed.scheme in {"http", "https"} and parsed.path.rstrip("/") == "/webhook/qq"
+    except ValueError:
+        return False
+
+
+def qq_request_id(response) -> str | None:
+    from uuid import UUID
+    try:
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("backend") == "hermes":
+            return str(UUID(str(payload.get("request_id"))))
+    except (AttributeError, ValueError, TypeError):
+        pass
+    return None
+
+
 def archived_call(*, channel: str, title: str, original_body: str,
                   final_body: str, sender, source: str, category: str = "report",
                   message_id: str | None = None, source_run_id: str | None = None,
                   idempotency_key: str | None = None,
-                  business_as_of: str | None = None) -> bool:
+                  business_as_of: str | None = None,
+                  target_label: str | None = None) -> bool:
     """Wrap one legacy direct send without changing its transport or route."""
     if IN_ROUTER_DELIVERY.get():
         direct_result = sender()
@@ -112,6 +133,7 @@ def archived_call(*, channel: str, title: str, original_body: str,
             "final_body": final_body, "idempotency_key": idempotency_key,
             "business_as_of": business_as_of, "sensitivity": "private",
             "planned_at": None, "fallback_from": None, "retry_of": None,
+            **({"target_label": target_label} if target_label else {}),
         })
         if not row["should_send"]:
             return False
@@ -126,6 +148,7 @@ def archived_call(*, channel: str, title: str, original_body: str,
             return False
         log.warning("message archive unavailable before direct delivery; source=%s channel=%s",
                     source, channel)
+    request_id = None
     try:
         result = sender()
         if isinstance(result, dict):
@@ -133,7 +156,11 @@ def archived_call(*, channel: str, title: str, original_body: str,
             http_status = result.get("http_status")
             provider_code = result.get("provider_code")
             error_code = result.get("error_code")
-            status = "accepted" if ok else "failed" if http_status else "unknown"
+            request_id = result.get("gateway_request_id")
+            if not ok and http_status == 504:
+                status, provider_code, error_code = "unknown", None, "http_timeout_unknown"
+            else:
+                status = "accepted" if ok else "failed" if http_status else "unknown"
         else:
             ok = bool(result)
             http_status = None
@@ -151,7 +178,8 @@ def archived_call(*, channel: str, title: str, original_body: str,
             archive_action("finish", {"delivery_id": delivery_id,
                                      "status": status, "http_status": http_status,
                                      "provider_code": provider_code,
-                                     "error_code": error_code})
+                                     "error_code": error_code,
+                                     **({"gateway_request_id": request_id} if request_id else {})})
         except Exception:
             log.warning("message archive finish unavailable; source=%s channel=%s",
                         source, channel)

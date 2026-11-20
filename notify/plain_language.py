@@ -18,6 +18,11 @@ _DIRECTION = {
 _ACTIONS = {"加仓", "减仓", "不动"}
 
 _PLAIN_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
+    (r"当前价触及\s*trade_plan\s*止损\s*(\d+(?:\.\d+)?)", r"股价已到计划止损价 \1 元"),
+    (r"当前价触及\s*trade_plan\s*第一目标\s*(\d+(?:\.\d+)?)", r"股价已到计划第一目标价 \1 元"),
+    (r"市场总闸数据未完整确认[（(]a500_constituents_asof_mismatch[）)]",
+     "中证A500的成分股名单日期对不上"),
+    (r"市场总闸数据未完整确认(?:[（(][a-z0-9_]+[）)])?", "大盘数据还没确认齐"),
     (r"破\s*MA\s*(20|60)", r"跌破\1日均线"),
     (r"MA\s*250|250\s*日均线|年线", "长期均线"),
     (r"MA\s*120|120\s*日均线|半年线", "半年均线"),
@@ -137,8 +142,10 @@ def build_portfolio_message(
     buys = unique(row for row in buy_rows or ()
                   if str(row.get("code") or "") not in sell_codes
                   and not row.get("sell_score"))
+    buy_label = "加仓" if action == "加仓" else "观察"
+    buy_summary = "加仓候选" if action == "加仓" else "买点观察"
     holding_summary = (
-        f"减仓关注{len(sells)}只、加仓候选{len(buys)}只（下列重点）"
+        f"减仓关注{len(sells)}只、{buy_summary}{len(buys)}只（下列重点）"
         if sells or buys else "没有必须处理的，先不动"
     )
     title, body = build_market_message(
@@ -157,7 +164,7 @@ def build_portfolio_message(
     # first, but reserve a slot for the other side so risks are never hidden.
     limit = min(max(0, int(item_limit)), max(0, 8 - len(lines)))
     groups = [("加仓", buys), ("减仓", sells)] if action == "加仓" else [
-        ("减仓", sells), ("加仓", buys)
+        ("减仓", sells), (buy_label, buys)
     ]
     selected = []
     if limit and groups[0][1] and groups[1][1]:

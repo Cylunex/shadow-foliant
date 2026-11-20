@@ -216,21 +216,24 @@ def private_action_evidence(holdings):
     return {"evidence_id": payload_hash(fact), "fact": fact}
 
 
-def prepare_reviews():
+def prepare_reviews(*, selection_date=None, retry_only=False):
     """Queue existing facts; no recomputation, trading, or notification."""
     from application.decision_loop import DecisionLoopService
     service = DecisionLoopService()
     capsule = service.capsule()
-    if not capsule:
-        return {"status": "missing"}
+    if not capsule or (selection_date and capsule.get("selection_date") != selection_date):
+        return {"status": "today_formal_selection_unavailable"}
     research = LosnaResearch(service.store)
+    run_id = capsule["run_id"]
+    prepared = research.repo.get("losna_preparation", run_id)
+    if retry_only and prepared and prepared.get("directed_id"):
+        return {"status": "already_prepared"}
+    discovery = None
     try:
         discovery = prepare_discovery(service, capsule)
         discovery_status = "prepared" if discovery else "data_missing"
     except Exception:
         discovery_status = "data_unavailable"
-    research.repo.once("losna_preparation", str(capsule["run_id"]),
-                       {"discovery_status": discovery_status}, owner="research")
     candidates = capsule.get("opportunity_set", {}).get("top15") or []
     # Each evidence reference binds the exact frozen row, not a model assertion.
     evidence = [{"evidence_id": payload_hash(row), "fact": row} for row in candidates]
@@ -250,8 +253,37 @@ def prepare_reviews():
         evidence.append({"evidence_id": payload_hash(group), "fact": group})
     candidates, evidence = attach_feature_evidence(service, capsule, candidates, evidence)
     version = payload_hash({"capsule": capsule, "reference": reference, "evidence": evidence})
-    return research.create(purpose="directed_review", input_version=version,
-                           candidates=candidates, evidence=evidence, owner="research", run_id=capsule["run_id"])
+    directed = research.create(purpose="directed_review", input_version=version,
+                               candidates=candidates, evidence=evidence, owner="research", run_id=run_id)
+    preparation = {"discovery_status": discovery_status, "directed_id": directed["object_id"],
+                   "discovery_id": discovery["object_id"] if discovery else None}
+    if prepared:
+        if any(prepared.get(key) != value for key, value in preparation.items()):
+            research.repo.put("losna_preparation", run_id, preparation,
+                              expected_revision=prepared["revision"])
+    else:
+        research.repo.once("losna_preparation", run_id, preparation)
+    return {**directed, "discovery_status": discovery_status}
+
+
+def research_delivery(selection_date, now):
+    """Return the delivery state of both morning packets for the current run."""
+    from application.decision_loop import DecisionLoopService
+    service = DecisionLoopService()
+    capsule = service.capsule()
+    if not capsule or capsule.get("selection_date") != selection_date:
+        return {"formal": "today_formal_selection_unavailable"}
+    research = LosnaResearch(service.store)
+    preparation = research.repo.get("losna_preparation", capsule["run_id"]) or {}
+    statuses = {}
+    for name in ("directed", "discovery"):
+        identity = preparation.get(f"{name}_id")
+        row = research.repo.get(KIND, identity) if identity else None
+        status = row["status"] if row else "missing"
+        if status in {"pending", "claimed"} and datetime.fromisoformat(row["packet"]["deadline"]) <= now:
+            status = "expired"
+        statuses[name] = status
+    return statuses
 
 
 def latest_review(run_id, *, now, store=None):

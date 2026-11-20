@@ -55,7 +55,13 @@ def register_notification_history(app):
         content = (f'<h1>{escape(row["title"])}</h1><p><a href="../notifications">返回通知记录</a></p>'
                    '<h2>完整报告</h2><pre>' + escape(row["original_body"]) + '</pre>')
         for delivery in row["deliveries"]:
-            content += ('<h2>' + escape(delivery["channel"]) + ' 投递正文</h2><p>'
-                        + escape(delivery["status"]) + '</p><pre>'
+            channel = delivery["channel"]
+            destination = delivery.get("target_label") or channel
+            label = destination if destination == channel else f"{destination}（{channel}兼容协议）"
+            status = "送达未确认" if delivery.get("http_status") == 504 else delivery["status"]
+            request_id = delivery.get("gateway_request_id")
+            receipt = f" · 网关请求 {request_id}" if request_id else ""
+            content += ('<h2>' + escape(label) + ' 投递正文</h2><p>'
+                        + escape(status + receipt) + '</p><pre>'
                         + escape(delivery["final_body"]) + '</pre>')
         return _page(row["title"], content)

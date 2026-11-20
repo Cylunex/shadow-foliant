@@ -518,6 +518,12 @@ class ResearchStore:
             "ON CONFLICT(version) DO NOTHING",
             ("19-message-channel-archive", datetime.now().astimezone().isoformat()),
         )
+        version = "24-notification-gateway-request-id"
+        cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
+        if not cur.fetchone():
+            self._add_column(cur, "notification_deliveries", "gateway_request_id", "TEXT")
+            cur.execute("INSERT INTO research_schema_migrations(version,applied_at) VALUES (?,?)",
+                        (version, datetime.now().astimezone().isoformat()))
         version = "20-scheduled-report-parts"
         cur.execute("SELECT 1 FROM research_schema_migrations WHERE version=?", (version,))
         if not cur.fetchone():

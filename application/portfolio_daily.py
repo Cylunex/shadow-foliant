@@ -77,12 +77,13 @@ def _comparison_line(current, prior, now):
     common = [symbol for symbol in current if symbol in previous]
     if not common:
         return "判断变化｜本次或前次有效行情不足，暂不比较动作变化。"
-    for symbol in common:  # Current final-risk priority, independent of the raw trigger.
+    from notify.stock_report import text
+    for symbol in common:  # Report the most important changed decision first.
         before, after = previous[symbol], current[symbol]
         if before["action"] != after["action"]:
             return (f"判断变化｜{symbol} {previous_label}{before['quote_at'][11:16]} {FINAL_ACTIONS[before['action']]}"
                     f" → 今日{after['quote_at'][11:16]} {FINAL_ACTIONS[after['action']]}｜"
-                    f"当期依据：{after['reason'] or '待核'}")
+                    f"当期依据：{text(after['reason'] or '待核', 80)}")
     return f"判断变化｜两期可比较的 {len(common)} 只持仓，最终判断相同。"
 
 

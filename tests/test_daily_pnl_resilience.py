@@ -96,3 +96,52 @@ class DailyPnlFallbackTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_reconciles_late_nav_without_replacing_stock_pnl_or_using_future_nav(tmp_path, monkeypatch):
+    from datetime import date
+    import sqlite3
+    from fund import fund_ledger
+    import fund_db
+
+    path = tmp_path / "pnl.db"
+    monkeypatch.setattr(daily_pnl, "_conn", lambda: sqlite3.connect(path))
+    monkeypatch.setattr(daily_pnl, "_INITIALIZED", False)
+    monkeypatch.setattr(daily_pnl, "is_postgres", lambda: False)
+    day = date(2026, 11, 18).isoformat()
+    daily_pnl.upsert_fund_pnl(day, 2, 200, 0, 0, fund_fresh_count=0)
+    with sqlite3.connect(path) as conn:
+        fund_ledger.create_schema(conn.cursor())
+        conn.execute("UPDATE daily_pnl_snapshots SET stock_daily_pnl=5,stock_mv=100 WHERE snap_date=?", (day,))
+
+    def ledger(*, as_of):
+        assert as_of == day
+        return {
+            "positions": [{"code": "000001", "shares": 100}, {"code": "000002", "shares": 100}],
+            "transactions": [{"code": "000001", "confirmation_date": day,
+                              "delta_shares": 25, "cash_paid": 27.5}],
+        }
+
+    def nav(codes, *, upto_date):
+        assert set(codes) == {"000001", "000002"} and upto_date == day
+        return {
+            "000001": {"unit_nav": 1.1, "prev_nav": 1.0, "nav_date": day},
+            "000002": {"unit_nav": 1.0, "prev_nav": 1.0, "nav_date": "2026-11-17"},
+        }
+
+    monkeypatch.setattr(fund_ledger, "read", ledger)
+    monkeypatch.setattr(fund_db, "get_nav_pairs", nav)
+    assert daily_pnl.reconcile_fund_pnl("2026-11-20")[day]["fund_fresh_count"] == 1
+    row = daily_pnl.get_pnl(day)
+    assert row["fund_daily_pnl"] == 7.5 and row["total_daily_pnl"] == 12.5
+    assert row["stock_daily_pnl"] == 5.0
+    assert daily_pnl.reconcile_fund_pnl("2026-11-20") == {}
+
+    # A legacy holding has no dated opening. New nightly snapshots carry the
+    # exact basis needed to calculate its return after NAV becomes available.
+    book = ledger(as_of=day)
+    basis = [{**h, "day_transactions": [e for e in book["transactions"] if e["code"] == h["code"]]}
+             for h in book["positions"]]
+    daily_pnl.upsert_fund_pnl(day, 2, 200, 0, 0, fund_fresh_count=0, basis=basis)
+    monkeypatch.setattr(fund_ledger, "read", lambda **_: None)
+    assert daily_pnl.reconcile_fund_pnl("2026-11-20")[day]["fund_daily_pnl"] == 7.5

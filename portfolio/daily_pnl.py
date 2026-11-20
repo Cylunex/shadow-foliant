@@ -244,41 +244,92 @@ def merge_save(snap_date: str) -> Optional[Dict]:
 
 def upsert_fund_pnl(snap_date: str, fund_count: int, fund_mv: float,
                     fund_daily_pnl: float, fund_daily_pct: float,
-                    *, fund_total_count: int = None, fund_fresh_count: int = None):
-    """由 fund_nav_refresh 调用：写入基金收益部分（仅更新当日基金字段，不碰其他）。"""
+                    *, fund_total_count: int = None, fund_fresh_count: int = None,
+                    only_improve: bool = False, basis: list[dict] | None = None):
+    """Update fund and combined P&L atomically while preserving the stock leg."""
     init_db()
-    conn = _conn()
-    cur = conn.cursor()
     fund_total_count = fund_count if fund_total_count is None else int(fund_total_count)
     fund_fresh_count = fund_count if fund_fresh_count is None else int(fund_fresh_count)
-    cur.execute("SELECT snap_date FROM daily_pnl_snapshots WHERE snap_date=?", (snap_date,))
-    exists = cur.fetchone()
-    if exists:
-        cur.execute(
-            """UPDATE daily_pnl_snapshots SET
-               fund_count=?, fund_mv=?, fund_daily_pnl=?, fund_daily_pct=?,
-               fund_total_count=?, fund_fresh_count=?,
-               total_daily_pnl = COALESCE(stock_daily_pnl,0) + ?,
-               total_daily_pct = CASE WHEN (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) > 0
-                   THEN (COALESCE(stock_daily_pnl,0) + ?) / (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) * 100
-                   ELSE 0 END
-               WHERE snap_date=?""",
-            (fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
-             fund_total_count, fund_fresh_count,
-             fund_daily_pnl, fund_mv, fund_daily_pnl, fund_daily_pnl, fund_mv, fund_daily_pnl, snap_date),
-        )
-    else:
-        cur.execute(
-            """INSERT INTO daily_pnl_snapshots
-               (snap_date, fund_count, fund_total_count, fund_fresh_count,
-                fund_mv, fund_daily_pnl, fund_daily_pct, total_daily_pnl, total_daily_pct)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (snap_date, fund_count, fund_total_count, fund_fresh_count,
-             fund_mv, fund_daily_pnl, fund_daily_pct,
-             fund_daily_pnl, fund_daily_pct),
-        )
-    conn.commit()
-    conn.close()
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        update = """
+            fund_count=?, fund_mv=?, fund_daily_pnl=?, fund_daily_pct=?,
+            fund_total_count=?, fund_fresh_count=?,
+            total_daily_pnl = COALESCE(stock_daily_pnl,0) + ?,
+            total_daily_pct = CASE WHEN (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) > 0
+                THEN (COALESCE(stock_daily_pnl,0) + ?) / (COALESCE(stock_mv,0) - COALESCE(stock_daily_pnl,0) + (? - ?)) * 100
+                ELSE 0 END
+        """
+        if not only_improve:
+            cur.execute("""INSERT INTO daily_pnl_snapshots (snap_date)
+                           VALUES (?) ON CONFLICT(snap_date) DO NOTHING""", (snap_date,))
+        where = "WHERE snap_date=?"
+        params = (fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+                  fund_total_count, fund_fresh_count, fund_daily_pnl, fund_mv,
+                  fund_daily_pnl, fund_daily_pnl, fund_mv, fund_daily_pnl, snap_date)
+        if only_improve:
+            where += " AND fund_total_count=? AND COALESCE(fund_fresh_count,0)<?"
+            params += (fund_total_count, fund_fresh_count)
+        cur.execute(f"UPDATE daily_pnl_snapshots SET {update} {where}", params)
+        changed = cur.rowcount > 0
+        if changed and basis is not None:
+            from fund.fund_ledger import _save
+            _save(cur, "pnl_basis", snap_date, {"holdings": basis})
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
+def reconcile_fund_pnl(before_date: str) -> dict[str, dict]:
+    """Refresh recent partial days only when dated books and verified NAVs agree."""
+    from datetime import date, timedelta
+
+    from fund import fund_ledger
+    import fund_db
+
+    init_db()
+    lower = (date.fromisoformat(before_date) - timedelta(days=7)).isoformat()
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT p.snap_date,p.fund_total_count,b.payload
+                       FROM daily_pnl_snapshots p LEFT JOIN fund_workspace b
+                         ON b.kind='pnl_basis' AND b.item_key=CAST(p.snap_date AS TEXT)
+                       WHERE p.snap_date>=? AND p.snap_date<?
+                         AND COALESCE(p.fund_fresh_count,0)<p.fund_total_count
+                       ORDER BY p.snap_date DESC""", (lower, before_date))
+        dates = cur.fetchall()
+    finally:
+        conn.close()
+
+    updated = {}
+    for day, total, captured in dates:
+        day = str(day)[:10]
+        if captured:
+            import json
+            holdings = json.loads(captured)["holdings"]
+        else:
+            book = fund_ledger.read(as_of=day)
+            if book is None:
+                continue
+            by_code = {}
+            for position in book["positions"]:
+                code = position["code"]
+                item = by_code.setdefault(code, {"code": code, "shares": 0, "day_transactions": []})
+                item["shares"] += position["shares"]
+            for event in book["transactions"]:
+                if event["confirmation_date"] == day:
+                    code = event["code"]
+                    item = by_code.setdefault(code, {"code": code, "shares": 0, "day_transactions": []})
+                    item["day_transactions"].append(event)
+            holdings = list(by_code.values())
+        navs = fund_db.get_nav_pairs([h["code"] for h in holdings], upto_date=day)
+        result = calculate_fund_pnl(holdings, navs, day)
+        if result["fund_total_count"] == total and upsert_fund_pnl(day, **result, only_improve=True):
+            updated[day] = result
+    return updated
 
 
 def get_pnl(snap_date: str = None) -> Optional[Dict]:

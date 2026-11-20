@@ -98,3 +98,15 @@ def wencai_reference(artifacts, *, shadow=None):
         except Exception:
             pass
     return openapi_trial_reference(shadow, cached_names=cached_names)
+
+
+def pending_reason(group):
+    """Explain the missing evidence without exposing provider field names."""
+    reasons = group.get("verification_reasons") or []
+    if "as_of_not_verified" in reasons:
+        if "sort_metric_date_missing" in reasons:
+            return "排名数据缺日期"
+        return "排名数据日期对不上"
+    if any(reason in reasons for reason in ("financial_period_missing", "yoy_baseline_unverified")):
+        return "财报所属期或同比口径待确认"
+    return "筛选条件还没核实"

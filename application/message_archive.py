@@ -84,10 +84,12 @@ class MessageArchiveService:
                 channel: str, final_body: str, idempotency_key: str | None = None,
                 business_as_of: str | None = None, sensitivity: str = "private",
                 planned_at: str | None = None, fallback_from: str | None = None,
-                retry_of: str | None = None) -> dict[str, Any]:
+                retry_of: str | None = None, target_label: str | None = None) -> dict[str, Any]:
         if not re.fullmatch(r"[0-9a-f]{32}", message_id or ""):
             raise ValueError("message_archive_id_invalid")
         if channel not in CHANNELS or sensitivity not in {"private", "sensitive"}:
+            raise ValueError("message_archive_metadata_invalid")
+        if target_label is not None and target_label not in CHANNELS:
             raise ValueError("message_archive_metadata_invalid")
         if not source or len(source) > 200 or not category or len(category) > 60:
             raise ValueError("message_archive_metadata_invalid")
@@ -150,7 +152,7 @@ class MessageArchiveService:
                 (delivery_id,message_id,channel,target_label,final_body_cipher,
                  final_sha256,planned_at,status,version,fallback_from,retry_of)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(message_id,channel) DO NOTHING""",
-                (delivery_id, actual_message_id, channel, channel,
+                (delivery_id, actual_message_id, channel, target_label or channel,
                  self._encrypt(final_body), final_hash, planned_at, "pending",
                  ARCHIVE_VERSION, fallback_from, retry_of))
             cur.execute("""SELECT delivery_id,final_sha256,status,attempted_at,
@@ -206,24 +208,24 @@ class MessageArchiveService:
 
     def finish(self, delivery_id: str, *, status: str,
                http_status: int | None = None, provider_code: str | None = None,
-               error_code: str | None = None) -> bool:
+               error_code: str | None = None, gateway_request_id: str | None = None) -> bool:
         if status not in STATUSES:
             raise ValueError("message_archive_status_invalid")
         if http_status is not None and not 100 <= http_status <= 599:
             raise ValueError("message_archive_http_status_invalid")
         if any(value and not SAFE_CODE.fullmatch(value)
-               for value in (provider_code, error_code)):
+               for value in (provider_code, error_code, gateway_request_id)):
             raise ValueError("message_archive_result_invalid")
         conn = self.store.connect()
         try:
             cur = conn.cursor()
             cur.execute("""UPDATE notification_deliveries
                            SET status=?,acknowledged_at=?,http_status=?,
-                               provider_code=?,error_code=?
+                               provider_code=?,error_code=?,gateway_request_id=?
                            WHERE delivery_id=? AND status='sending'""",
                         (status, self.clock().isoformat(timespec="seconds")
                          if status != "unknown" else None,
-                         http_status, provider_code, error_code, delivery_id))
+                         http_status, provider_code, error_code, gateway_request_id, delivery_id))
             recorded = int(cur.rowcount or 0) == 1
             if recorded:
                 cur.execute("SELECT message_id FROM notification_deliveries WHERE delivery_id=?",
@@ -284,7 +286,7 @@ class MessageArchiveService:
                                   final_sha256,planned_at,attempted_at,acknowledged_at,
                                   status,http_status,provider_code,error_code,
                                   retry_of,fallback_from,version,
-                                  suppressed_count,last_suppressed_at,suppression_reason
+                                  suppressed_count,last_suppressed_at,suppression_reason,gateway_request_id
                            FROM notification_deliveries WHERE message_id=?
                            ORDER BY channel""", (message_id,))
             deliveries = []
@@ -299,7 +301,7 @@ class MessageArchiveService:
                     "retry_of": item[12], "fallback_from": item[13],
                     "version": item[14], "suppressed_count": item[15],
                     "last_suppressed_at": item[16],
-                    "suppression_reason": item[17],
+                    "suppression_reason": item[17], "gateway_request_id": item[18],
                 })
             return {
                 "message_id": message_id, "source": row[0],

@@ -67,3 +67,67 @@ def run_stock(task) -> List[Tuple[str, dict]]:
         except Exception:
             continue
     return out
+
+
+def portfolio_batch(tasks, load_checkpoint, save_checkpoint, *, deadline, cancelled):
+    """Reuse only results made with identical bars, variants and scoring inputs."""
+    from hashlib import sha256
+    from multiprocessing import TimeoutError, get_context
+    from time import monotonic
+    from pandas.util import hash_pandas_object
+
+    completed, pending = {}, []
+    identities = {}
+    for task in tasks:
+        code, name, frame, variants, split_date, pool_size = task
+        definition = [
+            "genome-backtest-v1", name, split_date, pool_size, list(frame.columns),
+            [(v["id"], v["base_strategy"], v["params"]) for v in variants],
+        ]
+        identity = sha256(_json.dumps(definition, sort_keys=True, default=str).encode())
+        identity.update(hash_pandas_object(frame).to_numpy().tobytes())
+        key = f"_genome_backtest:{code}"
+        digest = identity.hexdigest()
+        cached = load_checkpoint(key) or {}
+        if cached.get("digest") == digest and cached.get("rows"):
+            completed[code] = cached["rows"]
+        else:
+            identities[code] = key, digest
+            pending.append(task)
+
+    if not pending or deadline <= monotonic() or cancelled():
+        return [completed[task[0]] for task in tasks if task[0] in completed]
+
+    # Pool.__exit__ terminates active children at the budget boundary. Executor
+    # shutdown(wait=True) previously consumed the outer task's remaining budget.
+    from os import cpu_count
+    workers = min(8, len(pending), max(1, (cpu_count() or 2) - 1))
+    with get_context("spawn").Pool(workers) as pool:
+        results = pool.imap_unordered(_batch_stock, pending)
+        received = 0
+        while received < len(pending) and not cancelled():
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            try:
+                code, rows = results.next(timeout=min(1, remaining))
+            except TimeoutError:
+                continue
+            received += 1
+            if rows:
+                key, digest = identities[code]
+                save_checkpoint(key, {"digest": digest, "rows": rows})
+                completed[code] = rows
+    return [completed[task[0]] for task in tasks if task[0] in completed]
+
+
+def _batch_stock(task):
+    try:
+        rows = run_stock(task)
+        if len(rows) != len(task[3]):
+            print(f"[daily_backtest] {task[0]} variants incomplete: {len(rows)}/{len(task[3])}", flush=True)
+            return task[0], []
+        return task[0], rows
+    except Exception as exc:
+        print(f"[daily_backtest] {task[0]} worker error: {type(exc).__name__}", flush=True)
+        return task[0], []

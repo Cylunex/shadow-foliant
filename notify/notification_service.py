@@ -7,9 +7,9 @@ from typing import Dict
 from uuid import uuid4
 
 try:
-    from .archive_gateway import archived_call
+    from .archive_gateway import archived_call, qq_bridge_url, qq_request_id
 except ImportError:
-    from archive_gateway import archived_call
+    from archive_gateway import archived_call, qq_bridge_url, qq_request_id
 
 from monitor_db import monitor_db
 
@@ -598,23 +598,28 @@ _此消息由AI股票分析系统自动发送_"""
             final_body=json.dumps(payload, ensure_ascii=False),
             sender=lambda: self._send_webhook_unarchived(payload),
             source=_source, category='report',
+            target_label='qq' if qq_bridge_url(url) else None,
             message_id=_message_id)
 
     def _send_webhook_unarchived(self, payload: dict) -> dict:
         try:
             import requests
             url = (self.config.get('webhook_url') or '').strip()
+            bridge = qq_bridge_url(url)
             r = requests.post(url, json=payload,
                               headers={'Content-Type': 'application/json'},
-                              timeout=10)
+                              timeout=30 if bridge else 10)
+            request_id = qq_request_id(r) if bridge else None
+            metadata = {'gateway_request_id': request_id} if request_id else {}
             if r.status_code != 200:
                 print(f"[NotificationService] send_webhook HTTP {r.status_code}")
                 return {'ok': False, 'http_status': r.status_code,
-                        'provider_code': 'rejected', 'error_code': 'http_rejected'}
+                        'provider_code': 'rejected', 'error_code': 'http_rejected', **metadata}
             ret = r.json()
-            if ret.get('errcode') == 0 or ret.get('StatusCode') == 0 or ret.get('code') == 0:
+            if (ret.get('errcode') == 0 or ret.get('StatusCode') == 0 or ret.get('code') == 0
+                    or (bridge and ret.get('ok') is True)):
                 return {'ok': True, 'http_status': r.status_code,
-                        'provider_code': 'accepted', 'error_code': None}
+                        'provider_code': 'accepted', 'error_code': None, **metadata}
             print("[NotificationService] send_webhook 返回业务错误")
             return {'ok': False, 'http_status': r.status_code,
                     'provider_code': 'rejected', 'error_code': 'provider_rejected'}

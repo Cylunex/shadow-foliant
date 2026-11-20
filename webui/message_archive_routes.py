@@ -30,6 +30,7 @@ class PrepareReq(StrictArchiveReq):
     planned_at: str | None = None
     fallback_from: str | None = None
     retry_of: str | None = None
+    target_label: str | None = None
 
 
 class StartReq(StrictArchiveReq):
@@ -41,6 +42,7 @@ class FinishReq(StartReq):
     http_status: int | None = Field(default=None, ge=100, le=599)
     provider_code: str | None = None
     error_code: str | None = None
+    gateway_request_id: str | None = None
 
 
 def register_message_archive_routes(
@@ -82,7 +84,8 @@ def register_message_archive_routes(
             return agent_result({"status": "complete", "data": {
                 "recorded": MessageArchiveService().finish(
                     req.delivery_id, status=req.status, http_status=req.http_status,
-                    provider_code=req.provider_code, error_code=req.error_code)}})
+                    provider_code=req.provider_code, error_code=req.error_code,
+                    gateway_request_id=req.gateway_request_id)}})
         except Exception as exc:
             return agent_error(exc)
 

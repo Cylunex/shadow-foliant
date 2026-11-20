@@ -81,6 +81,7 @@ def load_premarket_reference(path: Path, *, selection_date: str,
 def format_reference_lines(reference: dict) -> list[str]:
     """One bounded line per group; unverified rows never appear as valid picks."""
     from notify.plain_language import plain_text
+    from selection.reference_display import pending_reason
 
     lines = []
     for name in ORDER:
@@ -93,7 +94,7 @@ def format_reference_lines(reference: dict) -> list[str]:
             ).strip()
             detail = '✅已核验·' + (picks or '无命中')
         elif status == 'trial_unverified':
-            detail = '⚠️条件或时点待核验'
+            detail = '⚠️' + pending_reason(row)
         elif status == 'pending':
             detail = ('⚠️盘前缓存无效' if reference.get('availability_reason') == 'premarket_cache_invalid'
                       else '⚠️盘前缓存缺失')

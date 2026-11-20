@@ -66,6 +66,7 @@ def _selection_labels(rows, names=None, *, limit=5) -> list[str]:
 def _wencai_sections(reference, names):
     from selection.wencai_notification import reference_top5, verified_picks
     from selection.wencai_query_contract import ORDER
+    from selection.reference_display import pending_reason
 
     reference = reference or {}
     groups = reference.get("strategies") or {}
@@ -76,8 +77,10 @@ def _wencai_sections(reference, names):
         if status in {"ready", "trial_verified"}:
             labels = _selection_labels(verified_picks(group), names)
             detail = "、".join(labels) or "无命中"
-        elif status in {"trial_unverified", "degraded"}:
-            detail = "条件或时点待核验"
+        elif status == "trial_unverified":
+            detail = pending_reason(group)
+        elif status == "degraded":
+            detail = "筛选条件或数据日期待确认"
         elif status == "pending":
             detail = ("盘前缓存无效" if reference.get("availability_reason") == "premarket_cache_invalid"
                       else "盘前缓存缺失")

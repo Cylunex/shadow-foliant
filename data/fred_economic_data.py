@@ -195,3 +195,43 @@ if __name__ == '__main__':
     snap = get_fed_snapshot()
     print(f'\n核心序列 ({len(snap)} 项):')
     print(format_snapshot(snap))
+
+
+def us_index_closes(as_of):
+    """Read the public FRED daily-close export as a bounded fallback."""
+    import csv
+    import math
+    from datetime import date
+
+    series = {"DJIA": "道琼斯", "SP500": "标普500", "NASDAQCOM": "纳斯达克"}
+    response = requests.get(
+        "https://fred.stlouisfed.org/graph/fredgraph.csv",
+        params={"id": ",".join(series), "cosd": (as_of - timedelta(days=10)).isoformat()},
+        timeout=(3, 6),
+    )
+    response.raise_for_status()
+    observations = {name: {} for name in series.values()}
+    for row in csv.DictReader(response.text.splitlines()):
+        try:
+            day = date.fromisoformat(row.get("observation_date") or row.get("DATE") or "")
+        except ValueError:
+            continue
+        if day > as_of:
+            continue
+        for key, name in series.items():
+            try:
+                value = float(row.get(key) or "")
+            except ValueError:
+                continue
+            if math.isfinite(value) and value > 0:
+                observations[name][day] = value
+
+    lines = {}
+    for name, values in observations.items():
+        if len(values) < 2:
+            continue
+        previous_day, day = sorted(values)[-2:]
+        if (as_of - day).days <= 4:
+            current, previous = values[day], values[previous_day]
+            lines[name] = f"{name} {day}: {current:.2f} ({(current / previous - 1) * 100:+.2f}%)"
+    return lines

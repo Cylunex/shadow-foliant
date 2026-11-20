@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from db_compat import connect as db_connect, USE_POSTGRES
-from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
+from jobs.schedule_policy import DAILY_BACKTEST_RETRY_TIMES, EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
 _DB_PATH = _bootstrap.db_path('jobs_snapshots.db')
 
@@ -127,10 +127,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     'losna_followups': {
         'cn': 'Losna策略与持仓复盘', 'schedule': '17:20',
         'category': '研究', 'default': True, 'core': False,
-        'description': '分别冻结公开策略证据与私人持仓预览，提交受限研究包',
+        'description': '核对当日研究是否按期交付，冻结公开策略与私人持仓复盘证据',
     },
     'losna_research': {
-        'cn': 'Losna冻结候选研究', 'schedule': '09:58',
+        'cn': 'Losna冻结候选研究', 'schedule': '09:58，名单晚到时盘中补建',
         'category': '研究', 'default': True, 'core': False,
         'description': '把已发布冻结事实交给Losna受限研究，未收到结果仍准时报表',
     },
@@ -306,7 +306,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心',
         'default': True,
         'depends_on': ['kline_prefetch'],
-        'description': '默认一/三/五跑全池策略进化，二/四只做当日策略扫描；未完成K线预热时在worker外等待，避免冷拉和NAS并发升温，报告进入22:30盘后汇总',
+        'description': f'默认一/三/五跑全池策略进化，二/四只做当日策略扫描；依赖K线预热，按股保留完成结果，{'、'.join(DAILY_BACKTEST_RETRY_TIMES)}续跑当天未完成的批次，报告进入22:30盘后汇总',
     },
 
     # 新增工作流（默认全关）
@@ -376,6 +376,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '基金',
         'default': True,  # B 合并:顺序跑 净值入库 → 定投止盈检查(止盈依赖新净值),合一个调度入口
         'description': '盘后先①拉最新净值入库+算基金单日收益,再②按新净值查定投止盈达标。合 fund_nav_refresh+fund_target_check',
+    },
+    'fund_nav_backfill': {
+        'cn': '基金补齐迟到净值',
+        'schedule': '08:40 交易日',
+        'category': '基金', 'default': True,
+        'description': '有可核验的历史持仓和新净值时，更新前七天的部分盈亏',
     },
     'fund_nav_refresh': {
         'cn': '🏦 基金：盘后净值入库',

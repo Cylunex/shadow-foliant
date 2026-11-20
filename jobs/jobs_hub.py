@@ -32,7 +32,7 @@ import concurrent.futures
 from db_compat import connect as db_connect
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
-from jobs.schedule_policy import EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
+from jobs.schedule_policy import DAILY_BACKTEST_RETRY_TIMES, EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
 
 import schedule
 import datahub  # 统一外部数据层(行情/龙虎榜/板块/新闻等取数唯一入口)
@@ -621,7 +621,7 @@ def _wait_kline_prefetch(job: str, max_wait: int = None, poll: int = 10) -> bool
     return _wait_task_dependency(job, 'kline_prefetch', max_wait=max_wait, poll=poll)
 
 
-def task_daily_backtest():
+def task_daily_backtest(*, retry_only=False):
     """盘后批量回测 + 策略基因组进化：全股池回测 → 横截面评分 → 变异 → 反哺AI。
 
     每个交易日 19:30 起、K线预热完成后运行。受开关 daily_backtest 控制（默认开）。
@@ -643,7 +643,16 @@ def task_daily_backtest():
         pass
     if _skip_if_not_trading(job):
         return
-    started = datetime.now().isoformat()
+    current = datetime.now(_RUN_TIMEZONE)
+    started = current.isoformat()
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    if retry_only:
+        latest = _latest_job_run_since(job, day_start) or {}
+        detail = latest.get('error') or ''
+        if not (detail.startswith('execution_timeout:') or 'resume_pending' in detail):
+            return
+    scan_result = _latest_job_run_since('wf_daily_strategy_scan', day_start) if retry_only else None
+    scan_done = (scan_result or {}).get('status') in {'success', 'skipped'}
     # NAS 最重的“全池 × 全变体”进化无需每天重复。默认一/三/五跑完整进化，
     # 二/四仍执行当日策略命中扫描，交易决策不断档，CPU/发热显著下降。
     try:
@@ -653,7 +662,7 @@ def task_daily_backtest():
         }
     except Exception:
         full_days = {1, 3, 5}
-    if datetime.now().isoweekday() not in full_days:
+    if current.isoweekday() not in full_days:
         try:
             _daily_strategy_scan()
             _log_run(job, 'success', error='light_mode=strategy_scan_only',
@@ -662,10 +671,9 @@ def task_daily_backtest():
             _log_run(job, 'error', error=f'light_mode scan failed: {e}',
                      started_at=started, finished_at=datetime.now().isoformat())
         return
-    _t0 = time.time()   # 全任务起点:末尾预热步骤按剩余预算决定跑不跑(见第 9/10 步)
+    deadline = time.monotonic() + _TASK_HARD_TIMEOUTS.get(job, 3600)
     try:
         from portfolio_db import portfolio_db
-        from backtest_engine import backtest_one
         from stock_data import StockDataFetcher
         from analysis.strategy_genome import (
             init_genome_tables, seed_default_variants,
@@ -749,7 +757,7 @@ def task_daily_backtest():
 
         n_pool = len(valid_stocks)
         if n_pool == 0:
-            _log_run(job, 'success', error='no valid stock data',
+            _log_run(job, 'degraded', error='no valid stock data',
                      started_at=started, finished_at=datetime.now().isoformat())
             return
 
@@ -790,71 +798,29 @@ def task_daily_backtest():
         _HOLDOUT_DAYS = 120
         _split_date = (datetime.now() - timedelta(days=_HOLDOUT_DAYS)).strftime('%Y-%m-%d')
 
-        def _agg_trades(ts):
-            """从 trades 子集算 (win_rate%, avg_ret%, count)。"""
-            if not ts:
-                return (0.0, 0.0, 0)
-            rets = [t.get('ret_pct', 0) or 0 for t in ts]
-            wr = sum(1 for x in rets if x > 0) / len(rets) * 100
-            return (round(wr, 1), round(sum(rets) / len(rets), 2), len(rets))
-
-        # N² 回测(股 × 变体)是全任务最重的一段,纯 CPU(pandas/numpy 在内存 df 上算)。
-        # 用**进程池按股并行**(每 worker 跑该股全部变体):结果与串行逐位一致,实测多核 ~Nx 提速,
-        # 把原 45~60min 压到个位数分钟、不再踩 deadline。受限环境(无法 fork/spawn)自动回退串行。
+        from analysis.genome_bt_worker import portfolio_batch
+        tasks = [(code, name, df, all_variants, _split_date, n_pool)
+                 for code, name, df in valid_stocks]
+        cancel_event = _TASK_CANCEL_EVENTS.get(job)
+        _per_stock = portfolio_batch(
+            tasks, get_indicator_snapshot, save_indicator_snapshot,
+            deadline=min(time.monotonic() + 2400, deadline - 420),
+            cancelled=cancel_event.is_set if cancel_event else lambda: False,
+        )
+        completed = len(_per_stock)
+        coverage = f'completed={completed}/{n_pool} universe={len(pool)}'
+        if completed < n_pool:
+            from postmarket_digest import add_section
+            add_section('strategy_evolution', '🧬 策略回测',
+                        f'已完成 {completed}/{n_pool} 只，剩余 {n_pool - completed} 只。'
+                        '完成结果已保存，本轮策略评分和进化待续跑。', max_chars=900)
+            if not scan_done and time.monotonic() < deadline - 240:
+                _daily_strategy_scan()
+            _log_run(job, 'partial', error=f'{coverage} resume_pending stale_skipped={stale_skipped}',
+                     started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
+                     notify=False)
+            return
         total_backtests = 0
-        _bt_tasks = [(code, name, df, all_variants, _split_date, n_pool)
-                     for code, name, df in valid_stocks]
-        _per_stock = None
-        _workload = len(valid_stocks) * max(1, len(all_variants))
-        if len(valid_stocks) > 1 and _workload >= 200:
-            try:
-                import os as _os4
-                from concurrent.futures import (ProcessPoolExecutor,
-                                                as_completed as _bt_as_completed,
-                                                TimeoutError as _BtTimeout)
-                from genome_bt_worker import run_stock as _gbt
-                _nw = min(8, len(valid_stocks), max(1, (_os4.cpu_count() or 4) - 1))
-                # 预算按实测校准(2026-07-02 定 60s/股;2026-07-06 再校准):7-3 实测进程池内
-                # 每股槽位 ~154s(1208s×7worker÷55只完成,并行下 pandas 争核比串行 60s 慢),
-                # 60s 估算只够评一半(55/106)。改 150s/股 + 封顶 2400s(给后面扫描/IC 段留
-                # ~20min,总预算 3600s 内)。超预算仍只丢未完成的,已完成保留。
-                _bt_timeout = min(2400, max(900, int(len(_bt_tasks) * 150 / _nw) + 300))
-                # submit+as_completed(而非 map):超时只丢"还没跑完的",已完成结果全保留。
-                with ProcessPoolExecutor(max_workers=_nw) as _ex:
-                    _futs = [_ex.submit(_gbt, t) for t in _bt_tasks]
-                    _per_stock = []
-                    try:
-                        for _f in _bt_as_completed(_futs, timeout=_bt_timeout):
-                            try:
-                                _per_stock.append(_f.result())
-                            except Exception:
-                                pass   # 单股 worker 崩,丢这只、不丢全局
-                    except _BtTimeout:
-                        _n_pend = sum(1 for _f in _futs if not _f.done())
-                        for _f in _futs:
-                            _f.cancel()   # 取消未开跑的;正在跑的等 with 退出自然结束
-                        print(f'[daily_backtest] ⚠️ 进程池 {_bt_timeout}s 预算用尽: '
-                              f'完成 {len(_per_stock)}/{len(_bt_tasks)} 只,余 {_n_pend} 只跳过'
-                              f'(已完成结果保留,不再串行重跑)', flush=True)
-                print(f'[daily_backtest] 进程池并行回测: {len(_per_stock)}/{len(valid_stocks)}股 '
-                      f'× {len(all_variants)}变体, {_nw} 进程')
-            except Exception as _pe:
-                # 到这里 = 池本身起不来(受限环境无法 fork/spawn),才回退串行
-                print(f'[daily_backtest] 进程池不可用,回退串行: {type(_pe).__name__}: {str(_pe)[:60]}')
-                _per_stock = None
-        if _per_stock is None:
-            # 串行回退加截止时间守护(2026-07-01):进程池 timeout 抛出后,原来无脑串行,
-            # 单只慢就磨到 3600s 硬超时被切断、后面聚合入库全不执行(2026-06-30 撞过)。
-            # 现在给串行 25min 预算,超时 break、用已完成的部分数据继续聚合入库。
-            from genome_bt_worker import run_stock as _gbt
-            _per_stock = []
-            _serial_deadline = time.time() + 1500   # 25 min
-            for _i, _t in enumerate(_bt_tasks):
-                if time.time() > _serial_deadline:
-                    print(f'[daily_backtest] ⚠️ 串行回退撞 25min 上限,'
-                          f'{_i}/{len(_bt_tasks)} 只已完成,余下跳过(避免撞 3600s 硬超时)', flush=True)
-                    break
-                _per_stock.append(_gbt(_t))
         for _stock_out in _per_stock:
             for key, res in (_stock_out or []):
                 if key in strategy_results:
@@ -988,55 +954,18 @@ def task_daily_backtest():
         from postmarket_digest import add_section
         add_section('strategy_evolution', '🧬 策略进化', report, max_chars=900)
 
+        # The scan owns its own job_runs record. Finish this run after the
+        # downstream call so an outer timeout cannot follow a premature success.
+        if not scan_done:
+            _daily_strategy_scan()
         _log_run(job, 'success',
-                error=(f'pool={n_pool} backtests={total_backtests} '
-                       f'variants={len(all_variants)} new_variants={new_variant_count} '
-                       f'stale_skipped={stale_skipped}'),
-                started_at=started, finished_at=datetime.now().isoformat())
-    except Exception as e:
-        _log_run(job, 'error', error=str(e),
-                 started_at=started, finished_at=datetime.now().isoformat())
-
-    # ── 8. 策略命中扫描 → AI 深析 → 推荐池（原 wf_daily_strategy_scan,开关控制,默认开）──
-    # 放在进化之后:扫描时注入的是刚更新的基因组情报
-    try:
-        _daily_strategy_scan()
-    except Exception as e:
-        print(f'[daily_backtest] 策略扫描子任务失败: {e}')
-
-    # ── 9/10. 尾部纯预热步骤 — 按剩余预算决定跑不跑(2026-07-02)──
-    # 这两步只是给 genome 页焐缓存(页面可现算),非必须。7-1 撞过:回测串行拖到 19:45 后,
-    # 这两步无截止继续跑 → 顶过 3600s 硬超时被切断 + 发"数据源暂不可用"误报 + 孤儿跑到 20:18。
-    # 现在:距硬超时不足 10min 就整体跳过,保任务干净收尾。
-    _budget = _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0)
-    if _budget < 600:
-        print(f'[daily_backtest] ⏳ 剩余预算 {_budget:.0f}s 不足,跳过因子IC/价量IC预热(genome页可现算)', flush=True)
-        return
-
-    # ── 9. 预热因子IC评估(写 webui 同缓存键 factor_eval:10,genome页秒读)──
-    try:
-        from analysis.factor_eval import evaluate as _fe
-        rep = _fe(horizon=10, use_pit_exposures=True)
-        if rep.get('factors'):
-            from cache import cache_set
-            cache_set('factor_eval:10', rep, 86400)
-            print(f"[daily_backtest] 因子IC评估预热: {len(rep['factors'])}因子")
-    except Exception as e:
-        print(f'[daily_backtest] 因子评估预热失败: {e}')
-
-    # ── 10. 预热价量因子 IC 加权选股(闭环消费上一步的 IC;写 pv_ic_screen:000300,genome页秒读)──
-    if _TASK_HARD_TIMEOUTS.get(job, 3600) - (time.time() - _t0) < 600:
-        print(f'[daily_backtest] ⏳ 剩余预算不足,跳过价量IC预热', flush=True)
-        return
-    try:
-        from multi_factor_screener import screen_pv_ic
-        pv = screen_pv_ic(index_code='000300', n=30)
-        if pv.get('top'):
-            from cache import cache_set
-            cache_set('pv_ic_screen:000300', pv, 6 * 3600)
-            print(f"[daily_backtest] 价量IC选股预热: {len(pv['top'])}只 (ic_weighted={pv.get('ic_weighted')})")
-    except Exception as e:
-        print(f'[daily_backtest] 价量IC选股预热失败: {e}')
+                 error=(f'{coverage} backtests={total_backtests} '
+                        f'variants={len(all_variants)} new_variants={new_variant_count} '
+                        f'stale_skipped={stale_skipped}'),
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat())
+    except Exception as exc:
+        _log_run(job, 'error', error=str(exc), started_at=started,
+                 finished_at=datetime.now(_RUN_TIMEZONE).isoformat())
 
 
 def task_ai_eval_weekly():
@@ -1239,13 +1168,14 @@ def _fund_gate(job: str) -> bool:
     return _skip_if_not_trading(job)
 
 
-def task_fund_nav_refresh():
+def task_fund_nav_refresh(*, backfill_only=False):
     """🏦 盘后拉基金净值 + 计算基金单日总收益存表(开关 fund_nav_refresh,需手动开启)。"""
     from zoneinfo import ZoneInfo
-    job = 'fund_nav_refresh'
-    if _fund_gate(job):
+    job = 'fund_nav_backfill' if backfill_only else 'fund_nav_refresh'
+    if _fund_gate('fund_nav_refresh'):
         return
     started = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
+    snap_date = started[:10]
     try:
         import fund_db, fund_data
         fund_db.init_db()
@@ -1254,17 +1184,27 @@ def task_fund_nav_refresh():
         from fund.fund_ledger import list_saved, save as save_fund_workspace
         import time as fund_refresh_time
         ordered=sorted(codes)
-        checkpoint=next(iter(list_saved('nav_refresh_cursor')), {})
+        cursor_key = 'premarket' if backfill_only else 'default'
+        checkpoints = {row.get('slot', 'default'): row for row in list_saved('nav_refresh_cursor')}
+        checkpoint = checkpoints.get(cursor_key, {})
         offset=int(checkpoint.get('offset',0))%len(ordered) if ordered else 0
         ordered=ordered[offset:]+ordered[:offset]
-        deadline=fund_refresh_time.monotonic()+240
+        deadline = fund_refresh_time.monotonic() + (120 if backfill_only else 240)
         saved = 0
         for index,code in enumerate(ordered):
             if fund_refresh_time.monotonic()>=deadline:break
             df = fund_data.get_nav_history(code)
             if df is not None and not df.empty:
                 saved += fund_db.save_nav(code, df)
-            save_fund_workspace('nav_refresh_cursor','default',{'offset':offset+index+1})
+            save_fund_workspace('nav_refresh_cursor', cursor_key,
+                                {'slot': cursor_key, 'offset': offset + index + 1})
+        from portfolio.daily_pnl import reconcile_fund_pnl
+        corrected = reconcile_fund_pnl(snap_date) if codes else {}
+        if backfill_only:
+            detail = f"nav_rows={saved} corrected_dates={','.join(corrected) or 'none'}"
+            _log_run(job, 'success', error=detail, started_at=started,
+                     finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+            return {'status': 'success', 'error': detail}
         # 网络局部失败时沿用库内最近净值计市值；只有净值日期=今天且存在上一期
         # 净值的基金才进入当日收益，避免把滞后 QDII/失联源冒充成今日涨跌。
         nav_cache = fund_db.get_nav_pairs(codes)
@@ -1274,7 +1214,6 @@ def task_fund_nav_refresh():
             nav_lookup=lambda c: (nav_cache.get(c) or {}).get('unit_nav'))
         # ─── 计算基金单日总收益并写入 daily_pnl_snapshots ───
         # 只纳入当日净值已出的基金，避免混入不同日期的日增长率
-        snap_date = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
         holdings = fund_db.get_holdings()
         from portfolio.daily_pnl import calculate_fund_pnl, upsert_fund_pnl
         from fund.fund_ledger import read as read_fund_ledger
@@ -1282,18 +1221,12 @@ def task_fund_nav_refresh():
         for holding in holdings:
             holding['day_transactions']=[e for e in events if e['code']==holding['code'] and e['confirmation_date']==snap_date]
         fund_result = calculate_fund_pnl(holdings, nav_cache, snap_date)
-        try:
-            upsert_fund_pnl(
-                snap_date,
-                fund_result['fund_count'],
-                fund_result['fund_mv'],
-                fund_result['fund_daily_pnl'],
-                fund_result['fund_daily_pct'],
-                fund_total_count=fund_result['fund_total_count'],
-                fund_fresh_count=fund_result['fund_fresh_count'],
-            )
-        except Exception:
-            pass
+        flow_fields = ("txn_type", "delta_shares", "cash_paid", "cash_received")
+        basis = [{"code": holding["code"], "shares": holding["shares"],
+                  "day_transactions": [{field: event.get(field) for field in flow_fields}
+                                       for event in holding["day_transactions"]]}
+                 for holding in holdings]
+        upsert_fund_pnl(snap_date, **fund_result, basis=basis)
         status = ('success' if fund_result['fund_fresh_count'] == fund_result['fund_total_count']
                   else 'partial')
         detail = (f'funds={len(codes)} nav_rows={saved} snap={snap} '
@@ -1306,6 +1239,10 @@ def task_fund_nav_refresh():
         _log_run(job, 'error', error=str(e), started_at=started,
                  finished_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
         return {'status': 'error', 'error': str(e)}
+
+
+def task_fund_nav_backfill():
+    return task_fund_nav_refresh(backfill_only=True)
 
 
 def task_fund_dca_reminder():
@@ -1353,6 +1290,14 @@ def task_daily_pnl_snapshot():
         # 收盘后推送"今日盈亏"一条(通知驱动:一眼看到今天股票+基金合计赚亏)
         if r:
             try:
+                try:
+                    baseline = get_indicator_snapshot('_fund_pnl_report') or {}
+                    if baseline.get('date') != snap_date:
+                        save_indicator_snapshot('_fund_pnl_report', {
+                            'date': snap_date, 'fresh': r.get('fund_fresh_count', 0),
+                        })
+                except Exception as exc:
+                    print(f'[daily_pnl_snapshot] 基金晚报覆盖记录失败: {type(exc).__name__}')
                 tp = r.get('total_daily_pnl', 0) or 0
                 tpct = r.get('total_daily_pct', 0) or 0
                 # A 股惯例:红涨绿跌(盈利红, 亏损绿)
@@ -1710,8 +1655,7 @@ def _notify_dependency_wait(name: str, dependency: str, detail: str = ''):
 
 def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
     """真正进入任务主体后的超时：有明确坏源才归类数据源故障，否则按异常超时告警。"""
-    bad_srcs = _current_unhealthy_sources()
-    if bad_srcs:
+    if name != "daily_backtest" and _current_unhealthy_sources():
         _notify_data_unavailable(
             name, f'执行阶段运行 {elapsed:.0f}s 超时(阈值 {timeout}s)')
         return
@@ -1728,7 +1672,7 @@ def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
             pass
         body = (f"任务「{cn}」({name}) 已进入执行阶段，但运行 {elapsed:.0f}s "
                 f"超过阈值 {timeout}s。\n"
-                "未检测到明确熔断的数据源，按异常执行超时处理；应排查内部锁、未设超时的接口或死循环。")
+                "请按本次任务的执行阶段日志核对超时原因。")
         from notification_router import send
         send('alert', f"⏱️ 任务执行超时: {cn}", body)
     except Exception:
@@ -1739,7 +1683,7 @@ def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
 # 背景:6/14 夜里 pywencai 卡死, 整个线程池被 6 个僵尸任务堵满, 调度器主线程还活着
 #       但 supervisor 看 PID 在不重启 → 09:45 选股没跑。
 # 方案(06-17 改):
-#   软超时 SOFT_DEADLINE_SEC(默认 30min): 只打 ⚠️ + 记 job_runs, 不杀进程。
+#   软超时 SOFT_DEADLINE_SEC(默认 30min): 只打 ⚠️, 不杀进程。
 #     原始方案 30 分钟就 hard exit 整个 jobs_hub, 连带杀其它正在跑的任务 → 选股/回测
 #     这种本身就慢的任务(InStock 取因子 + 大量 K 线)会反复被误杀, 永远出不来结果。
 #   硬超时 HARD_DEADLINE_SEC(默认 90min): 任意单任务超这个时间 → os._exit, 真正失控才杀。
@@ -1816,6 +1760,8 @@ def _run_with_log(name, func, *a, **kw):
     print(f'[jobs_hub] ▶ {name} 开始 (active={pool_busy}, 超时{timeout}s)', flush=True)
     cancel_event = threading.Event()
     with _TASK_LOCK:
+        if name in {'daily_backtest', 'losna_research'} and name in _TASK_START_TS:
+            return
         _TASK_START_TS[name] = t0
         _TASK_CANCEL_EVENTS[name] = cancel_event
         _TASK_WAITING_ON.pop(name, None)
@@ -2239,11 +2185,6 @@ class _JobsHub:
                         msg = ', '.join(f'{n}({d}s)' for n, d in new_alerts)
                         print(f'[jobs_hub] ⚠️ 任务超时但继续等 (>{SOFT_DEADLINE_SEC}s): {msg}',
                               flush=True)
-                        try:
-                            for n, d in new_alerts:
-                                _log_run(n, 'error', error=f'soft_timeout {d}s, 继续运行')
-                        except Exception:
-                            pass
 
                     # 硬超时: 任一任务 > HARD_DEADLINE_SEC, 整体退出
                     if over_hard:
@@ -2728,31 +2669,51 @@ def task_morning_strategy():
         except Exception as e:
             dragon_tiger_summary = f'(拉取失败: {e})'
 
-        # ─── 2. 美股 3 大指数（直接 Yahoo V8 API，避免 yfinance 限速） ───
-        us_summary = '（无数据）'
+        # Overseas closes are informational and use provider dates.
+        import requests
+        import config as market_config
+        from analysis.morning_strategy_report import format_us_daily_reference
+        from data.fred_economic_data import us_index_closes
+        from zoneinfo import ZoneInfo
+
+        new_york_date = datetime.now(ZoneInfo('America/New_York')).date()
+        tickers = {'%5EDJI': '道琼斯', '%5EGSPC': '标普500', '%5EIXIC': '纳斯达克'}
+        lines, outcomes = {}, {}
+        for ticker, name in tickers.items():
+            try:
+                response = requests.get(
+                    f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=5d&interval=1d',
+                    headers={'User-Agent': 'Mozilla/5.0'}, proxies=market_config.PROXIES,
+                    timeout=(3, 4),
+                )
+                if response.status_code != 200:
+                    outcomes[name] = f'yahoo_http_{response.status_code}'
+                    continue
+                result = response.json()['chart']['result'][0]
+                line = format_us_daily_reference(name, result, as_of=new_york_date)
+                if line:
+                    lines[name] = line
+                outcomes[name] = 'yahoo' if line else 'yahoo_close_unverified'
+            except Exception as exc:
+                outcomes[name] = f'yahoo_{type(exc).__name__}'
+        if len(lines) < len(tickers):
+            try:
+                for name, line in us_index_closes(new_york_date).items():
+                    if name not in lines:
+                        lines[name] = line
+                        outcomes[name] += '+fred'
+            except Exception as exc:
+                print(f'[morning_strategy] FRED closes: {type(exc).__name__}')
+        us_summary = '\n'.join(lines[name] for name in tickers.values() if name in lines) or '（无数据）'
         try:
-            import requests as _yr
-            _h = {'User-Agent': 'Mozilla/5.0'}
-            import config as _cfg; _p = _cfg.PROXIES
-            _tickers = {'%5EDJI': '道琼斯', '%5EGSPC': '标普500', '%5EIXIC': '纳斯达克'}
-            lines = []
-            for sym, name in _tickers.items():
-                try:
-                    resp = _yr.get(
-                        f'https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=3d&interval=1d',
-                        headers=_h, proxies=_p, timeout=10)
-                    if resp.status_code == 200:
-                        d = resp.json()
-                        from analysis.morning_strategy_report import format_us_daily_reference
-                        line = format_us_daily_reference(name, d['chart']['result'][0])
-                        if line:
-                            lines.append(line)
-                except Exception:
-                    pass
-            if lines:
-                us_summary = '\n'.join(lines)
-        except Exception as e:
-            us_summary = f'(拉取失败: {e})'
+            prior = (get_indicator_snapshot('_morning_us_indices') or {}).get('last_verified_at', {})
+            observed = datetime.now(_RUN_TIMEZONE).isoformat(timespec='seconds')
+            save_indicator_snapshot('_morning_us_indices', {
+                'observed_at': observed, 'outcomes': outcomes,
+                'last_verified_at': {**prior, **{name: observed for name in lines}},
+            })
+        except Exception as exc:
+            print(f'[morning_strategy] 外盘记录失败: {type(exc).__name__}')
 
         # ─── 3. 隔夜事实流 ───
         # CLS 加红电报走稳定源 ID、A 股双时间窗口和本地结构化标签；只给晨报补证据，
@@ -2868,10 +2829,16 @@ def task_morning_strategy():
         pnl_text = ''
         try:
             from portfolio.daily_pnl import get_pnl as _get_pnl
-            _p = _get_pnl()
-            if _p:
+            _p = _get_pnl(lookback_date) or _get_pnl()
+            pnl_day = str(_p['snap_date']) if _p else ''
+            if pnl_day and pnl_day < datetime.now(_RUN_TIMEZONE).date().isoformat():
                 from analysis.morning_strategy_report import format_previous_pnl
                 pnl_text = format_previous_pnl(_p)
+                baseline = get_indicator_snapshot('_fund_pnl_report', pnl_day) or {}
+                if baseline.get('date') == pnl_day:
+                    gained = int(_p.get('fund_fresh_count') or 0) - int(baseline.get('fresh') or 0)
+                    if gained > 0:
+                        pnl_text += f"｜较晚报补齐 {gained} 只基金净值"
         except Exception:
             pass
         if pnl_text:
@@ -4839,6 +4806,14 @@ def _iwencai_shadow_premarket_path():
     return directory / (datetime.now(_RUN_TIMEZONE).date().isoformat() + '-premarket.json')
 
 
+def _iwencai_quality_detail(result):
+    missing_dates = [group['name'] for group in result.get('groups', [])
+                     if 'as_of_not_verified' in (group.get('failure_reasons') or [])]
+    detail = (f"status={result['status']};data={result['data_groups']}/5;"
+              f"verified={result.get('semantic_verified_groups', 0)}/5")
+    return detail + (';date_unverified=' + ','.join(missing_dates) if missing_dates else '')
+
+
 def _iwencai_shadow_job_status(result: dict) -> str:
     if result.get('status') == 'complete' and result.get('semantic_verified_groups') == 5:
         return 'success'
@@ -4881,7 +4856,7 @@ def task_iwencai_openapi_shadow_premarket():
             handle.flush()
             os.fsync(handle.fileno())
         _log_run(job, _iwencai_shadow_job_status(result),
-                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 error=_iwencai_quality_detail(result),
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
     except Exception as exc:
@@ -4961,7 +4936,7 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
         result['selection_date'] = str(formal.get('selection_date') or '')
         store.save_selection_artifact(formal['run_id'], artifact_type, result)
         _log_run(job, _iwencai_shadow_job_status(result),
-                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 error=_iwencai_quality_detail(result),
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
     except Exception as exc:
@@ -5027,7 +5002,7 @@ def _iwencai_shadow_open_retry():
         store.save_selection_artifact(formal['run_id'],
                                       'iwencai_openapi_shadow_open_retry', result)
         _log_run(job, _iwencai_shadow_job_status(result),
-                 error=f"status={result['status']};data={result['data_groups']}/5",
+                 error=_iwencai_quality_detail(result),
                  started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                  notify=False)
     except Exception as exc:
@@ -5721,9 +5696,8 @@ def _refresh_market_gate(report_slot: str) -> dict:
 
 
 def _intraday_job_log_status(result: dict) -> str:
-    """job_runs 的历史枚举不含 degraded；完整质量状态保留在快照和日志详情。"""
     status = str((result or {}).get('status') or 'error')
-    return status if status in {'success', 'error', 'skipped'} else 'success'
+    return status if status in {'success', 'error', 'skipped', 'degraded', 'partial'} else 'error'
 
 
 def task_intraday_decision_monitor():
@@ -5737,13 +5711,21 @@ def task_intraday_decision_monitor():
     started = datetime.now().isoformat()
     try:
         from jobs.intraday_decision_monitor import run_cycle
-        result = run_cycle(allow_plan_build=False, notify_changes=True)
+        # After the first fixed node is due, recover missing plans from the
+        # current formal run. The cycle still enforces quote and plan quality.
+        current = datetime.now(_RUN_TIMEZONE)
+        result = run_cycle(now=current,
+                           allow_plan_build=(current.hour, current.minute) >= (10, 5),
+                           notify_changes=True)
         status = str(result.get('status') or 'error')
+        quality = result.get('data_quality') or {}
+        progress = (f"run={result.get('selection_run_id') or 'none'} "
+                    f"plans={quality.get('plan_available', 0)}/{quality.get('plan_requested', 0)} "
+                    f"quotes={quality.get('coverage', 0):.1%} "
+                    f"events={len(result.get('events') or [])}")
         _log_run(
             job, _intraday_job_log_status(result),
-            error=(f'decision_status={status}; ' + (str(result.get('reason') or '') or
-                   f"coverage={(result.get('data_quality') or {}).get('coverage', 0):.1%} "
-                   f"events={len(result.get('events') or [])}")),
+            error=f"decision_status={status}; {result.get('reason') or progress}",
             started_at=started, finished_at=datetime.now().isoformat(),
         )
         return result
@@ -5907,21 +5889,43 @@ def task_morning_portfolio():
                  finished_at=datetime.now().isoformat())
 
 
-def task_losna_research():
-    started = datetime.now().isoformat()
+def task_losna_research(*, retry_only=False):
+    job = "losna_research"
+    if _skip_if_not_trading(job):
+        return
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
     try:
         from application.losna_research import prepare_reviews
-        result = prepare_reviews()
-        _log_run("losna_research", "success" if result.get("packet") else "degraded",
-                 started_at=started, finished_at=datetime.now().isoformat())
+        result = prepare_reviews(selection_date=started[:10], retry_only=retry_only)
+        if result.get("status") == "already_prepared":
+            return
+        if result.get("packet"):
+            discovery = result.get("discovery_status", "unknown")
+            status = "success" if discovery == "prepared" else "partial"
+            detail = f"phase=prepared;directed=prepared;discovery={discovery}"
+        else:
+            status, detail = "degraded", result["status"]
+        _log_run(job, status, error=detail, started_at=started,
+                 finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
     except Exception as exc:
-        _log_run("losna_research", "error", error=type(exc).__name__,
-                 started_at=started, finished_at=datetime.now().isoformat())
-
+        _log_run(job, "error", error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat())
 
 
 def task_losna_followups():
-    started = datetime.now().isoformat()
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    try:
+        from automation_config import is_enabled
+        from application.losna_research import research_delivery
+        if _is_trading_day(datetime.now(_RUN_TIMEZONE)) and is_enabled('losna_research'):
+            receipts = research_delivery(started[:10], datetime.now(_RUN_TIMEZONE))
+            status = 'success' if all(value == 'received' for value in receipts.values()) else 'degraded'
+            _log_run('losna_research_delivery', status,
+                     error=';'.join(f'{key}={value}' for key, value in receipts.items()),
+                     started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+    except Exception as exc:
+        _log_run('losna_research_delivery', 'error', error=type(exc).__name__,
+                 started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
     try:
         from application.losna_research import prepare_followups
         prepare_followups()
@@ -6830,6 +6834,7 @@ def register_default_jobs():
                  task_a500_constituents_refresh)
     hub.register('morning_strategy',            '09:00', task_morning_strategy)
     # 基金盘前合并(2026-06-27):fund_dca_reminder(08:55)+fund_valuation_signal(09:05)→ 一条 fund_premarket
+    hub.register('fund_nav_backfill', '08:40', task_fund_nav_backfill)
     hub.register('fund_premarket',              '08:55', task_fund_premarket)
     hub.register('iwencai_openapi_shadow_premarket', '09:05', task_iwencai_openapi_shadow_premarket)
 
@@ -6852,6 +6857,8 @@ def register_default_jobs():
     # ---- 14:30 尾盘持仓总结(eod_review 四合一:三合一 + 止盈/减仓信号并入一条推送)----
     hub.register('losna_followups', '17:20', task_losna_followups)
     hub.register('losna_research', '09:58', task_losna_research)
+    for retry_time in ('10:20', '11:40', '13:20', '14:40'):
+        hub.register('losna_research', retry_time, task_losna_research, retry_only=True)
     hub.register('daily_equity_exit', '10:06', task_daily_equity_exit)
     hub.register('daily_equity_exit_retry', 'every:10:minutes', task_daily_equity_exit)
     hub.register('afternoon_portfolio',          '14:30', task_afternoon_portfolio)
@@ -6875,6 +6882,8 @@ def register_default_jobs():
 
     # ---- 📐 盘后回测(放最后:纯 CPU 重活,读全量暖缓存,不与焐缓存抢)----
     hub.register('daily_backtest', MARKET_DATA_TIMES['daily_backtest'], task_daily_backtest)
+    for retry_time in DAILY_BACKTEST_RETRY_TIMES:
+        hub.register('daily_backtest', retry_time, task_daily_backtest, retry_only=True)
 
     # ---- 🌙 夜间 ----
     hub.register('mx_daily_analysis',           '17:00', task_mx_daily_analysis)

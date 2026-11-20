@@ -371,7 +371,7 @@ def _plans_from_previous(previous: dict[str, Any], run_id: str) -> dict[str, dic
 def _build_missing_plans(formal: dict[str, Any], pool: list[dict[str, Any]],
                          plans: dict[str, dict[str, Any]], snapshot_loader: Callable) -> None:
     manifest_id = str((formal.get("metadata") or {}).get("manifest_id") or "")
-    missing = [row["symbol"] for row in pool if row["symbol"] not in plans]
+    missing = [row["symbol"] for row in pool if not plans.get(row["symbol"], {}).get("available")]
     if not missing or not manifest_id:
         return
     try:
