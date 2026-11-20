@@ -306,7 +306,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'category': '核心',
         'default': True,
         'depends_on': ['kline_prefetch'],
-        'description': f'默认一/三/五跑全池策略进化，二/四只做当日策略扫描；依赖K线预热，按股保留完成结果，{'、'.join(DAILY_BACKTEST_RETRY_TIMES)}续跑当天未完成的批次，报告进入22:30盘后汇总',
+        'description': f"默认一/三/五跑全池策略进化，二/四只做当日策略扫描；依赖K线预热，按股保留完成结果，{'、'.join(DAILY_BACKTEST_RETRY_TIMES)}续跑当天未完成的批次，报告进入22:30盘后汇总",
     },
 
     # 新增工作流（默认全关）
