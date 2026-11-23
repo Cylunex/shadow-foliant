@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 from application.holding_review import ACTION_RANK
+from notify.stock_report import price as display_price
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_KEY = "intraday_decision"
@@ -471,9 +472,10 @@ def _holding_decision(item: dict[str, Any], quote: dict[str, Any], plan: dict[st
     stop = _finite(plan.get("stop_loss"))
     target = _finite(plan.get("target_price"))
     if stop and price <= stop:
-        action, reason, source = "sell", f"当前价触及 trade_plan 止损 {stop:.2f}", "hard_risk"
+        comparison = "低于" if price < stop else "达到"
+        action, reason, source = "sell", f"股价已{comparison}计划止损价 {display_price(stop)} 元", "hard_risk"
     elif target and price >= target:
-        action, reason, source = "reduce", f"当前价触及 trade_plan 第一目标 {target:.2f}", "formal_signal"
+        action, reason, source = "reduce", f"股价已到计划第一目标价 {display_price(target)} 元", "formal_signal"
     elif score >= 3:
         action, reason, source = "sell", "；".join(reasons), "portfolio_risk"
     elif score >= 1:
@@ -499,7 +501,7 @@ def _candidate_decision(quote: dict[str, Any], plan: dict[str, Any], fail_closed
     stop, target = _finite(plan.get("stop_loss")), _finite(plan.get("target_price"))
     buy_approved = str(plan.get("candidate_action") or plan.get("action") or "") in {"buy", "add"}
     if stop and price <= stop:
-        return {"action": "hold", "action_cn": "回避", "reason": f"已触及止损参考价 {stop:.2f}"}
+        return {"action": "hold", "action_cn": "回避", "reason": f"股价已到止损参考价 {display_price(stop)} 元"}
     if target and price >= target:
         return {"action": "hold", "action_cn": "等待", "reason": f"已到第一目标 {target:.2f}，不追高"}
     if buy_approved and low is not None and high is not None and low <= price <= high:
@@ -538,8 +540,8 @@ def _transition(events: list, states: dict, key: str, active: bool, now: datetim
 
 
 def _fmt_price(value: Any) -> str:
-    number = _finite(value)
-    return f"¥{number:.2f}" if number is not None else "暂不给价"
+    value_text = display_price(value)
+    return "暂不给价" if value_text == "待核验" else f"¥{value_text}"
 
 
 def _row_price(row: dict[str, Any], key: str) -> str:

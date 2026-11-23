@@ -474,7 +474,7 @@ def test_target_guard_keeps_take_profit_trigger_when_final_action_is_hold(monkey
     assert holding['action_guard']['reason_family'] == 'take_profit'
     summary = monitor.format_fixed_summary(result, '14:30')
     assert '永杰新材' in summary
-    assert '原信号：当前价触及 计划第一目标 12.00；处理限制：本轮同类风险处理名额已满' in summary
+    assert '原信号：股价已到计划第一目标价 12 元；处理限制：本轮同类风险处理名额已满' in summary
     assert '风险未解除' in summary and '未发生交易' in summary
 
 

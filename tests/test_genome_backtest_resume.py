@@ -25,3 +25,72 @@ def test_batch_reuses_only_results_with_matching_frozen_inputs():
     changed = bars.assign(Close=[10.0, 11.0])
     assert run([("600001", "示例", changed, variants, "2026-11-17", 2)], -1) == []
     assert len(run(tasks, 15)) == len(saved) == 2
+
+
+def test_scheduled_retry_reuses_the_saved_cohort_and_variants(monkeypatch):
+    from datetime import datetime
+    import json
+
+    import automation_config
+    import portfolio_db
+    import postmarket_digest
+    import stock_data
+    from analysis import genome_bt_worker, strategy_genome
+    from jobs import jobs_hub as hub
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 23, 19, 30, tzinfo=tz)
+
+    holdings = [{'code': '600001', 'name': '甲'}, {'code': '600002', 'name': '乙'}]
+    bars = pd.DataFrame({'Close': range(100, 180)})
+    availability = {'600001', '600002'}
+    snapshots = {}
+    outcomes = []
+    selections = []
+
+    def variants(strategy, **kwargs):
+        selections.append(strategy)
+        return [{'id': len(selections), 'base_strategy': strategy, 'params': {'hold_days': 10}}]
+
+    monkeypatch.setattr(hub, 'datetime', Clock)
+    monkeypatch.setattr(hub, '_skip_if_not_trading', lambda job: False)
+    monkeypatch.setattr(automation_config, 'is_enabled', lambda job: True)
+    monkeypatch.setattr(hub, '_latest_job_run_since', lambda job, since: {
+        'status': 'partial', 'error': 'resume_pending'
+    } if job == 'daily_backtest' else {'status': 'success'})
+    monkeypatch.setattr(hub, '_log_run', lambda job, status, **kw: outcomes.append((status, kw['error'])))
+    monkeypatch.setattr(hub, '_daily_strategy_scan', lambda: None)
+    monkeypatch.setattr(hub, 'get_indicator_snapshot', lambda key, *args: snapshots.get(key))
+    monkeypatch.setattr(hub, 'save_indicator_snapshot',
+                        lambda key, value: snapshots.update({key: json.loads(json.dumps(value))}))
+    monkeypatch.setattr(postmarket_digest, 'add_section', lambda *args, **kw: None)
+    monkeypatch.setattr(portfolio_db.portfolio_db, 'get_all_stocks', lambda: holdings)
+    monkeypatch.setattr(stock_data.StockDataFetcher, 'get_stock_data',
+                        lambda _, code, *a, **kw: bars if code in availability else None)
+    monkeypatch.setattr(hub.datahub, 'index_kline', lambda *a: None)
+    monkeypatch.setattr(hub.datahub, 'kline_quality', lambda *a, **kw: {'actionable': True})
+    for name in ('init_genome_tables', 'seed_default_variants', 'ensure_composed_population'):
+        monkeypatch.setattr(strategy_genome, name, lambda **kw: None)
+    monkeypatch.setattr(strategy_genome, 'evolution_fitness_pool', lambda pool, **kw: pool)
+    monkeypatch.setattr(strategy_genome, 'STRATEGY_PARAM_SPACE', {'enter': {}})
+    monkeypatch.setattr(strategy_genome, 'get_variants_for_eval', variants)
+
+    attempts = []
+    def batch(tasks, *args, **kwargs):
+        attempts.append([(task[0], task[3], task[4], task[5]) for task in tasks])
+        return [[('enter:1', {'trigger_count': 0})]]  # one completed stock so far
+
+    monkeypatch.setattr(genome_bt_worker, 'portfolio_batch', batch)
+    hub.task_daily_backtest()
+
+    holdings[:] = [{'code': '600003', 'name': '丙'}]
+    availability.remove('600002')
+    hub.task_daily_backtest(retry_only=True)
+
+    assert selections == ['enter', 'composed']
+    assert [task[0] for task in attempts[0]] == ['600001', '600002']
+    assert attempts[1] == attempts[0][:1]
+    assert outcomes[-1][0] == 'partial'
+    assert 'completed=1/2' in outcomes[-1][1] and 'inputs_missing=1' in outcomes[-1][1]

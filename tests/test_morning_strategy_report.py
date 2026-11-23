@@ -149,6 +149,15 @@ class MorningStrategyReportTests(unittest.TestCase):
         result.pop('timestamp')
         self.assertIn('日期未核实', format_us_daily_reference('示例指数', result))
 
+    def test_premarket_marks_individual_index_closes_that_are_behind(self):
+        _, body = format_plain_morning_notification(
+            {}, premarket=True, as_of='2026-11-23 09:00',
+            sources={'us_summary': '道琼斯 2026-11-20: 100.00 (+0.10%)\n'
+                                   '标普500 2026-11-19: 200.00 (+0.20%)\n'
+                                   '纳斯达克 2026-11-19: 300.00 (+0.30%)'},
+        )
+        self.assertIn('标普500、纳斯达克暂缺 11-20 收盘数据', body)
+
     def test_premarket_keeps_headline_without_long_wire_copy_or_success_status(self):
         _, body = format_plain_morning_notification(
             {}, premarket=True, as_of='2026-10-20 09:00', diagnosis_meta={'mode': 'ai'},
@@ -172,7 +181,8 @@ class MorningStrategyReportTests(unittest.TestCase):
                     'fund_fresh_count':10,'fund_daily_pnl':257,'fund_daily_pct':0.58,
                     'total_daily_pnl':847,'total_daily_pct':0.17}
         text = format_previous_pnl(snapshot)
-        self.assertIn('10/53只净值已更新', text)
+        self.assertIn('10/53只已计入收益', text)
+        self.assertIn('另有 43 只基金暂未计入', text)
         self.assertIn('已更新部分合计 +847元', text)
         snapshot['fund_fresh_count'] = 53
         self.assertNotIn('已更新部分合计', format_previous_pnl(snapshot))

@@ -785,7 +785,7 @@ def noon_report():
                   if holding_changes else '指数偏强，但持仓涨跌待核验，暂不据此决定个股加仓。')
     else:
         direction, action = '震荡', '不动'
-        reason = '涨跌都不明显，下午先看，不急着动。'
+        reason = '整体仓位暂不调整，下午继续观察。'
 
     holdings = ''
     if holding_changes:
@@ -793,6 +793,8 @@ def noon_report():
         down = sum(1 for change, _, _ in holding_changes if change < 0)
         holding_changes.sort(key=lambda item: item[0])
         holdings = f'涨{up}只、跌{down}只，平均{holding_avg:+.2f}%'
+        if down > len(holding_changes) / 2:
+            holdings = '持仓多数下跌。' + holdings
         weak = [f'{name}{change:+.1f}%' for change, name, _ in holding_changes[:3]
                 if change <= -2]
         if weak:

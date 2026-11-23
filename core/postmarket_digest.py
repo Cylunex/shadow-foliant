@@ -107,8 +107,13 @@ def format_notification_digest(day: Optional[str] = None) -> str:
         elif key == 'strategy_evolution':
             score = next((line for line in lines if re.search(r'触发\d+/\d+只', line)), '')
             pool = re.search(r'触发\d+/(\d+)只', score)
-            summary = [f'历史回测样本池{pool.group(1)}只；非全市场实盘收益。' if pool else '历史样本评估，非实盘收益。',
-                       text(score, 95)]
+            progress = next((match for line in lines
+                             if (match := re.match(r'已完成\s+(\d+/\d+)\s+只', line))), None)
+            if progress:
+                summary = [f'本轮完成 {progress[1]} 只，策略评分暂未更新。']
+            else:
+                summary = [f'历史回测样本池{pool.group(1)}只；非全市场实盘收益。' if pool else '历史样本评估，非实盘收益。',
+                           text(score, 95)]
         else:
             useful = [line for line in lines if not line.startswith(('━━', '【', '📢', '📑', '===', '#'))]
             summary = [text(line, 100) for line in useful[:2]]

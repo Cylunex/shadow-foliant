@@ -68,12 +68,15 @@ def test_digest_keeps_every_section_complete_original_and_one_delivery(tmp_path,
     detail = archive.detail(first.message_id)
     assert detail['original_body'] == original
     assert detail['deliveries'][0]['final_body'] == router._submitted_body(channel, '盘后汇总', body)
+    digest.add_section('strategy_evolution', '策略评估',
+                       '已完成 19/50 只，剩余 31 只。本轮策略评分暂未更新。', day='2026-11-09')
+    assert '本轮完成 19/50 只，策略评分暂未更新。' in digest.format_notification_digest('2026-11-09')
 
 
 def test_weekly_qq_preserves_return_loss_pending_and_email_original(monkeypatch, archive):
     body = ('📊 AI 推荐评估周报 — 2026-11-08\n样本: 406 综合得分: 49.6 等级: D\n'
             '口径：未了结为浮动估值、已了结为实现收益；盈利占比不是已成交胜率。\n'
-            '[综合选股] 样本=284 期间=30天\n综合得分:51\n'
+            '[unified_selection_final] 样本=284 期间=30天\n综合得分:51\n'
             '样本盈利占比(含未了结浮动):55.6% 平均回报:-0.84% 最大亏损:-28.3%\n'
             '盈亏比:0.74 已了结:0 持有中:284\n' + '完整研究明细\n' * 100)
     sent = {}
@@ -82,6 +85,7 @@ def test_weekly_qq_preserves_return_loss_pending_and_email_original(monkeypatch,
     router.send('archive', 'AI 推荐周报', body, source='jobs.jobs_hub', only_channels=['qq', 'email'])
     assert all(value in sent['qq'] for value in ('-0.84%', '-28.3%', '持有中:284', '综合得分: 49.6'))
     assert '加密消息存档' not in sent['qq'] and '通知记录' in sent['qq']
+    assert '正式优选名单' in sent['qq'] and 'unified_selection_final' not in sent['qq']
     assert sent['email'] == body.strip()
 
 
@@ -198,3 +202,41 @@ def test_partial_nav_changes_both_pnl_title_and_rendered_body(tmp_path, monkeypa
     args, kwargs = sent[0]
     assert '已更新部分盈亏' in args[1] and '已更新部分盈亏' in args[2]
     assert '8/53' in args[2] and kwargs['original_body']
+
+
+def test_intraday_qq_retains_etf_stop_precision_and_whole_risk_reasons(monkeypatch, archive):
+    from jobs.intraday_decision_monitor import _holding_decision, format_fixed_summary
+
+    etf = {'symbol': '159611', 'name': '电力ETF', 'cost_price': 1.153}
+    quote = {'price': 1.032, 'price_actionable': True}
+    decision = _holding_decision(etf, quote, {'stop_loss': 1.035}, lambda _: {}, False)
+    body = format_fixed_summary({
+        'generated_at': NOW.isoformat(), 'data_quality': {'status': 'success'},
+        'holdings': [
+            {**etf, **quote, **decision},
+            {'symbol': '600001', 'name': '示例股', 'action': 'sell', 'price_actionable': True,
+             'price': 10, 'cost_price': 16.5,
+             'reason': '浮亏-40%已破位；风险信号:跌破60日均线(14.00)/VaR95 9.4%/年回撤-56%'},
+        ],
+    }, '14:30')
+    assert '现价¥1.032' in body and '股价已低于计划止损价 1.035 元' in body
+    assert '浮亏-40%已破位；跌破60日均线(14.00)' in body
+    assert '…' not in body
+    sent = []
+    monkeypatch.setitem(router.CHANNELS, 'qq',
+                        lambda title, value: sent.append(value) or (True, 'HTTP 200'))
+    result = router.send('report', '尾盘持仓', body, only_channels=['qq'])
+    assert sent == [body]
+    assert archive.detail(result.message_id)['deliveries'][0]['final_body'] == body
+
+
+def test_weekend_timeout_does_not_blame_unrelated_source(monkeypatch):
+    import notification_router
+    from jobs import jobs_hub as hub
+
+    sent = []
+    monkeypatch.setattr(hub, '_ERR_NOTIFY_LAST', {})
+    monkeypatch.setattr(hub, '_current_unhealthy_sources', lambda: ['问财熔断'])
+    monkeypatch.setattr(notification_router, 'send', lambda *args, **kw: sent.append(args))
+    hub._notify_execution_timeout('wf_weekly_backtest', 616, 600)
+    assert sent == [('alert', '周末回测超时', '周末回测运行超过 10 分钟，本次未生成报告。')]

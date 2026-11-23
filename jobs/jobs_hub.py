@@ -696,40 +696,38 @@ def task_daily_backtest(*, retry_only=False):
 
         fetcher = StockDataFetcher()
 
-        # ── 0b. 市场环境(牛/熊/震荡)→ 写入 strategy_scores.market_regime ──
-        # (2026-06-12:该列建表时就有但从来没写过;突破类策略牛熊效能天差地别,评分必须带环境)
-        market_regime = None
-        # 沪深300 走指数专用域(个股 kline 链取不到指数,还会污染健康度/触发熔断,
-        # 详见 datahub.index_kline);失败再用 300ETF(510300 是基金,个股链可取)。
-        for _idx_code, _idx_fn in (('000300', lambda: datahub.index_kline('000300', '1y')),
-                                   ('510300', lambda: fetcher.get_stock_data('510300', '1y'))):
-            try:
-                _idx_df = _idx_fn()
-                if _idx_df is not None and not isinstance(_idx_df, dict) and len(_idx_df) > 60:
-                    from strategy_signals import detect_regime
-                    market_regime = detect_regime(_idx_df)
-                    break
-            except Exception:
-                continue
-
         # ── 1. 构建股票池：持仓 ∪ 固定多元基准样本(进化适应度去偏) ──
         # 原来补"昨日强势股 TOP20":这些是被近期涨幅选出来的,在其上回测"买强势"类策略 = 选择偏差,
         # 样本本身已经涨过 → 系统性高估所有动量类策略的胜率/收益,使变体适应度不可比。
         # 改用固定、跨行业、非按近期表现筛选的基准样本(EVOLUTION_FITNESS_UNIVERSE),适应度无偏。
-        pool = {}
-        stocks = portfolio_db.get_all_stocks() if hasattr(portfolio_db, 'get_all_stocks') else []
-        for s in stocks:
-            code = s.get('code', '')
-            if code and code not in pool:
-                pool[code] = s.get('name', '')
-        try:
-            from analysis.strategy_genome import evolution_fitness_pool
-            pool = evolution_fitness_pool(
-                pool,
-                as_of=(datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d'),
-            )
-        except Exception:
-            pass
+        day = current.date().isoformat()
+        plan_key = '_genome_backtest_plan'
+        plan = get_indicator_snapshot(plan_key, day) or {}
+        if plan.get('day') == day:
+            pool = dict(plan['stocks'])
+            market_regime = plan['market_regime']
+        else:
+            plan = {}
+            market_regime = None
+            for index_frame in (lambda: datahub.index_kline('000300', '1y'),
+                                lambda: fetcher.get_stock_data('510300', '1y')):
+                try:
+                    frame = index_frame()
+                    if frame is not None and not isinstance(frame, dict) and len(frame) > 60:
+                        from strategy_signals import detect_regime
+                        market_regime = detect_regime(frame)
+                        break
+                except Exception:
+                    continue
+            pool = {s['code']: s.get('name', '') for s in portfolio_db.get_all_stocks()
+                    if s.get('code')}
+            try:
+                from analysis.strategy_genome import evolution_fitness_pool
+                pool = evolution_fitness_pool(
+                    pool, as_of=(current.date() - timedelta(days=730)).isoformat(),
+                )
+            except Exception:
+                pass
 
         if not pool:
             _log_run(job, 'success', error='empty pool',
@@ -755,28 +753,41 @@ def task_daily_backtest(*, retry_only=False):
             print(f'[daily_backtest] 跳过 {stale_skipped} 只超过 3 天的陈旧 K 线，'
                   '不参与适应度和交易信号', flush=True)
 
-        n_pool = len(valid_stocks)
+        n_pool = len(pool) if plan else len(valid_stocks)
         if n_pool == 0:
-            _log_run(job, 'degraded', error='no valid stock data',
+            _log_run(job, 'degraded', error='no valid stock data; resume_pending',
                      started_at=started, finished_at=datetime.now().isoformat())
             return
 
         # ── 3. 获取本轮要评估的变体:每策略 高分top5 + 未评估新生5;组合策略 top6+新生10 ──
         # (修复:原全局 LIMIT 100 按分排,新生变体 NULLS LAST 永远轮不到评估)
-        all_variants = []
-        for _sid in STRATEGY_PARAM_SPACE:
-            try:
-                all_variants.extend(get_variants_for_eval(_sid, top_n=5, fresh_n=5))
-            except Exception:
-                continue
-        try:
-            all_variants.extend(get_variants_for_eval('composed', top_n=6, fresh_n=10))
-        except Exception:
-            pass
+        if plan:
+            all_variants = plan['variants']
+        else:
+            all_variants = []
+            for sid, top_n, fresh_n in [
+                *((sid, 5, 5) for sid in STRATEGY_PARAM_SPACE), ('composed', 6, 10)
+            ]:
+                try:
+                    all_variants.extend(get_variants_for_eval(sid, top_n=top_n, fresh_n=fresh_n))
+                except Exception:
+                    continue
+            # Only persist the fields used by the worker and the result aggregator.
+            all_variants = [{k: v[k] for k in ('id', 'base_strategy', 'params')} for v in all_variants]
         if not all_variants:
             _log_run(job, 'success', error='no active variants',
                      started_at=started, finished_at=datetime.now().isoformat())
             return
+
+        if not plan:
+            plan = {
+                'day': day,
+                'stocks': [(code, name) for code, name, _ in valid_stocks],
+                'variants': all_variants,
+                'split_date': (current.date() - timedelta(days=120)).isoformat(),
+                'market_regime': market_regime,
+            }
+            save_indicator_snapshot(plan_key, plan)
 
         # ── 4. 批量回测 ──
         # 结构: {strategy_id: {variant_id, params, results: [{code, name, win_rate, avg_ret, ...}]}}
@@ -794,12 +805,8 @@ def task_daily_backtest(*, retry_only=False):
         # 样本外切分:近 _HOLDOUT_DAYS 天的触发为 holdout(out-of-sample),其余为 train。
         # 单次回测拿全样本 trades,再按 trigger_date 切两段(不翻倍回测)。train 驱动适应度/进化,
         # holdout 入库供 get_live_strategy_set 的部署门(只有样本外也成立的变体才上线)。
-        from datetime import timedelta
-        _HOLDOUT_DAYS = 120
-        _split_date = (datetime.now() - timedelta(days=_HOLDOUT_DAYS)).strftime('%Y-%m-%d')
-
         from analysis.genome_bt_worker import portfolio_batch
-        tasks = [(code, name, df, all_variants, _split_date, n_pool)
+        tasks = [(code, name, df, all_variants, plan['split_date'], n_pool)
                  for code, name, df in valid_stocks]
         cancel_event = _TASK_CANCEL_EVENTS.get(job)
         _per_stock = portfolio_batch(
@@ -808,12 +815,13 @@ def task_daily_backtest(*, retry_only=False):
             cancelled=cancel_event.is_set if cancel_event else lambda: False,
         )
         completed = len(_per_stock)
-        coverage = f'completed={completed}/{n_pool} universe={len(pool)}'
+        coverage = (f'completed={completed}/{n_pool} universe={len(pool)} '
+                    f'inputs_missing={n_pool - len(valid_stocks)}')
         if completed < n_pool:
             from postmarket_digest import add_section
             add_section('strategy_evolution', '🧬 策略回测',
                         f'已完成 {completed}/{n_pool} 只，剩余 {n_pool - completed} 只。'
-                        '完成结果已保存，本轮策略评分和进化待续跑。', max_chars=900)
+                        '本轮策略评分暂未更新。', max_chars=900, day=day)
             if not scan_done and time.monotonic() < deadline - 240:
                 _daily_strategy_scan()
             _log_run(job, 'partial', error=f'{coverage} resume_pending stale_skipped={stale_skipped}',
@@ -1309,13 +1317,17 @@ def task_daily_pnl_snapshot():
                     _stock_note = f" ⚠️{r['stock_fallback_count']}只股票未采用实时价"
                     if r.get('stock_anomaly_count'):
                         _stock_note += f"（含{r['stock_anomaly_count']}只异常报价）"
-                partial = bool(r.get('fund_pending') or r.get('fund_fresh_count', 0) < r.get('fund_total_count', r.get('fund_count', 0)))
+                fund_total = r.get('fund_total_count', r.get('fund_count', 0))
+                fund_fresh = r.get('fund_fresh_count', 0)
+                fund_missing = max(0, fund_total - fund_fresh)
+                partial = bool(r.get('fund_pending') or fund_missing)
+                coverage_note = f'，另有 {fund_missing} 只未计入' if fund_missing else ''
                 pnl_label = '已更新部分盈亏' if partial else '今日盈亏'
                 lines = [
                     f"{emoji} {pnl_label} {tp:+,.0f} 元 ({tpct:+.2f}%){_fund_note}{_stock_note}",
                     f"  股票 {r.get('stock_daily_pnl', 0):+,.0f}({r.get('stock_count', 0)}只) · "
                     f"基金 {r.get('fund_daily_pnl', 0):+,.0f}"
-                    f"({r.get('fund_fresh_count', 0)}/{r.get('fund_total_count', r.get('fund_count', 0))}只净值已更新)",
+                    f"({fund_fresh}/{fund_total}只已计入收益{coverage_note})",
                 ]
                 if s.get('mtd_pnl') is not None:
                     lines.append(f"  本月累计 {s['mtd_pnl']:+,.0f} · 近{s.get('period_days', 0)}日 {s.get('period_pnl', 0):+,.0f}(胜率{s.get('win_rate', 0)}%)")
@@ -1654,11 +1666,7 @@ def _notify_dependency_wait(name: str, dependency: str, detail: str = ''):
 
 
 def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
-    """真正进入任务主体后的超时：有明确坏源才归类数据源故障，否则按异常超时告警。"""
-    if name != "daily_backtest" and _current_unhealthy_sources():
-        _notify_data_unavailable(
-            name, f'执行阶段运行 {elapsed:.0f}s 超时(阈值 {timeout}s)')
-        return
+    """Only the failing task can attribute its own timeout to a data source."""
     try:
         now = time.time()
         if now - _ERR_NOTIFY_LAST.get(name, 0) < _ERR_NOTIFY_COOLDOWN:
@@ -1670,11 +1678,14 @@ def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
             cn = REGISTRY.get(name, {}).get('cn', name)
         except Exception:
             pass
-        body = (f"任务「{cn}」({name}) 已进入执行阶段，但运行 {elapsed:.0f}s "
-                f"超过阈值 {timeout}s。\n"
-                "请按本次任务的执行阶段日志核对超时原因。")
         from notification_router import send
-        send('alert', f"⏱️ 任务执行超时: {cn}", body)
+        minutes = timeout / 60
+        if name == 'wf_weekly_backtest':
+            send('alert', '周末回测超时',
+                 f'周末回测运行超过 {minutes:g} 分钟，本次未生成报告。')
+        else:
+            send('alert', f'任务超时｜{cn}',
+                 f'{cn}运行超过 {minutes:g} 分钟，本次执行已停止。')
     except Exception:
         pass
 
@@ -1711,6 +1722,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     # 慢任务的专属超时(秒)
     'rag_ingest':                3600,   # 嵌入入库 ~13 分钟历史值, 给 1 小时
     'daily_backtest':            3600,   # 历史回测
+    'wf_weekly_backtest':        1500,   # 周末策略回测与组合对照
     'strategy_policy_weekly':     600,   # 一次有界 LLM + 策略政策校验
     'factor_collection':         1200,
     # 估值有内部 480s/120s 预算；外层还需容纳主数据、行情、财务和入库收尾。
@@ -2696,12 +2708,14 @@ def task_morning_strategy():
                 outcomes[name] = 'yahoo' if line else 'yahoo_close_unverified'
             except Exception as exc:
                 outcomes[name] = f'yahoo_{type(exc).__name__}'
-        if len(lines) < len(tickers):
+        yahoo_days = {line.split()[1].rstrip(':') for line in lines.values()}
+        if len(lines) < len(tickers) or len(yahoo_days) > 1:
             try:
                 for name, line in us_index_closes(new_york_date).items():
-                    if name not in lines:
+                    previous = lines.get(name)
+                    if not previous or line.split()[1] > previous.split()[1]:
                         lines[name] = line
-                        outcomes[name] += '+fred'
+                        outcomes[name] = outcomes.get(name, 'yahoo_missing') + '+fred'
             except Exception as exc:
                 print(f'[morning_strategy] FRED closes: {type(exc).__name__}')
         us_summary = '\n'.join(lines[name] for name in tickers.values() if name in lines) or '（无数据）'
@@ -2838,7 +2852,7 @@ def task_morning_strategy():
                 if baseline.get('date') == pnl_day:
                     gained = int(_p.get('fund_fresh_count') or 0) - int(baseline.get('fresh') or 0)
                     if gained > 0:
-                        pnl_text += f"｜较晚报补齐 {gained} 只基金净值"
+                        pnl_text += f"｜比晚报多计入 {gained} 只基金"
         except Exception:
             pass
         if pnl_text:
@@ -4075,15 +4089,28 @@ def task_weekly_backtest():
         except Exception:
             pass
 
-        # 2. 逐策略回测，汇总胜率
+        # Share the same input bars across strategies, including unavailable symbols.
+        from functools import lru_cache
+        from stock_data import StockDataFetcher
+        fetcher = StockDataFetcher()
+
+        @lru_cache(maxsize=len(stocks))
+        def weekly_bars(code, period):
+            try:
+                return fetcher.get_stock_data(code, period)
+            except Exception as exc:
+                print(f'[wf_weekly_backtest] 行情 {code}: {type(exc).__name__}', flush=True)
+                return None
+
+        print(f'[wf_weekly_backtest] 逐策略回测 pool={len(stocks)}', flush=True)
         results = []
-        for sid in STRATEGIES.keys():
+        for sid in STRATEGIES:
             try:
                 bp = live_params.get(sid) or None
                 hd = int((bp or {}).get('hold_days') or 10)
                 # 双收益:带 8% 止损 / 15% 止盈,评估"有纪律 vs 持有到期"的差异
                 r = backtest_batch(stocks, sid, start_date, end_date, hold_days=hd,
-                                   stop_pct=8, target_pct=15, params=bp)
+                                   df_fetcher=weekly_bars, stop_pct=8, target_pct=15, params=bp)
                 summary = r.get('summary', {})
                 if summary.get('count', 0) >= 3:  # 至少 3 个样本才有统计意义
                     results.append({
@@ -4130,6 +4157,7 @@ def task_weekly_backtest():
             from analysis.portfolio_backtest import run_evolution_ab
             init_genome_tables()  # 确保 evolution_ab 表就绪(幂等)
             ab_start = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+            print('[wf_weekly_backtest] 开始组合策略对照', flush=True)
             ab = run_evolution_ab(stocks, ab_start, end_date, persist=True,
                                   hold_days=10, stop_pct=8, target_pct=15, max_positions=5)
             ex = (ab.get('excess') or {}).get('return_pct')

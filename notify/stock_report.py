@@ -107,7 +107,7 @@ def selection_report(rows, *, held_codes=(), as_of="", market_as_of="", names=No
             continue
         seen.add(code)
         name = text(row.get("name") or (names or {}).get(code) or code, 8)
-        reason = text(row.get("reason") or row.get("primary_strategy_name"), 24)
+        reason = text(row.get("reason") or row.get("primary_strategy_name"), 36)
         selected.append(f"• {name}（{code}）：参考价 {price(row.get('price'))}。"
                         + (f"{reason}。" if reason else "入选项目候选，具体买点待核验。"))
         if len(selected) == 3:

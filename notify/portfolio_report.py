@@ -1,6 +1,23 @@
 """Human-readable projection of the authoritative intraday snapshot."""
+import re
+
 from notify.stock_report import report, text, price
 from application.holding_review import ordered_holdings, risk_label
+
+
+def _reason_summary(value, fallback, *, limit=60):
+    # Exit review joins indicator details with slashes after the risk label.
+    value = re.sub(r'(?:风险信号|单一风险)[:：]\s*', '', str(value or ''))
+    value = re.sub(r'(?<=[%）)])/(?=[^\s])', '；', value)
+    parts = re.split(r'[；;。\n]+', value)
+    selected = []
+    for part in parts:
+        reason = text(part, limit + 1)
+        if reason and len('；'.join(selected + [reason])) <= limit:
+            selected.append(reason)
+        if len(selected) == 2:
+            break
+    return '；'.join(selected) or fallback
 
 
 def render(snapshot, label, *, exit_review=None):
@@ -39,10 +56,10 @@ def render(snapshot, label, *, exit_review=None):
               "buy": "买入观察", "hold": "观望", "data_insufficient": "暂缓判断"}
     for row in shown:
         action = row.get("action")
-        reason = text(str(row.get("reason") or "条件尚未明确").replace("trade_plan ", "计划"), 45)
+        reason = _reason_summary(row.get("reason"), "具体原因见完整持仓分析")
         requested = row.get("requested_action")
         if requested and requested != action:
-            original = text(str(row.get('requested_reason') or labels.get(requested, '风险提示')).replace("trade_plan ", "计划"), 40)
+            original = _reason_summary(row.get('requested_reason'), labels.get(requested, '风险提示'))
             reason = f"原信号：{original}；处理限制：{text(_holding_guard_reason(row), 45)}；风险未解除"
         cost = price(row.get("cost_price"))
         cost_note = f"，成本 {cost}" if cost != "待核验" else "，成本待核验"
@@ -60,7 +77,7 @@ def render(snapshot, label, *, exit_review=None):
         if not code or code in held or code in seen or code.startswith("688") or "holding" in (row.get("sources") or []):
             continue
         seen.add(code)
-        reason = text(str(row.get("reason") or "已入选项目候选，买点待核验").replace("trade_plan ", "计划"), 90)
+        reason = _reason_summary(row.get("reason"), "已入选项目候选，买点待核验", limit=100)
         candidates.append(f"• {_event_label({'symbol': code, 'item': row}, snapshot)}："
                           f"现价{current_price(row)}。{reason}。")
         if len(candidates) == 3:

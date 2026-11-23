@@ -67,10 +67,11 @@ def format_previous_pnl(snapshot: Dict[str, Any]) -> str:
     total = int(snapshot.get('fund_total_count', snapshot['fund_count']) or 0)
     fresh = int(snapshot.get('fund_fresh_count') or 0)
     scope = '已更新部分合计' if fresh < total else '合计'
+    pending = f'｜另有 {total - fresh} 只基金暂未计入' if fresh < total else ''
     return (f"💰 昨日收益({snapshot['snap_date']}): "
             f"股票({snapshot['stock_count']}只) {snapshot['stock_daily_pnl']:+,.0f}元({snapshot['stock_daily_pct']:+.2f}%) | "
-            f"基金({fresh}/{total}只净值已更新) {snapshot['fund_daily_pnl']:+,.0f}元({snapshot['fund_daily_pct']:+.2f}%) | "
-            f"{scope} {snapshot['total_daily_pnl']:+,.0f}元({snapshot['total_daily_pct']:+.2f}%)")
+            f"基金({fresh}/{total}只已计入收益) {snapshot['fund_daily_pnl']:+,.0f}元({snapshot['fund_daily_pct']:+.2f}%) | "
+            f"{scope} {snapshot['total_daily_pnl']:+,.0f}元({snapshot['total_daily_pct']:+.2f}%){pending}")
 
 
 def _meaningful(value: Any) -> bool:
@@ -357,6 +358,13 @@ def format_plain_morning_notification(diagnosis: Dict[str, Any], *,
         market_rows = ['尚未开盘，A股盘面与主线待开盘后确认。']
         market_rows += ([text(line, 100) for line in us_rows[:3]] if _source_available(us)
                         else ['外盘：本次未获取，暂不判断外盘影响。'])
+        closes = dict(re.findall(r'^(\S+) (\d{4}-\d{2}-\d{2}):', str(us or ''), re.M))
+        if closes:
+            latest = max(closes.values())
+            missing = [name for name in ('道琼斯', '标普500', '纳斯达克')
+                       if closes.get(name) != latest]
+            if missing:
+                market_rows.append(f"{'、'.join(missing)}暂缺 {latest[5:]} 收盘数据。")
         news_rows = []
         for line in str(sources.get('news_summary') or '').splitlines():
             if not line.strip() or line.strip().startswith(('边界:', '题材线程:')):

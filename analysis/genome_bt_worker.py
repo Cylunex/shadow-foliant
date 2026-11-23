@@ -95,6 +95,7 @@ def portfolio_batch(tasks, load_checkpoint, save_checkpoint, *, deadline, cancel
             identities[code] = key, digest
             pending.append(task)
 
+    print(f"[daily_backtest] checkpoint_hits={len(completed)} pending={len(pending)}", flush=True)
     if not pending or deadline <= monotonic() or cancelled():
         return [completed[task[0]] for task in tasks if task[0] in completed]
 
