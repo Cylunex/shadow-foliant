@@ -484,7 +484,9 @@ def _latest_job_outcome(task_name: str, started_at: str) -> Tuple[str, Optional[
         row = cur.fetchone()
         conn.close()
         if row:
-            return str(row[0] or 'success'), row[1]
+            from jobs.task_health import scheduled_outcome
+            outcome = scheduled_outcome({'job_name': task_name, 'status': str(row[0] or 'success'), 'error': row[1]})
+            return outcome['status'], row[1]
     except Exception:
         pass
     return 'success', None
@@ -671,6 +673,9 @@ def execute_claimed_task(run: Dict[str, Any], task_runner=None) -> None:
             'partial': 'partial',
         }.get(job_status, 'success')
         result = {'job_status': job_status}
+        if task_name == 'eod_outcomes':
+            from jobs.task_health import eod_model_metrics
+            result['metrics'] = eod_model_metrics(job_error or '')
         if value is not None:
             result['return_value'] = value
         _update_run(
@@ -708,11 +713,12 @@ def recent_scheduled_runs(limit: int = 200) -> List[Dict[str, Any]]:
         ''', (limit,))
         rows = cur.fetchall()
         conn.close()
+        from jobs.task_health import scheduled_outcome
         return [
-            {
+            scheduled_outcome({
                 'job_name': row[0], 'started_at': row[1], 'finished_at': row[2],
                 'status': row[3], 'error': row[4], 'kind': 'scheduled',
-            }
+            })
             for row in rows
         ]
     except Exception:

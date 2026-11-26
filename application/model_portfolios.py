@@ -79,7 +79,7 @@ class ModelPortfolios:
         finally:
             conn.close()
 
-    def symbols(self, limit=None):
+    def symbols(self, limit=None, *, include_targets=True):
         conn = self.store.connect()
         try:
             cur = conn.cursor()
@@ -89,9 +89,10 @@ class ModelPortfolios:
                        for s, p in book["positions"].items() if p["quantity"]}
             symbols.update(r["symbol"] for book in books for r in book.get("receivables", {}).values()
                            if r["state"] == "receivable")
-            cur.execute("SELECT payload FROM research_model_targets WHERE state='pending' ORDER BY created_at")
-            for row in cur.fetchall():
-                symbols.update(json.loads(row[0])["weights"])
+            if include_targets:
+                cur.execute("SELECT payload FROM research_model_targets WHERE state='pending'")
+                for row in cur.fetchall():
+                    symbols.update(json.loads(row[0])["weights"])
             return sorted(symbols)[:limit] if limit is not None else sorted(symbols)
         finally:
             conn.close()
@@ -122,7 +123,8 @@ class ModelPortfolios:
                 entitled = {s for s, p in ledger["positions"].items() if p["quantity"]}
                 entitled.update(r["symbol"] for r in ledger.get("receivables", {}).values() if r["state"] == "receivable")
                 cur.execute("SELECT target_id,payload FROM research_model_targets WHERE baseline=? AND state='pending' "
-                            "ORDER BY created_at", (baseline,))
+                            "ORDER BY created_at,target_id", (baseline,))
+                pending = []
                 for identity, payload in cur.fetchall():
                     target = json.loads(payload)
                     earliest = target.get("earliest_execution_at")
@@ -132,6 +134,8 @@ class ModelPortfolios:
                         earliest = f"{next_date}T09:30:00+08:00" if next_date else None
                     if not earliest or earliest[:10] > day:
                         continue
+                    pending.append((earliest, identity, target))
+                for earliest, identity, target in sorted(pending, key=lambda row: row[0]):
                     if target["recording_mode"] != "contemporaneous":
                         state, reason = "expired", "target_registered_after_execution"
                     elif earliest[:10] < day:

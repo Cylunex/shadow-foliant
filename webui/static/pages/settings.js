@@ -41,7 +41,10 @@ export default {
                 <div style="color:var(--muted);font-size:11px;margin-top:3px">
                   {{fmtTime(effectiveRun(j)?.finished_at || effectiveRun(j)?.started_at || effectiveRun(j)?.requested_at)}}
                 </div>
-                <div v-if="effectiveRun(j)?.error" class="err"
+                <div v-if="modelProgress(effectiveRun(j))" class="sub" :title="effectiveRun(j).error">
+                  {{modelProgress(effectiveRun(j))}}
+                </div>
+                <div v-else-if="effectiveRun(j)?.error" class="err"
                      :title="effectiveRun(j).error"
                      style="max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px">
                   {{effectiveRun(j).error}}
@@ -135,6 +138,14 @@ export default {
     const statusColor = s => finalOk.has(s)?'var(--green)':
       ['queued','running'].includes(s)?'var(--amber)':finalBad.has(s)?'var(--red)':'var(--muted)'
     const fmtTime = v => v ? String(v).slice(0,19).replace('T',' ') : '—'
+    const modelProgress = run => {
+      const m = run?.metrics || run?.result?.metrics
+      if (!m?.decision_loop_status) return ''
+      const state = {complete:'完成', success:'完成', partial:'部分完成', error:'失败'}[m.decision_loop_status] || m.decision_loop_status
+      const facts = m.model_requested == null ? '' : ` · 行情 ${m.model_observed ?? '—'}/${m.model_requested} · 结算 ${m.model_settled ?? '—'} 笔`
+      const oldest = m.model_oldest_pending ? ` · 最早待结算 ${m.model_oldest_pending}` : ''
+      return `模拟结算 ${state}${facts}${oldest}`
+    }
     async function loadJobs(){
       st.loading=true; st.err=''
       try{ st.jobs = await api('/api/jobs') }catch(e){ st.err=''+e }finally{ st.loading=false }
@@ -204,7 +215,7 @@ export default {
     }
     onMounted(()=>{ loadJobs(); loadEnv() })
     onUnmounted(()=>{ timers.forEach(clearTimeout); timers.clear() })
-    return { tab, st, cats, byCat, summary, effectiveRun, statusText, statusColor, fmtTime,
+    return { tab, st, cats, byCat, summary, effectiveRun, statusText, statusColor, fmtTime, modelProgress,
       toggle, running, isRunning, runNow, loadJobs, e, form, groups, byGroup, save }
   }
 }

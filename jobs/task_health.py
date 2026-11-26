@@ -2,10 +2,61 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from zoneinfo import ZoneInfo
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 FAILED_STATES = {"error", "failed", "timeout", "interrupted", "degraded", "partial"}
+
+_MODEL_NUMBERS = ("requested", "observed", "settled", "waiting_books")
+
+
+def format_eod_models(result: dict) -> str:
+    recovered = result.get("recovered_original_sessions") or {}
+    metrics = {
+        "requested": result.get("requested_count"),
+        "observed": result.get("execution_fact_count"),
+        "settled": sum((result.get("settled") or {}).values()) + sum(
+            sum(day.get("cohorts_settled", {}).values()) for day in recovered.values()),
+        "waiting_books": result.get("waiting_books"),
+        "oldest_pending": result.get("oldest_pending_date"),
+        "pending_reason": result.get("pending_reason"),
+    }
+    return " ".join([f"decision_loop={result.get('status', 'missing')}",
+                     *[f"model_{key}={value}" for key, value in metrics.items() if value is not None]])
+
+
+def eod_model_metrics(detail: str) -> dict:
+    result = {}
+    status = re.search(r"\bdecision_loop=([a-zA-Z0-9_-]+)", detail)
+    if status:
+        result["decision_loop_status"] = status.group(1)[:40]
+    elif "decision_loop_err=" in detail:
+        result["decision_loop_status"] = "error"
+    for name in _MODEL_NUMBERS:
+        match = re.search(rf"\bmodel_{name}=(\d+)", detail)
+        if match:
+            result[f"model_{name}"] = int(match.group(1))
+    for name, pattern in (("oldest_pending", r"\d{4}-\d{2}-\d{2}"),
+                          ("pending_reason", r"[a-z0-9_]+")):
+        match = re.search(rf"\bmodel_{name}=({pattern})", detail)
+        if match:
+            result[f"model_{name}"] = match.group(1)[:80]
+    return result
+
+
+def scheduled_outcome(run: dict) -> dict:
+    if run.get("job_name") != "eod_outcomes":
+        return run
+    detail = run.get("error") or ""
+    metrics = eod_model_metrics(detail)
+    status = run["status"]
+    if status == "success" and (
+        metrics.get("decision_loop_status", "complete") not in {"complete", "success"}
+        or any(marker in detail for marker in ("rec_err=", "signal_err=", "external_err="))
+    ):
+        status = "partial"
+    return {**run, "status": status, "metrics": metrics}
 
 
 def run_timestamp(run: dict | None) -> float:

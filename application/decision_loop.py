@@ -185,35 +185,44 @@ class DecisionLoopService:
 
     def settle_models(self, execution_facts, *, now, limit=500):
         """Consume explicit dated facts. Missing facts remain unfilled/pending, not zero returns."""
-        if not execution_facts:
-            return {}
         conn = self.store.connect()
         counts = {}
         try:
             cur = conn.cursor()
             # Do not let an old missing-data backlog monopolize the first 500
             # rows forever. Admit only securities/dates available in this pass.
-            symbols = sorted({key[0] for key in execution_facts})
-            days = sorted({key[1] for key in execution_facts})
-            date_predicates = " OR ".join("payload LIKE ?" for _ in days)
-            cur.execute("SELECT order_id,payload FROM research_model_orders WHERE state='pending' "
-                        f"AND symbol IN ({','.join('?' for _ in symbols)}) "
-                        f"AND ({date_predicates} OR payload LIKE ?) ORDER BY created_at LIMIT ?",
-                        (*symbols, *(f'%"earliest_execution_at":"{day}T%' for day in days),
-                         '%"earliest_execution_at":null%', max(1, min(2000, limit))))
-            for order_id, raw in cur.fetchall():
+            def field(name):
+                return (f"CAST(payload AS jsonb)->>'{name}'" if self.store._is_postgres
+                        else f"json_extract(payload,'$.{name}')")
+
+            by_day = {}
+            for symbol, day in execution_facts:
+                by_day.setdefault(day, []).append(symbol)
+            predicates = ["recording_mode='backfilled'"]
+            params = [now[:10]]
+            for day, symbols in sorted(by_day.items()):
+                predicates.append(f"(execution_day=? AND symbol IN ({','.join('?' for _ in symbols)}))")
+                params.extend([day, *sorted(symbols)])
+            cur.execute(f"""
+                WITH pending AS (
+                    SELECT order_id,payload,symbol,created_at,{field("recording_mode")} AS recording_mode,
+                           COALESCE(NULLIF(substr({field("earliest_execution_at")},1,10),''),
+                              (SELECT MIN(trade_date) FROM research_trade_calendar
+                               WHERE trade_date>substr({field("published_at")},1,10))) AS execution_day
+                    FROM research_model_orders WHERE state='pending'
+                )
+                SELECT order_id,payload,execution_day FROM pending
+                WHERE execution_day<=? AND ({" OR ".join(predicates)})
+                ORDER BY CASE WHEN recording_mode='backfilled' THEN 1 ELSE 0 END,execution_day,created_at,order_id
+                LIMIT ?
+                """, (*params, max(1, min(2000, limit))))
+            for order_id, raw, execution_day in cur.fetchall():
                 order = _decode(raw)
-                earliest = order.get("earliest_execution_at")
-                if not earliest:
-                    # Resolve a calendar gap honestly without modifying frozen capsule.
-                    cur.execute("SELECT MIN(trade_date) FROM research_trade_calendar WHERE trade_date>?",
-                                (order["published_at"][:10],))
-                    row = cur.fetchone()
-                    earliest = f"{row[0]}T09:30:00+08:00" if row and row[0] else None
-                    order["earliest_execution_at"] = earliest
-                if not earliest or datetime.fromisoformat(now) < datetime.fromisoformat(earliest):
+                earliest = order.get("earliest_execution_at") or f"{execution_day}T09:30:00+08:00"
+                if datetime.fromisoformat(now) < datetime.fromisoformat(earliest):
                     continue
-                fact = execution_facts.get((order["symbol"], earliest[:10]))
+                order["earliest_execution_at"] = earliest
+                fact = execution_facts.get((order["symbol"], execution_day))
                 if order["recording_mode"] != "contemporaneous":
                     result = {"status": "unfilled", "reason": "backfilled_not_forward"}
                 elif fact is None:

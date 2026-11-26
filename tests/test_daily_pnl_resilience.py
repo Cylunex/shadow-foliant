@@ -22,6 +22,9 @@ class DailyPnlFallbackTests(unittest.TestCase):
         cursor.fetchall.return_value = [
             ('fund_total_count',),
             ('fund_fresh_count',),
+            ('fund_updated_at',),
+            ('fund_prior_fresh_count',),
+            ('fund_revision_delta',),
         ]
         conn.cursor.return_value = cursor
 
@@ -46,6 +49,7 @@ class DailyPnlFallbackTests(unittest.TestCase):
         second_cursor.fetchone.side_effect = [
             ('2026-08-17', 1000, 1, 20, 900, 1, 0, 0),
             (0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0, 20, 2.0408),
         ]
         second_conn.cursor.return_value = second_cursor
 
@@ -135,6 +139,12 @@ def test_reconciles_late_nav_without_replacing_stock_pnl_or_using_future_nav(tmp
     row = daily_pnl.get_pnl(day)
     assert row["fund_daily_pnl"] == 7.5 and row["total_daily_pnl"] == 12.5
     assert row["stock_daily_pnl"] == 5.0
+    assert row["fund_prior_fresh_count"] == 0 and row["fund_revision_delta"] == 7.5
+    assert row["fund_updated_at"]
+    from application.account_preview import account_books
+    latest = account_books()["summary"]["latest"]
+    assert latest["fund_fresh_count"] == 1 and latest["fund_pending_count"] == 1
+    assert latest["fund_revision_delta"] == 7.5 and latest["stock_daily_pnl"] == 5.0
     assert daily_pnl.reconcile_fund_pnl("2026-11-20") == {}
 
     # A legacy holding has no dated opening. New nightly snapshots carry the

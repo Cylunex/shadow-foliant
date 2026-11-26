@@ -1143,7 +1143,10 @@ def task_eod_outcomes():
     try:
         from jobs.decision_loop_jobs import daily_decision_loop
         loop_result = daily_decision_loop()
-        parts.append(f"decision_loop={loop_result.get('status')}")
+        from jobs.task_health import format_eod_models
+        parts.append(format_eod_models(loop_result))
+        if loop_result.get('status') not in ('complete', 'success'):
+            fails += 1
     except Exception as e:
         fails += 1
         parts.append(f"decision_loop_err={type(e).__name__}")
@@ -1158,11 +1161,9 @@ def task_eod_outcomes():
     except Exception as e:
         fails += 1
         parts.append(f"external_err={type(e).__name__}")
-    # 所有分段全失败 = 本次后验啥都没干,必须记 error 让面板可见(否则各后验
-    # 可静默停摆数周,胜率闭环悄悄失真);notify=False 走平和路线,不新增推送噪音。
-    # 单段失败仍记 success(分段隔离是有意设计,其他段照常工作)。
-    _log_run(job, 'error' if fails >= 4 else 'success', error=' | '.join(parts),
-             started_at=started, finished_at=datetime.now().isoformat(), notify=False)
+    status = 'error' if fails >= 4 else 'partial' if fails else 'success'
+    _log_run(job, status, error=' | '.join(parts), started_at=started,
+             finished_at=datetime.now().isoformat(), notify=False)
 
 
 def _fund_gate(job: str) -> bool:

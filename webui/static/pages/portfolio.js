@@ -22,10 +22,21 @@ export default {
       </div>
       <template v-if="p.daily && p.daily.summary && p.daily.summary.latest">
         <div style="border-left:1px solid var(--line,#2a2a2a);padding-left:28px">
-          <div class="sub">收盘合并(股票+基金) · {{p.daily.summary.latest.snap_date}}</div>
-          <div :class="cls(p.daily.summary.latest.total_daily_pnl)" style="font-size:22px;font-weight:700">
-            {{money(p.daily.summary.latest.total_daily_pnl)}}
-            <span style="font-size:14px">({{pct(p.daily.summary.latest.total_daily_pct/100)}})</span>
+          <div class="sub">{{closePnl.fund_pending_count ? '收盘已计入盈亏' : '收盘合并盈亏'}} · {{closePnl.snap_date}}</div>
+          <div :class="cls(closePnl.total_daily_pnl)" style="font-size:22px;font-weight:700">
+            {{money(closePnl.total_daily_pnl)}}
+            <span style="font-size:14px">({{pct(closePnl.total_daily_pct/100)}})</span>
+          </div>
+          <div class="sub" v-if="closePnl.fund_total_count != null">
+            股票 {{money(closePnl.stock_daily_pnl)}} · 基金 {{money(closePnl.fund_daily_pnl)}}
+            · 已计入 {{closePnl.fund_fresh_count}}/{{closePnl.fund_total_count}} 只
+            <span v-if="closePnl.fund_pending_count"> · {{closePnl.fund_pending_count}} 只待补</span>
+          </div>
+          <div class="sub" v-if="closePnl.fund_updated_at">
+            基金更新于 {{chinaTime(closePnl.fund_updated_at)}}
+            <span v-if="closePnl.fund_revision_delta != null">
+              · 最近一次修订 {{money(closePnl.fund_revision_delta)}}
+            </span>
           </div>
         </div>
         <div>
@@ -238,6 +249,8 @@ export default {
   </div>`,
   setup(){
     const p = reactive({ stocks:null, stress:null, curve:null, overview:null, xray:null, perf:null, bench:null, mc:null, opt:null, optBusy:false, err:'', busy:false, snapMsg:'', daily:null, insights:null, cls:null, clsBusy:false, clsErr:'', sig:null, sigBusy:false, sigErr:'', diag:null, diagBusy:false, diagErr:'' })
+    const closePnl = computed(() => p.daily?.summary?.latest)
+    const chinaTime = value => new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false})
     const alloc = ref(), curve = ref(), pnlchart = ref()
     const insSince = 90
     const DUR_LABELS = { '<7d':'7天内', '7-30d':'1周-1月', '30-90d':'1-3月', '90-180d':'3-6月', '>180d':'半年以上', 'unknown':'未知' }
@@ -306,7 +319,7 @@ export default {
       finally{ p.optBusy=false }
     }
     onMounted(load)
-    return { p, alloc, curve, pnlchart, todayStock, scols:STOCK_COLS, sortedStocks, sortBy, arrow,
+    return { p, closePnl, chinaTime, alloc, curve, pnlchart, todayStock, scols:STOCK_COLS, sortedStocks, sortBy, arrow,
              snapshot, optimize, load, fmt, pct, money, cls,
              insSince, durLabel, durPct, classify, sigColor, loadSignals,
              diagD, aiDiag }

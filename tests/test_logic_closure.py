@@ -159,7 +159,7 @@ def test_same_scores_on_new_dates_are_new_health_evidence():
 def test_archived_recovery_includes_independent_cohorts(store):
     from analysis.decision_evaluation import ExecutionRules
     archive = SettlementEvidence(store)
-    order = {"earliest_execution_at": "2026-09-01T09:30:00+08:00"}
+    order = {"earliest_execution_at": "2026-09-01T09:30:00+08:00", "recording_mode": "contemporaneous"}
     conn = store.connect()
     conn.execute("INSERT INTO research_model_orders VALUES (?,?,?,?,?,?,?,?)", ("o", "r", "fusion", "600001", "pending", json.dumps(order), "t", "t"))
     conn.commit()
@@ -167,7 +167,7 @@ def test_archived_recovery_includes_independent_cohorts(store):
     archive.record("600001", "2026-09-01", {"trade_date": "2026-09-01", "provider": "fixture", "adjustment": "raw",
         "open": 10, "close": 10, "execution_rules": asdict(ExecutionRules())})
     class Books:
-        def symbols(self): return []
+        def symbols(self, *, include_targets): return []
         def advance(self, facts, now): return {"fusion": {"status": "indicative"}}
     class Cohorts:
         def settle_models(self, facts, now):
@@ -246,7 +246,9 @@ def test_daily_fallback_and_optional_failure_do_not_block_settlement(store, monk
         @classmethod
         def now(cls, tz=None): return datetime(2026, 9, 4, 18, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr(jobs, "datetime", Clock)
-    monkeypatch.setattr("data.reliability_store.utcnow", lambda: "2026-09-04T09:00:00+00:00")
+    monkeypatch.setattr("data.reliability_store.utcnow", lambda: "2026-09-04T10:00:01+00:00")
+    archive = SettlementEvidence(store)
+    archive.request([f"60{i:04d}" for i in range(160)], "2026-09-03")
     # Avoid dependence on the wall-clock close while still testing the wiring.
     import data.valuation_contract as contract
     monkeypatch.setattr(contract, "closing_timestamp", lambda value, day: day + "T15:00:00+08:00")
@@ -260,7 +262,7 @@ def test_daily_fallback_and_optional_failure_do_not_block_settlement(store, monk
             return {"filled": 1}
     class Books:
         def __init__(self, given): pass
-        def symbols(self): return ["600001"]
+        def symbols(self, *, include_targets): return ["600001"]
         def advance(self, facts, now): return {"fusion": {"status": "indicative"}}
     monkeypatch.setattr(loop, "DecisionLoopService", Service)
     monkeypatch.setattr(books, "ModelPortfolios", Books)
@@ -277,3 +279,25 @@ def test_daily_fallback_and_optional_failure_do_not_block_settlement(store, monk
     assert calls == ["settled"] and result["status"] == "partial"
     assert replay_limits == [0]
     assert {e["component"] for e in result["errors"]} == {"tencent", "research_reviews"}
+    assert result["execution_fact_count"] == 1
+    assert archive.repo.work_status("execution") == {"pending": 160, "complete": 1}
+
+
+def test_eod_model_metrics_are_shared_by_task_list_and_close_review():
+    from application.scheduled_snapshot import _job_run
+    from jobs.task_health import format_eod_models, scheduled_outcome
+
+    legacy = {"job_name": "eod_outcomes", "status": "success", "error": "decision_loop=partial"}
+    assert scheduled_outcome(legacy)["status"] == "partial"
+    detail = format_eod_models({
+        "status": "partial", "requested_count": 15, "execution_fact_count": 12,
+        "settled": {"filled": 4}, "oldest_pending_date": "2026-11-25", "waiting_books": 2,
+        "pending_reason": "original_execution_or_mark_facts_missing",
+        "recovered_original_sessions": {"2026-11-24": {"cohorts_settled": {"filled": 3}}},
+    })
+    run = {**legacy, "status": "partial", "error": detail, "finished_at": "2026-11-26T19:15:00+08:00"}
+    metrics = scheduled_outcome(run)["metrics"]
+    assert metrics["model_settled"] == 7
+    assert metrics["model_observed"] == 12 and metrics["model_requested"] == 15
+    assert metrics["model_oldest_pending"] == "2026-11-25"
+    assert _job_run(run)["metrics"] == metrics

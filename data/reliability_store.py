@@ -117,7 +117,7 @@ class ReliabilityStore:
                         canonical_time(available_at) if available_at else utcnow(), json.dumps(payload, allow_nan=False), utcnow()))
         return identity
 
-    def claim(self, kind, *, limit=160, now=None, max_attempts=3):
+    def claim(self, kind, *, limit=160, now=None, max_attempts=3, trade_date=None, symbols=None):
         # No 'running' lease: reservation consumes one attempt; after a crash the
         # existing Run can retry the same id after its bounded backoff.
         from datetime import timedelta
@@ -125,10 +125,25 @@ class ReliabilityStore:
             raise ValueError("invalid_work_budget")
         now = canonical_time(now) if now else utcnow()
         later = (datetime.fromisoformat(now) + timedelta(minutes=15)).isoformat()
+        scope = ""
+        params = (kind, now, max_attempts)
+        def field(name):
+            return (f"CAST(payload AS jsonb)->>'{name}'" if self.store._is_postgres
+                    else f"json_extract(payload,'$.{name}')")
+
+        if trade_date is not None:
+            scope += f" AND {field('trade_date')}=?"
+            params += (trade_date,)
+        if symbols is not None:
+            if not symbols:
+                return []
+            scope += f" AND {field('symbol')} IN ({','.join('?' for _ in symbols)})"
+            params += tuple(symbols)
         with self.transaction() as cur:
             cur.execute("SELECT work_id,payload,attempts FROM research_reliability_work "
-                        "WHERE kind=? AND state='pending' AND available_at<=? AND attempts<? "
-                        "ORDER BY attempts,priority,updated_at,work_id LIMIT ?", (kind, now, max_attempts, min(limit, 160)))
+                        "WHERE kind=? AND state='pending' AND available_at<=? AND attempts<?"
+                        f"{scope} ORDER BY attempts,priority,updated_at,work_id LIMIT ?",
+                        (*params, limit))
             rows = cur.fetchall()
             for identity, _, _ in rows:
                 cur.execute("UPDATE research_reliability_work SET attempts=attempts+1,available_at=?,updated_at=? "

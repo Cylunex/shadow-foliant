@@ -47,15 +47,32 @@ def cached_quality(store=None):
         }
 
 
+def _execution_fact(symbol, day, quote, provider):
+    from analysis.decision_evaluation import equity_rules
+    from data.valuation_contract import closing_timestamp, number
+
+    timestamp = closing_timestamp(quote.get("quote_time") or quote.get("observed_at"), day)
+    rules = equity_rules(symbol)
+    prices = {key: number(quote.get(field)) for key, field in (
+        ("open", "open"), ("close", "price"), ("limit_up", "limit_up"), ("limit_down", "limit_down"))}
+    volume = number(quote.get("volume"))
+    if not timestamp or rules is None or any(not price or price <= 0 for price in prices.values()):
+        return None
+    if volume is None or volume < 0 or prices["limit_up"] < prices["limit_down"]:
+        return None
+    return {"trade_date": day, "adjustment": "raw", **prices, "volume": volume,
+            "suspended": volume == 0, "provider": provider,
+            "observed_at": timestamp, "execution_rules": asdict(rules)}
+
+
 def daily_decision_loop(store=None):
     from application.decision_loop import DecisionLoopService
-    from analysis.decision_evaluation import equity_rules
-    from data.sources.tencent import quotes
-    from data.valuation_contract import closing_timestamp
-    service = DecisionLoopService(store)
     from application.model_portfolios import ModelPortfolios
-    portfolios = ModelPortfolios(service.store)
     from application.settlement_evidence import SettlementEvidence
+    from data.sources.tencent import quotes
+
+    service = DecisionLoopService(store)
+    portfolios = ModelPortfolios(service.store)
     archive = SettlementEvidence(service.store)
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     day = now.date().isoformat()
@@ -64,63 +81,51 @@ def daily_decision_loop(store=None):
     capsule = service.capsule()
     if capsule:
         service.start_model_cohorts(capsule)
-    conn = service.store.connect()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT symbol FROM research_model_orders WHERE state='pending' "
-                    "ORDER BY symbol")
-        symbols = [str(r[0]) for r in cur.fetchall()]
-    finally:
-        conn.close()
-    symbols = sorted(set(symbols) | set(portfolios.symbols()))
-    archive.request(symbols, day, held=portfolios.symbols())
-    work = archive.repo.claim("execution", now=now.isoformat())
+    sessions, _ = archive.pending_sessions(day)
     errors = []
-    # Archived historical facts close the work item without spending another
-    # provider request. A current quote is never a substitute for an older date.
-    for row in work:
-        if archive.facts([row["symbol"]], row["trade_date"]):
-            archive.repo.finish(row["work_id"])
-    requested_symbols = symbols
-    symbols = [r["symbol"] for r in work if r["trade_date"] == day]
-    snapshot = {}
-    for offset in range(0, min(160, len(symbols)), 80):
+    try:
+        recovered = archive.recover(portfolios, through_day=day, cohorts=service, sessions=sessions)
+    except Exception as exc:
+        recovered = {}
+        errors.append({"component": "historical_settlement", "error_category": type(exc).__name__})
+    held = set(portfolios.symbols(include_targets=False))
+    requested_symbols = sorted(sessions.get(day, set()) | held)
+    archive.request(requested_symbols, day, held=held)
+    # Newly enqueued rows become available after the loop's business timestamp.
+    # Scope the claim to the session that the live quote endpoint can serve.
+    work = archive.repo.claim("execution", trade_date=day, symbols=requested_symbols)
+    facts = archive.facts(requested_symbols, day)
+    symbols = [row["symbol"] for row in work
+               if (row["symbol"], day) not in facts]
+    acquired = {}
+    for offset in range(0, len(symbols), 80):
         batch = symbols[offset:offset + 80]
         try:
             primary = quotes(batch)
         except Exception as exc:
             primary = {}
             errors.append({"component": "tencent", "error_category": type(exc).__name__})
-        snapshot.update({symbol: {**quote, "execution_provider": "tencent"} for symbol, quote in primary.items()})
-        missing = [symbol for symbol in batch if symbol not in primary]
+        for symbol in batch:
+            fact = _execution_fact(symbol, day, primary.get(symbol, {}), "tencent")
+            if fact:
+                acquired[(symbol, day)] = fact
+        missing = [symbol for symbol in batch if (symbol, day) not in acquired]
         if missing:
-            # Reuse configured stable-first routing. Only fully dated raw quotes
-            # with limits/volume can become execution facts below; no invented
-            # 10% price limits or yesterday-close fills for incomplete fallbacks.
             from data.datahub import quotes as routed_quotes
             try:
-                for symbol, quote in routed_quotes(missing).items():
-                    snapshot[symbol] = {**quote, "execution_provider": quote.get("provider") or "datahub"}
+                fallback = routed_quotes(missing)
+                for symbol in missing:
+                    quote = fallback.get(symbol, {})
+                    fact = _execution_fact(symbol, day, quote, quote.get("provider") or "datahub")
+                    if fact:
+                        acquired[(symbol, day)] = fact
             except Exception as exc:
                 errors.append({"component": "routed_quotes", "error_category": type(exc).__name__})
-    facts = {}
-    for symbol, quote in snapshot.items():
-        timestamp = closing_timestamp(quote.get("quote_time") or quote.get("observed_at"), day)
-        rules = equity_rules(symbol)
-        if not timestamp or rules is None or any(quote.get(field) is None for field in ("open", "price", "volume", "limit_up", "limit_down")):
-            continue
-        facts[(symbol, day)] = {
-            "trade_date": day, "adjustment": "raw", "open": quote.get("open"),
-            "close": quote.get("price"), "volume": quote.get("volume"),
-            "limit_up": quote.get("limit_up"), "limit_down": quote.get("limit_down"),
-            "suspended": not bool(quote.get("volume")), "provider": quote["execution_provider"],
-            "observed_at": timestamp, "execution_rules": asdict(rules)}
-        archive.record(symbol, day, facts[(symbol, day)])
+    for (symbol, session), fact in acquired.items():
+        facts[(symbol, session)] = archive.record(symbol, session, fact)
     for row in work:
         if (row["symbol"], row["trade_date"]) in facts:
             archive.repo.finish(row["work_id"])
-    facts.update(archive.facts(requested_symbols, day))
-    recovered = archive.recover(portfolios, through_day=day, cohorts=service)
     from application.reliability_jobs import refresh_corporate_evidence
     try:
         corporate = refresh_corporate_evidence(service.store, requested_symbols, day=day, now=now.isoformat())
@@ -130,6 +135,7 @@ def daily_decision_loop(store=None):
     for key, fact in list(facts.items()):
         coverage = archive.repo.get("corporate_coverage", f"{key[1]}:{key[0]}")
         if coverage:
+            fact = {k: v for k, v in fact.items() if k not in {"object_id", "revision", "fact_hash", "symbol"}}
             fact = {**fact, "corporate_coverage": coverage,
                     "corporate_action_unresolved": bool(coverage.get("gaps"))}
             facts[key] = archive.record(key[0], key[1], fact)
@@ -147,7 +153,15 @@ def daily_decision_loop(store=None):
     except Exception as exc:
         reliability = {"status": "failed", "error_category": type(exc).__name__}
         errors.append({"component": "research_reviews", **reliability})
-    return {"status": "partial" if errors or len(facts) < len(requested_symbols) else "complete", "errors": errors,
+    remaining, calendar_unresolved = archive.pending_sessions(day)
+    pending_day = min(remaining, default=None)
+    waiting_books = sum(row.get("status") == "waiting_data" for row in model_books.values())
+    pending_reason = ("original_execution_or_mark_facts_missing" if waiting_books
+                      else "execution_evidence_or_settlement_pending" if pending_day
+                      else "execution_calendar_unresolved" if calendar_unresolved else None)
+    partial = bool(errors or len(facts) < len(requested_symbols) or pending_reason)
+    return {"status": "partial" if partial else "complete", "errors": errors,
+            "oldest_pending_date": pending_day, "pending_reason": pending_reason, "waiting_books": waiting_books,
             "settled": settled, "execution_fact_count": len(facts),
             "execution_queue": archive.repo.work_status("execution"), "requested_count": len(requested_symbols),
             "recovered_original_sessions": recovered,

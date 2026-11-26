@@ -318,13 +318,12 @@ def _job_run(row: Any) -> dict[str, Any]:
             and raw_status == "skipped" and "already complete" in detail.lower()):
         status = "not_applicable"
         completion_semantics = "upstream_daily_market_already_complete"
-    decision_loop = re.search(r"\bdecision_loop=([a-zA-Z0-9_-]+)", detail)
-    if decision_loop:
-        metrics["decision_loop_status"] = decision_loop.group(1)[:40]
-        if decision_loop.group(1) not in {"complete", "success"}:
-            partial_failures.append("decision_loop_incomplete")
-            if status == "success":
-                status = "degraded"
+    from jobs.task_health import eod_model_metrics
+    metrics.update(eod_model_metrics(detail))
+    if metrics.get("decision_loop_status", "complete") not in {"complete", "success", "error"}:
+        partial_failures.append("decision_loop_incomplete")
+        if status == "success":
+            status = "degraded"
     closing_plans = re.search(r"\bclosing_plans=([a-zA-Z0-9_-]+)", detail)
     closing_available = re.search(r"\bavailable=(\d+)", detail)
     closing_requested = re.search(r"\brequested=(\d+)", detail)

@@ -171,7 +171,7 @@ def account_books(days=30):
         period = rows[-days:]
         pnls = [money(r["total_daily_pnl"]) for r in period]
         month = latest["snap_date"][:7]
-        summary = {"latest": {k: latest[k] for k in ("snap_date", "total_daily_pnl", "total_daily_pct", "total_mv")},
+        summary = {"latest": latest,
                    "mtd_pnl": float(sum((money(r["total_daily_pnl"]) for r in rows if r["snap_date"].startswith(month)), money(0))),
                    "period_pnl": float(sum(pnls, money(0))), "period_days": len(period),
                    "win_rate": round(sum(p > 0 for p in pnls) / len(pnls) * 100, 1),

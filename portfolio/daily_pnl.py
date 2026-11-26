@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 if not any(os.path.basename(p) == "shadow-foliant" for p in sys.path):
@@ -76,6 +77,9 @@ def _init_db_once():
         for name, ddl in (
             ('fund_total_count', 'fund_total_count INTEGER DEFAULT 0'),
             ('fund_fresh_count', 'fund_fresh_count INTEGER DEFAULT 0'),
+            ('fund_updated_at', 'fund_updated_at TEXT'),
+            ('fund_prior_fresh_count', 'fund_prior_fresh_count INTEGER'),
+            ('fund_revision_delta', f'fund_revision_delta {num}'),
         ):
             if name not in columns:
                 suffix = ' IF NOT EXISTS' if is_postgres() else ''
@@ -196,30 +200,38 @@ def merge_save(snap_date: str) -> Optional[Dict]:
     total_prev = (stock_mv - stock_daily_pnl) + (fund_mv - fund_daily_pnl)
     total_daily_pct = (total_daily_pnl / total_prev * 100) if total_prev > 0 else 0
 
-    cur.execute("DELETE FROM daily_pnl_snapshots WHERE snap_date=?", (snap_date,))
     cur.execute(
         """INSERT INTO daily_pnl_snapshots
-           (snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
-            fund_count, fund_total_count, fund_fresh_count,
-            fund_mv, fund_daily_pnl, fund_daily_pct,
-            total_daily_pnl, total_daily_pct)
-           VALUES (?,?,?,?,?, ?,?,?, ?,?,?, ?,?)""",
+           (snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct, total_daily_pnl, total_daily_pct)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(snap_date) DO UPDATE SET
+             stock_count=excluded.stock_count, stock_mv=excluded.stock_mv,
+             stock_daily_pnl=excluded.stock_daily_pnl, stock_daily_pct=excluded.stock_daily_pct,
+             total_daily_pnl=excluded.stock_daily_pnl+COALESCE(daily_pnl_snapshots.fund_daily_pnl,0),
+             total_daily_pct=CASE
+               WHEN excluded.stock_mv-excluded.stock_daily_pnl+COALESCE(daily_pnl_snapshots.fund_mv,0)
+                    -COALESCE(daily_pnl_snapshots.fund_daily_pnl,0)>0
+               THEN (excluded.stock_daily_pnl+COALESCE(daily_pnl_snapshots.fund_daily_pnl,0))*100.0
+                   /(excluded.stock_mv-excluded.stock_daily_pnl+COALESCE(daily_pnl_snapshots.fund_mv,0)
+                    -COALESCE(daily_pnl_snapshots.fund_daily_pnl,0))
+               ELSE 0 END
+           RETURNING fund_count, fund_total_count, fund_fresh_count, fund_mv, fund_daily_pnl,
+                     fund_daily_pct, total_daily_pnl, total_daily_pct""",
         (
             snap_date,
             stock_count,
             round(stock_mv, 2),
             round(stock_daily_pnl, 2),
             round(stock_daily_pct, 4),
-            fund_count,
-            fund_total_count,
-            fund_fresh_count,
-            round(fund_mv, 2),
-            round(fund_daily_pnl, 2),
-            round(fund_daily_pct, 4),
             round(total_daily_pnl, 2),
             round(total_daily_pct, 4),
         ),
     )
+    saved = cur.fetchone()
+    if saved:
+        fund_count, fund_total_count, fund_fresh_count = (int(value or 0) for value in saved[:3])
+        fund_total_count = fund_total_count or fund_count
+        fund_mv, fund_daily_pnl, fund_daily_pct, total_daily_pnl, total_daily_pct = map(_f, saved[3:])
     conn.commit()
     conn.close()
     return {
@@ -253,7 +265,15 @@ def upsert_fund_pnl(snap_date: str, fund_count: int, fund_mv: float,
     conn = _conn()
     try:
         cur = conn.cursor()
-        update = """
+        changed_pnl = "(COALESCE(fund_fresh_count,0)<>? OR COALESCE(fund_daily_pnl,0)<>?)"
+        has_previous = "(fund_updated_at IS NOT NULL OR COALESCE(fund_total_count,0)>0)"
+        update = f"""
+            fund_revision_delta=CASE WHEN {has_previous} AND {changed_pnl}
+                THEN ROUND(CAST(?-COALESCE(fund_daily_pnl,0) AS NUMERIC),2) ELSE fund_revision_delta END,
+            fund_prior_fresh_count=CASE WHEN {has_previous} AND {changed_pnl}
+                THEN COALESCE(fund_fresh_count,0) ELSE fund_prior_fresh_count END,
+            fund_updated_at=CASE WHEN fund_updated_at IS NULL OR {changed_pnl} OR COALESCE(fund_total_count,0)<>?
+                THEN ? ELSE fund_updated_at END,
             fund_count=?, fund_mv=?, fund_daily_pnl=?, fund_daily_pct=?,
             fund_total_count=?, fund_fresh_count=?,
             total_daily_pnl = COALESCE(stock_daily_pnl,0) + ?,
@@ -265,7 +285,10 @@ def upsert_fund_pnl(snap_date: str, fund_count: int, fund_mv: float,
             cur.execute("""INSERT INTO daily_pnl_snapshots (snap_date)
                            VALUES (?) ON CONFLICT(snap_date) DO NOTHING""", (snap_date,))
         where = "WHERE snap_date=?"
-        params = (fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
+        comparison = (fund_fresh_count, fund_daily_pnl)
+        params = (*comparison, fund_daily_pnl, *comparison, *comparison, fund_total_count,
+                  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  fund_count, fund_mv, fund_daily_pnl, fund_daily_pct,
                   fund_total_count, fund_fresh_count, fund_daily_pnl, fund_mv,
                   fund_daily_pnl, fund_daily_pnl, fund_mv, fund_daily_pnl, snap_date)
         if only_improve:
@@ -342,7 +365,7 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
             """SELECT snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
                       fund_count, fund_total_count, fund_fresh_count,
                       fund_mv, fund_daily_pnl, fund_daily_pct,
-                      total_daily_pnl, total_daily_pct
+                      total_daily_pnl, total_daily_pct, fund_updated_at, fund_prior_fresh_count, fund_revision_delta
                FROM daily_pnl_snapshots WHERE snap_date=?""",
             (snap_date,),
         )
@@ -351,7 +374,7 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
             """SELECT snap_date, stock_count, stock_mv, stock_daily_pnl, stock_daily_pct,
                       fund_count, fund_total_count, fund_fresh_count,
                       fund_mv, fund_daily_pnl, fund_daily_pct,
-                      total_daily_pnl, total_daily_pct
+                      total_daily_pnl, total_daily_pct, fund_updated_at, fund_prior_fresh_count, fund_revision_delta
                FROM daily_pnl_snapshots ORDER BY snap_date DESC LIMIT 1"""
         )
     row = cur.fetchone()
@@ -362,7 +385,7 @@ def get_pnl(snap_date: str = None) -> Optional[Dict]:
         "snap_date", "stock_count", "stock_mv", "stock_daily_pnl", "stock_daily_pct",
         "fund_count", "fund_total_count", "fund_fresh_count",
         "fund_mv", "fund_daily_pnl", "fund_daily_pct",
-        "total_daily_pnl", "total_daily_pct",
+        "total_daily_pnl", "total_daily_pct", "fund_updated_at", "fund_prior_fresh_count", "fund_revision_delta",
     ]
     return dict(zip(cols, row))
 
@@ -381,7 +404,8 @@ def get_recent(days: int = 30) -> List[Dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT snap_date, stock_daily_pnl, fund_daily_pnl, total_daily_pnl, total_daily_pct,
-                  stock_mv, fund_mv
+                  stock_mv, fund_mv, fund_count, fund_total_count, fund_fresh_count,
+                  fund_updated_at, fund_prior_fresh_count, fund_revision_delta
            FROM daily_pnl_snapshots ORDER BY snap_date DESC LIMIT ?""",
         (int(days),),
     )
@@ -391,6 +415,12 @@ def get_recent(days: int = 30) -> List[Dict]:
         "snap_date": str(r[0]), "stock_daily_pnl": _f(r[1]), "fund_daily_pnl": _f(r[2]),
         "total_daily_pnl": _f(r[3]), "total_daily_pct": _f(r[4]),
         "total_mv": round(_f(r[5]) + _f(r[6]), 2),
+        "fund_total_count": int(r[8] or r[7] or 0),
+        "fund_fresh_count": int(r[9] or 0),
+        "fund_pending_count": max(0, int(r[8] or r[7] or 0) - int(r[9] or 0)),
+        "fund_updated_at": r[10],
+        "fund_prior_fresh_count": r[11],
+        "fund_revision_delta": _f(r[12]) if r[12] is not None else None,
     } for r in rows]
     out.reverse()
     return out
