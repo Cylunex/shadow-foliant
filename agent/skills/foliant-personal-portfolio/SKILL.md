@@ -26,6 +26,7 @@ JSON 从 stdin 传入，stdout 是一个 JSON 结果。配置只指定固定 `ac
 
 - “最后一笔是哪天的什么票”：直接 `trades.list {"limit":1}`，按 `trade_time` 回答日期、名称/代码、买卖方向；无记录就明确说明。不要把 `created_at` 导入时间当成交时间。
 - 指定成交日用 `trade_date`，指定录入日用 `import_date`，不能同时传。使用上海时间解释无时区的用户日期。返回数量达到 limit 时不要宣称已经读完全部历史。
+- 翻阅完整历史用 `trades.page`，首请求省略 `cursor`。每页默认 50 条，可设 1 至 500 条。后续请求把上一页的 `data.next_cursor` 原样作为 `cursor`，直到返回 `null`。同一成交时刻依编号从大到小排列。
 - 用户明确要求记下**已经成交**的事实时，使用 `trades.import`。支持 `rows` 或原始 Markdown `table`，二选一；必需事实是名称或代码、成交时间、方向、数量和价格。名称可以由服务批量解析；代码歧义、日期或买卖方向不明时只问缺少的事实。截图看不清时不猜。
 - 保留已提供费用、券商成交编号、委托编号与账户标识，不补造手续费。默认 `update_position=true`；仅在用户要求只记流水时设为 false。计划买卖和研究建议不录为成交。
 - 同一笔录入使用稳定的 `idempotency_key`。提交中断后，用原配置身份调用 `trades.receipt`，传 `batch_id` 或原 `idempotency_key` 其中一个。该查询只读，返回批次当前状态。`write_in_progress` 表示创建仍在进行，稍后再查。`trade_review_not_found` 表示该身份尚未查到对应批次。需重试录入时复用原键和原始参数；同键改动内容会返回 `idempotency_conflict`。

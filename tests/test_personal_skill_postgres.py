@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import _bootstrap  # noqa: F401
@@ -49,6 +50,8 @@ def test_cli_import_query_retry_and_personal_parameters(database, tmp_path):
     latest=call('trades.list',{'limit':1})['data']['records'][0]
     assert latest['code']=='600001' and latest['quantity']==100
     assert latest['source']=='skill:foliant-personal-portfolio'
+    assert call('trades.get',{'id':latest['id']},identity=reader)['data']['record']==latest
+    assert call('trades.get',{'id':latest['id']+10000},identity=reader)['data']['record'] is None
     by_batch=call('trades.receipt',{'batch_id':saved['batch_id']},identity=reader)
     by_key={'idempotency_key': args['idempotency_key']}
     assert by_batch['receipt']==saved['receipt']
@@ -70,3 +73,50 @@ def test_cli_import_query_retry_and_personal_parameters(database, tmp_path):
     assert len(history)==1 and history[0]['receipt']==updated['receipt']
     assert call('strategy.update',{**change,'dry_run':False,'value':7})['status']=='conflict'
     assert {r['key']:r['current'] for r in call('strategy.parameters',{})}['max_position_pct']==8
+
+
+def test_personal_trade_pages_read_old_executions_and_survive_a_removed_anchor(database, monkeypatch):
+    from application import personal_skill
+    from application.services import ApplicationError, PortfolioAccessService
+
+    db, connect = database
+    service = PortfolioAccessService(portfolio_db=db)
+    monkeypatch.setattr(personal_skill, 'services', lambda: SimpleNamespace(portfolio=service))
+    reader = {'actor': 'synthetic-reader'}
+
+    def page(**args):
+        return personal_skill.invoke('trades.page', args, reader)['data']
+
+    assert page() == {'records': [], 'next_cursor': None}
+    for invalid in ['bad-token', 'v1.0.0', 'v1.999999999999999999.1', 'v1.0.9223372036854775808']:
+        with pytest.raises(ApplicationError) as raised:
+            page(cursor=invalid)
+        assert raised.value.code == 'invalid_cursor'
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO trade_records(stock_code, trade_type, order_id, trade_time)
+            SELECT '600001', CASE WHEN n % 2 = 0 THEN '买入' ELSE '卖出' END, n::text,
+                   TIMESTAMPTZ '2026-01-05 10:30:00.000001+08'
+                       + CASE WHEN n <= 2 THEN INTERVAL '1 microsecond' ELSE INTERVAL '0' END
+            FROM generate_series(1, 504) AS sample(n) ORDER BY sample.n
+        """)
+        cur.execute("INSERT INTO trade_records(stock_code, trade_type) VALUES ('600001', '调整')")
+
+    first = page(limit=1)
+    anchor = first['records'][0]
+    assert anchor['order_id'] == '2'
+    assert anchor == personal_skill.invoke('trades.get', {'id': anchor['id']}, reader)['data']['record']
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM trade_records WHERE id = %s", (anchor['id'],))
+        cur.execute("""
+            INSERT INTO trade_records(stock_code, trade_type, trade_time)
+            VALUES ('600001', '买入', TIMESTAMPTZ '2026-01-06 10:30:00+08')
+        """)
+
+    second = page(cursor=first['next_cursor'], limit=2)
+    assert [r['order_id'] for r in second['records']] == ['1', '504']
+    older = page(cursor=second['next_cursor'], limit=500)
+    assert [r['order_id'] for r in older['records']] == [str(n) for n in range(503, 3, -1)]
+    last = page(cursor=older['next_cursor'], limit=1)
+    assert [r['order_id'] for r in last['records']] == ['3']
+    assert last['next_cursor'] is None

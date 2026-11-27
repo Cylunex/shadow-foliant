@@ -5,6 +5,8 @@
 | 目的 | 命令 |
 | --- | --- |
 | 最新/指定股票/成交日/录入日的成交 | `trades.list` |
+| 连续翻阅历史成交 | `trades.page {"limit":50}`，从 `data.records` 读取本页，下次原样传入 `data.next_cursor` 为 `cursor`，返回 `null` 表示读到末页 |
+| 按稳定编号打开一笔历史成交 | `trades.get {"id":123}`，结果位于 `data.record`，记录不存在时为 `null` |
 | 成交预检、录入和回执恢复 | `trades.preview`、`trades.import`、`trades.receipt` |
 | 持仓、盘中决策、每日盈亏、绩效与曲线 | `portfolio.summary`、`portfolio.intraday`、`portfolio.daily-pnl`、`portfolio.performance`、`portfolio.curve` |
 | 交易习惯、持仓分级、加减仓信号 | `portfolio.habits`、`portfolio.classify`、`portfolio.actions` |

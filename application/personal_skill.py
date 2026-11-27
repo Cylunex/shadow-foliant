@@ -41,6 +41,11 @@ def register(capability_name, description, target, *, effect='read', schema_extr
 
 register('trades.list', '成交记录，按实际成交时间倒序；查最后一笔用 limit=1，成交日与导入日不同。', '$portfolio.trades',
          code=(Code | Literal[''], ''), trade_date=(Text, ''), import_date=(Text, ''), limit=(Limit, 200))
+register('trades.page', '按实际成交时间和编号倒序连续翻阅历史成交，后续页传上一页的 next_cursor。', '$portfolio.trade_page',
+         cursor=(Annotated[str, Field(min_length=1, max_length=64)], Field(default_factory=lambda: None)),
+         limit=(Limit, 50))
+register('trades.get', '按列表返回的稳定成交编号读取一笔买卖记录。', '$portfolio.trade',
+         id=(Annotated[int, Field(gt=0, le=9007199254740991)], ...))
 trade_fields = dict(rows=(Annotated[list[dict[str, Any]], Field(max_length=500)], []),
                     table=(Annotated[str, Field(max_length=200000)], ''), update_position=(bool, True))
 register('trades.preview', '后台校验已成交事实、名称解析、防重及持仓变动，不提交成交。', '@preview_trades', **trade_fields)

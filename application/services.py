@@ -13,7 +13,7 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from concurrent.futures import Executor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1298,6 +1298,45 @@ class PortfolioAccessService:
             warnings=warnings,
             data=snapshot,
             model_payload=snapshot,
+        )
+
+    def trade_page(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ApplicationError("invalid_limit", "limit must be an integer between 1 and 500")
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        before = None
+        if cursor is not None:
+            match = re.fullmatch(r"v1\.(-?[0-9]{1,18})\.([1-9][0-9]{0,18})", cursor)
+            if not match or int(match[2]) > 2**63 - 1:
+                raise ApplicationError("invalid_cursor", "invalid trade history cursor")
+            try:
+                before = (epoch + timedelta(microseconds=int(match[1])), int(match[2]))
+            except OverflowError as exc:
+                raise ApplicationError("invalid_cursor", "invalid trade history cursor") from exc
+        rows = self._db().get_trades(limit=limit + 1, before=before)
+        records = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = records[-1]
+            # Use the exact PostgreSQL instant before public JSON formatting rounds it to seconds.
+            micros = (last["trade_time"] - epoch) // timedelta(microseconds=1)
+            next_cursor = f"v1.{micros}.{last['id']}"
+        data = {"records": clean_json(records), "next_cursor": next_cursor}
+        return tool_result(
+            summary=f"读取到 {len(records)} 条成交记录",
+            resource_uri="shadow://foliant/portfolios/primary/trades",
+            status="complete", provenance_value=provenance(run_id="portfolio-primary-trades"),
+            data=data, model_payload=data,
+        )
+
+    def trade(self, *, id: int) -> dict[str, Any]:
+        rows = self._db().get_trades(trade_id=id, limit=1)
+        data = {"record": clean_json(rows[0]) if rows else None}
+        return tool_result(
+            summary="已读取成交记录" if rows else "未找到成交记录",
+            resource_uri=f"shadow://foliant/portfolios/primary/trades/{id}",
+            status="complete", provenance_value=provenance(run_id="portfolio-primary-trades"),
+            data=data, model_payload=data,
         )
 
     def trades(self, *, code: str = "", import_date: str = "", trade_date: str = "",

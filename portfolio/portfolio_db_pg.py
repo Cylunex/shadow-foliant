@@ -853,7 +853,8 @@ class PortfolioDBPG:
                 return (new_q, (float(old_c) if old_c else None), new_q - old_q)
             raise ValueError('trade_no_position')
 
-    def get_trades(self, code: Optional[str] = None, limit: int = 200) -> List[Dict]:
+    def get_trades(self, code: Optional[str] = None, limit: int = 200, *, trade_id: Optional[int] = None,
+                   before: Optional[Tuple[datetime, int]] = None) -> List[Dict]:
         """查询成交记录(真实买卖,trade_type in 买入/卖出),按时间倒序。"""
         conn = get_conn()
         cur = conn.cursor()
@@ -864,13 +865,19 @@ class PortfolioDBPG:
                    "pos_quantity, pos_cost_price, delta_qty, trade_time, extra, created_at, "
                    "source, commission, tax, order_id, broker_execution_id, account_ref, "
                    "import_batch_id, external_fingerprint, position_effect")
+            where = ["trade_type IN ('买入','卖出')"]
+            params = []
             if code:
-                cur.execute(f"""SELECT {sel} FROM trade_records
-                               WHERE stock_code=%s AND trade_type IN ('买入','卖出')
-                               ORDER BY trade_time DESC LIMIT %s""", (code, limit))
-            else:
-                cur.execute(f"""SELECT {sel} FROM trade_records WHERE trade_type IN ('买入','卖出')
-                               ORDER BY trade_time DESC LIMIT %s""", (limit,))
+                where.append("stock_code=%s")
+                params.append(code)
+            if trade_id is not None:
+                where.append("id=%s")
+                params.append(trade_id)
+            if before is not None:
+                where.append("(trade_time, id) < (%s, %s)")
+                params.extend(before)
+            cur.execute(f"SELECT {sel} FROM trade_records WHERE {' AND '.join(where)} "
+                        "ORDER BY trade_time DESC, id DESC LIMIT %s", (*params, limit))
             cols = ['id', 'code', 'name', 'trade_type', 'quantity', 'price', 'amount',
                     'pos_quantity', 'pos_cost_price', 'delta_qty', 'trade_time', 'extra',
                     'created_at', 'source', 'commission', 'tax', 'order_id',
