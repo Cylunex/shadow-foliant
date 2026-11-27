@@ -697,41 +697,28 @@ class StockDataFetcher:
         }
         
         try:
-            # 1-3. 三张报表共用同一个同花顺页面解析链。上游返回空 HTML 时
-            # AkShare 会抛 NoneType 解析错误；第一次已证明整条链不可用，后两次
-            # 再请求只会放大限流/代理故障。因此同一只股仅记一次错误并停止。
-            statement_sections = (
-                ("资产负债表", "balance_sheet"),
-                ("利润表", "income_statement"),
-                ("现金流量表", "cash_flow"),
-            )
-            for indicator, target in statement_sections:
+            from data.datahub import financials
+
+            for section, report_type, target in (
+                ("资产负债表", "fzb", "balance_sheet"),
+                ("利润表", "lrb", "income_statement"),
+                ("现金流量表", "llb", "cash_flow"),
+            ):
                 try:
-                    frame = ak.stock_financial_abstract_ths(
-                        symbol=symbol, indicator=indicator
-                    )
-                    if frame is None or frame.empty:
-                        financial_data["source_status"] = "degraded"
-                        financial_data["source_errors"].append({
-                            "source": "akshare_ths_financial",
-                            "section": indicator,
-                            "error_type": "EmptyResponse",
-                        })
-                        print(f"[stock_data.finance] {symbol} 同花顺财务报表不可用: "
-                              "EmptyResponse")
-                        break
-                    financial_data[target] = frame.head(8).to_dict('records')
+                    rows = financials(symbol, report_type)
+                    if rows:
+                        financial_data[target] = rows[:8]
+                        continue
+                    error_type = "EmptyResponse"
                 except Exception as exc:
-                    financial_data["source_status"] = "degraded"
-                    financial_data["source_errors"].append({
-                        "source": "akshare_ths_financial",
-                        "section": indicator,
-                        "error_type": type(exc).__name__,
-                    })
-                    print(f"[stock_data.finance] {symbol} 同花顺财务报表不可用: "
-                          f"{type(exc).__name__}")
-                    break
-            
+                    error_type = type(exc).__name__
+                financial_data["source_status"] = "degraded"
+                financial_data["source_errors"].append({
+                    "source": "datahub.financials", "section": section, "error_type": error_type,
+                })
+                print(f"[stock_data.finance] {symbol} {section}不可用: {error_type}")
+                break
+
             # 4. 获取主要财务指标
             try:
                 financial_abstract = ak.stock_financial_abstract(symbol=symbol)
