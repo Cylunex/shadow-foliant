@@ -119,18 +119,21 @@ def fund_type(code: str) -> Optional[str]:
 # ----- 净值历史 --------------------------------------------------------
 # ⭐ 历史净值统一走 datahub(主源东财 lsjz JSON + 兜底 akshare, 健康度路由 + 缓存)。
 # 这里保留 get_nav_history 函数签名是为兼容上层调用方; 真正取数在 data.datahub.fund_nav_history。
-def get_nav_history(code: str, start: str = None, end: str = None) -> Optional[pd.DataFrame]:
+def get_nav_history(code: str, start: str = None, end: str = None, *, require_date: str = None) -> Optional[pd.DataFrame]:
     """历史净值(瘦封装,实际走 datahub.fund_nav_history)。
     返回标准 DataFrame[date, unit_nav, acc_nav, daily_return](升序),失败 None。
     start/end: 'YYYY-MM-DD' 可选区间过滤。"""
     from data.datahub import fund_nav_history, fund_money_history
     kind=fund_type(code)
     if '货币' in (kind or ''):
-        df=fund_money_history(str(code).zfill(6))
+        df=fund_money_history(str(code).zfill(6), use_cache=require_date is None)
+        if df is None or df.empty:
+            return df
         if start: df=df[df['date']>=pd.Timestamp(start)]
         if end: df=df[df['date']<=pd.Timestamp(end)]
         return df
-    df = fund_nav_history(str(code).zfill(6), start=start, end=end)
+    df = fund_nav_history(str(code).zfill(6), start=start, end=end,
+                          require_date=require_date, use_cache=require_date is None)
     if df is None or df.empty:
         return df
     actions = get_corporate_actions(code)

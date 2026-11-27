@@ -1291,6 +1291,8 @@ class ResearchStore:
                     from data.acquisition_evidence import revision_impact
                     impact = revision_impact(json.loads(old[0]), json.loads(fact[-1]),
                         [{"kind": "financial_dataset", "symbol": fact[1], "granularity": "dataset"}])
+                    if not impact["requires_new_revision"]:
+                        continue
                     impact.update(symbol=fact[1], table=table, stat_date=fact[2], new_dataset_id=dataset_id,
                                   new_values=json.loads(fact[-1]),
                                   old_hash=hashlib.sha256(str(old[0]).encode()).hexdigest())
@@ -2366,6 +2368,27 @@ class ResearchStore:
             return self._observation_frame(cur.fetchall(), kind="valuation")
         finally:
             conn.close()
+
+    def financial_revision_in_manifest(self, manifest, impact) -> bool:
+        """Match the exact pre-revision fact visible to the frozen selection."""
+        context = manifest["decision_context"]
+        day = str(context["selection_date"])
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT payload FROM research_financial_facts
+                   WHERE table_name=? AND symbol=? AND stat_date=?
+                     AND pub_date<=? AND first_seen_as_of<=? AND first_seen_at<=?
+                   ORDER BY pub_date DESC,first_seen_as_of DESC,retrieved_at DESC LIMIT 1""",
+                (impact["table"], impact["symbol"], impact["stat_date"],
+                 day, day, str(context["financial_cutoff_at"])),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        old_hash = impact.get("old_hash")
+        return bool(row and (not old_hash or hashlib.sha256(str(row[0]).encode()).hexdigest() == old_hash))
 
     def load_financial_facts_from_manifest(self, manifest_id: str) -> dict[str, pd.DataFrame]:
         manifest = self.load_selection_manifest(manifest_id)

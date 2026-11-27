@@ -11,19 +11,30 @@ def compare_rankings(before, after):
             "score_changed": sorted(s for s in left.keys() & right.keys() if left[s][1] != right[s][1])}
 
 
+def _exclude_unchanged_work(repo, *, now):
+    """Close legacy jobs whose decoded financial values never changed."""
+    if repo.store._is_postgres:
+        fields = "CAST(payload AS jsonb)->'impact'->'changed_fields' = CAST('[]' AS jsonb)"
+    else:
+        fields = "json_extract(payload,'$.impact.changed_fields') = '[]'"
+    with repo.transaction() as cur:
+        cur.execute(
+            "UPDATE research_reliability_work SET state='excluded',updated_at=? "
+            "WHERE work_id IN (SELECT work_id FROM research_reliability_work "
+            f"WHERE kind='revision_replay' AND state='pending' AND {fields} "
+            "ORDER BY work_id LIMIT 1600)",
+            (now,),
+        )
+        return cur.rowcount
+
+
 def replay_impact(store, *, impact, manifest_id):
     import json
     manifest = store.load_selection_manifest(manifest_id)
     if not manifest:
         raise ValueError("manifest_missing")
-    frames = store.load_financial_facts_from_manifest(manifest_id)
-    frame = frames.get(impact["table"])
-    if frame is None or frame.empty or impact["symbol"] not in set(frame["symbol"].astype(str)):
-        return {"status": "excluded", "reason": "field_not_consumed", "manifest_id": manifest_id}
-    period = "stat_date" if "stat_date" in frame else "statDate"
-    if period not in frame or not (frame["symbol"].astype(str).eq(impact["symbol"]) &
-                                  frame[period].astype(str).eq(impact["stat_date"])).any():
-        return {"status": "excluded", "reason": "period_not_consumed", "manifest_id": manifest_id}
+    if not store.financial_revision_in_manifest(manifest, impact):
+        return {"status": "excluded", "reason": "source_revision_not_in_original_inputs", "manifest_id": manifest_id}
     corrected = store.replay_selection(manifest_id, financial_overrides={impact["table"]: {
         "symbol": impact["symbol"], "stat_date": impact["stat_date"], "values": impact["new_values"]}})
     if corrected["replay_status"] != "success":
@@ -47,10 +58,16 @@ def process_revision_impacts(store, *, now, limit=2):
     if type(limit) is not int or not 0 <= limit <= 2:
         raise ValueError("invalid_revision_replay_budget")
     repo = ReliabilityStore(store)
-    # Discovery is database-only; queue stores all discovered manifest IDs while
-    # only two expensive replays may run per invocation. No external fetches.
+    if not limit:
+        return {"completed": 0, "queue": repo.work_status("revision_replay"), "deferred": True}
+    excluded = _exclude_unchanged_work(repo, now=now)
+    # Existing work retains its identity. New impacts only queue matching facts.
+    discovered = 0
     for impact in repo.list("revision_impact", limit=100):
-        if not impact.get("new_values"):
+        if not impact.get("new_values") or impact.get("changed_fields") == []:
+            continue
+        key = payload_hash(impact)
+        if repo.get("revision_discovery", key):
             continue
         conn = store.connect()
         try:
@@ -59,23 +76,39 @@ def process_revision_impacts(store, *, now, limit=2):
             ids = [r[0] for r in cur.fetchall()]
         finally:
             conn.close()
-        key = payload_hash(impact)
-        if repo.get("revision_discovery", key):
-            continue
+        queued = 0
         for identity in ids:
-            repo.enqueue("revision_replay", key + ":" + identity, {"impact": impact, "manifest_id": identity}, priority=3)
-        repo.once("revision_discovery", key, {"manifest_count": len(ids), "discovered_at": now})
-    completed = 0
-    for work in repo.claim("revision_replay", limit=limit, now=now) if limit else []:
+            manifest = store.load_selection_manifest(identity)
+            if manifest and store.financial_revision_in_manifest(manifest, impact):
+                repo.enqueue("revision_replay", key + ":" + identity,
+                             {"impact": impact, "manifest_id": identity}, priority=3)
+                queued += 1
+        repo.once("revision_discovery", key, {"manifest_count": len(ids), "queued_count": queued, "discovered_at": now})
+        discovered += 1
+        if discovered == 4:
+            break
+    completed, replays = excluded, 0
+    for _ in range(160):
+        rows = repo.claim("revision_replay", limit=1, now=now)
+        if not rows:
+            break
+        work = rows[0]
         try:
             value = replay_impact(store, impact=work["impact"], manifest_id=work["manifest_id"])
             if value["status"] in {"complete", "excluded"}:
                 repo.finish(work["work_id"], state=value["status"])
                 completed += 1
+            excluded += value["status"] == "excluded"
+            replays += value["status"] != "excluded"
+            if value["status"] == "unavailable":
+                repo.once("revision_replay_error", f"{work['work_id']}:{work['attempt']}", value)
         except Exception as exc:
             repo.once("revision_replay_error", f"{work['work_id']}:{work['attempt']}", {"error_category": type(exc).__name__})
+            replays += 1
+        if replays >= limit:
+            break
     return {
-        "completed": completed,
+        "completed": completed, "excluded": excluded,
         "queue": repo.work_status("revision_replay"),
         "deferred": limit == 0,
     }

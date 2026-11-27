@@ -3,7 +3,7 @@
 借鉴 FinceptTerminal/scripts/fred_data.py，精简为 A 股最关心的 12 个核心序列。
 设计原则：
   - 优先 FRED API（需环境变量 FRED_API_KEY，免费申请：https://fred.stlouisfed.org/docs/api/api_key.html）
-  - 无 API key 时 fallback 到 yfinance（少数关键指标如 10Y 国债、VIX、美元指数有等价 ticker）
+  - 关键日线宏观指标优先用 FRED 公共导出补齐，随后用可用的市场代理指标
   - 不持久化，按需拉取 + 内存 lru_cache（凌晨任务一天拉一次即可）
 
 12 个序列（A 股相关性排序）：
@@ -16,7 +16,9 @@
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+from zipfile import BadZipFile
 from functools import lru_cache
 from typing import Dict, List, Optional, Any
 
@@ -133,13 +135,25 @@ def get_fed_snapshot() -> Dict[str, Dict[str, Any]]:
 
     返回:
       {series_id: {name, latest, latest_date, prev_value, change_pct,
-                   source ('fred'|'yfinance'|'none')}}
+                   source ('fred'|'fred_public'|'yfinance'|'none')}}
     """
     snapshot = {}
     fred_ok = bool(_api_key())
+    daily_ids = ('DGS10', 'DTWEXBGS', 'VIXCLS')
+    api_data = {sid: _fetch_fred_series(sid, days=60) for sid in CORE_SERIES} if fred_ok else {}
+    daily_missing = [sid for sid in daily_ids if not api_data.get(sid)]
+    try:
+        ny_day = datetime.now(ZoneInfo('America/New_York')).date()
+        public_data = _public_daily(daily_missing, ny_day, days=14) if daily_missing else {}
+    except (ValueError, OSError, BadZipFile, requests.RequestException) as exc:
+        print(f'[FRED] public daily unavailable: {type(exc).__name__}')
+        public_data = {}
     for sid, (cn_name, yf_ticker) in CORE_SERIES.items():
-        data = _fetch_fred_series(sid, days=60) if fred_ok else []
-        source = 'fred' if data else ''
+        data = api_data.get(sid) or public_data.get(sid) or []
+        source = 'fred' if api_data.get(sid) else 'fred_public' if data else ''
+        if not data and yf_ticker and sid == 'DTWEXBGS':
+            # The ICE DXY composition differs from the Fed's broad dollar index.
+            cn_name = '美元指数（DXY）'
         if not data and yf_ticker:
             data = _fetch_yfinance_fallback(yf_ticker, days=60)
             source = 'yfinance' if data else 'none'
@@ -173,12 +187,12 @@ def get_fed_snapshot() -> Dict[str, Dict[str, Any]]:
 
 def format_snapshot(snapshot: Dict[str, Dict[str, Any]]) -> str:
     """格式化为可塞 prompt 的多行文本"""
-    if not snapshot:
+    if not any(info.get('latest') is not None for info in snapshot.values()):
         return '（无数据）'
-    lines = []
+    lines, missing = [], []
     for sid, info in snapshot.items():
         if info['latest'] is None:
-            lines.append(f"  {info['name']} [{sid}]: 无数据")
+            missing.append(sid)
             continue
         chg = info['change_pct']
         chg_str = f" (5周期变 {chg:+.2f}%)" if chg is not None else ''
@@ -186,7 +200,100 @@ def format_snapshot(snapshot: Dict[str, Dict[str, Any]]) -> str:
             f"  {info['name']} [{sid}]: {info['latest']:.2f} "
             f"@ {info['latest_date']}{chg_str}  [{info['source']}]"
         )
+    if missing:
+        lines.append('  缺项：' + '、'.join(missing))
     return '\n'.join(lines)
+
+
+def _public_daily(series, as_of, *, days=10):
+    import csv
+    import io
+    import math
+    from zipfile import ZipFile, is_zipfile
+
+    response = requests.get(
+        "https://fred.stlouisfed.org/graph/fredgraph.csv",
+        params={"id": ",".join(series), "cosd": (as_of - timedelta(days=days)).isoformat(),
+                "coed": as_of.isoformat()},
+        timeout=(3, 6),
+    )
+    response.raise_for_status()
+    observations = {series_id: {} for series_id in series}
+    archive = io.BytesIO(response.content)
+    if is_zipfile(archive):
+        # FRED splits series with differing frequency labels into CSV members.
+        with ZipFile(archive) as files:
+            tables = [files.read(member).decode('utf-8-sig').splitlines() for member in files.infolist()
+                      if member.filename.endswith('.csv') and member.file_size <= 262144]
+    else:
+        tables = [response.text.splitlines()]
+    for table in tables:
+        for row in csv.DictReader(table):
+            try:
+                day = date.fromisoformat(row.get("observation_date") or row.get("DATE") or "")
+            except ValueError:
+                continue
+            if not as_of - timedelta(days=days) <= day <= as_of:
+                continue
+            for key in series:
+                try:
+                    value = float(row.get(key) or "")
+                except ValueError:
+                    continue
+                if math.isfinite(value):
+                    observations[key][day] = value
+
+    return {key: [{'date': day.isoformat(), 'value': value}
+                  for day, value in sorted(values.items(), reverse=True)]
+            for key, values in observations.items()}
+
+
+def _index_line(name, rows, as_of):
+    import math
+
+    valid = [(row['date'], row['value']) for row in rows
+             if math.isfinite(row['value']) and row['value'] > 0]
+    if len(valid) < 2:
+        return ''
+    day, current = valid[0]
+    if not as_of - timedelta(days=4) <= date.fromisoformat(day) <= as_of:
+        return ''
+    previous = valid[1][1]
+    return f"{name} {day}: {current:.2f} ({(current / previous - 1) * 100:+.2f}%)"
+
+
+def us_index_closes(as_of):
+    """Read the public FRED daily-close export as a bounded fallback."""
+    series = {"DJIA": "道琼斯", "SP500": "标普500", "NASDAQCOM": "纳斯达克"}
+    observations = _public_daily(series, as_of)
+    return {name: line for key, name in series.items()
+            if (line := _index_line(name, observations[key], as_of))}
+
+
+def eastmoney_sp500_close(as_of):
+    """Fetch dated S&P 500 index bars from the Eastmoney global-index history."""
+    response = requests.get(
+        'https://push2his.eastmoney.com/api/qt/stock/kline/get',
+        params={'secid': '100.SPX', 'klt': 101, 'fqt': 0, 'lmt': 8,
+                'end': as_of.strftime('%Y%m%d'), 'fields1': 'f1,f2,f3,f4,f5,f6',
+                'fields2': 'f51,f52,f53', 'iscca': 1, 'forcect': 1},
+        headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'},
+        timeout=(3, 5),
+    )
+    response.raise_for_status()
+    data = response.json().get('data') or {}
+    if data.get('code') != 'SPX':
+        return ''
+    bars = {}
+    for line in data.get('klines') or []:
+        try:
+            day, _, close = line.split(',')
+            if date.fromisoformat(day) <= as_of:
+                bars[day] = float(close)
+        except ValueError:
+            continue
+    return _index_line('标普500', [{'date': day, 'value': value}
+                                  for day, value in sorted(bars.items(), reverse=True)], as_of)
 
 
 if __name__ == '__main__':
@@ -195,43 +302,3 @@ if __name__ == '__main__':
     snap = get_fed_snapshot()
     print(f'\n核心序列 ({len(snap)} 项):')
     print(format_snapshot(snap))
-
-
-def us_index_closes(as_of):
-    """Read the public FRED daily-close export as a bounded fallback."""
-    import csv
-    import math
-    from datetime import date
-
-    series = {"DJIA": "道琼斯", "SP500": "标普500", "NASDAQCOM": "纳斯达克"}
-    response = requests.get(
-        "https://fred.stlouisfed.org/graph/fredgraph.csv",
-        params={"id": ",".join(series), "cosd": (as_of - timedelta(days=10)).isoformat()},
-        timeout=(3, 6),
-    )
-    response.raise_for_status()
-    observations = {name: {} for name in series.values()}
-    for row in csv.DictReader(response.text.splitlines()):
-        try:
-            day = date.fromisoformat(row.get("observation_date") or row.get("DATE") or "")
-        except ValueError:
-            continue
-        if day > as_of:
-            continue
-        for key, name in series.items():
-            try:
-                value = float(row.get(key) or "")
-            except ValueError:
-                continue
-            if math.isfinite(value) and value > 0:
-                observations[name][day] = value
-
-    lines = {}
-    for name, values in observations.items():
-        if len(values) < 2:
-            continue
-        previous_day, day = sorted(values)[-2:]
-        if (as_of - day).days <= 4:
-            current, previous = values[day], values[previous_day]
-            lines[name] = f"{name} {day}: {current:.2f} ({(current / previous - 1) * 100:+.2f}%)"
-    return lines

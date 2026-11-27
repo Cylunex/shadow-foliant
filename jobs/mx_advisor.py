@@ -2,8 +2,7 @@
 妙想(AI-SaaS)可选顾问 —— 独立模块,挂了不影响任何主流程
 
 设计原则:
-  - 完全独立,不 import 除 miaoxiang + psycopg2 以外的项目模块
-  - 所有异常静默捕获,失败只 log 不 raise
+  - 收盘综述复用当天的尾盘持仓快照和正式选股
   - 超时严格控制,单次调用 ≤ 90s,总任务 ≤ 5min
   - 仅对「卖出」+「高置信度」股票做第二意见,不泛滥调用
 
@@ -329,163 +328,72 @@ def _humanize_error(msg: str) -> str:
     return ' '.join(tokens) if tokens else msg[:60]
 
 
-def run_daily_wrap() -> Optional[str]:
-    """妙想每日盘后综述:只提供项目独有持仓数据,市场数据由妙想自行查询"""
-    start = time.monotonic()
-    print(f'[mx_advisor] 📰 每日盘后综述启动')
+def run_daily_wrap(*, now=None) -> dict:
+    """Use the dated closing decision and report missing inputs explicitly."""
+    from zoneinfo import ZoneInfo
+    from data.research_store import ResearchStore
+    from jobs.jobs_hub import get_indicator_snapshot
 
-    sell_items: list = []
-    buy_items: list = []
-    hold_items: list = []
-    top_picks: list = []
-    pnl_summary: str = ''
-    afternoon_signal: str = ''
+    zone = ZoneInfo("Asia/Shanghai")
+    current = now or datetime.now(zone)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=zone)
+    day = current.astimezone(zone).date().isoformat()
+    closing = get_indicator_snapshot('_portfolio_close_review', day) or {}
+    if closing.get('trade_date') != day or not closing.get('holdings'):
+        return {'status': 'skipped', 'reason': 'same_day_close_review_missing', 'report': ''}
 
+    formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
+    picks = []
+    if str(formal.get('selection_date')) == day:
+        picks = ((formal.get('artifacts') or {}).get('formal_top5') or {}).get('payload') or []
+
+    conn = _pg_conn()
     try:
-        conn = _pg_conn()
-        cur = conn.cursor()
-
-        # 1. 卖出Top5
-        cur.execute("""
-            WITH latest AS (
-                SELECT DISTINCT ON (portfolio_stock_id) * FROM portfolio_analysis_history
-                ORDER BY portfolio_stock_id, analysis_time DESC
-            )
-            SELECT p.name, h.confidence, p.code
-            FROM latest h JOIN portfolio_stocks p ON p.id = h.portfolio_stock_id
-            WHERE h.rating = '卖出' ORDER BY h.confidence DESC LIMIT 5
-        """)
-        sell_items = [(r[0], int(r[1]), r[2]) for r in cur.fetchall() if r[0]]
-
-        # 1b. 买入Top5
-        cur.execute("""
-            WITH latest AS (
-                SELECT DISTINCT ON (portfolio_stock_id) * FROM portfolio_analysis_history
-                ORDER BY portfolio_stock_id, analysis_time DESC
-            )
-            SELECT p.name, h.confidence, p.code
-            FROM latest h JOIN portfolio_stocks p ON p.id = h.portfolio_stock_id
-            WHERE h.rating = '买入' ORDER BY h.confidence DESC LIMIT 5
-        """)
-        buy_items = [(r[0], int(r[1]), r[2]) for r in cur.fetchall() if r[0]]
-
-        # 1c. 持有高置信度Top8
-        cur.execute("""
-            WITH latest AS (
-                SELECT DISTINCT ON (portfolio_stock_id) * FROM portfolio_analysis_history
-                ORDER BY portfolio_stock_id, analysis_time DESC
-            )
-            SELECT p.name, h.confidence, p.code
-            FROM latest h JOIN portfolio_stocks p ON p.id = h.portfolio_stock_id
-            WHERE h.rating = '持有' ORDER BY h.confidence DESC LIMIT 8
-        """)
-        hold_items = [(r[0], int(r[1]), r[2]) for r in cur.fetchall() if r[0]]
-
-        # 2. 今日正式 TOP5。追加式 selection_artifacts 是唯一权威源；展示快照不可回退成输入。
-        try:
-            from data.research_store import ResearchStore
-            formal = ResearchStore(ensure_schema=False).latest_formal_selection() or {}
-            if str(formal.get('selection_date') or '')[:10] == datetime.now().strftime('%Y-%m-%d'):
-                rows = ((formal.get('artifacts') or {}).get('formal_top5') or {}).get('payload') or []
-                top_picks = [
-                    str(item.get('code') or item.get('symbol') or '') for item in rows
-                    if item.get('code') or item.get('symbol')
-                ]
-        except Exception:
-            pass
-
-        # 3. 当日盈亏
-        try:
-            cur.execute("""
-                SELECT total_value, daily_pnl, daily_pnl_pct FROM daily_pnl_snapshots
-                WHERE snapshot_date = current_date ORDER BY created_at DESC LIMIT 1
-            """)
-            row = cur.fetchone()
-            if row:
-                val, pnl, pnl_pct = row
-                sign = '📈' if (pnl or 0) >= 0 else '📉'
-                pnl_summary = f'{sign} 总市值 {val:,.0f} 日盈亏 {pnl:+,.0f}({pnl_pct:+.2f}%)' if val else ''
-        except Exception:
-            pass
-
-        # 4. 尾盘持仓信号
-        try:
-            cur.execute("""
-                SELECT error FROM job_runs
-                WHERE job_name = 'afternoon_portfolio' AND started_at >= current_date
-                ORDER BY started_at DESC LIMIT 1
-            """)
-            row = cur.fetchone()
-            if row and row[0]:
-                kv = dict(x.split('=') for x in row[0].split() if '=' in x)
-                buy = int(kv.get('buy', 0))
-                sell = int(kv.get('sell', 0))
-                afternoon_signal = f'买入信号{buy}、卖出预警{sell}'
-        except Exception:
-            pass
-
-        # 基金净值(只打日志)
-        try:
-            cur.execute("""
-                SELECT f.name, n.daily_return FROM fund_nav n
-                JOIN funds f ON f.code = n.fund_code
-                WHERE n.nav_date = current_date AND n.daily_return IS NOT NULL
-                ORDER BY n.daily_return LIMIT 20
-            """)
-            fund_rows = cur.fetchall()
-            if fund_rows:
-                changes = ', '.join(f'{n}({dr:+.2f}%)' for n, dr in fund_rows)
-                print(f'[mx_advisor] 💵 基金: {changes}')
-        except Exception:
-            pass
-
-        cur.close()
+        with conn.cursor() as cur:
+            cur.execute("""SELECT total_daily_pnl, total_daily_pct, stock_count,
+                                  fund_total_count, fund_fresh_count
+                           FROM daily_pnl_snapshots WHERE snap_date = %s""", (day,))
+            pnl = cur.fetchone()
+    finally:
         conn.close()
-    except Exception as e:
-        print(f'[mx_advisor] ⚠️ 数据收集失败: {e}')
-        return None
 
-    # 至少有一项数据才输出
-    if not sell_items and not buy_items and not hold_items and not top_picks and not pnl_summary and not afternoon_signal:
-        print('[mx_advisor] ⚠️ 无今日数据,跳过')
-        return None
-
-    # 组装数据摘要(给妙想的上下文)
     data_parts = []
-    if pnl_summary:
-        data_parts.append(f'持仓盈亏：{pnl_summary}')
-    if sell_items:
-        names = [f'{n}({c})' for n, c, _ in sell_items[:5]]
-        data_parts.append(f'📉 卖出预警Top5：{", ".join(names)}')
-    if buy_items:
-        names = [f'{n}({c})' for n, c, _ in buy_items]
-        data_parts.append(f'📈 买入信号：{", ".join(names)}')
-    if hold_items:
-        names = [f'{n}({c})' for n, c, _ in hold_items[:8]]
-        data_parts.append(f'📊 持有(高置信)：{", ".join(names)}')
-    if afternoon_signal:
-        data_parts.append(f'尾盘持仓信号：{afternoon_signal}')
-    if top_picks:
-        data_parts.append(f'今日综合选股Top10：{", ".join(top_picks[:10])}')
+    gaps = []
+    coverage = closing.get('data_quality') or {}
+    holdings = closing['holdings']
+    data_parts.append(f"尾盘持仓 {len(holdings)} 只，行情覆盖 {(coverage.get('coverage') or 0):.0%}。")
+    if closing.get('status') != 'success':
+        data_parts.append('尾盘复核仅部分完成。')
+        gaps.append('close_review_partial')
+    for action_group, label in (
+        ({'sell', 'reduce'}, '减仓或退出'), ({'add', 'buy'}, '买入或增持'), ({'hold'}, '持有'),
+    ):
+        matching = [row for row in holdings if row.get('action') in action_group]
+        if matching:
+            names = [f"{row.get('name') or row['symbol']}({row['symbol']})" for row in matching[:5]]
+            data_parts.append(f"{label}共 {len(matching)} 只，示例：{'、'.join(names)}。")
+    if picks:
+        data_parts.append('今日正式 TOP5：' + '、'.join(str(row.get('code') or row.get('symbol')) for row in picks))
+    else:
+        gaps.append('same_day_top5_missing')
+    if pnl is None or not pnl[2]:
+        data_parts.append('今日收益快照待夜间汇总。')
+        gaps.append('same_day_pnl_pending')
+    else:
+        value, pct, _, fund_total, fund_fresh = pnl
+        if fund_total is None or (fund_fresh or 0) < fund_total:
+            gaps.append('fund_pnl_partial')
+        if value is not None and pct is not None:
+            data_parts.append(f'已计入收益 {value:+,.0f} 元（{pct:+.2f}%），基金覆盖 {fund_fresh or 0}/{fund_total or 0}。')
 
     data_context = '\n'.join(data_parts)
+    prompt = f"""根据 {day} 的尾盘持仓事实与正式选股做收盘复盘。
 
-    # 妙想提示词：交易员复盘风格，覆盖持仓全貌（卖/买/持 + 选股）
-    prompt = f"""你是A股交易员，现在是交易日收盘后，请根据以下持仓数据做收盘复盘。
-
-【今日持仓全貌】
 {data_context}
 
-请按以下三部分输出（简洁、直接，不要开场白）：
-
-1. **持仓诊断**：卖出预警哪些需要重视？买入信号是否值得跟进？持有标的有无变盘风险？
-2. **操作建议**：明天开盘后哪些该减仓/清仓，哪些可以继续持有或加仓？对照综合选股结果给具体建议。
-3. **明日方向**：基于持仓结构判断明天应该进攻还是防守，给出1-2个具体关注方向。
-
-注意：
-- 市场整体行情你自己查询，不要让我提供
-- 不要客套话，直接讲判断和建议
-- 每个部分2-4句话即可"""
+简述已确认的持仓风险、次日需要复核的事项和数据缺口。原样保留系统的持仓动作。
+仅使用已给出的当日持仓事实；收益未出时不推算；正式候选只表示观察对象。"""
 
     # 调妙想
     mx_content = ''
@@ -508,26 +416,24 @@ def run_daily_wrap() -> Optional[str]:
         print(f'[mx_advisor] ⚠️ 妙想调用失败: {e}')
 
     # 组装最终报告
-    lines = ['📰 **妙想收盘复盘**', '']
+    lines = ['📰 **妙想收盘复盘**', '', *data_parts, '']
     if mx_content:
-        lines.append(mx_content)
+        lines.extend(['**模型复核参考**', mx_content])
     else:
-        lines.append('_(妙想暂不可用，以下为持仓数据摘要)_')
-        lines.append('')
-        lines.extend(data_parts)
+        lines.append('妙想暂不可用。')
 
     lines.append('')
     lines.append('_数据来源：项目持仓分析 × 妙想AI-SaaS_')
-    report = '\n'.join(lines)
-    elapsed = time.monotonic() - start
-    print(f'[mx_advisor] 📰 综述完成,耗时{elapsed:.1f}s')
-    return report
+    if not mx_content:
+        gaps.append('model_unavailable')
+    return {'status': 'partial' if gaps else 'success',
+            'reason': ','.join(gaps) or 'complete', 'report': '\n'.join(lines)}
 
 
 def mx_daily_wrap():
     """盘后可选任务:妙想每日综述"""
     try:
-        report = run_daily_wrap()
+        report = run_daily_wrap()['report']
         if report:
             send_to_qq_webhook(report)
     except Exception as e:

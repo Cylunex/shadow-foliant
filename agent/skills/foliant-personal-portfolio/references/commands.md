@@ -26,3 +26,5 @@
 ```
 
 不得将示例写入真实账本。订单及费用字段含义沿用 `portfolio/trade_import_service.py`，不在 Losna 维护第二份业务模型。
+
+读取 `portfolio.daily-pnl` 时，同时报告 `fund_fresh_count / fund_total_count`。若 `fund_pending_count` 大于 0，日合计标为已更新部分。月度或区间汇总同时检查 `mtd_partial_fund_days` 或 `period_partial_fund_days`，并保留最近一次修订信息。

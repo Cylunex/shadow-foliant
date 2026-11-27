@@ -34,6 +34,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     # 开关名 = hub.register 的任务名(对齐后 webui 开关经 jobs_hub._wrap 闸门真正生效)。
     # core=True 标记"常驻核心任务"(默认开,建议别关;关掉会影响下游)。
     # ===== 常驻核心:盘前/盘中/盘后主流程(原先不在开关表里 → webui 看不到,现补全)=====
+    'revision_replay': {
+        'cn': '历史财务数据修订回放',
+        'schedule': '01:00–07:30 夜间分批，03:00–04:00 备份时段暂停',
+        'category': '数据', 'default': True,
+        'description': '核对原选股实际引用的财务版本，每批最多两次完整重算，保留原选股结果。',
+    },
     'morning_strategy': {
         'cn': '☀️ 晨间市场报告',
         'schedule': '09:00 每日',

@@ -39,6 +39,16 @@ def test_actual_page_size_and_partial_resume(monkeypatch):
     assert len(second) == 60 and audit_nav(second)["status"] == "ready"
 
 
+def test_recent_daily_refresh_reads_only_first_page(monkeypatch):
+    fetch = Mock(return_value={"TotalCount": 60, "Data": {"LSJZList": source_rows()[:20]}})
+    monkeypatch.setattr(eastmoney.C, "throttle", lambda *a: None)
+    monkeypatch.setattr(eastmoney.C, "http_get_json", fetch)
+    frame = eastmoney.fund_nav("000001", recent_only=True)
+    fetch.assert_called_once()
+    assert len(frame) == 20 and frame.attrs["recent_only"] is True
+    assert frame.attrs.get("pagination_checkpoint") is None
+
+
 def test_duplicate_and_invalid_nav_never_passes_quality(monkeypatch):
     data = source_rows(20)
     monkeypatch.setattr(eastmoney.C, "throttle", lambda *a: None)
@@ -75,7 +85,7 @@ def test_partial_source_can_fall_back_without_claiming_independent_upstream(
     def route(cap, sources, empty=None, **kwargs):
         for name, fn in sources:
             candidate = fn()
-            if not candidate.empty:
+            if not candidate.empty and kwargs["accept"](candidate):
                 return candidate
         return empty
 
@@ -83,6 +93,25 @@ def test_partial_source_can_fall_back_without_claiming_independent_upstream(
     result = datahub.fund_nav_history.__wrapped__("000001")
     assert len(result) == 30 and result.attrs["quality"]["status"] == "ready"
     assert result.attrs["upstream"] == "eastmoney"
+
+
+def test_missing_target_nav_advances_to_the_second_source(monkeypatch):
+    from data import datahub
+
+    stale = pd.DataFrame({"date": pd.to_datetime(["2026-11-25"]), "unit_nav": [1.0]})
+    fresh = pd.DataFrame({"date": pd.to_datetime(["2026-11-26"]), "unit_nav": [1.1]})
+    monkeypatch.setattr(datahub, "_fund_nav_eastmoney", lambda _, recent_only: stale)
+    monkeypatch.setattr(datahub, "_fund_nav_akshare", lambda _: fresh)
+    def route(_, sources, empty, *, accept):
+        for _, fetch in sources:
+            frame = fetch()
+            if not frame.empty and accept(frame):
+                return frame
+        return empty
+
+    monkeypatch.setattr(datahub, "_route", route)
+    result = datahub.fund_nav_history("000001", require_date="2026-11-26", use_cache=False)
+    assert result["date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-11-26"]
 
 
 def test_official_portfolio_performance_cashflow_example():

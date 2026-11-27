@@ -749,9 +749,11 @@ def portfolio_analysis(session_name="持仓"):
 
 def noon_report():
     """午盘只回答大盘涨跌、持仓涨跌和是否加减仓。"""
-    now_text = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
     from application.market_risk_notice import current_indices, index_lines, SHANGHAI
-    market_snapshot = current_indices(datetime.now(SHANGHAI))
+    from core.portfolio_policy import guard, is_usable_market_add_signal, latest_market_add_signal
+    now = datetime.now(SHANGHAI)
+    now_text = now.strftime('%Y-%m-%d %H:%M')
+    market_snapshot = current_indices(now)
     index_rows = [(row["name"], row["change_pct"]) for row in market_snapshot["rows"]]
 
     holding_changes = []
@@ -774,18 +776,29 @@ def noon_report():
     holding_avg = (sum(change for change, _, _ in holding_changes) / len(holding_changes)
                    if holding_changes else 0.0)
     if not index_rows:
-        direction, action = '待核验', '不动'
-        reason = '指数行情不足，暂缓整体仓位判断；已有持仓风险仍需单独核对。'
-    elif index_avg <= -0.8 or holding_avg <= -1.0:
-        direction, action = '看跌', '减仓'
-        reason = '大盘或已获取持仓明显走弱，优先核对弱势持仓与减仓条件。'
-    elif index_avg >= 0.8 and (not holding_changes or holding_avg >= 0):
-        direction, action = '看涨', '加仓'
-        reason = ('指数偏强，已获取持仓平均涨跌非负；关注回落机会，不追高。'
-                  if holding_changes else '指数偏强，但持仓涨跌待核验，暂不据此决定个股加仓。')
+        direction = '待核验'
+    elif index_avg <= -0.8:
+        direction = '看跌'
+    elif index_avg >= 0.8:
+        direction = '看涨'
     else:
-        direction, action = '震荡', '不动'
-        reason = '整体仓位暂不调整，下午继续观察。'
+        direction = '震荡'
+
+    signal = latest_market_add_signal() or {}
+    action = '不动'
+    if is_usable_market_add_signal(signal, now=now):
+        signal_action = signal['action']
+        reason = signal.get('reason') or '沿用最新组合仓位信号。'
+        if signal_action in {'reduce', 'sell'}:
+            action = '减仓'
+        elif signal_action in {'buy', 'strong_buy'} and signal.get('allow_buy') is True:
+            guarded = guard('add', reason=reason)
+            action = '不动' if guarded['blocked'] else '加仓'
+            reason = guarded['reason']
+    else:
+        reason = '组合仓位信号待核验，暂缓调整。'
+    if not index_rows:
+        reason = '午盘指数行情不足。' + reason
 
     holdings = ''
     if holding_changes:
@@ -801,7 +814,6 @@ def noon_report():
             holdings += '；最弱：' + '、'.join(weak)
 
     from notify.stock_report import report
-    # Broad market strength is context, not authority to buy an unspecified holding.
     return report('午盘', now_text, [
         ('1）盘面概况', [*index_lines(market_snapshot), f'盘面判断：{direction}。']),
         ('2）持仓观察', [holdings or '持仓涨跌待核验。']),

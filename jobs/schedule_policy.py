@@ -39,7 +39,11 @@ MARKET_DATA_TIMES = {
     'closing_trade_plans': '20:20',
 }
 
-DAILY_BACKTEST_RETRY_TIMES = ("20:35", "21:40")
+DAILY_BACKTEST_RETRY_TIMES = ("20:35", "21:40", "22:40")
+# Keep CPU-heavy hindsight replay away from market hours and the 03:15 backup.
+REVISION_REPLAY_TIMES = tuple(f"{hour:02d}:{minute:02d}"
+                              for hour in range(1, 8) if hour != 3
+                              for minute in (0, 30))
 
 # 夜间任务按硬超时预算后仍应在 23:30 前结束；24:00 是绝对上限。
 EVENING_TIMES = {

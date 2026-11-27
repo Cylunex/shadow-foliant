@@ -174,7 +174,7 @@ _ROUTE_INFLIGHT_LOCK = _route_threading.Lock()
 
 
 def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=None,
-           timeout: int = None):
+           timeout: int = None, *, accept: Callable[[Any], bool] | None = None):
     """稳定等级优先，同等级按健康度排序，返回第一个非空结果。
     sources: [(源名, 无参thunk), ...]。与缓存共用有效结果判定，结构性空字典也触发降级。
     有限等待和整条路由预算；底层超时线程不能强制取消，保留 inflight 防重入。"""
@@ -253,7 +253,8 @@ def _route(capability: str, sources: List[Tuple[str, Callable[[], Any]]], empty=
         if good:
             if isinstance(v, pd.DataFrame):
                 v.attrs['datahub_route_source'] = name
-            return v
+            if accept is None or accept(v):
+                return v
     return empty
 
 
@@ -2337,13 +2338,15 @@ def convertible_bonds() -> List[dict]:
 # 主源:东财官方 lsjz JSON(纯 HTTP, 无 JS exec, 稳定)
 # 兜底:akshare fund_open_fund_info_em(部分基金 PyExecJS 抛 ReferenceError 时主源已覆盖)
 # 返回标准列 [date, unit_nav, acc_nav, daily_return] 升序 DataFrame。
-def _fund_nav_eastmoney(code: str) -> pd.DataFrame:
+def _fund_nav_eastmoney(code: str, *, recent_only: bool = False) -> pd.DataFrame:
     """基金历史净值东财源。2026-06-27 阶段2:归位到 data/sources/eastmoney.py(东财 f10/lsjz JSON,
     纯 HTTP,带 Referer)。返回标准列 [date, unit_nav, acc_nav, daily_return] 升序。
     ⚠️ lsjz 现每页约 20 条上限(无视 pageSize),故只取近 ~20 条净值;拉全历史需 ~300 翻页(东财封禁风险),
     维持原行为(此前直连即如此,非本次回归)。"""
     try:
         from data.sources import eastmoney as _em
+        if recent_only:
+            return _em.fund_nav(code, recent_only=True)
         progress_key='fund_nav_progress:'+code
         checkpoint=_cache_get(progress_key,86400)
         df=_em.fund_nav(code,checkpoint=checkpoint)
@@ -2415,7 +2418,7 @@ def fund_money_history(code):
     return _route('fund_money', [('akshare',fetch)],empty=pd.DataFrame(),timeout=20)
 
 
-def fund_nav_history(code: str, start: str = None, end: str = None) -> pd.DataFrame | None:
+def fund_nav_history(code: str, start: str = None, end: str = None, *, require_date: str = None) -> pd.DataFrame | None:
     """基金历史净值。源链:东财 lsjz JSON → akshare PyExecJS 兜底。
     返回 DataFrame[date, unit_nav, acc_nav, daily_return] 升序;两源都失败返回 None。
     start/end='YYYY-MM-DD' 区间过滤。
@@ -2424,18 +2427,27 @@ def fund_nav_history(code: str, start: str = None, end: str = None) -> pd.DataFr
     """
     from fund.fund_contracts import code6
     code = code6(code)
-    partial=[]
-    def checked(fetch):
-        frame=fetch()
-        if not frame.empty and (frame.attrs.get('quality') or {}).get('status')=='partial':
+    partial = []
+    target = pd.Timestamp(require_date) if require_date else None
+
+    def usable(frame):
+        if (frame.attrs.get('quality') or {}).get('status') == 'partial' or (
+            target is not None and not frame['date'].eq(target).any()
+        ):
             partial.append(frame)
-            return pd.DataFrame()
-        return frame
-    df = _route("fund_nav",
-                [("eastmoney", lambda: checked(lambda: _fund_nav_eastmoney(code))),
-                 ("akshare", lambda: checked(lambda: _fund_nav_akshare(code)))],
-                empty=pd.DataFrame())
-    if (df is None or df.empty) and partial: df=max(partial,key=len)
+            return False
+        return True
+
+    def primary():
+        return (_fund_nav_eastmoney(code, recent_only=True) if target is not None
+                else _fund_nav_eastmoney(code))
+
+    df = _route("fund_nav", [("eastmoney", primary), ("akshare", lambda: _fund_nav_akshare(code))],
+                empty=pd.DataFrame(), accept=usable)
+    if (df is None or df.empty) and partial:
+        df = max(partial, key=lambda frame: (
+            target is not None and frame['date'].eq(target).any(), frame['date'].max(), len(frame),
+        ))
     if df is None or (hasattr(df, 'empty') and df.empty):
         return None
     from fund.fund_contracts import audit_nav

@@ -327,16 +327,51 @@ def test_case_attention_deduplicates_symbols_and_prefers_fresh_risks(store):
     assert attention[1]["event_id"] == "7"
 
 
-def test_revision_replay_ignores_period_not_in_original_input():
-    import pandas as pd
+def test_revision_replay_ignores_revision_not_in_original_input(store, monkeypatch):
+    import hashlib
     from application.revision_replay import replay_impact
-    class Frozen:
-        def load_selection_manifest(self, identity):
-            return {"run_id": "old"}
-        def load_financial_facts_from_manifest(self, identity):
-            return {"income": pd.DataFrame([{"symbol": "600001", "stat_date": "2025-12-31"}])}
-    result = replay_impact(Frozen(), impact={"symbol": "600001", "table": "income", "stat_date": "2026-06-30"}, manifest_id="old")
-    assert result["reason"] == "period_not_consumed"
+
+    manifest = {"run_id": "old", "decision_context": {
+        "selection_date": "2026-09-10", "financial_cutoff_at": "2026-09-10T00:00:00+00:00",
+    }}
+    monkeypatch.setattr(store, "load_selection_manifest", lambda _: manifest)
+    record = '{"value":1}'
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO research_financial_facts
+               (table_name,symbol,stat_date,pub_date,revision_no,provider,first_seen_as_of,
+                first_seen_at,origin,effective_at,retrieved_at,schema_version,quality_status,payload)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("income", "600001", "2026-06-30", "2026-08-27", "1", "fixture", "2026-08-27",
+             "2026-08-27T00:00:00+00:00", "fixture", "2026-08-27", "2026-08-27T00:00:00+00:00",
+             "v1", "ok", record),
+        )
+
+    impact = {"symbol": "600001", "table": "income", "stat_date": "2026-06-30",
+              "old_hash": hashlib.sha256(record.encode()).hexdigest()}
+    assert store.financial_revision_in_manifest(manifest, impact)
+    result = replay_impact(store, impact={**impact, "old_hash": "different"}, manifest_id="old")
+    assert result["reason"] == "source_revision_not_in_original_inputs"
+
+
+def test_serialization_only_financial_changes_never_queue_replay(store):
+    import pandas as pd
+    from application.revision_replay import process_revision_impacts
+
+    report = pd.DataFrame([{"symbol": "600001", "pub_date": "2026-08-27",
+                            "stat_date": "2026-06-30", "eps": 1}])
+    store.upsert_financial_pit("income", report, as_of="2026-09-10")
+    with store.connect() as conn:
+        payload = conn.execute("SELECT payload FROM research_financial_facts").fetchone()[0]
+        conn.execute("UPDATE research_financial_facts SET payload=?",
+                     (json.dumps(json.loads(payload), indent=2),))
+    store.upsert_financial_pit("income", report, as_of="2026-09-10")
+    repo = ReliabilityStore(store)
+    assert repo.list("revision_impact") == []
+
+    repo.enqueue("revision_replay", "old-format-only", {"impact": {"changed_fields": []}})
+    result = process_revision_impacts(store, now="2026-11-27T12:00:00+08:00")
+    assert result["excluded"] == 1 and result["queue"] == {"excluded": 1}
 
 
 def test_revision_replay_zero_budget_leaves_queue_unclaimed(monkeypatch):

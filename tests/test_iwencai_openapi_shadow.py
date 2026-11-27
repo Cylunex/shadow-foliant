@@ -592,3 +592,18 @@ def test_shadow_job_status_keeps_semantic_degradation_visible(state, verified, e
     from jobs.jobs_hub import _iwencai_shadow_job_status
     assert _iwencai_shadow_job_status({'status': state, 'semantic_verified_groups': verified,
                                       'data_groups': 5}) == expected
+
+
+def test_later_shadow_uses_sort_field_session_by_group(monkeypatch):
+    from data.sources import iwencai_openapi as client
+
+    observed = {}
+
+    def sample(name, **kwargs):
+        observed[name] = kwargs["expected_market_as_of"]
+        return {"name": name, "status": "credential_missing"}
+
+    monkeypatch.setattr(client, "run_group", sample)
+    client.run_shadow(expected_market_as_of="2026-11-25", current_market_as_of="2026-11-26")
+    assert observed == {"低价擒牛": "2026-11-26", "低估值": "2026-11-26", "小市值": "2026-11-26",
+                        "主力资金": "2026-11-25", "净利增长": "2026-11-25"}

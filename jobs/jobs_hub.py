@@ -32,7 +32,7 @@ import concurrent.futures
 from db_compat import connect as db_connect
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
-from jobs.schedule_policy import DAILY_BACKTEST_RETRY_TIMES, EVENING_TIMES, MARKET_DATA_TIMES, WEEKEND_TIMES
+from jobs.schedule_policy import DAILY_BACKTEST_RETRY_TIMES, EVENING_TIMES, MARKET_DATA_TIMES, REVISION_REPLAY_TIMES, WEEKEND_TIMES
 
 import schedule
 import datahub  # 统一外部数据层(行情/龙虎榜/板块/新闻等取数唯一入口)
@@ -809,7 +809,7 @@ def task_daily_backtest(*, retry_only=False):
         cancel_event = _TASK_CANCEL_EVENTS.get(job)
         _per_stock = portfolio_batch(
             tasks, get_indicator_snapshot, save_indicator_snapshot,
-            deadline=min(time.monotonic() + 2400, deadline - 420),
+            deadline=min(time.monotonic() + 3000, deadline - 420),
             cancelled=cancel_event.is_set if cancel_event else lambda: False,
         )
         completed = len(_per_stock)
@@ -1157,6 +1157,20 @@ def task_eod_outcomes():
              finished_at=datetime.now().isoformat(), notify=False)
 
 
+def task_revision_replay():
+    from application.revision_replay import process_revision_impacts
+    from data.research_store import ResearchStore
+
+    started = datetime.now(_RUN_TIMEZONE).isoformat()
+    result = process_revision_impacts(ResearchStore(ensure_schema=False), now=started)
+    queue = result["queue"]
+    status = 'partial' if queue.get('pending') or queue.get('exhausted') else 'success'
+    _log_run('revision_replay', status, error=(
+        f"completed={result['completed']} excluded={result['excluded']} "
+        f"pending={queue.get('pending', 0)} exhausted={queue.get('exhausted', 0)}"
+    ), started_at=started, finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
+
+
 def _fund_gate(job: str) -> bool:
     """基金任务统一开关 + 交易日守卫。返回 True 表示应跳过。"""
     try:
@@ -1184,27 +1198,56 @@ def task_fund_nav_refresh(*, backfill_only=False):
         from fund.fund_ledger import list_saved, save as save_fund_workspace
         import time as fund_refresh_time
         ordered=sorted(codes)
+        from data.research_store import ResearchStore
+        target_day = snap_date
+        if backfill_only:
+            target_day = ResearchStore(ensure_schema=False).expected_market_as_of(
+                snap_date, inclusive=False,
+            )
         cursor_key = 'premarket' if backfill_only else 'default'
         checkpoints = {row.get('slot', 'default'): row for row in list_saved('nav_refresh_cursor')}
         checkpoint = checkpoints.get(cursor_key, {})
         offset=int(checkpoint.get('offset',0))%len(ordered) if ordered else 0
         ordered=ordered[offset:]+ordered[:offset]
+        missing_nav = set()
+        if target_day:
+            current_navs = fund_db.get_nav_pairs(codes, upto_date=target_day)
+            missing_nav = {code for code in codes
+                           if (current_navs.get(code) or {}).get('nav_date') != target_day
+                           or not current_navs[code].get('prev_nav')
+                           or current_navs[code].get('actions_status') != 'ready'}
+        ordered.sort(key=lambda code: code not in missing_nav)
         deadline = fund_refresh_time.monotonic() + (120 if backfill_only else 240)
         saved = 0
-        for index,code in enumerate(ordered):
+        attempted = 0
+        for code in ordered:
             if fund_refresh_time.monotonic()>=deadline:break
-            df = fund_data.get_nav_history(code)
+            attempted += 1
+            try:
+                df = (fund_data.get_nav_history(code, require_date=target_day)
+                      if code in missing_nav else fund_data.get_nav_history(code))
+            except Exception as exc:
+                print(f"[fund_nav] read failed: {type(exc).__name__}", flush=True)
+                df = None
             if df is not None and not df.empty:
                 saved += fund_db.save_nav(code, df)
             save_fund_workspace('nav_refresh_cursor', cursor_key,
-                                {'slot': cursor_key, 'offset': offset + index + 1})
+                                {'slot': cursor_key, 'offset': offset + attempted})
         from portfolio.daily_pnl import reconcile_fund_pnl
         corrected = reconcile_fund_pnl(snap_date) if codes else {}
         if backfill_only:
-            detail = f"nav_rows={saved} corrected_dates={','.join(corrected) or 'none'}"
-            _log_run(job, 'success', error=detail, started_at=started,
+            from portfolio.daily_pnl import get_pnl
+            snapshot = (get_pnl(target_day) or {}) if target_day else {}
+            total = snapshot.get('fund_total_count')
+            fresh = snapshot.get('fund_fresh_count')
+            complete = not codes or (total is not None and fresh == total)
+            status = 'success' if complete else 'partial'
+            detail = (f"nav_rows={saved} attempted={attempted}/{len(ordered)} "
+                      f"target={target_day} fresh={fresh}/{total} "
+                      f"corrected_dates={','.join(corrected) or 'none'}")
+            _log_run(job, status, error=detail, started_at=started,
                      finished_at=datetime.now(_RUN_TIMEZONE).isoformat(), notify=False)
-            return {'status': 'success', 'error': detail}
+            return {'status': status, 'error': detail}
         # 网络局部失败时沿用库内最近净值计市值；只有净值日期=今天且存在上一期
         # 净值的基金才进入当日收益，避免把滞后 QDII/失联源冒充成今日涨跌。
         nav_cache = fund_db.get_nav_pairs(codes)
@@ -1721,6 +1764,7 @@ _TASK_HARD_TIMEOUTS: Dict[str, int] = {
     'research_data_sync_premarket_retry': 600,
     'kline_prefetch':            2700,   # 焐 raw+qfq 两套 K线 + 因子/海选;源况差实测 K线段 33min(7-2),
                                          # 1800→2700 给足;任务内另有循环截止(预算剩5min干净收尾,不靠切断)
+    'revision_replay':           720,    # bounded overnight evidence replay
     'mx_daily_analysis':         1500,   # LLM 慢
     'mx_selection_review':       1500,
     'iwencai_openapi_shadow_premarket': 240,
@@ -2673,7 +2717,7 @@ def task_morning_strategy():
         import requests
         import config as market_config
         from analysis.morning_strategy_report import format_us_daily_reference
-        from data.fred_economic_data import us_index_closes
+        from data.fred_economic_data import eastmoney_sp500_close, us_index_closes
         from zoneinfo import ZoneInfo
 
         new_york_date = datetime.now(ZoneInfo('America/New_York')).date()
@@ -2706,6 +2750,16 @@ def task_morning_strategy():
                         outcomes[name] = outcomes.get(name, 'yahoo_missing') + '+fred'
             except Exception as exc:
                 print(f'[morning_strategy] FRED closes: {type(exc).__name__}')
+        sp500 = lines.get('标普500', '')
+        latest_us_close = max((line.split()[1] for line in lines.values()), default='')
+        if not sp500 or sp500.split()[1] < latest_us_close:
+            try:
+                fallback = eastmoney_sp500_close(new_york_date)
+                if fallback and (not sp500 or fallback.split()[1] > sp500.split()[1]):
+                    lines['标普500'] = fallback
+                    outcomes['标普500'] = 'eastmoney_daily_close'
+            except Exception as exc:
+                print(f'[morning_strategy] Eastmoney SPX: {type(exc).__name__}')
         us_summary = '\n'.join(lines[name] for name in tickers.values() if name in lines) or '（无数据）'
         try:
             prior = (get_indicator_snapshot('_morning_us_indices') or {}).get('last_verified_at', {})
@@ -2854,33 +2908,6 @@ def task_morning_strategy():
             fred_summary = format_snapshot(snap)
         except Exception as e:
             fred_summary = f'(拉取失败: {e})'
-        # 如果 FRED 无数据，补充 Yahoo V8 市场指标
-        if '无数据' in fred_summary or not fred_summary:
-            try:
-                import requests as _yr2
-                _h2 = {'User-Agent': 'Mozilla/5.0'}
-                import config as _cfg2; _p2 = _cfg2.PROXIES
-                fallback_lines = []
-                for sym, name in [('%5ETNX', '10Y收益率'), ('%5EVIX', 'VIX恐慌指数')]:
-                    try:
-                        resp = _yr2.get(
-                            f'https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=5d&interval=1d',
-                            headers=_h2, proxies=_p2, timeout=10)
-                        if resp.status_code == 200:
-                            d = resp.json()
-                            c = d['chart']['result'][0]['indicators']['quote'][0]['close']
-                            c = [x for x in c if x is not None]
-                            if len(c) >= 2:
-                                last, prev = c[-1], c[-2]
-                                chg = (last - prev) / prev * 100
-                                fallback_lines.append(f'  {name}: {last:.2f} ({chg:+.2f}%)')
-                    except Exception:
-                        pass
-                if fallback_lines:
-                    fred_summary = '\n'.join(fallback_lines) + '\n  (来源: Yahoo Finance)'
-            except Exception:
-                pass
-
         # ─── 7. 拼 prompt 调 AI 一次（优先走 prompt_manager 模板，便于运行时编辑） ───
         prompt_vars = {
             'lookback_date': lookback_date,
@@ -4776,11 +4803,12 @@ def _iwencai_shadow_group_to_file(
 def _iwencai_shadow_isolated(
     old_reference: dict, *, cached_verified=None,
     expected_market_as_of: str | None = None,
+    current_market_as_of: str | None = None,
 ) -> dict:
     import json as _json
     import os as _os
     import tempfile as _tempfile
-    from data.sources.iwencai_openapi import run_shadow
+    from data.sources.iwencai_openapi import market_date_for_group, run_shadow
     from jobs.isolated_runtime import run_isolated_task
 
     with _tempfile.TemporaryDirectory(prefix='iwencai-shadow-') as directory:
@@ -4788,9 +4816,10 @@ def _iwencai_shadow_isolated(
             if name in (cached_verified or {}):
                 return dict(cached_verified[name])
             filename = _os.path.join(directory, str(len(_os.listdir(directory))) + '.json')
+            group_as_of = market_date_for_group(name, expected_market_as_of, current_market_as_of)
             isolated = run_isolated_task(
                 'iwencai_openapi:' + name, _iwencai_shadow_group_to_file,
-                (name, filename, expected_market_as_of), {},
+                (name, filename, group_as_of), {},
                 timeout_seconds=35, cancel_grace_seconds=1,
             )
             if isolated.get('status') != 'complete':
@@ -4808,6 +4837,7 @@ def _iwencai_shadow_isolated(
         return run_shadow(
             old_reference, group_runner=group_runner,
             expected_market_as_of=expected_market_as_of,
+            current_market_as_of=current_market_as_of,
         )
 
 
@@ -4933,6 +4963,7 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
                          finished_at=datetime.now(_RUN_TIMEZONE).isoformat(),
                          notify=False)
                 return
+        current_market_as_of = started[:10] if slot in {'afternoon', 'postclose'} else None
         if cached:
             rows = {row['name']: row for row in cached['groups']}
             result = run_shadow(
@@ -4943,9 +4974,11 @@ def _iwencai_shadow_attach(slot: str, *, cache_only: bool = False):
         else:
             result = (_iwencai_shadow_isolated(
                           old, expected_market_as_of=expected_market_as_of,
+                          current_market_as_of=current_market_as_of,
                       ) if configured_key() else
                       run_shadow(old, key='',
-                                 expected_market_as_of=expected_market_as_of))
+                                 expected_market_as_of=expected_market_as_of,
+                                 current_market_as_of=current_market_as_of))
             result['sampled_at'] = result['executed_at']
         result['sampling_slot'] = slot
         result['selection_run_id'] = str(formal.get('run_id') or '')
@@ -6027,6 +6060,14 @@ def task_afternoon_portfolio():
             for item in (res.get('items') or []) if item.get('code')
         }
         intraday = _run_fixed_intraday('14:30', holding_overrides=overrides)
+        if intraday.get('holdings'):
+            save_indicator_snapshot('_portfolio_close_review', {
+                'trade_date': intraday.get('trade_date'),
+                'status': intraday.get('status'),
+                'data_quality': intraday.get('data_quality'),
+                'holdings': [{key: row.get(key) for key in ('symbol', 'name', 'action')}
+                             for row in intraday['holdings']],
+            })
         if intraday.get('data_quality'):
             from jobs.intraday_decision_monitor import format_fixed_summary
             _push_daily('🧹 尾盘持仓与候选动作', format_fixed_summary(intraday, '14:30'))
@@ -6443,16 +6484,12 @@ def task_mx_daily_analysis():
     try:
         from jobs.mx_advisor import run_daily_wrap
 
-        report = run_daily_wrap()
-        if not report:
-            _log_run(job, 'success', error='no data', started_at=started,
-                     finished_at=datetime.now().isoformat())
-            return
-
-        from postmarket_digest import add_section
-        add_section('mx_close', '🌙 妙想收盘复盘', report, max_chars=1200)
-        _log_run(job, 'success', error='ok',
-                 started_at=started, finished_at=datetime.now().isoformat())
+        result = run_daily_wrap()
+        if result['report']:
+            from postmarket_digest import add_section
+            add_section('mx_close', '🌙 妙想收盘复盘', result['report'], max_chars=1200)
+        _log_run(job, result['status'], error=result['reason'], started_at=started,
+                 finished_at=datetime.now().isoformat(), notify=False)
 
     except Exception as e:
         _log_run(job, 'error', error=str(e), started_at=started,
@@ -6838,6 +6875,8 @@ def register_default_jobs():
       2026-06-12 二轮: morning_pnl(08:50昨日收益)并入 morning_strategy 模块D;
         持仓扫描改读盘后快照(不再逐只拉K线);AI 加 lazy_summary 口语化一句话。
     """
+    for replay_time in REVISION_REPLAY_TIMES:
+        hub.register('revision_replay', replay_time, task_revision_replay)
     # ---- 🟢 盘前 ----
     hub.register('research_calendar_refresh', MARKET_DATA_TIMES['research_calendar_refresh'],
                  task_research_calendar_refresh)

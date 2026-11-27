@@ -426,7 +426,8 @@ def get_nav_pairs(codes=None, upto_date: str = None) -> Dict[str, Dict]:
         snapshot=snapshots.get(code,{})
         record=next((r for r in snapshot.get('records',[]) if str(r['date'])[:10]==info['nav_date']),{})
         info.update({k:record[k] for k in ('cash_dividend','split_ratio','income_per_10000','yield_7d') if k in record})
-        info.update({k:snapshot.get('metadata',{}).get(k) for k in ('source','upstream','actions_status','unit_nav_kind')})
+        evidence = (record.get('evidence') or snapshot.get('metadata', {})) if record else {}
+        info.update({k: evidence.get(k) for k in ('source','upstream','actions_status','unit_nav_kind')})
         if not info.get('actions_status'):info['actions_status']='unknown'
     return out
 
@@ -436,42 +437,56 @@ def save_nav(code: str, nav_df):
     if nav_df is None or len(nav_df) == 0:
         return 0
     code = str(code).zfill(6)
-    conn = _conn()
-    cur = conn.cursor()
-    from core.db_compat import upsert_sql, USE_POSTGRES
-    keys = ['code', 'nav_date']
-    all_cols = ['code', 'nav_date', 'unit_nav', 'acc_nav', 'daily_return']
-    n = 0
-    for _, r in nav_df.iterrows():
-        from fund.fund_contracts import day,number,now
-        try:
-            d=day(r['date']);number(r.get('unit_nav'),positive=True)
-            if d>now()[:10]:continue
-        except (TypeError,ValueError):continue
-        vals = (code, str(d)[:10], _f(r.get('unit_nav')), _f(r.get('acc_nav')), _f(r.get('daily_return')))
-        sql, ordered = upsert_sql('fund_nav', keys, all_cols, vals)
-        # 逐行隔离:单行异常(并发写/脏数据触发约束)不污染整个 PG 事务、不让整批净值刷新失败
-        try:
-            if USE_POSTGRES:
-                cur.execute('SAVEPOINT sp_nav')
-                cur.execute(sql, ordered)
-                cur.execute('RELEASE SAVEPOINT sp_nav')
-            else:
-                cur.execute(sql, ordered)
-            n += 1
-        except Exception:
-            if USE_POSTGRES:
-                try:
-                    cur.execute('ROLLBACK TO SAVEPOINT sp_nav')
-                except Exception:
-                    pass
-    conn.commit()
-    conn.close()
-    from fund.fund_ledger import save
+    import json
     from application.results import clean_json
-    from fund.fund_contracts import nav_records
-    records=nav_records(nav_df)
-    save('nav_snapshot',code,clean_json({'code':code,'records':records,'metadata':nav_df.attrs}))
+    from core.db_compat import upsert_sql
+    from fund.fund_contracts import day, nav_records, now, number
+    from fund.fund_ledger import _save, transaction
+
+    metadata = nav_df.attrs
+    evidence_fields = ('source', 'upstream', 'actions_status', 'unit_nav_kind')
+    evidence = {key: metadata.get(key) for key in evidence_fields}
+    keys = ['code', 'nav_date']
+    columns = ['code', 'nav_date', 'unit_nav', 'acc_nav', 'daily_return']
+    n = 0
+    today = now()[:10]
+    with transaction(write=True) as cur:
+        records = {}
+        if metadata.get('recent_only'):
+            cur.execute("SELECT payload FROM fund_workspace WHERE kind='nav_snapshot' AND item_key=?", (code,))
+            prior = cur.fetchone()
+            if prior:
+                snapshot = json.loads(prior[0])
+                legacy = {key: snapshot.get('metadata', {}).get(key) for key in evidence_fields}
+                records = {row['date']: {'evidence': legacy, **row} for row in snapshot.get('records', [])}
+        for row in nav_records(nav_df):
+            try:
+                when = day(row['date'])
+                number(row.get('unit_nav'), positive=True)
+                if when > today:
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+            values = (code, when, _f(row.get('unit_nav')), _f(row.get('acc_nav')), _f(row.get('daily_return')))
+            sql, ordered = upsert_sql('fund_nav', keys, columns, values)
+            if is_postgres():
+                cur.execute('SAVEPOINT sp_nav')
+            try:
+                cur.execute(sql, ordered)
+            except Exception:
+                if is_postgres():
+                    cur.execute('ROLLBACK TO SAVEPOINT sp_nav')
+            else:
+                records[when] = {**row, 'evidence': evidence}
+                n += 1
+            finally:
+                if is_postgres():
+                    cur.execute('RELEASE SAVEPOINT sp_nav')
+        if n:
+            _save(cur, 'nav_snapshot', code, clean_json(
+                {'code': code, 'records': [records[when] for when in sorted(records)], 'metadata': metadata}
+            ))
     return n
 
 

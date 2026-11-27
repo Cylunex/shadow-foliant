@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta
+
+from core import portfolio_policy
 from scripts import daily_signal_scan
 from application import market_risk_notice
 
@@ -14,6 +17,11 @@ def test_noon_report_leads_with_down_and_reduce(monkeypatch):
         "000002": {"name": "乙", "change_pct": 0.2},
     })
 
+    monkeypatch.setattr(portfolio_policy, 'latest_market_add_signal', lambda: {
+        'action': 'reduce', 'reason': '组合下调仓位',
+        'date': datetime.now(portfolio_policy.SHANGHAI).date().isoformat(),
+        'updated_at': (datetime.now(portfolio_policy.SHANGHAI) - timedelta(seconds=1)).isoformat(),
+    })
     text = daily_signal_scan.noon_report()
 
     assert text.startswith("【A股参考｜午盘｜")
@@ -33,6 +41,7 @@ def test_noon_report_defaults_to_no_action_without_a_clear_move(monkeypatch):
     ]})
     monkeypatch.setattr(daily_signal_scan, "get_portfolio_codes", lambda: [])
 
+    monkeypatch.setattr(portfolio_policy, "latest_market_add_signal", lambda: None)
     text = daily_signal_scan.noon_report()
 
     assert text.startswith("【A股参考｜午盘｜")
@@ -42,6 +51,23 @@ def test_noon_report_defaults_to_no_action_without_a_clear_move(monkeypatch):
 def test_missing_market_is_unknown_not_flat(monkeypatch):
     monkeypatch.setattr(market_risk_notice, "current_indices", lambda now: {"rows": []})
     monkeypatch.setattr(daily_signal_scan, "get_portfolio_codes", lambda: [])
+    monkeypatch.setattr(portfolio_policy, 'latest_market_add_signal', lambda: None)
     text = daily_signal_scan.noon_report()
     assert '盘面判断：待核验' in text
     assert '指数行情不足' in text and '涨跌都不明显' not in text
+
+
+def test_noon_rally_cannot_override_the_effective_hold(monkeypatch):
+    monkeypatch.setattr(market_risk_notice, "current_indices", lambda now: {"rows": [
+        {"name": "上证指数", "change_pct": 2},
+    ]})
+    monkeypatch.setattr(daily_signal_scan, "get_portfolio_codes", lambda: [])
+    monkeypatch.setattr(portfolio_policy, "latest_market_add_signal", lambda: {
+        "action": "hold", "allow_buy": False, "reason": "维持仓位",
+        "date": datetime.now(portfolio_policy.SHANGHAI).date().isoformat(),
+        "updated_at": (datetime.now(portfolio_policy.SHANGHAI) - timedelta(seconds=1)).isoformat(),
+    })
+    report = daily_signal_scan.noon_report()
+    assert "盘面判断：看涨" in report
+    assert "仓位参考：不动。维持仓位" in report
+    assert "仓位参考：加仓" not in report

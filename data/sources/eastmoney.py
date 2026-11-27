@@ -159,7 +159,7 @@ def convertible_bonds() -> List[dict]:
 _LSJZ_URL = "https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize={ps}"
 
 
-def fund_nav(code: str, checkpoint=None) -> pd.DataFrame:
+def fund_nav(code: str, checkpoint=None, *, recent_only: bool = False) -> pd.DataFrame:
     """东财 f10/lsjz JSON 翻页拉全部历史净值(纯 HTTP,无 JS exec)。
     返回标准列 DataFrame[date, unit_nav, acc_nav, daily_return] 升序;空/异常 → 空 DF。
     ⚠️ lsjz 必须带 Referer(否则返空,实测)。"""
@@ -186,7 +186,7 @@ def fund_nav(code: str, checkpoint=None) -> pd.DataFrame:
                 complete = total is not None and len(seen) >= total
                 if not complete: reasons.append('unexpected_empty_page')
                 break
-            if page==1 and checkpoint and checkpoint.get('rows'):
+            if not recent_only and page==1 and checkpoint and checkpoint.get('rows'):
                 prior=checkpoint['rows']
                 if lst[0].get('FSRQ')==prior[0].get('FSRQ') and total==checkpoint.get('total'):
                     rows=list(prior); seen={r.get('FSRQ') for r in rows}
@@ -199,6 +199,10 @@ def fund_nav(code: str, checkpoint=None) -> pd.DataFrame:
             rows.extend(fresh)
             seen.update(r.get('FSRQ') for r in fresh)
             next_page=page+1
+            # A daily refresh only needs the newest page, including the prior NAV.
+            if recent_only:
+                complete = True
+                break
             # Page number uses upstream's effective page size, never requested size.
             if total is not None and len(seen) >= total:
                 complete = True; break
@@ -225,6 +229,7 @@ def fund_nav(code: str, checkpoint=None) -> pd.DataFrame:
     if not complete:
         df.attrs['pagination_checkpoint']={'rows':rows,'next_page':next_page,'total':total}
     df.attrs.update(source='eastmoney_lsjz', upstream='eastmoney', retrieved_at=now(),
+                    recent_only=recent_only,
                     published_at=None, quality={'status': 'ready' if complete else 'partial',
                     'reasons': reasons or ([] if complete else ['unknown_total']), 'total': total})
     return df

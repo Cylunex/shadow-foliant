@@ -54,6 +54,9 @@ _SORT_FIELDS = {
 }
 _TARGET_TOP_N = {'低价擒牛': 5, '低估值': 10, '主力资金': 5,
                  '小市值': 5, '净利增长': 5}
+# These ranks use price or market value sampled during the current session.
+# The flow and profit-growth queries explicitly sort by the previous session.
+CURRENT_SESSION_GROUPS = frozenset(('低价擒牛', '低估值', '小市值'))
 _FINANCIAL_GROUPS = frozenset(('低价擒牛', '低估值', '小市值', '净利增长'))
 _CONDITION_RULES = {
     '低价擒牛': ((0, 'lt', 20.0, 'CNY'), (1, 'ge', 100.0, 'percent')),
@@ -71,6 +74,12 @@ _REPORT_SOURCE_FIELDS = {
 }
 _REPORT_PERIOD = re.compile(r'(20\d{2})年(一季报|中报|三季报|年报)')
 _REPORT_DATES = frozenset(('0331', '0630', '0930', '1231'))
+
+
+def market_date_for_group(name, previous_session, current_session=None):
+    if current_session and name in CURRENT_SESSION_GROUPS:
+        return current_session
+    return previous_session
 
 
 def configured_key() -> str:
@@ -637,14 +646,16 @@ def run_group(name: str, *, session=None, key: str | None = None,
 
 def run_shadow(old_reference: dict | None = None, *, session=None,
                key: str | None = None, group_runner=None,
-               expected_market_as_of: str | None = None) -> dict:
+               expected_market_as_of: str | None = None,
+               current_market_as_of: str | None = None) -> dict:
     """Read-only five-group evaluation; no candidate ranking or trading side effects."""
     old = (old_reference or {}).get('strategies') or {}
     groups = []
     for name in ORDER:
+        group_as_of = market_date_for_group(name, expected_market_as_of, current_market_as_of)
         row = (group_runner(name) if group_runner is not None else
                run_group(name, session=session, key=key,
-                         expected_market_as_of=expected_market_as_of))
+                         expected_market_as_of=group_as_of))
         old_row = old.get(name) or {}
         old_symbols = {_symbol(p) for p in (old_row.get('picks') or []) if isinstance(p, dict)}
         new_symbols = set(row.get('picks') or [])
@@ -666,6 +677,7 @@ def run_shadow(old_reference: dict | None = None, *, session=None,
                    else 'degraded'),
         'executed_at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(timespec='seconds'),
         'expected_market_as_of': expected_market_as_of,
+        'current_market_as_of': current_market_as_of,
         'groups': groups, 'ready_groups': sum(g['status'] == 'complete' for g in groups),
         'semantic_verified_groups': semantic_verified_groups,
         'data_groups': sum(bool(g.get('schema_valid') and g.get('returned_count')) for g in groups),

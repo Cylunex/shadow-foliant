@@ -694,6 +694,19 @@ def test_no_cost_price_replacement_and_no_destructive_ledger_shortcut(db):
     assert fund_db.get_latest_navs()["000001"]["nav_date"] == "2026-10-14"
 
 
+def test_recent_nav_refresh_preserves_other_dates_and_action_status(db):
+    original = nav([1.0, 1.2], dates=["2026-10-14", "2026-10-15"])
+    original.attrs["actions_status"] = "ready"
+    db.save_nav("000001", original)
+    recent = nav([1.1, 1.3], dates=["2026-10-15", "2026-10-16"])
+    recent.attrs.update(recent_only=True, actions_status="partial")
+    db.save_nav("000001", recent)
+    old = db.get_nav_pairs(["000001"], upto_date="2026-10-14")["000001"]
+    latest = db.get_nav_pairs(["000001"], upto_date="2026-10-16")["000001"]
+    assert old["actions_status"] == "ready" and old["unit_nav"] == 1.0
+    assert latest["actions_status"] == "partial" and latest["prev_nav"] == 1.1
+
+
 def test_account_market_valuation_dedup_and_cost_fallback_exclusion():
     from fund.fund_portfolio import merge_market_values
 

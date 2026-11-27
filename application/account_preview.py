@@ -171,9 +171,12 @@ def account_books(days=30):
         period = rows[-days:]
         pnls = [money(r["total_daily_pnl"]) for r in period]
         month = latest["snap_date"][:7]
+        month_rows = [r for r in rows if r["snap_date"].startswith(month)]
         summary = {"latest": latest,
-                   "mtd_pnl": float(sum((money(r["total_daily_pnl"]) for r in rows if r["snap_date"].startswith(month)), money(0))),
+                   "mtd_pnl": float(sum((money(r["total_daily_pnl"]) for r in month_rows), money(0))),
                    "period_pnl": float(sum(pnls, money(0))), "period_days": len(period),
+                   "mtd_partial_fund_days": sum(r.get("fund_pending_count", 0) > 0 for r in month_rows),
+                   "period_partial_fund_days": sum(r.get("fund_pending_count", 0) > 0 for r in period),
                    "win_rate": round(sum(p > 0 for p in pnls) / len(pnls) * 100, 1),
                    "best_day": float(max(pnls)), "worst_day": float(min(pnls))}
     return {"schema_version": "account-books-v1", "scope": "securities_only",
