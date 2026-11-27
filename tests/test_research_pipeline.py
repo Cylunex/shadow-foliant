@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,20 @@ def _sqlite(path):
 
 
 class SourceContractTest(unittest.TestCase):
+    def test_daily_market_rejects_empty_or_wrong_session_before_writing(self):
+        store = Mock()
+        syncer = ResearchSynchronizer(store=store)
+        for frame, error in (
+            (pd.DataFrame(), ResearchSourceUnavailable),
+            (pd.DataFrame({"code": ["600001"]}), ValueError),
+            (pd.DataFrame({"trade_date": ["20261126", "20261127"]}), ValueError),
+        ):
+            with patch.object(zzshare, "get_market_daily", return_value=frame):
+                with self.assertRaises(error):
+                    syncer.sync_day("2026-11-27", refresh_calendar=False)
+            self.assertEqual(store.finish_sync.call_args.kwargs["status"], "error")
+            store.upsert_daily_bars.assert_not_called()
+
     def test_missing_dates_are_rejected_before_calendar_comparison(self):
         quality, detail = _calendar_chunk_quality(
             [(pd.NaT, True), ('2026-08-21', True)], '2026-08-20', '2026-08-21'

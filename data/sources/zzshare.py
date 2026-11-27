@@ -534,7 +534,7 @@ def historical_execution_session(day, symbols):
             "trade_date": day, "provider": "zzshare", "adjustment": "raw", "observed_at": observed,
             "data_class": "reconstructed_history", "source_endpoint": "daily",
             "open": number(row.get("open")), "close": close, "volume": volume,
-            "previous_close": number(row.get("pre_close")),
+            "previous_close": number(row.get("prev_close")) or number(row.get("pre_close")),
             "suspended": suspended,
             "limit_up": number(row.get("high_limit")), "limit_down": number(row.get("low_limit")),
             "execution_rules": asdict(rules),

@@ -142,8 +142,12 @@ def _receipt(ok: bool, message: str) -> dict:
         # A bridge deadline does not prove that the provider rejected the send.
         return {"status": "unknown", "http_status": 504, "provider_code": None,
                 "error_code": "http_timeout_unknown"}
-    rejected = bool(match) or message in {"provider_rejected", "send_failed",
-                                         "webhook 未启用", "feishu 未启用"}
+    if not ok and (message in {"unknown channel", "webhook 未启用", "feishu 未启用",
+                               "当前 webhook_type 不是 dingtalk", "EMAIL_ENABLED 未开",
+                               "NotificationService 无 send_email"} or "未配置" in (message or "")):
+        return {"status": "failed", "http_status": None, "provider_code": None,
+                "error_code": "channel_unavailable"}
+    rejected = bool(match) or message == "provider_rejected"
     return {"status": "accepted" if ok else "failed" if rejected else "unknown",
             "http_status": int(match.group(1)) if match else None,
             "provider_code": "accepted" if ok else "rejected" if rejected else None,
@@ -597,14 +601,14 @@ def send(category: str, title: str, content: str,
                 results.archive_outcomes[ch] = "unknown"
                 log.warning("message archive finish unavailable; source=%s channel=%s", source, ch)
 
+    targets = list(dict.fromkeys(targets))
     for ch in targets:
         attempt(ch)
 
     # 兜底:主渠道全军覆没 → 尝试 fallback。默认 None(不兜底, 保持路由约定)。
     if (fallback and fallback in CHANNELS and fallback not in results
-            and results and not any(ok for ok, _ in results.values())
-            and not any(message.startswith(('archive_', 'HTTP 504'))
-                        for _, message in results.values())):
+            and results and all(_receipt(ok, message)["status"] == "failed"
+                                for ok, message in results.values())):
         attempt(fallback, fallback_from=','.join(targets))
 
     outcomes = set(results.archive_outcomes.values())

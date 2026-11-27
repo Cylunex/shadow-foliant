@@ -98,9 +98,13 @@ def RSI(CLOSE, N=24):
     return RD(SMA(MAX(DIF,0), N) / SMA(ABS(DIF), N) * 100)  
 
 def WR(CLOSE, HIGH, LOW, N=10, N1=6):            #W&R 威廉指标
-    WR = (HHV(HIGH, N) - CLOSE) / (HHV(HIGH, N) - LLV(LOW, N)) * 100
-    WR1 = (HHV(HIGH, N1) - CLOSE) / (HHV(HIGH, N1) - LLV(LOW, N1)) * 100
-    return RD(WR), RD(WR1)
+    def williams(period):
+        high = HHV(HIGH, period)
+        spread = high - LLV(LOW, period)
+        # A flat window has no defined relative price.
+        return RD(np.divide(high - CLOSE, spread, out=np.full_like(high, np.nan),
+                            where=spread != 0) * 100)
+    return williams(N), williams(N1)
 
 def BIAS(CLOSE,L1=6, L2=12, L3=24):              # BIAS乖离率
     BIAS1 = (CLOSE - MA(CLOSE, L1)) / MA(CLOSE, L1) * 100

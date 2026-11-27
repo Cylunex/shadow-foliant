@@ -242,6 +242,25 @@ class ScheduledDependencyTests(unittest.TestCase):
                 jobs_hub.task_research_data_sync()
         log_run.assert_not_called()
 
+    def test_empty_daily_market_names_source_and_retry_in_single_notice(self):
+        syncer = mock.MagicMock()
+        syncer.sync_master.return_value = {'quality_status': 'ok', 'industry_coverage': 1}
+        syncer.sync_day.side_effect = ResearchSourceUnavailable('empty', source='zzshare/daily_market')
+        with mock.patch.object(jobs_hub, '_skip_if_not_trading', return_value=False), \
+                mock.patch('data.research_sync.ResearchSynchronizer', return_value=syncer), \
+                mock.patch('jobs.decision_loop_jobs.refresh_quality') as refresh, \
+                mock.patch.object(jobs_hub, '_log_run') as log_run, \
+                mock.patch.object(jobs_hub, '_notify_data_unavailable') as notify:
+            jobs_hub.task_research_data_sync()
+        self.assertEqual(log_run.call_args.args, ('research_data_sync', 'degraded'))
+        self.assertFalse(log_run.call_args.kwargs['notify'])
+        refresh.assert_called_once_with(syncer.store)
+        notify.assert_called_once()
+        self.assertIn('前复权行情未返回记录', notify.call_args.args[1])
+        self.assertIn('next_retry=20:05', notify.call_args.args[1])
+        self.assertEqual(notify.call_args.kwargs['source'], 'zzshare/daily_market')
+        syncer.store.update_selection_candidate_outcomes.assert_not_called()
+
     def test_research_sync_treats_late_valuation_as_expected_degradation(self):
         syncer = mock.MagicMock()
         syncer.sync_master.return_value = {

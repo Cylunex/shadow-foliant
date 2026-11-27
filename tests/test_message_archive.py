@@ -330,7 +330,8 @@ def test_protected_route_page_detail_and_export_are_read_only(tmp_path, monkeypa
     assert svc.detail(row["message_id"])["deliveries"][0]["status"] == "pending"
 
 
-def test_legacy_dingtalk_route_archives_qq_gateway_timeout_without_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport_timeout", [False, True])
+def test_legacy_dingtalk_route_archives_qq_gateway_timeout_without_fallback(tmp_path, monkeypatch, transport_timeout):
     from types import SimpleNamespace
     import notification_service
 
@@ -344,6 +345,8 @@ def test_legacy_dingtalk_route_archives_qq_gateway_timeout_without_fallback(tmp_
 
     def post(_url, **kwargs):
         calls.append(kwargs)
+        if transport_timeout:
+            raise notification_router.requests.ReadTimeout()
         return SimpleNamespace(status_code=504, json=lambda: {
             "ok": False, "backend": "hermes", "request_id": request_id,
         })
@@ -359,11 +362,12 @@ def test_legacy_dingtalk_route_archives_qq_gateway_timeout_without_fallback(tmp_
     monkeypatch.setattr(notification_router, "archive_action", archive)
     monkeypatch.setitem(notification_router.CHANNELS, "dingtalk", notification_router._send_dingtalk_via_legacy)
     monkeypatch.setitem(notification_router.CHANNELS, "qq", lambda *_: pytest.fail("fallback after unknown"))
-    args = dict(only_channels=["dingtalk"], fallback="qq", source="job.test", idempotency_key="fixture:qq-timeout")
+    args = dict(only_channels=["dingtalk", "dingtalk"], fallback="qq", source="job.test", idempotency_key="fixture:qq-timeout")
     result = notification_router.send("report", "盘后测试", "完整正文", **args)
     notification_router.send("report", "盘后测试", "完整正文", **args)
     assert len(calls) == 1 and calls[0]["timeout"] > 25
     delivery = svc.detail(result.message_id)["deliveries"][0]
     assert (delivery["channel"], delivery["target_label"]) == ("dingtalk", "qq")
-    assert delivery["gateway_request_id"] == request_id
-    assert delivery["status"] == "unknown" and delivery["http_status"] == 504
+    assert delivery.get("gateway_request_id") == (None if transport_timeout else request_id)
+    assert delivery["status"] == "unknown"
+    assert delivery["http_status"] == (None if transport_timeout else 504)

@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
-from data.research_store import ResearchStore
+from data.research_store import ResearchStore, _iso_date
 from data.research_readiness import resolve_valuation, valuation_lag_budget
 from data.sources import akshare, baostock, exchange_holiday_notices, fuyao_aicubes, zzshare
 from data.valuation_sync import ValuationSynchronizer
@@ -24,8 +24,10 @@ _CALENDAR_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 class ResearchSourceUnavailable(RuntimeError):
     """A required research dataset is temporarily unavailable, not a code failure."""
 
-    def __init__(self, message: str, *, result: Optional[dict] = None):
+    def __init__(self, message: str, *, source: str = "valuation/multi-source",
+                 result: Optional[dict] = None):
         super().__init__(message)
+        self.source = source
         self.result = dict(result or {})
 
 
@@ -129,14 +131,18 @@ def _flag(value) -> bool:
 def _normalize_market_bars(frame: pd.DataFrame, trade_date: str) -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
-    out = frame.copy()
-    rename = {
+    aliases = {
         "date": "trade_date", "vol": "volume", "amount": "turnover",
         "pct_chg": "quote_rate",
     }
-    out = out.rename(columns={key: value for key, value in rename.items() if key in out.columns})
-    if "trade_date" not in out.columns:
-        out["trade_date"] = trade_date
+    out = frame.rename(columns={key: value for key, value in aliases.items()
+                                if key in frame and value not in frame})
+    # The request date alone cannot establish the date of the returned bars.
+    if "trade_date" not in out or any(
+        _iso_date(str(day)) != trade_date for day in out["trade_date"].unique()
+    ):
+        raise ValueError("zzshare.daily_market response has missing or mismatched trade_date")
+    out["trade_date"] = trade_date
     if "ts_code" not in out.columns:
         code_col = next((c for c in ("code", "symbol") if c in out.columns), None)
         if code_col:
@@ -464,7 +470,10 @@ class ResearchSynchronizer:
         try:
             frame = _normalize_market_bars(zzshare.get_market_daily(trade_date), trade_date)
             if frame.empty:
-                raise RuntimeError("zzshare.daily_market returned no rows")
+                raise ResearchSourceUnavailable(
+                    "zzshare.daily_market returned no rows", source="zzshare/daily_market",
+                    result={"trade_date": trade_date, "market_quality_status": "unavailable"},
+                )
             self.store.upsert_daily_bars(frame, adjustment="qfq")
             primary_rows = self.store.daily_bar_symbol_count(
                 trade_date, adjustment="qfq", provider="zzshare"
@@ -575,6 +584,10 @@ class ResearchSynchronizer:
                                            "valuation_attempts": result.get("valuation_attempts"),
                                            "fallback_repaired_count": fallback_rows})
             return result
+        except ResearchSourceUnavailable as exc:
+            self.store.finish_sync(run_id, status="error", row_count=0, quality_status="unavailable",
+                                   detail={"error_stage": stage, "source": exc.source, **exc.result})
+            raise
         except Exception as exc:
             self.store.finish_sync(run_id, status="error", row_count=0, quality_status="failed",
                                    detail={"error_type": type(exc).__name__,

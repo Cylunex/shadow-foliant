@@ -1660,7 +1660,7 @@ def _notify_data_unavailable(name: str, detail: str = '', *, source: str = ''):
         # 具体到源:列出当前卡死/冷却中的外部源(datahub _route 各源 + 问财熔断),
         # 让通知不只是笼统的"数据源暂不可用"。
         bad_srcs = [source] if source else _current_unhealthy_sources()
-        src_line = (f"\n⛔ 当前卡死/降级的源:{', '.join(bad_srcs)}" if bad_srcs
+        src_line = (f"\n数据源：{', '.join(bad_srcs)}" if bad_srcs
                     else "\n具体数据源尚未定位，请查看任务日志。")
         title_hint = f" ({bad_srcs[0].split(':')[0].split('×')[0]})" if bad_srcs else ""
         body = (f"任务「{cn}」({name})\n"
@@ -3814,6 +3814,13 @@ def _valuation_unavailable_detail(trade_date, result, *, next_retry):
     )
 
 
+def _research_unavailable_detail(trade_date, exc, *, next_retry):
+    if exc.source == 'zzshare/daily_market':
+        return (f"日K {trade_date}：全市场前复权行情未返回记录，暂不能选股。\n"
+                f"next_retry={next_retry}")
+    return _valuation_unavailable_detail(trade_date, exc.result, next_retry=next_retry)
+
+
 def _research_repair_detail(trade_date, result):
     detail = (
         f"daily_market {trade_date} mode={result.get('repair_mode', 'unknown')} "
@@ -3903,18 +3910,30 @@ def task_research_data_sync():
     started = datetime.now().isoformat()
     stage = 'initialization'
     try:
-        from data.research_sync import ResearchSynchronizer
+        from data.research_sync import ResearchSourceUnavailable, ResearchSynchronizer
         syncer = ResearchSynchronizer()
         stage = 'security_master'
         master = syncer.sync_master()
         stage = 'daily_market'
-        result = syncer.sync_day(datetime.now().strftime('%Y-%m-%d'), fundamentals=True)
+        trade_date = datetime.now().strftime('%Y-%m-%d')
         from jobs.decision_loop_jobs import refresh_quality
+        master_incomplete = (master.get('quality_status') != 'ok'
+                             or float(master.get('industry_coverage') or 0) < .90)
+        try:
+            result = syncer.sync_day(trade_date, fundamentals=True)
+        except ResearchSourceUnavailable as exc:
+            detail = _research_unavailable_detail(trade_date, exc, next_retry='20:05')
+            if master_incomplete:
+                detail = 'security_master_unavailable; ' + detail
+            _log_run(job, 'partial' if master_incomplete else 'degraded',
+                     error=f'source_unavailable: {detail}', started_at=started,
+                     finished_at=datetime.now().isoformat(), notify=False)
+            _notify_data_unavailable(job, detail, source=exc.source)
+            refresh_quality(syncer.store)
+            return
         refresh_quality(syncer.store)
         stage = 'quality_gate'
         detail = _research_sync_detail(result, master)
-        master_incomplete = (master.get('quality_status') != 'ok'
-                             or float(master.get('industry_coverage') or 0) < .90)
         if result.get('quality_status') == 'ok':
             try:
                 stage = 'selection_outcomes'
@@ -3969,8 +3988,8 @@ def task_research_data_sync_retry():
     try:
         result = syncer.repair_daily_market_if_missing(today)
     except ResearchSourceUnavailable as exc:
-        detail = _valuation_unavailable_detail(
-            today, exc.result, next_retry='next_trading_day_08:35'
+        detail = _research_unavailable_detail(
+            today, exc, next_retry='next_trading_day_08:35'
         )
         _log_run(
             job, 'error' if master_unready else 'skipped',
@@ -3978,7 +3997,7 @@ def task_research_data_sync_retry():
                   + f'source_unavailable: {detail}',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, detail, source='valuation/multi-source')
+        _notify_data_unavailable(job, detail, source=exc.source)
         return
     except Exception as exc:
         raise RuntimeError(
@@ -4018,16 +4037,16 @@ def task_research_data_sync_premarket_retry():
         stage = 'lightweight_repair'
         result = syncer.repair_daily_market_if_missing(trade_date)
     except ResearchSourceUnavailable as exc:
-        detail = _valuation_unavailable_detail(
+        detail = _research_unavailable_detail(
             getattr(exc, 'result', {}).get('trade_date') or locals().get('trade_date', 'unknown'),
-            exc.result,
+            exc,
             next_retry='unified_selection_09:45',
         )
         _log_run(
             job, 'skipped', error=f'source_unavailable: {detail}; formal_selection=fail_closed',
             started_at=started, finished_at=datetime.now().isoformat(), notify=False,
         )
-        _notify_data_unavailable(job, detail, source='valuation/multi-source')
+        _notify_data_unavailable(job, detail, source=exc.source)
         return
     except Exception as exc:
         raise RuntimeError(
@@ -5091,12 +5110,12 @@ def task_unified_selection():
         try:
             repair = syncer.repair_daily_market_if_missing(effective_market_date)
         except ResearchSourceUnavailable as exc:
-            detail = _valuation_unavailable_detail(
-                effective_market_date, exc.result, next_retry='next_selection_cycle'
+            detail = _research_unavailable_detail(
+                effective_market_date, exc, next_retry='next_selection_cycle'
             )
             _log_run(job, 'skipped', error=f'source_unavailable: {detail}',
                      started_at=started, finished_at=datetime.now().isoformat(), notify=False)
-            _notify_data_unavailable(job, detail, source='valuation/multi-source')
+            _notify_data_unavailable(job, detail, source=exc.source)
             return
         if repair.get('repaired'):
             print('[unified_selection] 🧰 ' + _research_repair_detail(effective_market_date, repair),

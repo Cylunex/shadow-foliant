@@ -33,6 +33,15 @@ def _qualified_run():
     return prices
 
 
+def test_williams_flat_window_remains_undefined():
+    from data.MyTT import WR
+    prices = np.array([1., 1., 1., 2., 1.])
+    with np.errstate(invalid='raise', divide='raise'):
+        short, long = WR(prices, prices, prices, 2, 3)
+    for values in (short, long):
+        np.testing.assert_equal(values, [np.nan, np.nan, np.nan, 0., 100.])
+
+
 class RiseRolloverTests(unittest.TestCase):
     def test_setup_uses_ten_days_seven_up_and_fifteen_percent(self):
         setup = rise_rollover_setup(_frame(_qualified_run()))

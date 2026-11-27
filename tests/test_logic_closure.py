@@ -225,7 +225,7 @@ def test_historical_zzshare_requires_original_date_and_explicit_pause(monkeypatc
     from jobs.decision_loop_jobs import _execution_fact
 
     day = "2026-09-08"
-    row = dict(ts_code="600001.SH", trade_date="20260908", open=10, close=10, pre_close=9.9,
+    row = dict(ts_code="600001.SH", trade_date="20260908", open=10, close=10, prev_close=9.9,
                volume=100000, high_limit=11, low_limit=9, is_paused=0)
     def daily(trade_date, *, adjust):
         assert trade_date == day and adjust == "raw"
@@ -236,6 +236,7 @@ def test_historical_zzshare_requires_original_date_and_explicit_pause(monkeypatc
     monkeypatch.setattr(zzshare, "get_market_daily", daily)
     facts, detail = zzshare.historical_execution_session(day, {"600001", "600002", "600003", "600004"})
     assert not missing_execution_fields(facts["600001"], day)
+    assert facts["600001"]["previous_close"] == 9.9
     assert facts["600001"]["volume"] == 100000
     assert facts["600002"]["suspended"] and not missing_execution_fields(facts["600002"], day)
     assert "600003" not in facts
