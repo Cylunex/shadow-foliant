@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import re
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,11 @@ def format_eod_models(result: dict) -> str:
         "oldest_pending": result.get("oldest_pending_date"),
         "pending_reason": result.get("pending_reason"),
     }
+    books = result.get("model_books") or {}
+    blockers = {book: books[book]["blocker"] for book in ("top5", "source:formal")
+                if books.get(book, {}).get("blocker")}
+    if blockers:
+        metrics["book_blockers"] = json.dumps(blockers, separators=(",", ":"))
     return " ".join([f"decision_loop={result.get('status', 'missing')}",
                      *[f"model_{key}={value}" for key, value in metrics.items() if value is not None]])
 
@@ -42,6 +48,12 @@ def eod_model_metrics(detail: str) -> dict:
         match = re.search(rf"\bmodel_{name}=({pattern})", detail)
         if match:
             result[f"model_{name}"] = match.group(1)[:80]
+    blockers = re.search(r"\bmodel_book_blockers=(\S+)", detail)
+    if blockers:
+        try:
+            result["model_book_blockers"] = json.loads(blockers.group(1))
+        except ValueError:
+            pass
     return result
 
 

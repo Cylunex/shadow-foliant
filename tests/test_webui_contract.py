@@ -54,6 +54,7 @@ def test_static_assets_are_present_and_versioned():
     assert 'styles.css?v=8' in index
     assert 'app.js?v=8' in index
     assert "A股" in manifest
-    assert "sf-shell-v2" in service_worker
+    assert "sf-shell-v3" in service_worker
+    assert "!resp.redirected" in service_worker
     for asset in ("app.js", "styles.css", "manifest.webmanifest", "sw.js"):
         assert (STATIC / asset).is_file()

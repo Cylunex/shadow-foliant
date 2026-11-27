@@ -532,7 +532,7 @@ def send(category: str, title: str, content: str,
             if qq_bridge_url(NotificationService().config.get("webhook_url") or ""):
                 target_label = "qq"
         channel_content = (_qq_archive_summary(delivery_content)
-                           if category == "archive" and ch == "qq" else delivery_content)
+                           if category == "archive" and (target_label or ch) == "qq" else delivery_content)
         try:
             prepared = archive_action("prepare", {
                 "message_id": message_id, "source": source,
@@ -616,7 +616,7 @@ def send(category: str, title: str, content: str,
 
     # 审计日志:让"实际发到哪些渠道 / 哪些成功"可观察(否则无法验证路由配置生效)
     audit = ' '.join(f'{ch}={"ok" if ok else "❌"}' for ch, (ok, _) in results.items())
-    print(f'[notify] {category} "{title[:40]}" → {audit}', flush=True)
+    print(f'[notify] {category} id={results.message_id or message_id} → {audit}', flush=True)
     return results
 
 

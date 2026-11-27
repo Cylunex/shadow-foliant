@@ -82,7 +82,7 @@ DEFAULT_COST_PCT = 0.2
 def _forward_return(df: pd.DataFrame, trigger_date: str, hold_days: int,
                     cost_pct: float = DEFAULT_COST_PCT,
                     stop_pct: Optional[float] = None,
-                    target_pct: Optional[float] = None) -> Optional[Dict[str, float]]:
+                    target_pct: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """从触发日次日起，持有 hold_days 天的收益统计(借鉴 daily_stock_analysis 双收益)。
 
     返回: {entry_price, exit_price, max_high, min_low, ret_pct(毛), ret_pct_net(扣成本), max_dd_pct,
@@ -110,6 +110,7 @@ def _forward_return(df: pd.DataFrame, trigger_date: str, hold_days: int,
     drawdown = (window['close'].values - cum_max) / cum_max * 100
     max_dd = float(drawdown.min())
     out = {
+        'exit_date': str(window.iloc[-1]['date']),
         'entry_price': round(entry, 2),
         'exit_price': round(exit_p, 2),
         'max_high': round(max_h, 2),

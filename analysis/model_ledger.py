@@ -89,7 +89,7 @@ def apply_corporate_action(ledger, event):
     return value
 
 
-def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False):
+def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False, reconstructed=False):
     value = deepcopy(ledger)
     if value["marks"] and trade_date <= value["marks"][-1]["trade_date"]:
         raise ValueError("model_mark_must_advance")
@@ -123,6 +123,10 @@ def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False)
             "corporate_actions_complete": bool(corporate_actions_complete),
             "status": "verified" if not missing and corporate_actions_complete else "indicative"}
     mark["net_return_pct"] = float((nav / money(value["initial_cash"]) - 1) * 100) if nav is not None else None
+    if value.get("fusion_policy_hash"):
+        mark["fusion_policy_hash"] = value["fusion_policy_hash"]
+    if reconstructed or (value["marks"] and value["marks"][-1].get("data_class") == "reconstructed_history"):
+        mark["data_class"] = "reconstructed_history"
     value["marks"].append(mark)
     observed = [float(v["net_asset_value"]) for v in value["marks"] if v["net_asset_value"] is not None]
     # Missing marks can hide intervening peaks; do not label a partial series MDD.
@@ -130,3 +134,27 @@ def mark_ledger(ledger, *, trade_date, prices, corporate_actions_complete=False)
     value["revision"] += 1
     value["state_hash"] = payload_hash({k: v for k, v in value.items() if k != "state_hash"})
     return value
+
+
+def period_performance(marks, calendar, *, month, through_day):
+    """Require a verified prior close and every completed session in the month."""
+    month_end = [day for day in calendar if day.startswith(month) and day <= through_day]
+    opening = next((day for day in reversed(calendar) if day[:7] < month), None)
+    required = ([opening] if opening else []) + month_end
+    by_date = {mark["trade_date"]: mark for mark in marks}
+    verified = {day for day, mark in by_date.items()
+                if mark.get("status") == "verified" and mark.get("net_asset_value") is not None}
+    missing = [day for day in required if day not in verified]
+    result = {"month": month, "through_date": month_end[-1] if month_end else None,
+              "latest_verified_date": max(verified, default=None), "first_unverified_date": missing[0] if missing else None,
+              "expected_sessions": len(month_end), "verified_sessions": sum(day in verified for day in month_end),
+              "status": "unverifiable", "net_return_pct": None, "max_drawdown_pct": None}
+    if opening in verified and month_end and month_end[-1] in verified:
+        start = by_date[opening]["net_asset_value"]
+        end = by_date[month_end[-1]]["net_asset_value"]
+        result.update(status="partial" if missing else "verified",
+                      net_return_pct=price_metrics(start, [end])["price_return_pct"])
+        if not missing:
+            result["max_drawdown_pct"] = price_metrics(
+                start, [by_date[day]["net_asset_value"] for day in month_end])["close_max_drawdown_pct"]
+    return result

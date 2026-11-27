@@ -48,7 +48,7 @@ def cached_quality(store=None):
 
 
 def _execution_fact(symbol, day, quote, provider):
-    from analysis.decision_evaluation import equity_rules
+    from analysis.decision_evaluation import equity_rules, missing_execution_fields
     from data.valuation_contract import closing_timestamp, number
 
     timestamp = closing_timestamp(quote.get("quote_time") or quote.get("observed_at"), day)
@@ -56,13 +56,59 @@ def _execution_fact(symbol, day, quote, provider):
     prices = {key: number(quote.get(field)) for key, field in (
         ("open", "open"), ("close", "price"), ("limit_up", "limit_up"), ("limit_down", "limit_down"))}
     volume = number(quote.get("volume"))
-    if not timestamp or rules is None or any(not price or price <= 0 for price in prices.values()):
-        return None
-    if volume is None or volume < 0 or prices["limit_up"] < prices["limit_down"]:
-        return None
-    return {"trade_date": day, "adjustment": "raw", **prices, "volume": volume,
+    fact = {"trade_date": day, "adjustment": "raw", **prices, "volume": volume,
+            "previous_close": number(quote.get("last_close")),
             "suspended": volume == 0, "provider": provider,
-            "observed_at": timestamp, "execution_rules": asdict(rules)}
+            "observed_at": timestamp, "execution_rules": asdict(rules) if rules else None}
+    missing = missing_execution_fields(fact, day)
+    if not timestamp:
+        missing.append("same_day_closing_timestamp")
+    if not prices["close"] or prices["close"] <= 0:
+        missing.append("close")
+    return (None, missing or ["no_quote"]) if missing or not quote else (fact, [])
+
+
+def _historical_acquirer(archive):
+    from analysis.decision_evaluation import missing_execution_fields
+    from application.results import payload_hash
+    from data.sources.zzshare import available, historical_execution_session
+
+    remaining = 3
+
+    def acquire(day, symbols):
+        nonlocal remaining
+        if not symbols or not remaining or not available():
+            return {}
+        work_id = archive.repo.enqueue("historical_execution", f"{day}:{payload_hash(sorted(symbols))}",
+                                       {"trade_date": day})
+        work = archive.repo.claim("historical_execution", work_id=work_id, limit=1)
+        if not work:
+            return {}
+        remaining -= 1
+        incoming, detail = historical_execution_session(day, symbols)
+        records = {}
+        gaps = {}
+        for symbol in sorted(symbols):
+            fact = incoming.get(symbol)
+            if fact:
+                coverage = archive.repo.get("corporate_coverage", f"{day}:{symbol}")
+                if coverage:
+                    fact["corporate_coverage"] = coverage
+                    fact["corporate_action_unresolved"] = any(
+                        event.get("ex_date") == day and event.get("status") == "requires_entitlement_and_tax"
+                        for event in coverage.get("events", []))
+                records[(symbol, day)] = fact
+            if missing := missing_execution_fields(fact, day):
+                gaps[symbol] = missing
+        try:
+            facts = archive.record_many(records, historical=True)
+        except Exception as exc:
+            archive.repo.record_work_outcomes([(work[0], {**detail, "archive_error": type(exc).__name__}, False)])
+            raise
+        archive.repo.record_work_outcomes([(work[0], {**detail, "missing": gaps}, not gaps)])
+        return facts
+
+    return acquire
 
 
 def daily_decision_loop(store=None):
@@ -84,7 +130,8 @@ def daily_decision_loop(store=None):
     sessions, _ = archive.pending_sessions(day)
     errors = []
     try:
-        recovered = archive.recover(portfolios, through_day=day, cohorts=service, sessions=sessions)
+        recovered = archive.recover(portfolios, through_day=day, cohorts=service, sessions=sessions,
+                                    acquire=_historical_acquirer(archive))
     except Exception as exc:
         recovered = {}
         errors.append({"component": "historical_settlement", "error_category": type(exc).__name__})
@@ -98,15 +145,19 @@ def daily_decision_loop(store=None):
     symbols = [row["symbol"] for row in work
                if (row["symbol"], day) not in facts]
     acquired = {}
+    diagnostics = {symbol: {} for symbol in symbols}
     for offset in range(0, len(symbols), 80):
         batch = symbols[offset:offset + 80]
+        primary_error = None
         try:
             primary = quotes(batch)
         except Exception as exc:
             primary = {}
-            errors.append({"component": "tencent", "error_category": type(exc).__name__})
+            primary_error = type(exc).__name__
+            errors.append({"component": "tencent", "error_category": primary_error})
         for symbol in batch:
-            fact = _execution_fact(symbol, day, primary.get(symbol, {}), "tencent")
+            fact, missing_fields = _execution_fact(symbol, day, primary.get(symbol, {}), "tencent")
+            diagnostics[symbol]["tencent"] = missing_fields if primary.get(symbol) else [primary_error or "no_quote"]
             if fact:
                 acquired[(symbol, day)] = fact
         missing = [symbol for symbol in batch if (symbol, day) not in acquired]
@@ -116,16 +167,18 @@ def daily_decision_loop(store=None):
                 fallback = routed_quotes(missing)
                 for symbol in missing:
                     quote = fallback.get(symbol, {})
-                    fact = _execution_fact(symbol, day, quote, quote.get("provider") or "datahub")
+                    fact, missing_fields = _execution_fact(symbol, day, quote, quote.get("provider") or "datahub")
+                    diagnostics[symbol]["routed_quotes"] = missing_fields if quote else ["no_quote"]
                     if fact:
                         acquired[(symbol, day)] = fact
             except Exception as exc:
                 errors.append({"component": "routed_quotes", "error_category": type(exc).__name__})
-    for (symbol, session), fact in acquired.items():
-        facts[(symbol, session)] = archive.record(symbol, session, fact)
-    for row in work:
-        if (row["symbol"], row["trade_date"]) in facts:
-            archive.repo.finish(row["work_id"])
+                for symbol in missing:
+                    diagnostics[symbol]["routed_quotes"] = [type(exc).__name__]
+    facts.update(archive.record_many(acquired))
+    archive.repo.record_work_outcomes([
+        (row, {"providers": diagnostics.get(row["symbol"], {})}, (row["symbol"], row["trade_date"]) in facts)
+        for row in work])
     from application.reliability_jobs import refresh_corporate_evidence
     try:
         corporate = refresh_corporate_evidence(service.store, requested_symbols, day=day, now=now.isoformat())
@@ -140,7 +193,8 @@ def daily_decision_loop(store=None):
                     "corporate_action_unresolved": bool(coverage.get("gaps"))}
             facts[key] = archive.record(key[0], key[1], fact)
     settled = service.settle_models(facts, now=now.isoformat())
-    model_books = portfolios.advance(facts, now=now.isoformat())
+    model_books = portfolios.advance(facts, now=now.isoformat(),
+                                     recorded_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat())
     from application.reliability_jobs import refresh_reliability
     try:
         # Historical revision replay can rebuild entire frozen selections and is
@@ -164,6 +218,7 @@ def daily_decision_loop(store=None):
             "oldest_pending_date": pending_day, "pending_reason": pending_reason, "waiting_books": waiting_books,
             "settled": settled, "execution_fact_count": len(facts),
             "execution_queue": archive.repo.work_status("execution"), "requested_count": len(requested_symbols),
+            "historical_execution_queue": archive.repo.work_status("historical_execution"),
             "recovered_original_sessions": recovered,
             "reliability": reliability, "corporate_evidence": corporate,
             "model_books": model_books,

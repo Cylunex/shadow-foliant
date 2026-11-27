@@ -117,7 +117,7 @@ class ReliabilityStore:
                         canonical_time(available_at) if available_at else utcnow(), json.dumps(payload, allow_nan=False), utcnow()))
         return identity
 
-    def claim(self, kind, *, limit=160, now=None, max_attempts=3, trade_date=None, symbols=None):
+    def claim(self, kind, *, limit=160, now=None, max_attempts=3, trade_date=None, symbols=None, work_id=None):
         # No 'running' lease: reservation consumes one attempt; after a crash the
         # existing Run can retry the same id after its bounded backoff.
         from datetime import timedelta
@@ -134,6 +134,9 @@ class ReliabilityStore:
         if trade_date is not None:
             scope += f" AND {field('trade_date')}=?"
             params += (trade_date,)
+        if work_id is not None:
+            scope += " AND work_id=?"
+            params += (work_id,)
         if symbols is not None:
             if not symbols:
                 return []
@@ -156,6 +159,18 @@ class ReliabilityStore:
         with self.transaction() as cur:
             cur.execute("UPDATE research_reliability_work SET state=?,updated_at=? WHERE work_id=?",
                         (state, utcnow(), identity))
+
+    def record_work_outcomes(self, outcomes):
+        if not outcomes:
+            return
+        with self.transaction() as cur:
+            for row, details, complete in outcomes:
+                payload = {key: value for key, value in row.items() if key not in {"work_id", "attempt"}}
+                payload["last_outcome"] = details
+                cur.execute("UPDATE research_reliability_work SET payload=?,state=?,updated_at=? "
+                            "WHERE work_id=? AND state='pending' AND attempts=?",
+                            (json.dumps(payload, allow_nan=False), "complete" if complete else "pending",
+                             utcnow(), row["work_id"], row["attempt"]))
 
     def work_status(self, kind):
         conn = self.store.connect()

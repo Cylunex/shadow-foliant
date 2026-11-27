@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import json
 from application.results import payload_hash
-from analysis.decision_evaluation import ExecutionRules, simulate_fill
+from analysis.decision_evaluation import ExecutionRules, missing_execution_fields, simulate_fill
 from analysis.factor_ast import fingerprint
 from analysis.research_governance import HYPOTHESES, evidence_summary
 
@@ -196,8 +196,9 @@ class DecisionLoopService:
                         else f"json_extract(payload,'$.{name}')")
 
             by_day = {}
-            for symbol, day in execution_facts:
-                by_day.setdefault(day, []).append(symbol)
+            for (symbol, day), fact in execution_facts.items():
+                if not missing_execution_fields(fact, day):
+                    by_day.setdefault(day, []).append(symbol)
             predicates = ["recording_mode='backfilled'"]
             params = [now[:10]]
             for day, symbols in sorted(by_day.items()):
@@ -225,8 +226,10 @@ class DecisionLoopService:
                 fact = execution_facts.get((order["symbol"], execution_day))
                 if order["recording_mode"] != "contemporaneous":
                     result = {"status": "unfilled", "reason": "backfilled_not_forward"}
-                elif fact is None:
+                elif order["symbol"] not in by_day.get(execution_day, ()):
                     continue  # Missing original facts are recoverable, not an expired trading signal.
+                elif fact.get("suspended"):
+                    result = {"status": "unfilled", "reason": "suspended"}
                 else:
                     from decimal import Decimal
                     try:
@@ -500,7 +503,11 @@ class DecisionLoopService:
         return {"status": "rolled_back", "proposal_id": proposal["proposal_id"], "target": target_hash}
 
     def dashboard(self):
+        from analysis.model_ledger import period_performance
+        from application.model_portfolios import market_time, target_execution_at
         from application.research_cases import ResearchCases
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        through_day = (now.date() - timedelta(days=now.hour < 15)).isoformat()
         conn = self.store.connect()
         try:
             cur = conn.cursor()
@@ -526,12 +533,45 @@ class DecisionLoopService:
             cur.execute("SELECT payload FROM research_artifacts WHERE artifact_kind='committee-reservation' "
                         "ORDER BY created_at DESC LIMIT 1")
             reservation = cur.fetchone()
+            cur.execute("SELECT trade_date FROM research_trade_calendar ORDER BY trade_date")
+            calendar = [str(row[0]) for row in cur.fetchall()]
+            cur.execute("SELECT baseline,target_id,payload FROM research_model_targets WHERE state='pending'")
+            pending = {}
+            for baseline, target_id, raw in cur.fetchall():
+                target = _decode(raw)
+                if target.get("recording_mode") != "contemporaneous":
+                    continue
+                counts = pending.setdefault(baseline, {"due": 0, "not_due": 0, "calendar_unresolved": 0})
+                execution = target_execution_at(target, calendar)
+                if not execution:
+                    counts["calendar_unresolved"] += 1
+                    continue
+                execution = market_time(execution).isoformat()
+                if market_time(execution) > now:
+                    counts["not_due"] += 1
+                    continue
+                counts["due"] += 1
+                if (execution, target_id) < counts.get("oldest", ("~", "")):
+                    counts["oldest"] = (execution, target_id)
             cur.execute("SELECT baseline,payload FROM research_model_portfolios ORDER BY baseline")
             model_books = []
             for baseline, payload in cur.fetchall():
                 ledger = _decode(payload)
+                counts = pending.get(baseline, {})
+                oldest = counts.get("oldest")
+                blocker = ledger.get("settlement_blocker")
+                if not blocker and oldest:
+                    blocker = {"stage": "target_pending", "trade_date": oldest[0][:10], "target_id": oldest[1]}
+                latest = ledger["marks"][-1].copy() if ledger["marks"] else None
+                performance = period_performance(ledger["marks"], calendar, month=now.date().isoformat()[:7],
+                                                 through_day=through_day)
+                if latest and (blocker or len(ledger["marks"]) < 2 or latest.get("status") != "verified"
+                               or latest["trade_date"] < (performance["through_date"] or through_day)):
+                    latest.update(net_return_pct=None, nav_max_drawdown_pct=None)
                 model_books.append({"baseline": baseline, "revision": ledger["revision"],
-                                    "latest": ledger["marks"][-1] if ledger["marks"] else None,
+                                    "latest": latest, "period_performance": performance, "blocker": blocker,
+                                    "pending_targets": {key: counts.get(key, 0)
+                                                        for key in ("due", "not_due", "calendar_unresolved")},
                                     "fees_paid": ledger["fees"], "mark_count": len(ledger["marks"])})
             return {"schema_version": "decision-loop-dashboard-v1", "scope": "research",
                     "research_cases": ResearchCases(self.store).view(),

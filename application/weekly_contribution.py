@@ -168,9 +168,15 @@ def weekly_contribution(store, *, week_of=None, now=None):
         book = cur.fetchone()
         available = book and shanghai_instant(book[1]) and shanghai_instant(book[1]) <= now
         closed = now.date() if now.time() >= time(15) else now.date() - timedelta(days=1)
-        marks = [m for m in (_decode(book[0]).get("marks", []) if available else [])
-                 if start.isoformat() <= m["trade_date"] <= min(end, closed).isoformat()]
+        ledger = _decode(book[0]) if available else {}
+        through_day = min(end, closed).isoformat()
+        history = [m for m in ledger.get("marks", []) if m["trade_date"] <= through_day]
+        marks = [m for m in history if start.isoformat() <= m["trade_date"]]
         mark = max(marks, key=lambda m: m["trade_date"]) if marks else None
+        blocker = ledger.get("settlement_blocker")
+        if mark and (len(history) < 2 or mark.get("status") != "verified" or
+                     (blocker and blocker["trade_date"] <= through_day)):
+            mark = {**mark, "net_return_pct": None}
     finally:
         conn.close()
     reviews = [r for b in batches for r in b["reviews"]]

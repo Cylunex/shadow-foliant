@@ -261,7 +261,7 @@ def _log_run(job_name: str, status: str, error: str = None,
     # _log_run('error') 的路径仍默认推送,保证那条是唯一告警。
     if status == 'error' and error and notify:
         try:
-            _push_error(f'⚠️ 任务异常: {job_name}', f'{error[:500]}')
+            _notify_task_error(job_name)
         except Exception:
             pass
 
@@ -802,10 +802,8 @@ def task_daily_backtest(*, retry_only=False):
                 'results': [],
             }
 
-        # 样本外切分:近 _HOLDOUT_DAYS 天的触发为 holdout(out-of-sample),其余为 train。
-        # 单次回测拿全样本 trades,再按 trigger_date 切两段(不翻倍回测)。train 驱动适应度/进化,
-        # holdout 入库供 get_live_strategy_set 的部署门(只有样本外也成立的变体才上线)。
-        from analysis.genome_bt_worker import portfolio_batch
+        # 完整持仓窗口须落在同一段。跨切分点的交易不参与拟合或样本外评估。
+        from analysis.genome_bt_worker import pooled_returns, portfolio_batch
         tasks = [(code, name, df, all_variants, plan['split_date'], n_pool)
                  for code, name, df in valid_stocks]
         cancel_event = _TASK_CANCEL_EVENTS.get(job)
@@ -848,32 +846,25 @@ def task_daily_backtest(*, retry_only=False):
 
             # 聚合统计(dd 同样只算有触发的股票:零交易股 max_dd=0,混入会把 avg_dd 稀释到近 0,
             # 20% 回撤风险项被架空、进化重新偏好深回撤变体;2026-07-16 修,与 wr/ar 口径对齐)
-            wr_all = [r['win_rate'] for r in results if r['trigger_count'] > 0]
-            ar_all = [r['avg_ret'] for r in results if r['trigger_count'] > 0]
             dd_all = [r['max_dd'] for r in results if r['trigger_count'] > 0]
             best_all = [r['best_ret'] for r in results if r['trigger_count'] > 0]
             worst_all = [r['worst_ret'] for r in results if r['trigger_count'] > 0]
 
-            avg_wr = sum(wr_all) / len(wr_all) if wr_all else 0
-            avg_ar = sum(ar_all) / len(ar_all) if ar_all else 0
+            avg_wr, avg_ar, total_trades = pooled_returns(results)
+            avg_wr, avg_ar = avg_wr or 0, avg_ar or 0
             avg_dd = sum(dd_all) / len(dd_all) if dd_all else 0
             best_ret = max(best_all) if best_all else 0
             worst_ret = min(worst_all) if worst_all else 0
 
-            # 样本外聚合(只统计 holdout 有触发的股票)
-            ho_wr_all = [r['ho_wr'] for r in results if r.get('ho_n', 0) > 0]
-            ho_ar_all = [r['ho_ar'] for r in results if r.get('ho_n', 0) > 0]
-            ho_trig = sum(r.get('ho_n', 0) for r in results)
-            ho_avg_wr = round(sum(ho_wr_all) / len(ho_wr_all), 1) if ho_wr_all else None
-            ho_avg_ar = round(sum(ho_ar_all) / len(ho_ar_all), 2) if ho_ar_all else None
+            holdout_wr, holdout_ar, ho_trig = pooled_returns(results, holdout=True)
+            ho_avg_wr = round(holdout_wr, 1) if holdout_wr is not None else None
+            ho_avg_ar = round(holdout_ar, 2) if holdout_ar is not None else None
 
-            # 更新变体适应度(零触发也更新:trigger_count=0 让它有低分,可被淘汰,而非永远 NULL 待评估)
-            _total_trades = sum(r['trigger_count'] for r in results)
             update_variant_fitness(
                 sr['variant_id'], avg_wr, avg_ar, avg_dd,
                 trigger_count=n_triggered, sample_stocks=len(results),
                 holdout_win_rate=ho_avg_wr, holdout_avg_ret=ho_avg_ar, holdout_trigger=ho_trig,
-                confidence_n=_total_trades,
+                confidence_n=total_trades,
             )
             if n_triggered == 0:
                 continue
@@ -881,7 +872,7 @@ def task_daily_backtest(*, retry_only=False):
             # confidence_n=总交易笔数(置信收缩按笔数立论;trigger_count 仍传触发股票数供触发率项)
             v_score = compute_strategy_score(avg_wr, avg_ar, n_triggered,
                                              max_trigger=n_pool, sample_stocks=len(results),
-                                             max_dd=avg_dd, confidence_n=_total_trades)
+                                             max_dd=avg_dd, confidence_n=total_trades)
             prev = per_strategy_best.get(sr['strategy_id'])
             if prev is None or v_score > prev['score']:
                 per_strategy_best[sr['strategy_id']] = {
@@ -1572,7 +1563,7 @@ _ERR_NOTIFY_LAST: Dict[str, float] = {}
 _ERR_NOTIFY_COOLDOWN = 7200  # 2h
 
 
-def _notify_task_error(name: str, exc: Exception, tb: str):
+def _notify_task_error(name: str):
     """任务失败 → 推一条告警(默认 QQ),便于第一时间发现+后续修复。同任务 2h 内限一条。"""
     try:
         now = time.time()
@@ -1585,11 +1576,9 @@ def _notify_task_error(name: str, exc: Exception, tb: str):
             cn = REGISTRY.get(name, {}).get('cn', name)
         except Exception:
             pass
-        body = (f"任务「{cn}」({name}) 执行失败\n"
-                f"{type(exc).__name__}: {str(exc)[:300]}\n\n"
-                f"——traceback 尾——\n{tb[-600:]}")
+        body = f"任务「{cn}」({name}) 执行失败，详情见任务运行记录。"
         from notification_router import send
-        send('alert', f"⚠️ 任务失败: {name}", body)
+        send('system_error', f"⚠️ 任务失败: {name}", body)
     except Exception:
         pass  # 通知失败绝不影响主流程
 
@@ -1682,10 +1671,10 @@ def _notify_execution_timeout(name: str, elapsed: float, timeout: int):
         from notification_router import send
         minutes = timeout / 60
         if name == 'wf_weekly_backtest':
-            send('alert', '周末回测超时',
+            send('system_error', '周末回测超时',
                  f'周末回测运行超过 {minutes:g} 分钟，本次未生成报告。')
         else:
-            send('alert', f'任务超时｜{cn}',
+            send('system_error', f'任务超时｜{cn}',
                  f'{cn}运行超过 {minutes:g} 分钟，本次执行已停止。')
     except Exception:
         pass
@@ -1813,7 +1802,7 @@ def _run_with_log(name, func, *a, **kw):
             _log_run(name, 'error', error=f'isolated_task_failed:{category}{suffix}',
                      started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
                      finished_at=datetime.now().astimezone().isoformat(), notify=False)
-            _notify_task_error(name, RuntimeError(reason or category), '')
+            _notify_task_error(name)
             return
         outcome = _latest_job_run_since(
             name, datetime.fromtimestamp(t0).astimezone().isoformat()
@@ -1832,15 +1821,13 @@ def _run_with_log(name, func, *a, **kw):
         else:
             print(f'[jobs_hub] ✅ {name} 完成 (耗时 {elapsed:.1f}s)', flush=True)
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
         elapsed = time.time() - t0
         print(f'[jobs_hub] ❌ {name} 失败 (耗时 {elapsed:.1f}s): '
               f'{type(e).__name__}: {str(e)[:120]}', flush=True)
         _log_run(name, 'error', error=f'task_runtime_failed:{type(e).__name__}',
                  started_at=datetime.fromtimestamp(t0).astimezone().isoformat(),
                  finished_at=datetime.now().astimezone().isoformat(), notify=False)
-        _notify_task_error(name, e, tb)
+        _notify_task_error(name)
     finally:
         with _TASK_LOCK:
             _TASK_START_TS.pop(name, None)

@@ -23,16 +23,21 @@ export default {
       <div v-if="s.previous && s.previous!==s.data.capsule.capsule_id" class="notice">正式上下文已变化，旧行动预览需要重新计算。</div>
     </div></div>
     <div class="table-wrap" v-if="s.data?.model_orders?.length"><table>
-      <thead><tr><th>对照组</th><th>执行状态</th><th>数量</th></tr></thead>
+      <thead><tr><th>独立批次模拟</th><th>执行状态</th><th>数量</th></tr></thead>
       <tbody><tr v-for="r in s.data.model_orders" :key="r.baseline+r.state"><td>{{baseline(r.baseline)}}</td><td>{{status(r.state)}}</td><td>{{r.count}}</td></tr></tbody>
     </table></div>
     <div v-else class="empty-state">模型账本会从新版本发布后的正式选股开始累计。</div>
     <div class="table-wrap" v-if="s.data?.model_books?.length"><table>
-      <thead><tr><th>连续模型账户</th><th>净收益</th><th>净值回撤</th><th>数据口径</th></tr></thead>
+      <thead><tr><th>连续模型账户</th><th>本月扣费后收益</th><th>本月最大回撤</th><th>核验进度</th></tr></thead>
       <tbody><tr v-for="r in s.data.model_books" :key="r.baseline"><td>{{baseline(r.baseline)}}</td>
-        <td :class="cls(r.latest?.net_return_pct)">{{percent(r.latest?.net_return_pct)}}</td>
-        <td :class="cls(r.latest?.nav_max_drawdown_pct)">{{percent(r.latest?.nav_max_drawdown_pct)}}</td>
-        <td>{{r.latest?.status==='verified'?'已核实':r.latest?'参考净值：公司行为或行情待核实':'等待首次执行'}}</td></tr></tbody>
+        <td :class="cls(r.period_performance?.net_return_pct)">{{r.period_performance?.net_return_pct == null ? '不可核验' : percent(r.period_performance.net_return_pct)}}</td>
+        <td :class="cls(r.period_performance?.max_drawdown_pct)">{{r.period_performance?.max_drawdown_pct == null ? '不可核验' : percent(r.period_performance.max_drawdown_pct)}}</td>
+        <td>最近核验日 {{r.period_performance?.latest_verified_date ?? '—'}}
+          <div v-if="r.blocker">{{r.blocker.trade_date}} · {{bookBlocker(r.blocker.stage)}}</div>
+          <details v-if="r.blocker?.missing"><summary>查看缺失字段</summary>
+            <div v-for="(fields,symbol) in r.blocker.missing" :key="symbol">{{symbol}} · {{fields.join('、')}}</div>
+          </details>
+        </td></tr></tbody>
     </table></div>
     <div class="table-wrap" v-if="s.data?.experiments?.length"><table>
       <thead><tr><th>假设</th><th>状态</th><th>有效样本</th><th>净超额下界</th></tr></thead>
@@ -136,6 +141,13 @@ export default {
     function selectFacts(preview){s.accountRows=JSON.stringify(preview.rows,null,2);s.accountPreview={...preview,input:s.accountRows};s.accountMessage='请核对以下 '+preview.rows.length+' 条记录后确认'}
     async function previewFacts(){try{s.accountPreview=await post('/api/portfolio/account-facts/preview',{rows:JSON.parse(s.accountRows)});s.accountMessage='预览 '+s.accountPreview.rows.length+' 条，尚未入账';s.accountPreview.input=s.accountRows}catch(e){s.accountMessage=String(e)}}
     async function confirmFacts(){if(!s.accountPreview)return;if(s.accountPreview.input!==s.accountRows){s.accountMessage='输入已变化，请重新预览';return}try{const r=await post('/api/portfolio/account-facts/confirm',{preview_id:s.accountPreview.object_id,confirm:true});s.accountMessage='已确认 '+r.count+' 条；未据此推算完整账户收益';s.accountPreview=null}catch(e){s.accountMessage=String(e)}}
-    return {s,status,baseline,bookName,hypothesis,percent,action,thesisStatus,editor,editorState,selectDraft,isSaved,hasChanges,resetEditor,load,preview,cls,fmt,saveThesis,lockThesis,loadPrivate,previewFacts,confirmFacts,acknowledge,loadFacts,selectFacts}
+    const bookBlocker = stage => ({
+      target_pending: '调仓待处理',
+      original_session_required: '等待回放原定交易日',
+      execution_evidence: '缺原日成交依据',
+      earlier_close_required: '缺前序净值',
+      close_valuation: '缺收盘估值'
+    })[stage] || '等待结算'
+    return {s,status,baseline,bookName,bookBlocker,hypothesis,percent,action,thesisStatus,editor,editorState,selectDraft,isSaved,hasChanges,resetEditor,load,preview,cls,fmt,saveThesis,lockThesis,loadPrivate,previewFacts,confirmFacts,acknowledge,loadFacts,selectFacts}
   }
 }

@@ -321,8 +321,10 @@ def strategy_validation_facts(dashboard, store):
         return value
     experiments = [{k: trial[k] for k in ("trial_id", "hypothesis_id", "state", "status", "protocol", "evaluation") if k in trial}
                    for trial in (dashboard.get("experiments") or [])[:20]]
+    books = dashboard.get("model_books") or []
+    books = sorted(books, key=lambda book: book.get("baseline") not in {"top5", "source:formal"})
     public = {"policy_timeline": bounded(dashboard.get("policy_timeline")),
-              "experiments": bounded(experiments), "model_books": bounded(dashboard.get("model_books")),
+              "experiments": bounded(experiments), "model_books": bounded(books),
               "projection": "bounded aggregate evidence; raw factor arrays omitted; full source remains in Foliant",
               "signal_outcomes": {}}
     fields = ("strategy_id", "strategy_version", "metric_version", "lane", "sample_size", "independent_dates",

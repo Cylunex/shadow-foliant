@@ -1,7 +1,7 @@
 """Prospective one-session, equal-cash research pairs using archived execution facts."""
 from dataclasses import asdict
 from datetime import datetime, time
-from analysis.decision_evaluation import ExecutionRules, money, simulate_fill, unit_price
+from analysis.decision_evaluation import ExecutionRules, missing_execution_fields, money, simulate_fill, unit_price
 from analysis.model_ledger import apply_fill, empty_ledger, mark_ledger
 from application.market_prices import SHANGHAI, shanghai_instant
 from application.results import payload_hash
@@ -78,6 +78,9 @@ def evaluate_pair(target, facts, now):
         budget = money(target["initial_cash"]) / len(target[side])
         for symbol in target[side]:
             fact = facts[symbol]
+            if fact.get("suspended"):
+                fills.append({"symbol": symbol, "status": "unfilled", "reason": "suspended"})
+                continue
             rules = ExecutionRules(**fact["execution_rules"])
             qty = int(budget / unit_price(fact["open"])) // rules.buy_step * rules.buy_step
             order = {"side": "buy", "quantity": qty, "published_at": target["recorded_at"],
@@ -111,7 +114,6 @@ def _complete(fact, day, now):
             or not asdict(ExecutionRules()).keys() <= fact["execution_rules"].keys()):
         return False
     try:
-        ExecutionRules(**fact["execution_rules"])
-        return unit_price(fact["open"]) > 0 and unit_price(fact["close"]) > 0
+        return not missing_execution_fields(fact, day) and unit_price(fact["close"]) > 0
     except (ArithmeticError, ValueError, TypeError, KeyError):
         return False

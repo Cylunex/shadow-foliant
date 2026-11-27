@@ -1,8 +1,11 @@
 """Immutable dated execution facts and fair bounded acquisition work."""
-from bisect import bisect_right
 from collections import defaultdict
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from analysis.decision_evaluation import missing_execution_fields
+from application.model_portfolios import dated_price, market_time, target_execution_at
 from data.reliability_store import ReliabilityStore
 from application.results import payload_hash
 
@@ -17,17 +20,33 @@ class SettlementEvidence:
                               priority=0 if symbol in held else 1)
 
     def record(self, symbol, day, fact):
-        if fact.get("trade_date") != day or fact.get("adjustment") != "raw" or not fact.get("provider"):
-            raise ValueError("invalid_execution_fact")
+        return self.record_many({(symbol, day): fact})[(symbol, day)]
+
+    def record_many(self, records, *, historical=False):
         from data.corporate_actions import coverage_complete
-        fact = {**fact, "corporate_actions_complete": coverage_complete(fact.get("corporate_coverage"),
-            symbol=symbol, day=day, events=fact.get("corporate_actions") or [])}
-        identity = f"{day}:{symbol}"
-        old = self.repo.get("execution_fact", identity)
-        content = {**fact, "symbol": symbol, "fact_hash": payload_hash(fact)}
-        if old and old.get("fact_hash") == content["fact_hash"]:
-            return old
-        return self.repo.put("execution_fact", identity, content, expected_revision=(old or {}).get("revision", 0))
+        result = {}
+        if not records:
+            return result
+        with self.repo.transaction() as cur:
+            for (symbol, day), fact in records.items():
+                if fact.get("trade_date") != day or fact.get("adjustment") != "raw" or not fact.get("provider"):
+                    raise ValueError("invalid_execution_fact")
+                fact = {**fact, "corporate_actions_complete": coverage_complete(fact.get("corporate_coverage"),
+                    symbol=symbol, day=day, events=fact.get("corporate_actions") or [])}
+                identity = f"{day}:{symbol}"
+                old = self.repo.read(cur, "execution_fact", identity, "research")
+                content = {**fact, "symbol": symbol, "fact_hash": payload_hash(fact)}
+                if old and (old.get("fact_hash") == content["fact_hash"] or
+                            historical and not missing_execution_fields(old, day) and dated_price(old, day, "close")
+                            and (not old.get("suspended") or dated_price(old, day, "previous_close"))):
+                    result[(symbol, day)] = old
+                else:
+                    result[(symbol, day)] = self.repo.append(cur, "execution_fact", identity, "research", content, old)
+                if historical and not missing_execution_fields(result[(symbol, day)], day):
+                    execution_id = payload_hash({"kind": "execution", "key": identity})
+                    cur.execute("UPDATE research_reliability_work SET state='complete' WHERE work_id=? AND state='pending'",
+                                (execution_id,))
+        return result
 
     def facts(self, symbols, day):
         keys = [f"{day}:{symbol}" for symbol in sorted(set(symbols))]
@@ -65,13 +84,11 @@ class SettlementEvidence:
                 item = json.loads(raw)
                 if item.get("recording_mode") != "contemporaneous":
                     continue
-                day = (item.get("earliest_execution_at") or "")[:10]
-                if not day:
-                    index = bisect_right(calendar, item["published_at"][:10])
-                    if index == len(calendar):
-                        unresolved += 1
-                        continue
-                    day = calendar[index]
+                execution = target_execution_at(item, calendar)
+                if not execution:
+                    unresolved += 1
+                    continue
+                day = market_time(execution).date().isoformat()
                 if day <= through_day:
                     sessions[day].update([symbol] if symbol else item["weights"])
             return dict(sessions), unresolved
@@ -88,25 +105,73 @@ class SettlementEvidence:
             "arms": {"hold": deepcopy(initial), "incumbent": deepcopy(initial), "proposed": deepcopy(initial)},
             "policies": {"incumbent": old_policy, "proposed": new_policy}, "status": "registered"})
 
-    def recover(self, portfolios, *, through_day, cohorts=None, sessions=None):
-        """Replay archived original sessions in order, without enqueuing unserviceable dates."""
-        if sessions is None:
-            sessions, _ = self.pending_sessions(through_day)
+    def _recovery_days(self, through_day):
         conn = self.repo.store.connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT DISTINCT substr(object_id,1,10) FROM research_reliability_records "
-                        "WHERE kind='execution_fact' AND owner_id='research' AND substr(object_id,1,10)<?",
-                        (through_day,))
-            archived_days = {str(row[0]) for row in cur.fetchall()}
+            cur.execute("SELECT trade_date FROM research_trade_calendar WHERE trade_date<=? ORDER BY trade_date", (through_day,))
+            calendar = [str(row[0]) for row in cur.fetchall()]
+            cur.execute("SELECT baseline,payload FROM research_model_targets WHERE state='pending'")
+            earliest = {}
+            for baseline, raw in cur.fetchall():
+                target = json.loads(raw)
+                if target.get("recording_mode") != "contemporaneous":
+                    continue
+                execution = target_execution_at(target, calendar)
+                if execution:
+                    day = market_time(execution).date().isoformat()
+                    earliest[baseline] = min(earliest.get(baseline, through_day), day)
+            cur.execute("SELECT baseline,payload FROM research_model_portfolios")
+            candidates = set()
+            for baseline, raw in cur.fetchall():
+                ledger = json.loads(raw)
+                marks = ledger["marks"]
+                if baseline.startswith("policyarm:") and len(marks) >= 120:
+                    continue
+                next_day = earliest.get(baseline, through_day)
+                blocker = ledger.get("settlement_blocker") or {}
+                if blocker.get("stage") == "close_valuation":
+                    next_day = min(next_day, blocker["trade_date"])
+                if marks:
+                    last_day = marks[-1]["trade_date"]
+                    next_day = min(next_day, next((date for date in calendar if date > last_day), through_day))
+                if next_day < through_day:
+                    candidates.add(next_day)
+            return candidates
         finally:
             conn.close()
+
+    def recover(self, portfolios, *, through_day, cohorts=None, sessions=None, acquire=None):
+        """Advance each book in trading-day order with bounded historical acquisition."""
+        if sessions is None:
+            sessions, _ = self.pending_sessions(through_day)
         result = {}
-        for day in sorted(archived_days.intersection(sessions))[:10]:
-            symbols = sessions[day] | set(portfolios.symbols(include_targets=False))
+        recorded_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+        historical = sorted(day for day in sessions if day < through_day)
+        examined = set()
+        initial_days = self._recovery_days(through_day)
+        for _ in range(10):
+            book_days = self._recovery_days(through_day)
+            candidates = (book_days & initial_days) - examined or book_days - examined
+            if not candidates:
+                candidates = set(historical) - examined
+            if not candidates:
+                break
+            day = min(candidates)
+            examined.add(day)
+            held = set(portfolios.symbols(include_targets=False))
+            session_symbols = sessions.get(day, set())
+            symbols = session_symbols | held
             facts = self.facts(symbols, day)
-            if facts:
-                result[day] = portfolios.advance(facts, now=day + "T16:30:00+08:00")
+            if acquire:
+                execution_symbols = symbols if session_symbols else set()
+                wanted = {s for s in symbols if not dated_price(facts.get((s, day)), day, "close") or
+                          (s in execution_symbols and missing_execution_fields(facts[(s, day)], day)) or
+                          (s in held and facts[(s, day)].get("suspended")
+                           and not dated_price(facts[(s, day)], day, "previous_close"))}
+                facts.update(acquire(day, wanted))
+            if facts or day in book_days:
+                result[day] = portfolios.advance(facts, now=day + "T16:30:00+08:00", recorded_at=recorded_at)
                 if cohorts is not None:
                     result[day]["cohorts_settled"] = cohorts.settle_models(facts, now=day + "T16:30:00+08:00")
         return result

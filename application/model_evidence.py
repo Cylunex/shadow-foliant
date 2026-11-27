@@ -17,7 +17,9 @@ def _ledger_summary(*, name, ledger, baseline, calendar, policy_hash,
         paired = [book.get(day) for book in (marks, baseline) for day in window]
         if not all(
             row and row.get("status") == "verified"
-            and row.get("policy_hash") == policy_hash
+            and row.get("data_class") != "reconstructed_history"
+            and not row.get("policy_transition")
+            and row.get("fusion_policy_hash", row.get("policy_hash")) == policy_hash
             and row.get("net_asset_value")
             and float(row["net_asset_value"]) > 0
             for row in paired

@@ -230,13 +230,32 @@ def test_intraday_qq_retains_etf_stop_precision_and_whole_risk_reasons(monkeypat
     assert archive.detail(result.message_id)['deliveries'][0]['final_body'] == body
 
 
-def test_weekend_timeout_does_not_blame_unrelated_source(monkeypatch):
+def test_weekend_timeout_reaches_system_error_route(monkeypatch, archive):
     import notification_router
     from jobs import jobs_hub as hub
 
     sent = []
     monkeypatch.setattr(hub, '_ERR_NOTIFY_LAST', {})
     monkeypatch.setattr(hub, '_current_unhealthy_sources', lambda: ['问财熔断'])
-    monkeypatch.setattr(notification_router, 'send', lambda *args, **kw: sent.append(args))
+    monkeypatch.setattr(notification_router, 'send', router.send)
+    monkeypatch.setattr(router, '_get_routes_for', lambda category, title: ['qq'] if category == 'system_error' else [])
+    monkeypatch.setitem(router.CHANNELS, 'qq', lambda title, body: (sent.append((title, body)) or True, 'HTTP 200'))
     hub._notify_execution_timeout('wf_weekly_backtest', 616, 600)
-    assert sent == [('alert', '周末回测超时', '周末回测运行超过 10 分钟，本次未生成报告。')]
+    assert sent == [('周末回测超时', '周末回测运行超过 10 分钟，本次未生成报告。')]
+
+
+def test_qq_bridge_uses_archive_summary_and_logs_opaque_id(monkeypatch, archive, capsys):
+    import notification_service
+
+    monkeypatch.setattr(notification_service, "NotificationService",
+                        lambda: SimpleNamespace(config={"webhook_url": "https://example.com/qq"}))
+    monkeypatch.setattr(router, "qq_bridge_url", lambda url: True)
+    sent = []
+    monkeypatch.setitem(router.CHANNELS, "dingtalk", lambda title, body: (sent.append(body) or True, "HTTP 200"))
+    title = "私人周报标题"
+    body = "完整周报原稿\n" * 300
+    result = router.send("archive", title, body, source="jobs.jobs_hub", only_channels=["dingtalk"])
+    assert sent == [router._qq_archive_summary(body.strip())]
+    assert archive.detail(result.message_id)["original_body"] == body
+    output = capsys.readouterr().out
+    assert result.message_id in output and title not in output

@@ -17,13 +17,27 @@ import json as _json
 from typing import Any, List, Tuple
 
 
-def _agg(ts) -> Tuple[float, float, int]:
-    """从 trades 子集算 (win_rate%, avg_ret%, count)。与 task_daily_backtest 内联口径一致。"""
-    if not ts:
-        return (0.0, 0.0, 0)
-    rets = [t.get('ret_pct', 0) or 0 for t in ts]
-    wr = sum(1 for x in rets if x > 0) / len(rets) * 100
-    return (round(wr, 1), round(sum(rets) / len(rets), 2), len(rets))
+def _agg(trades):
+    returns = [trade["ret_pct"] for trade in trades]
+    count = len(returns)
+    wins = sum(value > 0 for value in returns)
+    return_sum = sum(returns)
+    return {"count": count, "wins": wins, "return_sum": return_sum,
+            "win_rate": round(wins / count * 100, 1) if count else 0.0,
+            "avg_return": round(return_sum / count, 2) if count else 0.0,
+            "drawdown": round(sum(trade["max_dd_pct"] for trade in trades) / count, 2) if count else 0.0,
+            "best": max(returns, default=0.0), "worst": min(returns, default=0.0)}
+
+
+def pooled_returns(rows, *, holdout=False):
+    prefix = "ho_" if holdout else ""
+    count_key = "ho_n" if holdout else "trigger_count"
+    count = sum(row[count_key] for row in rows)
+    if not count:
+        return None, None, 0
+    wins = sum(row[prefix + "wins"] for row in rows)
+    total_return = sum(row[prefix + "return_sum"] for row in rows)
+    return wins / count * 100, total_return / count, count
 
 
 def run_stock(task) -> List[Tuple[str, dict]]:
@@ -45,24 +59,19 @@ def run_stock(task) -> List[Tuple[str, dict]]:
                              stop_pct=8, target_pct=15, params=params)
             if r.get('error'):
                 continue
-            ws = r.get('summary', {}) or {}
             trades = r.get('trades') or []
-            tr_trades = [t for t in trades if (t.get('trigger_date') or '') < split_date]
-            ho_trades = [t for t in trades if (t.get('trigger_date') or '') >= split_date]
-            tr_wr, tr_ar, tr_n = _agg(tr_trades)
-            ho_wr, ho_ar, ho_n = _agg(ho_trades)
-            _dd = ws.get('avg_max_dd_pct', 0) or 0
+            train = _agg([t for t in trades if t["exit_date"] < split_date])
+            holdout = _agg([t for t in trades if t["trigger_date"] >= split_date])
             out.append((key, {
                 'code': code, 'name': name,
-                'win_rate': tr_wr, 'avg_ret': tr_ar,
-                'max_dd': _dd,
-                'best_ret': ws.get('max_win_pct', 0) or 0,
-                'worst_ret': ws.get('max_loss_pct', 0) or 0,
-                'trigger_count': tr_n,
-                'ho_wr': ho_wr, 'ho_ar': ho_ar, 'ho_n': ho_n,
-                'score': compute_strategy_score(tr_wr, tr_ar, tr_n,
+                'win_rate': train["win_rate"], 'avg_ret': train["avg_return"],
+                'max_dd': train["drawdown"],
+                'best_ret': train["best"], 'worst_ret': train["worst"],
+                'trigger_count': train["count"], 'wins': train["wins"], 'return_sum': train["return_sum"],
+                'ho_n': holdout["count"], 'ho_wins': holdout["wins"], 'ho_return_sum': holdout["return_sum"],
+                'score': compute_strategy_score(train["win_rate"], train["avg_return"], train["count"],
                                                 max_trigger=n_pool, sample_stocks=1,
-                                                max_dd=_dd),
+                                                max_dd=train["drawdown"]),
             }))
         except Exception:
             continue
@@ -81,7 +90,7 @@ def portfolio_batch(tasks, load_checkpoint, save_checkpoint, *, deadline, cancel
     for task in tasks:
         code, name, frame, variants, split_date, pool_size = task
         definition = [
-            "genome-backtest-v1", name, split_date, pool_size, list(frame.columns),
+            "genome-backtest-v2", name, split_date, pool_size, list(frame.columns),
             [(v["id"], v["base_strategy"], v["params"]) for v in variants],
         ]
         identity = sha256(_json.dumps(definition, sort_keys=True, default=str).encode())

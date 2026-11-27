@@ -102,6 +102,34 @@ def equity_rules(symbol):
     return None
 
 
+def missing_execution_fields(fact, day):
+    if not fact:
+        return ["execution_fact"]
+    missing = [name for name, expected in (("trade_date", day), ("adjustment", "raw"))
+               if fact.get(name) != expected]
+    try:
+        ExecutionRules(**(fact.get("execution_rules") or {}))
+        if not fact.get("execution_rules"):
+            missing.append("execution_rules")
+    except (ValueError, TypeError, ArithmeticError):
+        missing.append("execution_rules")
+    if fact.get("corporate_action_unresolved"):
+        missing.append("corporate_action")
+    if fact.get("suspended") is True:
+        return missing if fact.get("volume") == 0 else [*missing, "suspension_status"]
+    prices = {}
+    for field in ("open", "volume", "limit_up", "limit_down"):
+        try:
+            prices[field] = unit_price(fact.get(field))
+        except (ValueError, TypeError, ArithmeticError):
+            missing.append(field)
+    if "limit_up" in prices and "limit_down" in prices and prices["limit_up"] <= prices["limit_down"]:
+        missing.append("price_limit_range")
+    elif {"open", "limit_up", "limit_down"} <= prices.keys() and not prices["limit_down"] <= prices["open"] <= prices["limit_up"]:
+        missing.append("open_outside_price_limits")
+    return missing
+
+
 def simulate_fill(order: dict, bar: dict, rules: ExecutionRules, *, cash=None, sellable=0):
     """One declared next-open attempt. Raw data and published daily limits required.
 

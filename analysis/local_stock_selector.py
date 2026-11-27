@@ -1202,10 +1202,13 @@ class LocalStockSelector:
 
     def _score_fundamentals(self, frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
+
         def values(names):
-            return pd.to_numeric(
-                out.apply(lambda row: _first(row, names), axis=1), errors="coerce"
-            ).astype(float)
+            columns = out.reindex(columns=list(names)).apply(
+                lambda column: column.astype(float) if column.dtype.kind in "biuf"
+                else column.map(_number).astype(float)
+            )
+            return columns.where(np.isfinite(columns)).bfill(axis=1).iloc[:, 0]
 
         roe = values(("indicator_roe", "indicator_roe_weighted", "indicator_roe_ttm"))
         roa = values(("indicator_roa", "indicator_roa2", "indicator_roa_yearly"))

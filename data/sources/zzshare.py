@@ -497,6 +497,51 @@ def get_market_daily(trade_date: str, *, adjust: str = "qfq") -> pd.DataFrame:
     )
 
 
+def historical_execution_session(day, symbols):
+    """Return exact-session unadjusted prices, published limits and suspension flags."""
+    from dataclasses import asdict
+    from zoneinfo import ZoneInfo
+
+    from analysis.decision_evaluation import equity_rules
+    from data.valuation_contract import number
+
+    frame = get_market_daily(day, adjust="raw")
+    detail = {"provider": "zzshare"}
+    if frame.empty:
+        return {}, {**detail, "reason": "no_usable_provider_response"}
+    if not {"ts_code", "trade_date"}.issubset(frame.columns):
+        return {}, {**detail, "reason": "provider_identity_fields_missing"}
+    codes = {_ts_code(symbol): symbol for symbol in symbols}
+    matching_codes = frame.loc[frame["ts_code"].isin(codes)]
+    correct_date = matching_codes["trade_date"].astype(str).map(_normalize_date).eq(day)
+    wrong_date = matching_codes.loc[~correct_date, "ts_code"]
+    if not wrong_date.empty:
+        detail["wrong_session_symbols"] = sorted({codes[code] for code in wrong_date})
+    frame = matching_codes.loc[correct_date]
+    if frame["ts_code"].duplicated().any():
+        detail["reason"] = "duplicate_provider_rows"
+    observed = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    facts = {}
+    for row in frame.drop_duplicates("ts_code", keep=False).to_dict("records"):
+        symbol = codes[row["ts_code"]]
+        rules = equity_rules(symbol)
+        close = number(row.get("close"))
+        if rules is None or close is None or close <= 0:
+            continue
+        volume = number(row.get("volume"))
+        suspended = number(row.get("is_paused")) == 1 and volume == 0
+        facts[symbol] = {
+            "trade_date": day, "provider": "zzshare", "adjustment": "raw", "observed_at": observed,
+            "data_class": "reconstructed_history", "source_endpoint": "daily",
+            "open": number(row.get("open")), "close": close, "volume": volume,
+            "previous_close": number(row.get("pre_close")),
+            "suspended": suspended,
+            "limit_up": number(row.get("high_limit")), "limit_down": number(row.get("low_limit")),
+            "execution_rules": asdict(rules),
+        }
+    return facts, detail
+
+
 def get_valuation(trade_date: str) -> pd.DataFrame:
     """Fetch a whole-market valuation snapshot for a trading day."""
     api = _get_api()

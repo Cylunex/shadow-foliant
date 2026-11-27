@@ -27,6 +27,24 @@ def test_batch_reuses_only_results_with_matching_frozen_inputs():
     assert len(run(tasks, 15)) == len(saved) == 2
 
 
+def test_worker_excludes_trades_crossing_split_and_pools_actual_wins(monkeypatch):
+    import backtest_engine
+    from analysis.genome_bt_worker import pooled_returns, run_stock
+
+    trades = [
+        {"trigger_date": "2026-09-01", "exit_date": "2026-09-03", "ret_pct": 5, "max_dd_pct": -1},
+        {"trigger_date": "2026-09-03", "exit_date": "2026-09-04", "ret_pct": 100, "max_dd_pct": -20},
+        {"trigger_date": "2026-09-04", "exit_date": "2026-09-06", "ret_pct": -6, "max_dd_pct": -9},
+    ]
+    monkeypatch.setattr(backtest_engine, "backtest_one", lambda *args, **kwargs: {"trades": trades})
+    variants = [{"id": 1, "base_strategy": "unknown_fixture", "params": {}}]
+    _, row = run_stock(("600001", "甲", None, variants, "2026-09-04", 2))[0]
+    assert (row["trigger_count"], row["win_rate"], row["best_ret"], row["max_dd"]) == (1, 100, 5, -1)
+    assert (row["ho_n"], row["ho_wins"], row["ho_return_sum"]) == (1, 0, -6)
+    other = {**row, "trigger_count": 9, "wins": 0, "return_sum": -15}
+    assert pooled_returns([row, other]) == (10, -1, 10)
+
+
 def test_scheduled_retry_reuses_the_saved_cohort_and_variants(monkeypatch):
     from datetime import datetime
     import json
